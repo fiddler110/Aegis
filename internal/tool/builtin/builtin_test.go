@@ -167,7 +167,7 @@ func TestRegisterAll(t *testing.T) {
 // path) to cut always-exposed schema tokens for small local models; the
 // default profile keeps them always-exposed, unchanged from before P25.6.
 func TestRegisterLocalProfileDefersNetworkAndScanTools(t *testing.T) {
-	deferCandidates := []string{"web_fetch", "web_search", "security_scan", "git_pr"}
+	deferCandidates := []string{"web_fetch", "web_search", "security_scan", "git_pr", "edit_file"}
 
 	regDefault := tool.NewRegistry()
 	if err := Register(regDefault, Options{Root: t.TempDir()}); err != nil {
@@ -218,6 +218,19 @@ func TestRegisterLocalProfileDefersNetworkAndScanTools(t *testing.T) {
 
 	if len(regLocal.Schemas()) >= len(regDefault.Schemas()) {
 		t.Errorf("local profile should expose fewer schemas than default: local=%d default=%d", len(regLocal.Schemas()), len(regDefault.Schemas()))
+	}
+
+	// P62.9's direction is the non-obvious half of the editing-surface cut, and
+	// it is the half a later "save more tokens" pass would undo: the handle-
+	// based editors cost MORE than edit_file (edit_section 407, multi_edit 276,
+	// fill_marker 226 against 185) and are the ones that must stay, because
+	// P39.16 measured a small model failing edit_file's byte-exact match 12
+	// times running where edit_section took 7 clean calls. Deferring them to
+	// save the bigger number would re-create exactly that failure.
+	for _, name := range []string{"write_file", "edit_section", "fill_marker", "multi_edit"} {
+		if !localSchemaNames[name] {
+			t.Errorf("local profile: %q must stay always-exposed — it is what edit_file was deferred in favour of", name)
+		}
 	}
 }
 

@@ -133,10 +133,17 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 			return t.exec(ctx, root, args.Command, timeout)
 		})
 	}
-	const maxOutput = 200 << 10 // 200 KiB — prevent context flooding on large outputs
-	if len(text) > maxOutput {
-		text = text[:maxOutput] + fmt.Sprintf("\n[...%d bytes truncated — use background:true and task_output for large commands]", len(text)-maxOutput)
-	}
+	// P64.3: was 200 << 10 (200 KiB), which tokenest prices at 51,200 tokens —
+	// four to twelve times the whole context window under the local profile, so
+	// it could never bind before the window did. 24 KiB is ~6,144 estimated
+	// tokens, the same value the skill-script cap (maxSkillScriptOutput) picked
+	// for the same class of thing. See the posture table in truncate.go.
+	//
+	// Tail, not head: command output is a log, and a failing build prints its
+	// errors last. The old head-keeping slice was never argued for — it is what
+	// `text[:maxOutput]` does. The dropped bytes are recoverable (P64.1 spills
+	// them), so this only decides which end gets the inline budget.
+	text = SpillTail(ctx, root, "shell", text, maxShellOutput, "use background:true and task_output for large commands")
 	if err != nil {
 		content := fmt.Sprintf("%v\n%s", err, text)
 		if hint := interpreterHint(args.Command); hint != "" {

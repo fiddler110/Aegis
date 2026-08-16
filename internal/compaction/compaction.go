@@ -44,8 +44,36 @@ const (
 	// summarizeSystemPrompt and summarizePreamble are the fixed parts of the
 	// summarization request. They are constants (rather than inline literals)
 	// so the fit check can price the *whole* request, not just the transcript.
-	summarizeSystemPrompt = "You compress conversation history. Produce a concise but complete summary that preserves: decisions made, facts established, file paths and identifiers, tool results that matter, and any open tasks or unresolved questions. Use terse bullet points."
-	summarizePreamble     = "Summarize this conversation so far:\n\n"
+	// P65.2 replaced a free-form instruction ("Use terse bullet points") with a
+	// fixed skeleton the summarizing model fills in. The reason is not style. The
+	// two task shapes this repo already separates are generation and completion:
+	// every measurement in the P38.x line says a local model degrades on the
+	// first and holds up on the second, which is why scaffold.py pre-writes
+	// structure with per-section markers instead of asking for a document. The
+	// summarizer was the last place in the engine still asking a local model for
+	// unstructured prose, and asking at the worst possible moment — when the
+	// context is nearly full and the model has least room to think.
+	//
+	// The section list is deliberately short. A skeleton is output tokens, and
+	// summaryTokens bounds the reply, so a long one crowds out the content it was
+	// meant to organize; the fix for that is fewer sections, not a bigger budget.
+	// These five are the ones a resumed run cannot reconstruct from the tail:
+	// what the run is trying to do, what it must not do, where it got to, and
+	// what is next. Anything derivable from the surviving messages was left out.
+	summarizeSystemPrompt = "You compress conversation history. Fill in this exact skeleton, keeping every heading " +
+		"and omitting nothing the run would need to continue:\n" +
+		"## Goal\n## Constraints\n## Progress\n(use Done / In Progress / Blocked)\n## Key Decisions\n## Next Steps\n" +
+		"Under each heading use terse bullet points. Preserve decisions made, facts established, " +
+		"file paths and identifiers, tool results that matter, and any open or unresolved questions. " +
+		"Do not add headings that are not listed, and do not write an introduction or a conclusion."
+	summarizePreamble = "Summarize this conversation so far:\n\n"
+
+	// fileListPreamble labels the carried-forward path lists inside the
+	// summarization request (P65.2). It tells the summarizer the lists are
+	// context rather than transcript, and that it must not restate them — they
+	// are re-emitted verbatim by the code, so a model repeating them would spend
+	// its bounded reply on bytes it did not have to produce.
+	fileListPreamble = "Files this session has already touched (do NOT repeat these in your summary; they are recorded separately):\n"
 
 	// toolResultRuneLimit is the long-standing per-tool-result cap applied when
 	// rendering a transcript, independent of any fit-driven shrinking.
@@ -457,11 +485,23 @@ func (s *Summarizer) FallbackCompact(msgs []provider.Message) ([]provider.Messag
 		return msgs, false
 	}
 	prefix := msgs[:boundary]
+	note := fallbackNote(prefix)
+	// P65.2: carry the accumulated file lists through the fallback too. This
+	// path fires precisely when a local summarizer is failing, which is the same
+	// population the carried lists exist to help — and because it replaces the
+	// prefix outright, not re-emitting them here would *permanently* destroy a
+	// set that had accumulated across every prior compaction. It cannot include
+	// the current run's paths (FallbackCompact takes no context, by the
+	// FallbackCompactor interface), so it carries forward what is on record and
+	// nothing more, which is strictly better than dropping it.
+	if carriedRead, carriedModified := collectCarriedFiles(prefixText(prefix), fileContext{}); len(carriedRead)+len(carriedModified) > 0 {
+		note += "\n\n" + renderFileLists(carriedRead, carriedModified)
+	}
 	out := make([]provider.Message, 0, len(msgs)-boundary+1)
 	out = append(out, provider.Message{
 		Role: provider.RoleUser,
 		Content: []provider.Block{provider.TextBlock{Text: "Earlier conversation was dropped by deterministic fallback " +
-			"compaction (the AI summarizer failed repeatedly, so no AI-generated summary is available):\n\n" + fallbackNote(prefix)}},
+			"compaction (the AI summarizer failed repeatedly, so no AI-generated summary is available):\n\n" + note}},
 	})
 	out = append(out, msgs[boundary:]...)
 	return out, true
@@ -555,9 +595,13 @@ func (s *Summarizer) summarizeFitBudget() int {
 // whose stated job is to absorb how wrong tokenest can be about text in hand —
 // so correcting here would be double-counting the same error, and would shrink
 // the transcript the summary is built from for no measured reason.
-func summarizeRequestTokens(transcript string) int {
+// fixed is any caller-supplied text that rides in the same user message ahead of
+// the preamble — today, P65.2's carried file lists. It is priced here rather
+// than bolted on afterwards for the reason the reserve exists at all: a "fits"
+// verdict must be about the request that is actually sent.
+func summarizeRequestTokens(transcript, fixed string) int {
 	return tokenest.Messages(summarizeSystemPrompt, []provider.Message{
-		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: summarizePreamble + transcript}}},
+		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: fixed + summarizePreamble + transcript}}},
 	})
 }
 
@@ -568,13 +612,13 @@ func summarizeRequestTokens(transcript string) int {
 // stages: oversized individual blocks are truncated first (middle-out, with a
 // visible elision marker), and only if that is still not enough are the oldest
 // messages dropped, oldest-first, until it fits.
-func (s *Summarizer) fitTranscript(prefix []provider.Message) (transcript string, dropped int, err error) {
+func (s *Summarizer) fitTranscript(prefix []provider.Message, fixed string) (transcript string, dropped int, err error) {
 	full := renderTranscript(prefix)
 	budget := s.summarizeFitBudget()
 	if budget == 0 {
 		return full, 0, nil // no budget to check against
 	}
-	fits := func(t string) bool { return summarizeRequestTokens(t) <= budget }
+	fits := func(t string) bool { return summarizeRequestTokens(t, fixed) <= budget }
 	if budget < 0 || !fits("") {
 		// The reserve (or the fixed request scaffolding alone) already exceeds
 		// the whole budget: no amount of shrinking can help. Non-fatal — the
@@ -618,17 +662,33 @@ func omissionNote(dropped int) string {
 // that transcript (P53.3) until the request it produces fits the window the
 // compaction exists to stay inside.
 func (s *Summarizer) summarize(ctx context.Context, prefix []provider.Message) (string, error) {
-	transcript, dropped, err := s.fitTranscript(prefix)
+	// P65.2: the file set, merged from what a previous summary carried and what
+	// this run reported. Computed *before* fitTranscript and handed to it, so
+	// the block is priced by the same fit check as everything else — adding it
+	// afterwards would push the request past the budget the reserve exists to
+	// defend, which is the one way this feature could turn a working compaction
+	// into a failing one.
+	readList, modifiedList := collectCarriedFiles(prefixText(prefix), filesFrom(ctx))
+	fileBlock := renderFileLists(readList, modifiedList)
+	fixed := ""
+	if fileBlock != "" {
+		fixed = fileListPreamble + fileBlock + "\n"
+	}
+
+	transcript, dropped, err := s.fitTranscript(prefix, fixed)
 	if err != nil {
 		return "", err
 	}
+
+	userText := fixed + summarizePreamble + transcript
 	req := provider.Request{
 		Model:     s.model,
 		MaxTokens: s.summaryTokens,
 		System:    summarizeSystemPrompt,
 		Messages: []provider.Message{
-			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: summarizePreamble + transcript}}},
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: userText}}},
 		},
+		SuppressCache: true,
 	}
 	stream, err := s.adapter.Stream(ctx, req)
 	if err != nil {
@@ -649,6 +709,14 @@ func (s *Summarizer) summarize(ctx context.Context, prefix []provider.Message) (
 	}
 	if dropped > 0 {
 		out += "\n\n" + omissionNote(dropped)
+	}
+	// P65.2: re-emit the lists as code rather than trusting the model to have
+	// copied them. This is the half that has to be *computed*: a model that
+	// fumbles "## Key Decisions" still cannot lose a path list it was never
+	// asked to reproduce, and it is what makes the set accumulate — the next
+	// compaction reads these tags back out of this very message.
+	if fileBlock != "" {
+		out += "\n\n" + fileBlock
 	}
 	return out, nil
 }

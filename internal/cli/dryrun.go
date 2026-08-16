@@ -14,6 +14,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// profileLabel names the active prompt profile for the dry-run report, so the
+// tool counts below are read against the profile that produced them rather than
+// mistaken for the only surface Aegis has.
+func profileLabel(local bool) string {
+	if local {
+		return "local"
+	}
+	return "default"
+}
+
 func newDryRunCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "dry-run",
@@ -37,16 +47,38 @@ func newDryRunCmd() *cobra.Command {
 			enc.Encode(cfg)
 
 			// Tools.
-			fmt.Fprintln(out, "\n=== Registered Tools ===")
+			//
+			// P62.10: this command's whole job is "preview what this session will
+			// send without calling the model", so it has to register the surface
+			// the session actually registers. It passed no LocalProfile, so
+			// against a local model it printed a tool list the session would not
+			// use — 1,318 schema tokens' worth of tools the daemon defers,
+			// security_scan alone 818. Fixing an instrument that reports the wrong
+			// answer is P62.4's lesson: this is the operator-facing report for
+			// exactly the question P62.6 and P62.9 were measuring.
+			//
+			// Deferred tools are printed separately rather than dropped. Under the
+			// local profile most of the inventory moves there, and a shorter list
+			// with no explanation would read as "these tools are gone" when they
+			// are one tool_search call away.
+			local := cfg.Provider.LocalPromptProfile()
+			fmt.Fprintf(out, "\n=== Registered Tools (%s prompt profile) ===\n", profileLabel(local))
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
+			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: local, ToolFamilies: cfg.Tools.Families}); err != nil {
 				fmt.Fprintf(out, "(error registering tools: %v)\n", err)
 			} else {
 				schemas := reg.Schemas()
 				for _, s := range schemas {
 					fmt.Fprintf(out, "  %s\n", s.Name)
 				}
-				fmt.Fprintf(out, "(%d tools)\n", len(schemas))
+				fmt.Fprintf(out, "(%d exposed tools)\n", len(schemas))
+				if deferred := reg.Deferred(); len(deferred) > 0 {
+					fmt.Fprintln(out, "\n=== Deferred Tools (advertised as one line; loaded on demand via tool_search) ===")
+					for _, d := range deferred {
+						fmt.Fprintf(out, "  %s\n", d.Name)
+					}
+					fmt.Fprintf(out, "(%d deferred tools)\n", len(deferred))
+				}
 			}
 
 			// Memory.

@@ -221,6 +221,18 @@ func (t *taskUpdateTool) Execute(_ context.Context, input json.RawMessage) (tool
 	return tool.Result{Content: "updated"}, nil
 }
 
+// SignatureTransparent drops task_update's arguments from the loop signature
+// (P64.2). Retitling a background job is bookkeeping about the work rather than
+// the work, and the title is chosen fresh each time. Note the contrast with its
+// neighbours in this file: task_get and task_output are PollExempt, the stronger
+// concession, because a poll is *expected* to repeat forever while waiting on
+// external state. task_update is not waiting on anything, so it takes the
+// narrower one — its name stays in the signature and a run that only ever
+// retitles is still judged.
+func (t *taskUpdateTool) SignatureTransparent(json.RawMessage) bool { return true }
+
+var _ tool.SignatureTransparent = (*taskUpdateTool)(nil)
+
 // --- task_stop ---
 
 type taskStopTool struct{ mgr *task.Manager }
@@ -269,11 +281,13 @@ func truncateTitle(s string) string {
 	return s
 }
 
-// tail returns the last n bytes of s, prefixed with an elision marker if it was
-// truncated.
+// tail returns the last n bytes of s. P64.3 kept this site's *end* choice
+// unchanged — it was already the tree's only tail truncation and already
+// correct, since a background job's output is a log — and only routed it
+// through the shared helper so the notice says how much was dropped instead of
+// "…(truncated)…". The recovery path is task_output, which returns the job's
+// full output and is why this preview can be as small as 2 KiB.
 func tail(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return "…(truncated)…\n" + s[len(s)-n:]
+	out, _ := TruncateTail(s, n, "call task_output for this job's full output")
+	return out
 }

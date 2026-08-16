@@ -135,6 +135,16 @@ type Request struct {
 	// here; a request that constrains its output should not also be offering
 	// tools, and the one caller that sets Format suppresses them.
 	Format json.RawMessage
+	// SuppressCache asks the adapter to skip prompt-cache breakpoints for this
+	// request, even though the adapter's own posture (provider.prompt_caching)
+	// is on. It exists for one-off requests that share the conversation's
+	// adapter instance but will never be replayed — the compaction summarizer
+	// and the output guard (P65.3) — where a cache_control breakpoint is a
+	// billed write with no possible matching read, and on a single-GPU local
+	// backend interposes a large prompt between two conversation turns,
+	// evicting exactly the KV cache PreservePrefixCache exists to protect.
+	// Ignored by adapters that don't do prompt caching.
+	SuppressCache bool
 }
 
 // StopReason explains why the model stopped generating.

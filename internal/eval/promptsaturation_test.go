@@ -1,6 +1,9 @@
 package eval
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestSaturationReason covers the P63.11 guard: the live tier's prompt-size
 // comparison must be able to say "the instrument saturated" instead of blaming
@@ -53,5 +56,33 @@ func TestSaturationReason(t *testing.T) {
 					tc.localTokens, tc.localWindow, tc.defaultTokens, tc.defaultWindow, got, tc.wantSaturated)
 			}
 		})
+	}
+}
+
+// The window guard has to distinguish three cases, and the middle one is the
+// whole reason it exists: a window that is *plausible* but too small produces a
+// run that looks like a confused model rather than a truncated prompt.
+func TestInsufficientWindowReason(t *testing.T) {
+	if why := insufficientWindowReason(32768, "modelfile"); why != "" {
+		t.Errorf("a 32k window should be fine, got %q", why)
+	}
+	if why := insufficientWindowReason(workflowMinContextWindow, "config"); why != "" {
+		t.Errorf("the floor itself must pass, got %q", why)
+	}
+	// An undetermined window is a non-Ollama backend or a failed detection.
+	// Skipping the tier on it would be a guess dressed as a check.
+	if why := insufficientWindowReason(0, ""); why != "" {
+		t.Errorf("an unknown window must not block the run, got %q", why)
+	}
+	why := insufficientWindowReason(4096, "ollama:default")
+	if why == "" {
+		t.Fatal("Ollama's 4096 default is below what the task needs and must be reported")
+	}
+	// The message is the whole value of the skip: it has to name the number, the
+	// source, and the fix that actually works before the model is loaded.
+	for _, want := range []string{"4096", "ollama:default", "num_ctx", "provider.context_window", "OLLAMA_CONTEXT_LENGTH"} {
+		if !strings.Contains(why, want) {
+			t.Errorf("the skip message does not mention %q: %s", want, why)
+		}
 	}
 }

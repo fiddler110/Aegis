@@ -8,9 +8,500 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-14 — **P62.6 built and closed.** The local-profile base prompt goes from
-**7,790 to 4,907** estimated tokens (37%), with **no exposed tool schema touched and no tool made
-unreachable**. Write-up immediately below; the 2026-08-10 Tier 3 batch follows it.
+**Last updated:** 2026-08-15 (later the same day) — **P66.2 shipped**, the first commit of the P66
+review batch and the one the day plan puts first for a reason that has nothing to do with its
+severity: it changes the toolchain every subsequent test run in the batch executes on, so landing it
+after any other item makes that item's evidence ambiguous.
+
+`go.mod` now pins `toolchain go1.26.6`. At go1.26.5 `govulncheck ./...` reported seven standard-library
+vulnerabilities with **six traced call paths from this codebase** — four of them on surfaces the same
+review independently established are fed by data the operator does not control (`openai.Adapter.Stream`
+and `ollama.Adapter.Healthy` parsing model-server responses, `security.parseNmapXML` hitting an
+`encoding/xml` recursion crash on third-party scanner output, and GO-2026-6089's missing
+`ReadHeaderTimeout` on the daemon's own listener). All are denial-of-service in character and none
+crosses a privilege boundary, which is why the review rated it Medium; all are fixed by the one-line
+bump. `govulncheck ./...` now prints `No vulnerabilities found` and `go test ./...` stays green across
+all 68 packages.
+
+**The durable half of the item is the CI wiring, not the bump.** A project that ships a vulnerability
+scanner and runs `aegis security update-db` to keep *the user's* CVE data fresh had never scanned its
+own toolchain — so the finding could only ever recur. `.github/workflows/ci.yml` gained `govulncheck`
+(blocking) and `staticcheck` (advisory) on the ubuntu leg, both OS-independent analyses following the
+same one-leg convention as the gofmt and frontend-drift checks already there.
+
+**The trap is documented beside the install step, and the documentation is the point.** A tool module
+can pin an *older* toolchain in its own `go.mod`, and under the default `GOTOOLCHAIN=auto` `go install`
+honors that directive — so the installed binary is built with the older Go and then cannot analyze this
+go1.26 module. `honnef.co/go/tools@v0.7.0` does exactly this (`toolchain go1.25.13`), and during the
+review it produced 21 packages failing with `package requires newer Go version go1.26 (application
+built with go1.25)`, which reads like a broken codebase and is not. Upgrading the tool reproduces it one
+version higher; pinning the toolchain fixes it. Both installs therefore run under
+`GOTOOLCHAIN="$(go env GOVERSION)"` — taking the pin from the toolchain `actions/setup-go` already
+resolved out of `go.mod`, rather than hardcoding a version that would drift from the module the day
+someone bumps it again. Re-verified at go1.26.6 rather than trusting the review's go1.26.5 note: the
+pinned install yields a staticcheck that analyzes the tree and reports 28 findings.
+
+Those 28 are **P66.12's** work and this item was not licensed to fix them, so the staticcheck step
+carries `continue-on-error: true` with a comment naming the item that removes it. That is the honest
+posture — a step that gates on a known-failing backlog either goes red permanently or gets deleted, and
+both outcomes lose the check. Deleting the line is now written into P66.12's closure condition, so
+clearing the backlog cannot silently leave the step advisory for the next 28 findings to accumulate
+against.
+
+**Last updated:** 2026-08-15 — **P65.3's mechanism shipped**, closing the Tier 3 measurement gate it
+was filed behind. The item's own instructions were "measure Question 1 before building anything," and
+Question 1 — does a session's reported cache usage include the summarizer's and guard's one-off prompts
+— turned out to be answerable by reading code rather than running a live model: both call sites share
+the conversation's Anthropic adapter instance, which emits `cache_control` breakpoints unconditionally
+whenever prompt caching is on. Confirmed, not refuted, and worse than framed: neither call site ever
+read the stream's `Usage` event, so the billed cache-write cost wasn't merely unattributed, it was
+invisible to Aegis. `provider.Request` gained `SuppressCache bool` (alongside `NumCtx`/`Format`), set by
+`compaction.go`'s summarizer and `guard.go`'s validation call, honored only by the Anthropic adapter
+(`cache := a.cache && !req.SuppressCache`) and ignored elsewhere — same shape as every other per-request
+override in that struct. `TestPromptCachingSuppressedPerRequest` pins that a suppressed request carries
+no breakpoint on `system`, the last tool, or the last message block. Debate roles, named alongside the
+summarizer and guard in the original filing as another rider on the shared adapter, were deliberately
+left untouched: nothing established a debate role's prompt is one-off the way a summarization or guard
+call is, and suppressing there was not measured, only assumed. The item's local half (Question 2 — does
+a one-off call between turns measurably raise the next turn's local prefill?) stays open, gated on the
+same live-tier local-model session as P38.1/P62.9/P65.2's prompt half; none of those had a reachable
+backend in this pass. See [roadmap.md](roadmap.md)'s P65.3 entry.
+
+**Last updated:** 2026-08-14 (later the same day) — **the P64/P65 batch: P65.1, P64.2, P65.2's
+deterministic half, P64.3 and P64.1 all shipped**, taking the five highest-priority buildable items off
+the two harness-review batches filed that morning. P64.3 and P64.1 were built in that order on the
+document's own sequencing rule — the instrument before the optimization it measures — and their
+write-ups are at the end of this entry, after the three correctness items.
+
+**The batch's largest single result is a number nobody had:** nine ordinary built-in tool calls over a
+60-file fixture return **15,666 estimated tokens**, against the 4,550-token ceiling the whole P62.x
+line spent five items defending. The prompt was measured to the token and gated in CI; the results
+were not measured at all. That asymmetry was the deepseek review's finding and it holds up. All three remove a *false or missing statement* rather than
+adding a capability, which is why they were sequenced first: P65.1 stops the transcript claiming a
+cancelled tool "did not run" when it may have half-completed, P64.2 closes a by-construction defeat of
+the loop detector, and P65.2 stops every compaction losing the session's file set. Their write-ups are
+immediately below, then P62.10's.
+
+**The batch's finding is about the two guards it touched, and it is one finding, not two.** P64.2 and
+P65.1 are the same defect in different clothes: **a mechanism that reports on the agent's behaviour
+while keying on the wrong evidence.** The loop detector keys on the whole turn, so it reads a varying
+bookkeeping payload as new work; the orphan repair keys on the message list, which records what the
+model *asked for* and never what the runtime *started*. In both cases the fix is not a better
+heuristic over the same data — it is finding the one fact the mechanism was guessing at and recording
+it. That is a different move from tightening a threshold, and it is worth naming because the tempting
+version of each fix (widen `PollExempt`; soften the wording for all orphans) is a heuristic and would
+have been strictly worse.
+
+**P65.1 — the interrupted-tool result stops asserting something it cannot know (SHIPPED 2026-08-14).**
+
+`repairOrphanedToolUses` injected `"tool call interrupted; %s did not run"` for every unresolved
+`tool_use`. The repair itself is right — a provider rejects a conversation with an unmatched tool_use
+— but the claim was never checked, because the function reads the message list and the message list
+cannot distinguish a call that was refused from one that deleted half a directory before the stall
+detector cancelled its context.
+
+It is reached routinely rather than exceptionally, which is what moved it out of Tier 4 when it was
+filed: every bound Aegis has for stopping a run cancels the run context mid-flight *by design* —
+`MaxTurnStall` (on by default at 900s, and the only bound covering the tool-execution phase),
+`MaxWallClockPerRun`, a user interrupt, a TUI quit-while-streaming — and the tool most likely to be
+running when a stall bound fires is the long one that stalled. The drive's reset ladder then hands the
+next context a transcript asserting the effect did not happen.
+
+`Engine.startedTools` records the tool_use IDs that reached `Execute`, under a mutex for the same
+reason `writtenFiles` has one, and `repairOrphanedToolUses` takes it as a parameter. A started call now
+says *"interrupted while running; `shell` may have partially completed. Verify before assuming its
+effects did or did not land."* The second sentence is the whole change: a model told an effect is
+uncertain re-checks, a model told it did not happen re-runs it.
+
+Three decisions the filing did not specify, each of which changes behaviour:
+
+- **The mark sits immediately before `t.Execute`, not at the top of `executeTool`.** Everything above
+  that line — unknown tool, gate refusal, hook veto — returns without the tool running, so marking at
+  entry would over-warn on exactly the calls whose "did not run" is provably true, and an
+  always-uncertain message is no more useful than an always-confident one.
+- **The repair runs before the per-run reset, and the order is load-bearing.** The orphans belong to
+  the run that was interrupted, so the only map that can classify them is that run's.
+- **A nil map keeps the old wording.** A session restored into a fresh process has no record either
+  way; recovering the fact across a process boundary needs a durable store and is P65.4's problem.
+  The item's scope discipline — "this is not the durable version and must not grow into it" — is
+  honored.
+
+`TestInterruptedToolRepairDistinguishesStartedFromUnreached` drives a real `Engine.Run` cancelled
+mid-round with two calls outstanding, made deterministic by the same-path ordering in `runTools`
+(both calls name one path, so the second waits on the first and abandons the wait on `ctx.Done`).
+**Both halves are asserted and both mutations were run:** forcing every orphan to "may have run" fails
+on the unreached call, forcing none fails on the started one. A one-call fixture can distinguish
+neither — P63.9's finding, applied deliberately rather than rediscovered.
+
+**P64.2 — a bookkeeping call with varying arguments no longer launders a loop past the detector
+(SHIPPED 2026-08-14).**
+
+`turnSignatureExcludingPolls` keyed on the **whole turn**, so `grep X` emitted alongside a `todo` write
+whose payload changes every turn produced a fresh signature every turn and the repeated grep was never
+seen — no matter how many turns it repeated. `toolFailureTracker` only counts *failing* calls, so a
+succeeding loop with a varying bookkeeping call simply rode to `MaxIterations`.
+
+The item's stated first step was to demonstrate the defeat by construction rather than from a reading
+of the code, and that was done: with the fix's predicate disabled,
+`TestEngineDetectsLoopLaunderedByVaryingBookkeepingCall` fails — a plain error loop the detector has
+caught since P53.2 goes entirely undetected once one varying `todo` write rides along.
+
+**The design decision worth recording is that transparency is not exemption, and the code makes them
+structurally different rather than merely differently-named.** The obvious fix — declare `todo`
+`PollExempt` — closes the gap and buys it with the concession `PollExempter`'s own doc comment warns
+about at length: an exempt call is dropped entirely, and a turn made of nothing but exempt calls is not
+recorded, so a model that does nothing but rewrite its plan five turns running runs to the iteration
+cap unwatched. A **signature-transparent** call loses only its *arguments*; its name stays. So
+`grep X → todo_write(varying) → grep X` collapses to one repeated signature and is caught, **and** a
+turn of pure bookkeeping still counts as a turn and is judged. The narrower concession is what makes
+the set safe to grow past three entries.
+
+Five builtins declare it: `todo_add`, `todo_update`, `remember`, `entity_remember`, `task_update`. The
+tests pin the *opaque* half as hard as the transparent one, because that is where the rule lives —
+`project_knowledge` and `entity_recall` are searches (the query is the model choosing what to look
+for, which is the evidence the detector runs on), `save_skill` is a deliverable, `todo_list` is a read.
+`TestTransparencyAndPollExemptionAreDisjoint` fails if a tool ever claims both, which is the shape of
+someone reaching for the stronger concession while meaning the narrower one.
+
+**P65.2 — compaction summaries have a skeleton, and the file set survives them (deterministic half
+SHIPPED 2026-08-14; the prompt half built and gated on the live tier).**
+
+Two things did not exist. The summarizer asked for "terse bullet points" and took what came back, and
+nothing carried the file set forward — `Engine.writtenFiles` is reset per run, read paths were tracked
+nowhere at all, so after a compaction the model's record of the workspace was whatever survived in the
+keep-recent tail plus whatever the free-form summary happened to mention, and after a *second*
+compaction, whatever the second summary happened to carry over from the first.
+
+*The prompt half.* `summarizeSystemPrompt` now pins a five-heading skeleton (`## Goal`,
+`## Constraints`, `## Progress` with Done/In Progress/Blocked, `## Key Decisions`, `## Next Steps`).
+The reason is not style: free-form compression is generation and structured fill is completion, every
+measurement in the P38.x line says a local model degrades on the first and holds up on the second, and
+the summarizer was the last place in the engine asking a local model for unstructured prose — at the
+worst possible moment, when the context is nearly full. **Measured before choosing the section list,
+per this document's own repeated finding about instruments: 62 → 128 estimated tokens, a delta of 66,
+paid once per summarization request against a transcript already thousands of tokens long.** Pi's list
+has six sections plus a Critical Context heading; five were kept and the sixth dropped, on the item's
+own rule that a skeleton crowding out content is fixed by fewer sections rather than a bigger budget.
+
+*The deterministic half, and this is where the build differed from the filing.* The item proposed
+promoting `Engine.writtenFiles` to session scope. **That does not work, and finding out why changed the
+design.** Two things are rebuilt per request: the `Engine` (so no Go-side accumulator survives between
+runs) and — worse — the `Summarizer` is built once per *server* and shared by every session, so a
+`SetFiles` method would have sessions overwriting each other's paths. That is a cross-session leak, not
+a stale list.
+
+So the state lives in the only place that actually persists: **the transcript**. Each summary re-emits
+the lists inside `<read-files>`/`<modified-files>` tags, and the next compaction parses them back out
+of the prefix it is summarizing and merges. The set accumulates across any number of compactions with
+no state anywhere, and survives a daemon restart that reloads the conversation for free.
+
+Four details are load-bearing:
+
+- **The lists travel on the context, via a new `FileContextCompactor` optional interface** — a context
+  *decorator*, not a `Compact` variant. The guard calls `CompactYield` when it can and `Compact` when
+  it cannot, so a variant would have to be written twice and every future widening would double again.
+  The engine cannot import `internal/compaction` (engine's own tests import it, so the dependency would
+  close a cycle), which is exactly why the existing seams here are optional interfaces.
+- **The block is priced by the same fit check as everything else.** `summarizeRequestTokens` takes the
+  fixed prefix, so the lists are inside the budget the reserve exists to defend. Adding them after
+  `fitTranscript` — the obvious implementation — is the one way this feature could turn a working
+  compaction into a failing one. A 10-path list measures 33 tokens; at the 40-path cap, 17.
+- **`FallbackCompact` carries the lists too.** It fires precisely when a local summarizer keeps
+  failing, which is the same population the lists exist to help, and because it replaces the prefix
+  outright, not re-emitting them would destroy an accumulated set *permanently* rather than for a turn.
+- **The lists are re-emitted by code, not by the model.** A model that fumbles `## Key Decisions` still
+  cannot lose a path list it was never asked to reproduce — and it is what makes accumulation work at
+  all, since the tags are a wire format between successive summaries.
+  `TestFileListsAccumulateAcrossCompactions` drives *two* compactions for that reason; a
+  single-compaction fixture cannot see the failure.
+
+Read paths are recorded in `executeTool` on the same effective-capability rule (P25.4c) the write
+branch uses, so a `cat` routed through `shell` is recorded the way a `read_file` call would be, and
+errored reads are excluded — a failed read tells the model nothing about the file and would advertise
+one the session never saw. The carried lists are capped at 40 each, keeping the **most recent** paths
+and stating the count dropped, on the same rule as `truncNotice` and `omissionNote`.
+
+**Still open:** the prompt half's closure condition is a live run showing a local model filling the
+skeleton without losing content the terse-bullet prompt kept. Per the item, it wants the same harness
+P38.1's conformance re-run uses — one setup instead of two.
+
+**P64.3 — what a tool result costs is now stated, measured and (in one respect) gated
+(SHIPPED 2026-08-14).**
+
+The convention plus its instrument, in that order, because the convention without the instrument is
+prose that rots and the instrument without the convention is a number nobody owns.
+
+*The convention.* `TruncateHead`/`TruncateTail` (`internal/tool/builtin/truncate.go`) replace six
+independently-chosen caps with two helpers on pi's rule that **the tool declares which end carries the
+information** — head for file reads, search results and fetched pages; tail for logs, test runs and
+builds. The values were deliberately **not** homogenised (the point is a shared mechanism and a stated
+posture, not one number), and the file carries the full posture table: per tool, typical size, cap,
+which end survives, and what happens to the remainder. Before this the tree had five different
+phrasings of the notice, three of which (`…(truncated)`) said only that something was cut — not which
+end, not how much, and not how to get it back.
+
+Two values did change, and both were argued:
+
+- **`shell`'s cap was `200 << 10` — 200 KiB, ~51,200 estimated tokens, larger than the entire context
+  window under the local profile.** A cap that cannot bind before the window does is not a cap. It is
+  now 24 KiB, the value the skill-script cap already chose for the same class of thing (a subprocess
+  writing to stdout); aligning two caps within one class is not the homogenising the item warns
+  against, it is removing an 8x difference nobody chose. `TestResultCapsCanBindBeforeTheContextWindow`
+  is the one **gate** in this item, and reverting the constant fails it with a message that explains
+  itself.
+- **`shell` now keeps the tail, where it kept the head.** Command output is a log; a failing build
+  prints its errors last, and the head of an over-cap `go test ./...` is the list of packages that
+  passed. The head was never argued for — it is what a `text[:max]` slice does.
+
+*The instrument, and it contradicted the filing.* `TestResultSizeComposition` reports measured bytes
+and tokens per call over a fixture workspace, mirroring `TestBasePromptComposition_localProfile`'s
+shape and printing under `-v`. It **reports and does not gate**, on the item's own reasoning: result
+size depends on the workspace, so a CI threshold keyed to it would fail on someone else's repo. The
+item was filed believing `shell`'s 200 KiB was the anomaly. **It was not the largest result a built-in
+can return — an ordinary default `read_file` was**, at 58,000 bytes / 14,501 estimated tokens for a
+2,000-line source file, because `defaultReadLines` bounded lines and *nothing bounded bytes*. That is
+the fourth consecutive item in this document whose measurement contradicted part of its own write-up,
+and it is the one that would have been missed by building from the filing alone. `maxDefaultReadBytes`
+(32 KiB) is defaultReadLines' missing other half.
+
+**P64.1 — a capped result's remainder is recoverable (SHIPPED 2026-08-14, both layers).**
+
+`truncNotice` was honest and was not a recovery path: a model told "these are 500 of an unknown number,
+in no particular order" has exactly two moves, reason from a partial set anyway or re-run a narrower
+query it has no information to narrow correctly. The full result now goes to a file and the notice
+names it.
+
+**The design question the item said could change the answer was answered by measurement, and it did
+change the answer — twice.** `TestSpillLocationIsReachableByTheModel` asks the sandbox rather than
+reading it:
+
+- **`<data_dir>` is unreachable.** The obvious home, alongside `builtin-skills/` and
+  `model_caps.json`, sits outside every root `sandbox.ValidatePathIn` accepts — `read_file` does not
+  merely refuse a path there, it fails with "escapes the workspace root". A locator the model cannot
+  open is worse than no locator, so the spill lives at `<workspace>/.aegis/spill/`.
+- **The item's own suggested wording cannot be honored.** It proposes the hint *"or grep this path to
+  search within it"*. `grep` has no path parameter at all — it always searches the workspace root —
+  and `.aegis` is in `skipDirNames`, so neither search backend descends into the spill directory.
+  `spillLocator` therefore offers `read_file` with offset/limit and **does not promise grep**. Naming a
+  recovery path that silently returns "no matches" is precisely the failure this item exists to
+  remove, and the test asserts grep's blindness so that if either decision changes the wording gets
+  revisited.
+
+All three of the borrowed design's load-bearing details are honored and tested. The notice's bytes are
+**reserved out of** the cap, so spilling can never *add* tokens to a turn — removing the reserve fails
+`TestTruncateNeverExceedsTheCap` at every limit. `read_file` is **excluded**, since its remainder is
+the file, already addressable with offset/limit, and spilling a read produces a file the model would
+read again. And the whole thing is **best-effort**: no root, an unwritable workspace or a failed write
+leaves the inline result exactly as it was and never converts a success into `isError`.
+
+**The item-level half — the one the item says a careless port would miss — is built.** `glob` and
+`grep` cap at the *result* level, so by the time a byte policy sees the result the tail matches are
+already discarded; only the collector can spill them. `grep` now collects to `grepSpillMaxMatches`
+(2,000) while showing `grepMaxMatches` (500). **Two numbers, not one, because they bound different
+costs:** the inline cap bounds the model's context, the collection cap bounds the *walk* — and the walk
+is what CLAUDE.md's streaming-cancel note is about, where cancelling ripgrep at the cap took a common
+pattern from 964ms to 46ms on a 40k-file tree. Measured on this repo before choosing 4x: `func `
+collects 2,000 matches in ~90ms against ~50ms for 500, where uncapped collection costs ~900ms for a set
+no model will page through. `TestItemSpillCarriesMatchesPastTheInlineCap` asserts specifically that a
+match *beyond* the inline cap is recoverable, which no byte-level spill could deliver.
+
+**One thing the round-trip test found that neither the filing nor the build anticipated.** Asserting
+recovery end-to-end — read the locator out of the notice, open it, look for the dropped bytes — fails
+on a default read, because a spill file is large by construction and `read_file`'s default window
+returns only its head. That is not a spill bug and the locator already says "with offset/limit to
+page", but it means the naive recovery attempt returns *the same head the model already had*. The test
+now pins both halves: a default read of a spill must tell the model how to page, and the instructed
+paged read must reach the dropped tail. A test that only checked "a file was written" would have passed
+while the recovery path silently didn't work.
+
+Reaping is TTL (24h) plus count (200) plus bytes (64 MiB), oldest-first — never the newest, which is
+the one the current turn's notice points at. Scoping is by **workspace**, not session: the tool layer
+has no session id (ctx carries a workdir, extra roots and a registry, nothing else) and adding one to
+`internal/tool` is outside this change. That is weaker than the item asks in exactly one way, stated in
+the code: a spill from a previous session in the same workspace stays readable until it ages out.
+
+**Last updated (earlier the same day):** 2026-08-14 — **P62.10 shipped, all four parts**, which is where the prompt-cost work
+finally lands on the path a local conformance run actually takes: **phase 6 of the phased drive now
+narrows to a declared surface, 3,492 → 1,209 schema tokens per turn**, and all four CLI entry points
+carry the local prompt profile — the last of them on live evidence rather than on a token count, which
+is also what turned up an `edit_section` description pointing at a deferred tool.
+**P62.9 built, closure pending live verification**, taking the
+local-profile base prompt from **4,907 to 4,317** estimated tokens (12%) and finding a latent
+phase-scoping bug on the way. **P62.6 built and closed** the same day, taking it from **7,790 to
+4,907** (37%). P62.10's write-up is immediately below, then P62.9's, then P62.6's, then the 2026-08-10
+Tier 3 batch.
+
+**P62.10 — the local profile reaches the rest of the CLI, and the drive's longest phase finally
+narrows (SHIPPED 2026-08-14, all four parts).**
+
+The item was filed off P62.9 by asking how far that change reached, and the build inverted its own
+ranking. The half it led with — `LocalProfile` passed at one of five `builtin.Register` call sites,
+worth a measured 1,318 schema tokens — is partly blocked on the live tier, because its most valuable
+site is `aegis chat`, the harness every P38.1 re-test drives. The half it filed second, described
+only as "phase 6 narrows nothing", turned out to be **2,283 tokens per turn** on the phase a build
+spends the most turns in, needing no live tier at all because P39.14 had already decided that phases
+narrow. Filed cheap, worth more.
+
+**1. Phase 6 declares a tool surface (3,492 → 1,209 schema tokens per phase-6 turn).** `scopeTools`
+had exactly two callers — the content-phase loop and the re-opened content phase — so
+`runPhasedVerifyAndQuality` (the `MaxVerifyRounds` fix rounds plus the quality pass, each its own
+fresh context) ran on the session's whole surface, `web_search` included: the tool
+`TestScopeToolsPerPhase` asserts no content phase offers, and which the P39.14 comment names as "the
+detour that opened a real run". `phase6Tools` is `fillPhaseTools` + `threat_model_inventory`, read off
+phase 6's own prompts rather than guessed — they say read the suite first, fix in place with
+`fill_marker`/`edit_section`/`edit_file`, never re-scaffold and never `write_file` a suite file, so
+`write_file` stays out for the reason the fill phases dropped it, and the one addition is the tool that
+*generates* `inventory.yaml`, which the assessment prompt already forbids hand-writing.
+
+Two mechanics are load-bearing. The scope is taken once for the whole round rather than per turn,
+because every iteration is the same phase; a re-opened content phase narrows further on top of it and
+restores back into it. And the content loop releases its own narrowing *before* phase 6 scopes, so
+phase 6's baseline is the session surface rather than whichever content phase happened to run last.
+
+The one judgement the build added rather than inherited: narrowing is gated on the *plan* having
+declared per-phase tools at all. A plan assembled from a skill's `phases:` frontmatter declares none,
+and handing its verify round a threat-model surface would take `web_search` away from a deep-research
+fix round that never opted into narrowing anywhere else. Declared narrowing stays declared.
+
+**2. `dry-run`, `worker` and `debate` carry the profile.** `dry-run` was the one to fix first because
+it is an *instrument*: its whole job is "preview what this session will send without calling the
+model", and against a loopback `base_url` it printed a tool list the session would not use. That is
+P62.4's lesson in miniature — an optimization measured with a broken instrument produces a confident
+wrong verdict — and this is the operator-facing report for exactly the question P62.6 and P62.9 were
+answering. It now labels the active profile in its header and prints deferred tools in their own
+section, because under the local profile most of the inventory moves there and a silently shorter list
+reads as "these tools are gone" rather than "one `tool_search` away".
+
+`worker.go` is the third thing the subprocess sub-agent did not inherit, after the gate stack (P10.1)
+and the sandbox (P10.2) — it reconstructs `cfg` from disk and then has to actually consult it.
+`debate.go` was not in the filing's three-site list and should have been: a debate is several full
+engine runs per round, so the per-turn schema cost is paid more times there than anywhere else in the
+CLI.
+
+**3. The omission is now a sentence somebody wrote, not a field somebody forgot.**
+`TestEveryRegisterCallSiteDecidesTheLocalProfile` walks the repo's production Go source, finds every
+`builtin.Register(` call, reads it through its matching paren, and requires each either to pass
+`LocalProfile:` or to explain in the comment directly above it why it does not. It also asserts a floor
+on how many sites it found, so a refactor that renames the call or hides every site behind a helper
+fails rather than passing vacuously. `chat.go` is the only site using the escape hatch, and its comment
+now states the specific evidence that would change that: `--skill` layers the drive's per-phase tool
+arrays on top of whatever is registered there, so deferring `edit_file` on that path changes what those
+arrays resolve to mid-drive.
+
+**4. `aegis chat` carries the profile too, and the live tier is what says so.** This was the site the
+filing deliberately gated: `aegis chat --skill` is the harness every P38.1 re-test drives, and the
+phased drive layers its per-phase tool arrays on top of whatever is registered here. It was measured
+rather than argued — the seeded-bug task run end to end through the real command against qwen3:14b at
+a 16,384-token window, three runs per arm, outcome re-derived by re-running the script rather than by
+believing the model:
+
+| arm | tool calls | sequence | outcome |
+|---|---|---|---|
+| `edit_file` exposed (before) | 3, 3 | shell → edit_file → shell | passed 2/2 |
+| deferred, before the fix below | 8 | shell → edit_section ×3 (failed) → read_file → multi_edit → shell → multi_edit → shell | passed |
+| deferred, after it | 4, 6 | shell → read_file → multi_edit → shell | passed 2/2 |
+
+**The predicted refutation did not occur: no run ever called `tool_search`.** P62.9's stated failure
+mode was a turn spent hunting for a tool the model knows by name; across three deferred-surface runs
+the model went straight to a handle-based editor instead. The deferred surface did take more tool
+calls (4-6 against a steady 3), and that is recorded as a caveat rather than a finding, because a
+control arm with `edit_file` exposed then failed the task **twice** by explaining the fix in prose
+instead of applying it — run-to-run variance on this task is larger than the difference being
+measured. The clean number from the same afternoon is prompt size, through the daemon tier with
+neither count clamped: local 4,854 vs default 8,376 first-turn input tokens.
+
+**5. The defect the live tier actually found, which nobody had filed.** `edit_section`'s description
+ended "use `edit_file` for a surgical change" and its no-headings error read `%s has no markdown
+headings` and stopped there. Against a `.py` file with `edit_file` deferred, that is a description
+pointing at a tool the model cannot see plus an error carrying none of the information needed to
+recover — and it cost three consecutive failed calls and a tool-failure-breaker trip in the run above.
+Both now name `multi_edit`, chosen because it is exposed under **both** prompt profiles; the error also
+says *why* there is nothing to edit rather than only that there is not. That is P39.16's finding (a
+tool that holds what the model needs and returns an error without it) and P62.9's finding (a declared
+surface naming a tool that is not on it) landing in the same three lines, in a surface — a tool's own
+description — that neither item had thought to check. `TestEditSectionOnHeadinglessFileNamesTheToolThatWorks`
+pins both halves, including that the message must *not* name `edit_file`.
+
+**Verification.** `go test ./...` green. Four mutations checked, all killed: dropping phase 6's scope
+call (0 scope calls observed), narrowing an undeclared plan, putting `web_search` back on the phase-6
+surface, and silently removing `LocalProfile` from `dry-run` while leaving no explanation. The
+1,318-token profile delta and the 2,283-token phase-6 delta were both re-measured through `tokenest`
+against the CLI's own option set on an empty workspace; the former reproduces the filing's number
+exactly (3,492 → 2,174 exposed-schema tokens, 19 → 14 tools). Eight live runs total across the arms
+above, on a machine whose Ollama defaults to a 4,096-token window — which is worth recording on its
+own, because at that window the local base prompt *is* the entire context and the daemon tier's
+`FixSeededBug` fails for want of room, not for want of a fix.
+
+**P62.9 — the exposed-schema half: one deferred editing tool, three local prose blocks, and a
+declared surface that was not real (BUILT 2026-08-14, closure pending the live tier).**
+
+| | before | after |
+|---|---|---|
+| tool schemas | 3,275 (27 exposed) | **3,090** (26 exposed) |
+| shared prose blocks | 1,001 | **581** |
+| `<deferred_tools>` | 409 (13 tools) | 425 (14 tools) |
+| persona + everything else | 222 | 222 |
+| **total** | **4,907** | **4,317** |
+
+Unlike its parent, both halves are behaviour changes on the local profile rather than defect fixes,
+so this is written up as **built, not closed**. The closure condition is a `TestLiveWorkflow` run
+showing the agent's behaviour is not worse; no model server was reachable when this landed, and the
+numbers below are what the change *costs*, not evidence that it is free.
+
+**1. The editing surface (185 tokens), and it is the inverse of the obvious cut.** Five editing tools
+were exposed at once for 1,299 tokens, and the token-greedy move is to defer the two most expensive —
+`edit_section` (407) and `multi_edit` (276) — for ~500. That is precisely backwards. P39.16 shipped
+the handle-based tools *because* small models fail `edit_file`'s byte-exact `old_string` match, at 12
+consecutive `edit_file` failures becoming 7 clean `edit_section` calls. So the local profile defers
+`edit_file`, the cheapest of the five and the one a small model uses worst, and keeps the four it was
+introduced in favour of. Deferred rather than removed: `tool_search` loads it by name, a surgical
+single-line or table-row change is still what it is best at, and the default profile is untouched. A
+test in `builtin_test.go` pins the *direction* — the four handle-based tools must stay exposed —
+because a later pass optimizing the same number would otherwise undo this by taking the bigger saving.
+
+**2. The three shared prose blocks (420 tokens), compressed and not cut.** `completing-tasks` (464),
+`platform` (284) and `tool-use` (253) had no local variant. They do now
+(`persona.ToolUseBlockFor`/`CompletingTasksBlockFor`/`PlatformBlockFor`, selected by the profile in
+both `server.effectiveSystem` and the CLI's `buildChatSystem`), and the design rule is that they say
+the same things in fewer words. The tempting version of this change is to *drop* rules, and every one
+of these rules was added after a real run went wrong — narrating instead of calling a tool, answering
+in chat instead of writing the requested file, a skeleton reported as finished, a PowerShell command
+written in bash. What a small model loses when a rule is removed is exactly the question the live tier
+exists to answer, so nothing was removed on inference. `TestLocalBlocksKeepEveryRule` enumerates each
+rule with a phrase that must survive into the local text.
+
+The single deliberate deletion is duplication, not a rule: the default platform block ends by
+repeating the tool-use block's "call the tool immediately, do not narrate" sentence, and both blocks
+are always injected together. That one sentence is the largest saving in the platform block, and the
+test asserts the default block still carries it — so if the exception ever stops describing anything
+real, it fails rather than rots.
+
+**3. A declared tool surface that was not real (no tokens, found on the way).** `edit_file` appears
+in every one of the drive's phase tool lists, which raised the question of what happens when a phase
+names a deferred tool. Nothing did: `Registry.ScopeExposed` narrowed and never widened, so a named
+deferred tool stayed hidden. **Two phases had been in that state since they were written** —
+`dfdPhaseTools` names `render_diagram` and `assessmentPhaseTools` names `yaml_validate`, both deferred
+tools — meaning the DFD phase was told to render a diagram and the assessment phase to validate YAML
+with prompts naming tools that were not in their arrays. `ph.tools` is a *declared surface*: naming a
+tool is the drive saying the phase needs it. `ScopeExposed` now loads a named deferred tool for the
+scope's duration and the restore returns it to deferred.
+
+The narrowing-only rule is kept for everything else, and the line between the two cases is the point:
+a tool hidden by a `SetExposed` permission decision stays hidden even when named, because widening
+there would be an escalation. Deferral is not an escalation — it is a prompt-cost mechanism, and
+`tool_search` can load any deferred tool at any turn. `TestPhaseToolsSurviveScoping` runs the real
+builtin registry under the local profile against all four phase sets, so a future deferral that
+strands a phase tool fails in `go test ./...` rather than in a live run.
+
+**Closure.** `localBasePromptCeilingTokens` 5,200 → 4,550 against the measured 4,317, with the
+comment recording both changes and stating plainly that the live confirmation is outstanding. Three
+mutations were run and all three killed: the deferred-loading branch in `ScopeExposed` (kills the new
+registry test *and* `TestPhaseToolsSurviveScoping` with all three stranded tools named), the local
+prose selection reverting to the default blocks (kills the size test, and the budget test at 4,595
+over a 4,550 ceiling), and `edit_file` exposed under the local profile. One scope note recorded in
+code rather than left to inference: `aegis chat` never opted into P25.6's tool half, so the CLI path
+gets the local prose blocks but still exposes `edit_file` — turning that on is a P25.6 extension with
+its own evidence to gather, not something to change on the way past.
 
 **P62.6 — the base prompt is 84% tool inventory, and deferral is most of the waste (SHIPPED 2026-08-14).**
 

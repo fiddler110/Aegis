@@ -163,9 +163,10 @@ func (d *loopDetector) reset() {
 // A nil *loopGuard is the disabled detector (LoopThreshold < 0), and every
 // method tolerates it, so Run carries no nil checks of its own.
 type loopGuard struct {
-	threshold  int
-	detector   *loopDetector
-	pollExempt func(provider.ToolUseBlock) bool
+	threshold   int
+	detector    *loopDetector
+	pollExempt  func(provider.ToolUseBlock) bool
+	transparent func(provider.ToolUseBlock) bool
 }
 
 // newLoopGuard builds the guard for a run, or returns nil when loop detection is
@@ -175,9 +176,10 @@ func (e *Engine) newLoopGuard() *loopGuard {
 		return nil
 	}
 	return &loopGuard{
-		threshold:  e.loopThreshold,
-		detector:   newLoopDetector(e.loopThreshold),
-		pollExempt: e.pollExempt,
+		threshold:   e.loopThreshold,
+		detector:    newLoopDetector(e.loopThreshold),
+		pollExempt:  e.pollExempt,
+		transparent: e.signatureTransparent,
 	}
 }
 
@@ -213,6 +215,10 @@ type loopVerdict struct {
 // one otherwise, and canonicalizeToolInput erases the very fields that would
 // tell them apart.
 //
+// P64.2: calls a tool declares signature-transparent keep their name and lose
+// their arguments, so an interleaved bookkeeping write cannot launder a repeated
+// call past the detector by varying its own payload every turn.
+//
 // P53.2(b): the outcome decides the ending. A cycle whose rounds errored is
 // fatal. A cycle that keeps *succeeding* earns one corrective nudge and a window
 // reset; only a second trigger in the same run ends it. nudgesSpent is the run's
@@ -222,7 +228,7 @@ func (g *loopGuard) check(toolUses []provider.ToolUseBlock, nudgesSpent int) loo
 	if g == nil {
 		return loopVerdict{}
 	}
-	sig, shouldRecord := turnSignatureExcludingPolls(toolUses, g.pollExempt)
+	sig, shouldRecord := turnSignatureExcludingPolls(toolUses, g.pollExempt, g.transparent)
 	if !shouldRecord {
 		return loopVerdict{}
 	}
@@ -270,20 +276,37 @@ func isRepeatingCycle(window []string, period int) bool {
 // canonicalized inputs, in request order). Two turns with the same signature
 // requested the exact same work — the hallmark of a loop.
 func turnSignature(toolUses []provider.ToolUseBlock) string {
-	sig, _ := turnSignatureExcludingPolls(toolUses, nil)
+	sig, _ := turnSignatureExcludingPolls(toolUses, nil, nil)
 	return sig
 }
 
-// turnSignatureExcludingPolls builds the loop signature for a turn, dropping
-// every call that pollExempt reports as a legitimate poll (P53.2), and reports
-// whether the turn should be recorded at all.
+// turnSignatureExcludingPolls builds the loop signature for a turn, applying the
+// two per-call filters a tool can ask for, and reports whether the turn should
+// be recorded at all.
 //
-// record is false when nothing survives the filter — a turn made up entirely of
-// polls. Recording it as an empty signature would be actively harmful: empty
-// equals empty, so a handful of poll-only turns would form a perfect period-1
-// cycle and trip the very detector the exemption exists to keep quiet.
-// pollExempt may be nil, which reproduces the pre-P53.2 signature exactly.
-func turnSignatureExcludingPolls(toolUses []provider.ToolUseBlock, pollExempt func(provider.ToolUseBlock) bool) (string, bool) {
+// pollExempt (P53.2) drops the call entirely: name, arguments and all. record is
+// false when nothing survives that filter — a turn made up entirely of polls.
+// Recording it as an empty signature would be actively harmful: empty equals
+// empty, so a handful of poll-only turns would form a perfect period-1 cycle and
+// trip the very detector the exemption exists to keep quiet.
+//
+// transparent (P64.2) drops only the call's *arguments*, keeping its name. The
+// asymmetry is the entire point of having two predicates instead of widening
+// the first: a bookkeeping write whose payload legitimately changes every turn
+// carries no evidence either way, but the fact that it happened still does. So
+// `grep X → todo_write(varying) → grep X` collapses to one repeated signature
+// and is caught, while a turn of nothing but todo writes still counts as a turn
+// and is judged on the name alone. Widening pollExempt to cover these tools
+// would have bought the first behaviour at the cost of the second, and at the
+// cost of the blast radius PollExempter's own doc comment warns about.
+//
+// Either function may be nil; both nil reproduces the pre-P53.2 signature
+// exactly.
+func turnSignatureExcludingPolls(
+	toolUses []provider.ToolUseBlock,
+	pollExempt func(provider.ToolUseBlock) bool,
+	transparent func(provider.ToolUseBlock) bool,
+) (string, bool) {
 	var b strings.Builder
 	kept := 0
 	for _, tu := range toolUses {
@@ -293,7 +316,9 @@ func turnSignatureExcludingPolls(toolUses []provider.ToolUseBlock, pollExempt fu
 		kept++
 		b.WriteString(tu.Name)
 		b.WriteByte('\x00')
-		b.Write(canonicalizeToolInput(tu.Input))
+		if transparent == nil || !transparent(tu) {
+			b.Write(canonicalizeToolInput(tu.Input))
+		}
 		b.WriteByte('\n')
 	}
 	return b.String(), kept > 0

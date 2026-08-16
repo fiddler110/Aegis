@@ -61,8 +61,8 @@ func TestScopeExposedNarrowsAndRestores(t *testing.T) {
 	}
 }
 
-// Narrowing must never *widen*: a tool hidden for another reason (permission
-// mode, deferred registration) stays hidden even when a phase names it.
+// Narrowing must never widen past a *permission* decision: a tool hidden by a
+// SetExposed call stays hidden even when a phase names it.
 func TestScopeExposedOnlyNarrows(t *testing.T) {
 	r := NewRegistry()
 	for _, n := range []string{"read_file", "shell"} {
@@ -79,6 +79,63 @@ func TestScopeExposedOnlyNarrows(t *testing.T) {
 	restore()
 	if exposedNames(r)["shell"] {
 		t.Error("restore re-exposed a deliberately hidden tool")
+	}
+}
+
+// A *deferred* tool is the one exception, and it is the case the drive's phase
+// lists actually hit (P62.9): render_diagram and yaml_validate have been named
+// by a phase and deferred in the registry since both were written, so the phase
+// was handed a prompt naming a tool that was not in its array. Loading it for
+// the scope is not an escalation — tool_search can load any deferred tool at
+// any time — but it must go back to deferred afterwards, or one phase's surface
+// leaks into the next and into the <deferred_tools> block.
+func TestScopeExposedLoadsNamedDeferredTool(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(&namedStub{name: "read_file"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterDeferred(&namedStub{name: "render_diagram"}); err != nil {
+		t.Fatal(err)
+	}
+	if exposedNames(r)["render_diagram"] {
+		t.Fatal("a deferred tool is exposed before any scope")
+	}
+
+	restore := r.ScopeExposed([]string{"read_file", "render_diagram"})
+	if !exposedNames(r)["render_diagram"] {
+		t.Error("a phase named a deferred tool and did not get it")
+	}
+
+	restore()
+	if exposedNames(r)["render_diagram"] {
+		t.Error("restore left a deferred tool exposed")
+	}
+	// Still advertised as deferred, i.e. genuinely back where it started.
+	var advertised bool
+	for _, info := range r.Deferred() {
+		if info.Name == "render_diagram" {
+			advertised = true
+		}
+	}
+	if !advertised {
+		t.Error("after restore the tool is neither exposed nor advertised as deferred")
+	}
+}
+
+// A deferred tool a phase does NOT name stays deferred: scoping loads what was
+// declared, not everything the registry knows.
+func TestScopeExposedLeavesUnnamedDeferredAlone(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(&namedStub{name: "read_file"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RegisterDeferred(&namedStub{name: "web_search"}); err != nil {
+		t.Fatal(err)
+	}
+	restore := r.ScopeExposed([]string{"read_file"})
+	defer restore()
+	if exposedNames(r)["web_search"] {
+		t.Error("scoping loaded a deferred tool the phase never named")
 	}
 }
 

@@ -15,8 +15,18 @@ import (
 )
 
 const (
-	gitTimeout    = 30 * time.Second
-	maxGitOutput  = 100 << 10 // 100 KiB of combined output returned to the model
+	gitTimeout = 30 * time.Second
+	// maxGitOutput bounds what one git invocation returns to the model.
+	// P64.3: was 100 << 10 (100 KiB ≈ 25,600 estimated tokens), which is still
+	// larger than a 4k–16k local window, so it could not bind first either.
+	// 32 KiB is ~8,192 tokens — deliberately larger than shell's 24 KiB and not
+	// homogenised with it, because a diff is the one over-cap result a model
+	// routinely has to read in full to act on, and it has no `background:true`
+	// escape hatch of its own.
+	maxGitOutput = 32 << 10
+	// maxTestOutput bounds the pre-commit test command's output. It is shell
+	// output, not git output, so it takes shell's value and shell's end (tail).
+	maxTestOutput = 24 << 10
 	maxGitArgs    = 64
 	maxCommitMsg  = 8 << 10 // 8 KiB
 	maxCommitPath = 50
@@ -72,9 +82,9 @@ func runGit(ctx context.Context, root string, args ...string) (string, error) {
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	text := string(out)
-	if len(text) > maxGitOutput {
-		text = text[:maxGitOutput] + "\n…(truncated)"
-	}
+	// Head: a diff, a log or a status is read top-down and the model narrows by
+	// path from what it sees first. P64.3 posture table in truncate.go.
+	text = SpillHead(ctx, root, "git", text, maxGitOutput, "narrow the command with a pathspec (e.g. git diff -- <dir>) to see the rest")
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return text, fmt.Errorf("git timed out after %s", gitTimeout)
@@ -204,9 +214,10 @@ func runPreCommitTest(ctx context.Context, root, command string, timeout time.Du
 	cmd.Dir = root
 	b, err := cmd.CombinedOutput()
 	text := string(b)
-	if len(text) > maxGitOutput {
-		text = text[:maxGitOutput] + "\n…(truncated)"
-	}
+	// Tail, unlike runGit's head above, and the difference is the point of
+	// P64.3's convention: this is a *test run*, not a diff. The failures are
+	// the last thing printed and the head is a list of packages that passed.
+	text = SpillTail(ctx, root, "pre-commit-test", text, maxTestOutput, "")
 	if ctx.Err() == context.DeadlineExceeded {
 		return strings.TrimSpace(text) + fmt.Sprintf("\n(pre-commit test timed out after %s)", timeout), false
 	}

@@ -70,7 +70,9 @@ var frameworkEnum = []string{"stride", "stride-a", "linddun", "pasta", "trike", 
 
 // maxSkillScriptOutput caps what a script's stdout can add to the context. The
 // recon digest is a few KB by design; a runaway one must not become the reason
-// a phase overflows.
+// a phase overflows. ~6,000 estimated tokens (P64.3); the value predates that
+// item and is kept, because it is the one cap in the tree that was already
+// chosen against a context window rather than against "large".
 const maxSkillScriptOutput = 24000
 
 // skillScriptTool runs one bundled skill script with argv built from a typed
@@ -124,9 +126,10 @@ func (t *skillScriptTool) Execute(ctx context.Context, input json.RawMessage) (t
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	text := strings.TrimRight(string(out), "\n")
-	if len(text) > maxSkillScriptOutput {
-		text = text[:maxSkillScriptOutput] + "\n…(output truncated)"
-	}
+	// Head, unlike the shell tool's tail (P64.3): these scripts emit a digest
+	// written top-down — the summary the phase needs is the first thing
+	// printed, and the tail is per-item detail.
+	text = SpillHead(ctx, root, t.name, text, maxSkillScriptOutput, "")
 	if err != nil {
 		if text == "" {
 			text = err.Error()

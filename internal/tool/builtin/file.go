@@ -16,6 +16,16 @@ import (
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
+// P64.3: read_file is the one capping tool in the tree that does *not* route
+// through TruncateHead/TruncateTail, and the reason is worth stating rather
+// than leaving as an omission. Its cap is a *line window* (defaultReadLines),
+// not a byte cut, and its remainder is not lost data — it is the file, which
+// the model can already address with offset/limit. Byte-truncating a numbered
+// line listing would corrupt the last line and buy nothing. maxReadBytes below
+// is an input guard on how much is read from disk, not a result cap; when it
+// bites, the tool refuses and points at grep rather than returning a partial
+// answer. read_file is excluded from P64.1's spill policy for the same reason:
+// spilling a read produces a file the model would then read again.
 const (
 	maxReadBytes    = 50 << 20 // 50 MiB
 	maxWriteContent = 10 << 20 // 10 MiB
@@ -29,6 +39,15 @@ const (
 	// An explicit limit is always honored verbatim — this only bounds the
 	// "read the whole thing" default.
 	defaultReadLines = 1500
+	// maxDefaultReadBytes is defaultReadLines' missing other half (P64.3):
+	// whichever bites first ends the default window. 32 KiB is ~8,192 estimated
+	// tokens, the same value git's diff cap takes — the two are the same class
+	// of thing, source text the model has to read in order to act on it, and
+	// both are deliberately more generous than shell's 24 KiB because neither
+	// has a background-job escape hatch. It cuts the measured worst case above
+	// from 14,501 tokens to ~8,200 and leaves every ordinary source read
+	// untouched (this repo's median .go file is well under it).
+	maxDefaultReadBytes = 32 << 10
 	// newFileMode is the permission for files we create; parent dirs are made
 	// 0o750 (see os.MkdirAll calls). On overwrite we preserve the existing
 	// file's mode instead — see writePreservingMode.
@@ -178,6 +197,22 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		}
 		if count >= limit {
 			truncated = true // at least one more line exists past the window
+			break
+		}
+		// P64.3: defaultReadLines bounds the *line* count and nothing bounded
+		// the bytes, which the result-size instrument caught as the largest
+		// single result any built-in tool produces — a 2000-line source file
+		// measured 58,000 bytes / 14,501 estimated tokens on the default read,
+		// three times the whole local base-prompt budget and past a 4k window
+		// on its own. Lines are not a proxy for bytes: a minified bundle or a
+		// generated data file is a handful of enormous lines.
+		//
+		// Only the default window is bounded. An explicit limit is still
+		// honored verbatim — that contract is what lets a model page through a
+		// file deliberately, and a byte cut applied to an explicit window would
+		// silently make offset arithmetic wrong.
+		if capped && b.Len() >= maxDefaultReadBytes {
+			truncated = true
 			break
 		}
 		fmt.Fprintf(&b, "%d\t%s\n", lineNo, sc.Text())

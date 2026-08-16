@@ -125,6 +125,16 @@ func (t *todoAddTool) Execute(_ context.Context, input json.RawMessage) (tool.Re
 	return tool.Result{Content: fmt.Sprintf("added todo #%d", id)}, nil
 }
 
+// SignatureTransparent drops todo_add's arguments from the loop signature
+// (P64.2). Adding a plan step is bookkeeping *about* the work, not the work: the
+// text differs on every call by design, so it is exactly the kind of varying
+// payload that made a whole turn look new and laundered a repeated call past the
+// detector. The tool name is still recorded, so a model that only ever rewrites
+// its plan is still caught — this is transparency, not exemption.
+func (t *todoAddTool) SignatureTransparent(json.RawMessage) bool { return true }
+
+var _ tool.SignatureTransparent = (*todoAddTool)(nil)
+
 // --- todo_update ---
 
 type todoUpdateTool struct{ list *TodoList }
@@ -155,6 +165,14 @@ func (t *todoUpdateTool) Execute(_ context.Context, input json.RawMessage) (tool
 	}
 	return tool.Result{Content: fmt.Sprintf("todo #%d → %s", args.ID, args.Status)}, nil
 }
+
+// SignatureTransparent drops todo_update's arguments from the loop signature
+// (P64.2), for the same reason as todo_add: an id/status pair that advances each
+// turn is a progress *report*, and treating it as evidence of progress is what
+// let a stuck agent keep the detector quiet.
+func (t *todoUpdateTool) SignatureTransparent(json.RawMessage) bool { return true }
+
+var _ tool.SignatureTransparent = (*todoUpdateTool)(nil)
 
 // --- todo_list ---
 

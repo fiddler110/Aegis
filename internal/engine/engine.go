@@ -396,6 +396,35 @@ type Engine struct {
 	// parallel tool rounds write to it from multiple goroutines.
 	writtenFilesMu sync.Mutex
 	writtenFiles   map[string]struct{}
+
+	// readFiles tracks workspace-relative paths a successful read-capability
+	// tool call named during the current Run (P65.2), so a compaction can carry
+	// the set forward instead of leaving the model to re-discover the workspace
+	// after its transcript is replaced. Read paths were tracked nowhere before;
+	// writtenFiles above exists for a different consumer (the output guard) and
+	// is deliberately left alone rather than widened, since the guard must keep
+	// reading back only what was written.
+	//
+	// Ordered rather than a bare set: the carried list is capped, and the cap
+	// keeps the most recently touched paths, so insertion order is load-bearing.
+	readFilesMu sync.Mutex
+	readFiles   []string
+	readFileSet map[string]struct{}
+
+	// startedTools records the tool_use IDs whose tool actually entered
+	// Execute this run (P65.1). It answers the one question
+	// repairOrphanedToolUses was previously guessing at: the message list
+	// records what the model *asked for*, never what the runtime *started*, so
+	// a call cancelled mid-flight was reported to the model as "did not run"
+	// whether or not it had already had its effect. Same shape and the same
+	// reason for the mutex as writtenFiles above — a parallel tool round writes
+	// to it from several goroutines. Reset at the start of each Run: the map is
+	// only consulted for orphans in the conversation it was built alongside,
+	// and an in-process cancel is the only case it can speak to. A daemon that
+	// is killed loses the map with everything else, which is the durable
+	// problem (P65.4) and deliberately not this one.
+	startedToolsMu sync.Mutex
+	startedTools   map[string]struct{}
 }
 
 // ErrInterrupted is returned when the run is cancelled via context.
@@ -591,7 +620,15 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// Repair any tool_use blocks left without a matching tool_result by a
 	// previous interrupted run. Without this, most providers reject the
 	// conversation with a validation error that permanently locks the session.
-	if repaired := repairOrphanedToolUses(conv.Messages); len(repaired) != len(conv.Messages) {
+	//
+	// P65.1: this runs *before* the per-run reset of startedTools below, and the
+	// order is load-bearing — the orphans being repaired belong to the run that
+	// was interrupted, so the only map that can classify them is that run's.
+	// A nil map (first run of this process, or a session restored from disk)
+	// classifies every orphan as never-started, which is what the pre-P65.1 code
+	// asserted unconditionally; recovering the fact across a process boundary
+	// needs a durable record and is P65.4's problem, not this one.
+	if repaired := repairOrphanedToolUses(conv.Messages, e.startedToolSet()); len(repaired) != len(conv.Messages) {
 		e.logger.Info("repaired orphaned tool calls", "added", len(repaired)-len(conv.Messages))
 		conv.Messages = repaired
 		conv.invalidate()
@@ -627,6 +664,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	e.writtenFilesMu.Lock()
 	e.writtenFiles = make(map[string]struct{})
 	e.writtenFilesMu.Unlock()
+
+	e.startedToolsMu.Lock()
+	e.startedTools = make(map[string]struct{})
+	e.startedToolsMu.Unlock()
+
+	e.readFilesMu.Lock()
+	e.readFiles, e.readFileSet = nil, make(map[string]struct{})
+	e.readFilesMu.Unlock()
 
 	// nudges tracks the corrective/nudge scaffolding injected this run (guard
 	// retries, the P28.3 zero-tool nudge, the P34.1 empty-answer nudge, and the
@@ -1497,6 +1542,22 @@ func (e *Engine) pollExempt(tu provider.ToolUseBlock) bool {
 	return tool.IsPollExempt(t, tu.Input)
 }
 
+// signatureTransparent reports whether a single tool call's *arguments* should
+// be left out of the loop signature while its name stays (P64.2). Unknown tools
+// and a nil registry answer false, which is the pre-P64.2 behavior — the same
+// safe default pollExempt takes, and for the same reason: a tool the run cannot
+// see is not one whose calls should quietly stop being evidence.
+func (e *Engine) signatureTransparent(tu provider.ToolUseBlock) bool {
+	if e.tools == nil {
+		return false
+	}
+	t, ok := e.tools.Get(tu.Name)
+	if !ok {
+		return false
+	}
+	return tool.IsSignatureTransparent(t, tu.Input)
+}
+
 // resultsHadError reports whether any tool result in a completed round was an
 // error — the signal that classifies a detected cycle as an error loop (fatal)
 // rather than a succeeding one (nudgeable). Deliberately "any", not "all": a
@@ -1899,11 +1960,44 @@ func (e *Engine) serializeTool(name string, input json.RawMessage) bool {
 	}
 }
 
+// interruptedNotStartedText is the synthetic result for an orphaned call the
+// runtime is known never to have begun. It is the pre-P65.1 wording, kept
+// verbatim because for this half it was always true.
+func interruptedNotStartedText(name string) string {
+	return fmt.Sprintf("tool call interrupted; %s did not run", name)
+}
+
+// interruptedMaybeRanText is the synthetic result for an orphaned call that had
+// reached its Execute when the run was cancelled (P65.1).
+//
+// The second sentence is the whole point of the split, and it is a claim about
+// how a model reads the first: told an effect is *uncertain* it re-checks, told
+// the effect did not happen it re-runs. Re-running a `shell` that already
+// deleted half a directory, or a write that already landed, is the failure this
+// wording exists to prevent — and the tool most likely to be running when a
+// stall bound fires is the long one that stalled, which is exactly the class
+// where "did not run" is both most likely false and most costly to believe.
+func interruptedMaybeRanText(name string) string {
+	return fmt.Sprintf("tool call interrupted while running; %s may have partially completed."+
+		" Verify before assuming its effects did or did not land.", name)
+}
+
 // repairOrphanedToolUses scans the conversation for tool_use blocks in assistant
 // messages that have no matching tool_result in a subsequent user message, and
 // injects synthetic error results. This prevents providers from rejecting a
 // conversation that was interrupted mid-tool-round (e.g. by context cancel).
-func repairOrphanedToolUses(msgs []provider.Message) []provider.Message {
+//
+// P65.1: started carries the tool_use IDs the runtime is known to have begun
+// executing, so the synthetic result can tell "never started" from "may have
+// run" instead of asserting the first for both. Every mechanism Aegis has for
+// bounding a run cancels the run context mid-flight by design — MaxTurnStall
+// (on by default, and the only bound covering the tool-execution phase),
+// MaxWallClockPerRun, a user interrupt, a TUI quit-while-streaming — so this
+// path is reached routinely rather than exceptionally, and the drive's reset
+// ladder then hands the next context whatever this function wrote. An unknown
+// ID is treated as not started, which is the pre-P65.1 behaviour and the only
+// honest answer when there is no record either way.
+func repairOrphanedToolUses(msgs []provider.Message, started map[string]struct{}) []provider.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
@@ -1957,9 +2051,13 @@ func repairOrphanedToolUses(msgs []provider.Message) []provider.Message {
 		var synth []provider.Block
 		for _, b := range msg.Content {
 			if tu, ok := b.(provider.ToolUseBlock); ok && !resolved[tu.ID] {
+				text := interruptedNotStartedText(tu.Name)
+				if _, ran := started[tu.ID]; ran {
+					text = interruptedMaybeRanText(tu.Name)
+				}
 				synth = append(synth, provider.ToolResultBlock{
 					ToolUseID: tu.ID,
-					Content:   fmt.Sprintf("tool call interrupted; %s did not run", tu.Name),
+					Content:   text,
 					IsError:   true,
 				})
 			}
@@ -2032,6 +2130,15 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 			return fmt.Sprintf("blocked by hook: %v", err), true
 		}
 	}
+	// P65.1: mark the call started here rather than at the top of executeTool.
+	// The distinction the synthetic interrupted result has to make is "did this
+	// call's effects begin", and everything above this line — an unknown tool, a
+	// gate refusal, a hook veto — returns without the tool ever running, so
+	// marking at entry would over-warn on exactly the calls whose "did not run"
+	// is provably true. Those branches return a result of their own and so are
+	// only orphaned if the whole round is discarded by a cancel, which is the
+	// case this is trying to describe accurately.
+	e.markToolStarted(tu.ID)
 	res, err := t.Execute(ctx, tu.Input)
 	content, isErr := res.Content, res.IsError
 	if err != nil {
@@ -2056,6 +2163,14 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 			e.logger.Warn("write-capability tool call yielded no paths for output-guard coverage", "tool", tu.Name)
 		}
 		e.recordWrittenPaths(paths)
+	}
+	// P65.2: record what this call read, on the same effective-capability rule
+	// (P25.4c) the write branch above uses — so a `cat` routed through shell is
+	// recorded the way a read_file call would be. Errors are excluded: a failed
+	// read tells the model nothing about the file and would put a path the
+	// session never saw into the carried set.
+	if !isErr && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
+		e.recordReadPaths(writtenPathsFromInput(tu.Input))
 	}
 	if !isErr && e.redactSecrets && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
 		// P24.12 / FIND-09: opt-in scrub of tool-read file content for secret
@@ -2125,6 +2240,79 @@ func (e *Engine) recordWrittenPaths(paths []string) {
 	for _, p := range paths {
 		e.writtenFiles[p] = struct{}{}
 	}
+}
+
+// recordReadPaths adds paths to the current run's read-files list (P65.2),
+// preserving first-seen order and dropping duplicates.
+func (e *Engine) recordReadPaths(paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	e.readFilesMu.Lock()
+	defer e.readFilesMu.Unlock()
+	if e.readFileSet == nil {
+		e.readFileSet = make(map[string]struct{})
+	}
+	for _, p := range paths {
+		if _, dup := e.readFileSet[p]; dup {
+			continue
+		}
+		e.readFileSet[p] = struct{}{}
+		e.readFiles = append(e.readFiles, p)
+	}
+}
+
+// touchedFiles reports what this run has read and modified, for a
+// FileContextCompactor to carry across a compaction (P65.2).
+//
+// The written half is sorted while the read half keeps insertion order, and the
+// asymmetry is not an oversight: writtenFiles is a set owned by the output guard
+// and has no recency information to preserve, so a stable order is the best
+// available; readFiles was built for this caller and does have one, which is
+// what the carried list's cap depends on.
+func (e *Engine) touchedFiles() (read, modified []string) {
+	e.readFilesMu.Lock()
+	read = append(read, e.readFiles...)
+	e.readFilesMu.Unlock()
+
+	e.writtenFilesMu.Lock()
+	for p := range e.writtenFiles {
+		modified = append(modified, p)
+	}
+	e.writtenFilesMu.Unlock()
+	sort.Strings(modified)
+	return read, modified
+}
+
+// markToolStarted records that a tool call reached its Execute (P65.1). Called
+// from both the sequential and the concurrent tool paths, hence the mutex.
+func (e *Engine) markToolStarted(id string) {
+	if id == "" {
+		return
+	}
+	e.startedToolsMu.Lock()
+	defer e.startedToolsMu.Unlock()
+	if e.startedTools == nil {
+		// Run resets this per run; the lazy init keeps a tool call outside a
+		// Run (or before its reset) from panicking on a nil map write, matching
+		// recordWrittenPaths above.
+		e.startedTools = make(map[string]struct{})
+	}
+	e.startedTools[id] = struct{}{}
+}
+
+// startedToolSet snapshots the started-call IDs for repairOrphanedToolUses. A
+// copy rather than the live map: the repair is a pure function of the message
+// list and this set, and handing it the map under no lock would race a tool
+// round still finishing from an earlier cancelled Run.
+func (e *Engine) startedToolSet() map[string]struct{} {
+	e.startedToolsMu.Lock()
+	defer e.startedToolsMu.Unlock()
+	out := make(map[string]struct{}, len(e.startedTools))
+	for id := range e.startedTools {
+		out[id] = struct{}{}
+	}
+	return out
 }
 
 // maxGuardFiles caps how many written files are read back for guard

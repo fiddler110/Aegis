@@ -118,6 +118,57 @@ func IsPollExempt(t Tool, input json.RawMessage) bool {
 	return false
 }
 
+// SignatureTransparent is an optional Tool extension for a bookkeeping tool
+// whose *arguments* carry no evidence about whether the agent is making
+// progress (P64.2). A transparent tool contributes its name to the loop
+// signature and nothing else, so two turns that differ only in what the tool
+// wrote compare equal.
+//
+// It exists because the loop detector keys on the **whole turn** — every
+// surviving call's name plus canonicalized input, concatenated — and that makes
+// one interleaved bookkeeping write enough to defeat it by construction. A model
+// emitting `grep X` alongside a todo write whose payload changes every turn
+// produces a fresh signature every turn, so the repeated grep is never seen no
+// matter how many turns it repeats. Neither guard that partly covers the gap
+// helps: toolFailureTracker only counts *failing* calls, and a succeeding loop
+// with a varying bookkeeping call simply rides to MaxIterations.
+//
+// **Transparent is deliberately not the same as PollExempt**, and conflating
+// them is the trap this interface exists to avoid:
+//
+//   - An exempt call is dropped from the signature *and* makes its turn
+//     unrecordable when it is the only call, because a poll is genuinely
+//     expected to repeat forever while waiting on external state. That is a real
+//     concession — loop detection is disabled for whatever it matches — and
+//     PollExempter's own doc argues at length that the set must stay small.
+//   - A transparent call is dropped only from the *arguments*. Its name stays,
+//     so the turn is still judged: a model that does nothing but rewrite its
+//     todo list five turns running trips the detector, which is correct, and
+//     which exemption would have let run to the iteration cap.
+//
+// The narrower concession is what makes the set safe to grow past three
+// entries. Declare it for a tool whose arguments legitimately differ every turn
+// as a matter of course — a todo write, a memory or knowledge note, a task
+// status update — and never for a tool whose arguments are the model's choice
+// of *work*, since that is precisely the evidence the detector runs on.
+type SignatureTransparent interface {
+	// SignatureTransparent reports whether this call's arguments should be
+	// dropped from the turn's loop signature. Per-call rather than a static
+	// flag, for the same reason PollExempt is: the narrowest honest answer
+	// belongs at the call.
+	SignatureTransparent(input json.RawMessage) bool
+}
+
+// IsSignatureTransparent reports whether a specific call's arguments should be
+// dropped from the loop signature: false unless t implements
+// SignatureTransparent and claims this input. Mirrors IsPollExempt.
+func IsSignatureTransparent(t Tool, input json.RawMessage) bool {
+	if s, ok := t.(SignatureTransparent); ok {
+		return s.SignatureTransparent(input)
+	}
+	return false
+}
+
 // Registry holds registered tools and tracks which are exposed.
 type Registry struct {
 	mu          sync.RWMutex
@@ -261,10 +312,9 @@ func (r *Registry) SetExposed(name string, exposed bool) {
 	}
 }
 
-// ScopeExposed narrows the exposed set to allow (plus anything already hidden,
-// which stays hidden) and returns a function restoring the previous exposure.
-// An empty allow list is a no-op returning a no-op restore, so a caller with
-// nothing to narrow needs no special case.
+// ScopeExposed narrows the exposed set to allow and returns a function
+// restoring the previous exposure. An empty allow list is a no-op returning a
+// no-op restore, so a caller with nothing to narrow needs no special case.
 //
 // This is the enforcing counterpart to persona.Tools, which is advisory:
 // PersonaToolGate warns *after* a call, while the model still sees every
@@ -273,6 +323,19 @@ func (r *Registry) SetExposed(name string, exposed bool) {
 // tool schemas used 4 of them, and the one wrong choice — an unprompted
 // web_search — opened a phase and spent its context on the public web instead
 // of the repo. A tool that is not in the array cannot be chosen.
+//
+// Naming a *deferred* tool loads it for the scope's duration, and the restore
+// puts it back to deferred. Narrowing is otherwise still narrowing-only: a tool
+// hidden for any other reason (a permission gate calling SetExposed) stays
+// hidden even when named, because widening there would be an escalation.
+// Deferral is not — it is a prompt-cost mechanism, and tool_search can load any
+// deferred tool at any time. The distinction is load-bearing rather than
+// pedantic: `allow` is a *declared surface*, so a caller that names a tool has
+// said the phase needs it, and before P62.9 three such declarations were
+// silently inert. dfdPhaseTools names render_diagram and assessmentPhaseTools
+// names yaml_validate, both deferred since they were written; under the local
+// prompt profile edit_file joins them. Each phase was handed a prompt naming a
+// tool that was not in its array.
 //
 // Restore is idempotent and safe to defer.
 func (r *Registry) ScopeExposed(allow []string) (restore func()) {
@@ -287,9 +350,13 @@ func (r *Registry) ScopeExposed(allow []string) (restore func()) {
 	prev := make(map[string]bool, len(r.exposed))
 	for name, was := range r.exposed {
 		prev[name] = was
-		// Only ever narrow: a tool already hidden stays hidden even if named.
-		if was && !keep[name] {
+		switch {
+		case was && !keep[name]:
 			r.exposed[name] = false
+		case !was && keep[name] && r.deferred[name]:
+			// Load a named deferred tool for this scope only; restore returns
+			// it to deferred because prev recorded false above.
+			r.exposed[name] = true
 		}
 	}
 	r.schemaCache = nil

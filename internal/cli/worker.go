@@ -151,7 +151,15 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	}
 
 	reg := tool.NewRegistry()
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Sandbox: workerSandbox, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive}); err != nil {
+	// P62.10: carry the daemon's prompt profile across the process boundary,
+	// like the gate stack (P10.1) and the sandbox (P10.2) above. This worker
+	// reconstructs cfg from disk and then has to actually consult it: without
+	// this it registered the cloud surface regardless of the configured model,
+	// so a teammate spawned under a local model paid ~1,300 schema tokens the
+	// daemon had already decided that model should not spend. Nothing becomes
+	// unreachable — the profile defers rather than removes, and tool_search
+	// loads any of it on demand.
+	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Sandbox: workerSandbox, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile(), ToolFamilies: cfg.Tools.Families}); err != nil {
 		return "", cost.Snapshot{}, err
 	}
 

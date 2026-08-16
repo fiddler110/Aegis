@@ -421,6 +421,36 @@ func TestPromptCachingDisabled(t *testing.T) {
 	}
 }
 
+// P65.3: a one-off request (the compaction summarizer, the output guard)
+// shares the conversation's adapter instance and its default-on caching
+// posture, but sets SuppressCache since a breakpoint there is a billed write
+// with no possible matching read.
+func TestPromptCachingSuppressedPerRequest(t *testing.T) {
+	body := captureBodyReq(t, provider.Request{
+		Model:     "m",
+		MaxTokens: 10,
+		System:    "you are a test",
+		Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		},
+		SuppressCache: true,
+	})
+	sys, ok := body["system"].([]any)
+	if !ok || len(sys) != 1 {
+		t.Fatalf("system not a single-block array: %#v", body["system"])
+	}
+	if _, has := sys[0].(map[string]any)["cache_control"]; has {
+		t.Error("SuppressCache set but system has cache_control")
+	}
+	msgs := body["messages"].([]any)
+	lastMsg := msgs[len(msgs)-1].(map[string]any)
+	content := lastMsg["content"].([]any)
+	lastBlock := content[len(content)-1].(map[string]any)
+	if _, has := lastBlock["cache_control"]; has {
+		t.Error("SuppressCache set but last message block has cache_control")
+	}
+}
+
 func TestCacheUsageParsing(t *testing.T) {
 	const s = `event: message_start
 data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}}}

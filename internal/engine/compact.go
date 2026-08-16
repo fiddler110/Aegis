@@ -86,6 +86,30 @@ type YieldReportingCompactor interface {
 	CompactYield(ctx context.Context, system string, msgs []provider.Message) (out []provider.Message, changed, summarized bool, freedTokens int, err error)
 }
 
+// FileContextCompactor is an optional capability of a Compactor: it can be told
+// which files this run has read and modified, so a summary can carry that set
+// forward instead of leaving the model to re-discover the workspace with glob
+// and read after every compaction (P65.2).
+//
+// It is shaped as a context *decorator* rather than as a Compact variant or a
+// setter, and both alternatives are wrong for reasons worth recording:
+//
+//   - A setter (`SetFiles`) cannot work. A Summarizer is built once per server
+//     and shared by every session, so two sessions would overwrite each other's
+//     paths — a cross-session leak, not merely a stale list. The calibration seam
+//     above can be a setter precisely because a calibration *is* process-wide.
+//   - A Compact variant would have to be written twice, since the guard calls
+//     CompactYield when it can and Compact when it cannot, and every future
+//     widening of the seam would double again.
+//
+// Decorating the context leaves both call paths untouched and keeps the data
+// where per-call, caller-scoped data belongs. A Compactor that does not
+// implement this is called with an undecorated context and behaves exactly as
+// before.
+type FileContextCompactor interface {
+	WithFiles(ctx context.Context, read, modified []string) context.Context
+}
+
 // compactionGuard is the third concern lifted out of Engine.Run under P63.9:
 // proactive context compaction, the summarizer's failure/latch bookkeeping, and
 // the one context-nearly-full notice a run is allowed to emit.
@@ -140,6 +164,10 @@ type compactionGuard struct {
 	window    func() int
 	maxTokens int
 	logger    *slog.Logger
+
+	// touchedFiles reports the paths this run has read and modified, for a
+	// FileContextCompactor to carry forward (P65.2). Never nil.
+	touchedFiles func() (read, modified []string)
 
 	// requestOverhead is what every request carries that conv.System and
 	// conv.Messages do not, measured once per run.
@@ -224,6 +252,10 @@ func (e *Engine) newCompactionGuard() *compactionGuard {
 		window:    e.effectiveContextWindow,
 		maxTokens: e.maxTokens,
 		logger:    e.logger,
+		// P65.2: read at compaction time, not captured now — the whole point is
+		// the set of files touched *before* the compaction, and a compaction
+		// happens many turns into a run.
+		touchedFiles: e.touchedFiles,
 	}
 	if e.tools != nil {
 		// Mirrors turn(): under the shim the schemas are rendered into the
@@ -237,6 +269,21 @@ func (e *Engine) newCompactionGuard() *compactionGuard {
 		}
 	}
 	return g
+}
+
+// withFileContext hands the compactor the paths this run has touched, when it
+// can accept them (P65.2). A compactor that does not implement
+// FileContextCompactor gets the context unchanged.
+func (g *compactionGuard) withFileContext(ctx context.Context) context.Context {
+	fc, ok := g.compactor.(FileContextCompactor)
+	if !ok || g.touchedFiles == nil {
+		return ctx
+	}
+	read, modified := g.touchedFiles()
+	if len(read) == 0 && len(modified) == 0 {
+		return ctx
+	}
+	return fc.WithFiles(ctx, read, modified)
 }
 
 // compactOnEntry runs the unconditional pass at the top of a run, before the
@@ -253,7 +300,7 @@ func (g *compactionGuard) compactOnEntry(ctx context.Context, conv *Conversation
 	if g.compactor == nil {
 		return
 	}
-	out, changed, err := g.compactor.Compact(ctx, conv.System, conv.Messages)
+	out, changed, err := g.compactor.Compact(g.withFileContext(ctx), conv.System, conv.Messages)
 	if err != nil {
 		g.logger.Warn("context compaction failed", "err", err)
 		return
@@ -474,11 +521,12 @@ func (g *compactionGuard) compact(ctx context.Context, conv *Conversation, emit 
 		err        error
 		yieldKnown bool
 	)
+	fileCtx := g.withFileContext(ctx)
 	if yc, ok := g.compactor.(YieldReportingCompactor); ok {
-		out, changed, summarized, freed, err = yc.CompactYield(ctx, conv.System, conv.Messages)
+		out, changed, summarized, freed, err = yc.CompactYield(fileCtx, conv.System, conv.Messages)
 		yieldKnown = true
 	} else {
-		out, changed, err = g.compactor.Compact(ctx, conv.System, conv.Messages)
+		out, changed, err = g.compactor.Compact(fileCtx, conv.System, conv.Messages)
 	}
 	if err != nil {
 		return g.summarizerFailed(err, conv, emit, pct)

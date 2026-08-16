@@ -99,6 +99,17 @@ func TestLiveWorkflow(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
+		// Refuse to measure through a window too small to hold the task, the
+		// same way the profile subtest refuses to measure a saturated prompt.
+		// This daemon leaves provider.context_window unset on purpose (it is
+		// testing the default path), so it plans against whatever detection
+		// found — 4,096 when the model is not loaded and pins no num_ctx, which
+		// on 2026-08-14 produced a red that named the model and the harness for
+		// what was an environment gap.
+		if win, src := servedContextWindow(t, cl); insufficientWindowReason(win, src) != "" {
+			t.Skip(insufficientWindowReason(win, src))
+		}
+
 		meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
 		if err != nil {
 			t.Fatalf("CreateSession: %v", err)

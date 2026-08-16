@@ -63,6 +63,16 @@ func (t *entityRememberTool) Execute(ctx context.Context, input json.RawMessage)
 	return tool.Result{Content: fmt.Sprintf("saved entity %s:%s", args.EntityType, args.EntityName)}, nil
 }
 
+// SignatureTransparent drops entity_remember's arguments from the loop
+// signature (P64.2) on the same reasoning as `remember`: the facts recorded
+// about an entity necessarily differ per call, so they are varying payload that
+// carries no evidence about progress. entity_recall is deliberately left opaque
+// — a recall query is the model choosing what to look up, which is exactly the
+// evidence the detector runs on.
+func (t *entityRememberTool) SignatureTransparent(json.RawMessage) bool { return true }
+
+var _ tool.SignatureTransparent = (*entityRememberTool)(nil)
+
 // --- entity_recall ---
 
 type entityRecallTool struct {

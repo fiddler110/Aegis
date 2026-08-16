@@ -46,9 +46,10 @@ func (s *Server) effectiveSystem(base, sessionID string) string {
 	if base != "" {
 		parts = append(parts, base)
 	}
-	parts = append(parts, persona.ToolUseBlock())
-	parts = append(parts, persona.CompletingTasksBlock())
-	parts = append(parts, persona.PlatformBlock())
+	local := s.cfg.Provider.LocalPromptProfile()
+	parts = append(parts, persona.ToolUseBlockFor(local))
+	parts = append(parts, persona.CompletingTasksBlockFor(local))
+	parts = append(parts, persona.PlatformBlockFor(local))
 	if ctx := s.memory.LoadContext(); ctx != "" {
 		parts = append(parts, ctx)
 	}
@@ -60,7 +61,7 @@ func (s *Server) effectiveSystem(base, sessionID string) string {
 		parts = append(parts, sk)
 	}
 	repoMap := s.repoMapFor(workdir)
-	if repoMap != "" && !(s.cfg.Provider.LocalPromptProfile() && len(repoMap) > localRepoMapMaxBytes) {
+	if repoMap != "" && !(local && len(repoMap) > localRepoMapMaxBytes) {
 		parts = append(parts, repoMap)
 	}
 	if dt := deferredToolsBlock(s.toolRegistryFor(sessionID)); dt != "" {

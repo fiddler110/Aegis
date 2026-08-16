@@ -12,7 +12,65 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/skills"
+	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
+
+// A phase's tool list is a declared surface: naming a tool is the drive saying
+// this phase needs it, and every phase prompt names the tools it expects. That
+// held only for always-exposed tools until P62.9 — a deferred tool named by a
+// phase was silently dropped, because ScopeExposed narrowed and never widened.
+// Three declarations were inert: render_diagram (dfd), yaml_validate
+// (assessment), and, once the local profile deferred it, edit_file in every
+// set. Each phase was handed a prompt instructing a tool that was not in its
+// array, which is the P38.1 failure shape exactly.
+//
+// This runs against the real builtin registry under the local profile — the
+// configuration the drive is actually used in — so a future deferral decision
+// that strands a phase tool fails here rather than in a live run. Typed skill
+// tools (threat_model_*) are registered onto a session clone only when the
+// skill loads, so they are absent from a plain registry and skipped.
+func TestPhaseToolsSurviveScoping(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: t.TempDir(), LocalProfile: true}); err != nil {
+		t.Fatal(err)
+	}
+	sets := map[string][]string{
+		"setup":      setupPhaseTools,
+		"fill":       fillPhaseTools,
+		"dfd":        dfdPhaseTools,
+		"assessment": assessmentPhaseTools,
+		"phase6":     phase6Tools,
+	}
+	for name, set := range sets {
+		func() {
+			restore := reg.ScopeExposed(set)
+			defer restore()
+			exposed := map[string]bool{}
+			for _, s := range reg.Schemas() {
+				exposed[s.Name] = true
+			}
+			for _, want := range set {
+				if _, registered := reg.Get(want); !registered {
+					continue // typed skill tool, registered on skill load
+				}
+				if !exposed[want] {
+					t.Errorf("%s phase declares %q but the scoped tool array does not contain it", name, want)
+				}
+			}
+		}()
+	}
+	// And the scoping is still per-phase: nothing it loaded stays loaded.
+	deferredAfter := map[string]bool{}
+	for _, d := range reg.Deferred() {
+		deferredAfter[d.Name] = true
+	}
+	for _, name := range []string{"render_diagram", "yaml_validate", "edit_file"} {
+		if !deferredAfter[name] {
+			t.Errorf("%q stayed loaded after every phase scope was restored", name)
+		}
+	}
+}
 
 // The file tools refuse a write into the materialized built-in skill tree
 // (see TestSkillAssetsAreReadOnlyToTools), but the shell tool can still reach
@@ -114,13 +172,19 @@ func TestScopeToolsPerPhase(t *testing.T) {
 	}
 	// The tool that makes filling tractable for a weak model must be offered
 	// wherever filling happens.
-	for _, set := range [][]string{setupPhaseTools, fillPhaseTools, dfdPhaseTools, assessmentPhaseTools} {
+	for _, set := range [][]string{setupPhaseTools, fillPhaseTools, dfdPhaseTools, assessmentPhaseTools, phase6Tools} {
 		if !slices.Contains(set, "fill_marker") {
 			t.Errorf("phase tool set %v is missing fill_marker", set)
 		}
 	}
+	// P62.10: phase 6 is a phase like any other and is covered by the sets above
+	// — until then it declared nothing, so it ran the verify/fix rounds and the
+	// quality pass on the whole session surface, web_search included.
+	if len(phase6Phase(ThreatModelPhases).tools) == 0 {
+		t.Error("phase 6 declares no tool surface for the built-in plan")
+	}
 	// No phase offers web_search — the detour that opened a real run.
-	for _, set := range [][]string{setupPhaseTools, fillPhaseTools, dfdPhaseTools, assessmentPhaseTools} {
+	for _, set := range [][]string{setupPhaseTools, fillPhaseTools, dfdPhaseTools, assessmentPhaseTools, phase6Tools} {
 		if slices.Contains(set, "web_search") {
 			t.Errorf("phase tool set %v offers web_search", set)
 		}

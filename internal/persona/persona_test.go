@@ -106,16 +106,27 @@ func TestPersonaPromptKeywords(t *testing.T) {
 	}
 }
 
+// profiles is the pair every shared-block test runs over: the local variants
+// (P62.9) say the same things in fewer words, so a rule the default block
+// carries and the local one does not is a rule that was silently dropped in a
+// token-cutting pass rather than removed on purpose.
+var profiles = []struct {
+	name  string
+	local bool
+}{{"default", false}, {"local", true}}
+
 func TestToolUseBlock_content(t *testing.T) {
-	block := ToolUseBlock()
-	for _, want := range []string{
-		"IMMEDIATELY",
-		"narration of intent",
-		"A tool result is input",
-		"truncated",
-	} {
-		if !contains(block, want) {
-			t.Errorf("ToolUseBlock() missing expected phrase: %q", want)
+	for _, p := range profiles {
+		block := ToolUseBlockFor(p.local)
+		for _, want := range []string{
+			"IMMEDIATELY",
+			"narration of intent",
+			"A tool result is input",
+			"truncated",
+		} {
+			if !contains(block, want) {
+				t.Errorf("%s ToolUseBlock missing expected phrase: %q", p.name, want)
+			}
 		}
 	}
 }
@@ -125,14 +136,16 @@ func TestToolUseBlock_content(t *testing.T) {
 // profile, must steer the model toward local file tools over network tools
 // for file-scoped tasks.
 func TestToolUseBlock_preferLocalOverNetwork(t *testing.T) {
-	block := ToolUseBlock()
-	for _, want := range []string{"read_file", "grep", "glob", "web_search", "web_fetch"} {
-		if !contains(block, want) {
-			t.Errorf("ToolUseBlock() missing expected local-vs-network tool name: %q", want)
+	for _, p := range profiles {
+		block := ToolUseBlockFor(p.local)
+		for _, want := range []string{"read_file", "grep", "glob", "web_search", "web_fetch"} {
+			if !contains(block, want) {
+				t.Errorf("%s ToolUseBlock missing expected local-vs-network tool name: %q", p.name, want)
+			}
 		}
-	}
-	if !contains(block, "prefer local tools") {
-		t.Error("ToolUseBlock() missing the prefer-local-over-network guidance")
+		if !contains(block, "prefer local tools") {
+			t.Errorf("%s ToolUseBlock missing the prefer-local-over-network guidance", p.name)
+		}
 	}
 }
 
@@ -142,14 +155,98 @@ func TestToolUseBlock_preferLocalOverNetwork(t *testing.T) {
 // call remember unprompted, or add unrequested features/robustness — the
 // qwen3coder:30b over-delivery behavior the roadmap item calls out.
 func TestCompletingTasksBlock_noScopeCreep(t *testing.T) {
-	block := CompletingTasksBlock()
-	for _, want := range []string{
-		"only what was explicitly asked",
-		"remember",
-		"unrequested",
-	} {
-		if !contains(block, want) {
-			t.Errorf("CompletingTasksBlock() missing expected phrase: %q", want)
+	for _, p := range profiles {
+		block := CompletingTasksBlockFor(p.local)
+		for _, want := range []string{
+			"only what was explicitly asked",
+			"remember",
+			"unrequested",
+		} {
+			if !contains(block, want) {
+				t.Errorf("%s CompletingTasksBlock missing expected phrase: %q", p.name, want)
+			}
+		}
+	}
+}
+
+// TestLocalBlocksKeepEveryRule is the assertion behind P62.9's claim that the
+// local variants compress rather than delete. Each entry is one rule the
+// default blocks carry, with a phrase that must survive into the local text —
+// the rules are not paraphrases of each other, and every one of them was added
+// after a run went wrong, so a missing entry is a regression and not a saving.
+//
+// The one deliberate deletion is recorded here as an exception rather than
+// left to inference: the default platform block ends by repeating the tool-use
+// block's "call the tool immediately, do not narrate" rule, and the local
+// platform block does not, because both blocks are always injected together.
+func TestLocalBlocksKeepEveryRule(t *testing.T) {
+	toolUse := []struct{ rule, phrase string }{
+		{"call the tool immediately", "IMMEDIATELY"},
+		{"no narration of intent", "narration of intent"},
+		{"never describe what a tool would return", "describe what a tool would return"},
+		{"ground claims in tool output", "not prior knowledge"},
+		{"a tool result is not the end of the task", "A tool result is input"},
+		{"handle truncation", "truncated"},
+		{"prefer local tools over network tools", "prefer local tools"},
+	}
+	for _, c := range toolUse {
+		if !contains(localToolUseBlock, c.phrase) {
+			t.Errorf("local tool-use block dropped the %q rule (looked for %q)", c.rule, c.phrase)
+		}
+	}
+
+	completing := []struct{ rule, phrase string }{
+		{"finish compound instructions", "compound instruction"},
+		{"write_file at the named path", "write_file with that path"},
+		{"write_file even with no path named", "write_file"},
+		{"an outline is not done", "outline"},
+		{"no scope creep", "only what was explicitly asked"},
+		{"do not persist to memory unprompted", "remember"},
+		{"confirm the action and the path", "file path"},
+		{"handle truncation", "truncated"},
+		{"a tool error is not a reason to stop", "do NOT give up"},
+	}
+	for _, c := range completing {
+		if !contains(localCompletingTasksBlock, c.phrase) {
+			t.Errorf("local completing-tasks block dropped the %q rule (looked for %q)", c.rule, c.phrase)
+		}
+	}
+
+	// The platform block is generated per-GOOS, so assert the invariant that
+	// holds on every platform: the OS/arch line and the shell are named, and
+	// the duplicated call-the-tool sentence is gone.
+	local := PlatformBlockFor(true)
+	for _, want := range []string{"OS: ", "Shell: "} {
+		if !contains(local, want) {
+			t.Errorf("local platform block missing %q", want)
+		}
+	}
+	if contains(local, "call the tool immediately") {
+		t.Error("local platform block still duplicates the tool-use block's call-the-tool rule")
+	}
+	if !contains(PlatformBlock(), "call the tool immediately") {
+		t.Error("default platform block lost the rule the local one deliberately drops — the exception above is now describing nothing")
+	}
+}
+
+// The local variants have to actually be smaller, or they are three more
+// strings to keep in sync for nothing. This is a direction check, not a budget:
+// internal/server's localBasePromptCeilingTokens holds the number.
+func TestLocalBlocksAreSmaller(t *testing.T) {
+	cases := []struct {
+		name             string
+		def, local       string
+		minSavedFraction float64
+	}{
+		{"tool-use", ToolUseBlock(), ToolUseBlockFor(true), 0.15},
+		{"completing-tasks", CompletingTasksBlock(), CompletingTasksBlockFor(true), 0.3},
+		{"platform", PlatformBlock(), PlatformBlockFor(true), 0.15},
+	}
+	for _, c := range cases {
+		saved := float64(len(c.def)-len(c.local)) / float64(len(c.def))
+		if saved < c.minSavedFraction {
+			t.Errorf("local %s block saves %.0f%% (%d → %d bytes), want at least %.0f%%",
+				c.name, saved*100, len(c.def), len(c.local), c.minSavedFraction*100)
 		}
 	}
 }

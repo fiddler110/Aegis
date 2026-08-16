@@ -43,7 +43,7 @@ type editSectionTool struct {
 func (t *editSectionTool) Name() string                { return "edit_section" }
 func (t *editSectionTool) Capability() tool.Capability { return tool.CapWrite }
 func (t *editSectionTool) Description() string {
-	return "Replace or extend the body of one markdown section, selected by its `heading` text or its 1-based `index` — no exact-text match required. Call with only `path` to list the file's sections. A section runs to the next same-or-higher heading, so target the deepest heading you actually mean. Pass mode:\"new\" with a `heading` to create a section that does not exist yet. Use edit_file for a surgical change to a single line or table row."
+	return "Replace or extend the body of one markdown section, selected by its `heading` text or its 1-based `index` — no exact-text match required. Call with only `path` to list the file's sections. A section runs to the next same-or-higher heading, so target the deepest heading you actually mean. Pass mode:\"new\" with a `heading` to create a section that does not exist yet. For a file with no markdown headings (source code, config, data), or a surgical change to a single line or table row, use multi_edit instead."
 }
 func (t *editSectionTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative path to a markdown file"},"heading":{"type":"string","description":"heading text of the section to edit, without the leading #s. Omit both heading and index to list the file's sections instead of editing."},"index":{"type":"integer","description":"1-based position of the section, as reported by listing. Use this when a heading appears more than once."},"content":{"type":"string","description":"replacement body for the section, excluding the heading line itself; required when editing"},"mode":{"type":"string","enum":["replace","append","new"],"description":"replace the section body (default), append to it, or create a new section (\"new\")"},"level":{"type":"integer","description":"heading level 1-6 for mode=new (default 2)"},"after":{"type":"string","description":"for mode=new, insert after this existing section instead of at the end of the file"},"allow_structure_loss":{"type":"boolean","description":"permit a replacement that deletes nested subsections or a markdown table the section currently has; refused by default"}},"required":["path"]}`)
@@ -109,7 +109,17 @@ func headingStart(content string, s section) int {
 
 func describeSections(path string, sections []section) string {
 	if len(sections) == 0 {
-		return fmt.Sprintf("%s has no markdown headings", path)
+		// Name the tool that *does* work here (P62.10). Measured live on
+		// qwen3:14b: with edit_file deferred under the local profile, a model
+		// asked to fix a two-line bug in a .py file reached for edit_section
+		// three times running and got this message three times, tripping the
+		// tool-failure breaker before recovering — the error stated what had
+		// failed and nothing about what to do instead, which is the P39.16
+		// finding (a tool that holds the information the model needs and returns
+		// an error without it) in its smallest possible form. multi_edit is
+		// named rather than edit_file because it is exposed under both prompt
+		// profiles.
+		return fmt.Sprintf("%s has no markdown headings, so it has no sections to edit — use multi_edit (or write_file for a whole small file) to change a file without headings", path)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s has %d section(s):\n", path, len(sections))

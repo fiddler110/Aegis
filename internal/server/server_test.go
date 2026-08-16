@@ -915,6 +915,24 @@ func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
 // still found by tool_search, which matches the full description held in the
 // registry.
 //
+// Re-measured 2026-08-14 at 4,317 after P62.9 took the exposed-schema half,
+// and the ceiling lowered from 5,200 to match. Two changes, 590 tokens:
+//
+//   - 420 out of the three shared prose blocks (1,001 → 581), which now have
+//     local variants: the same rules in fewer words, plus the one genuine
+//     duplication between the platform and tool-use blocks. No rule was
+//     dropped — see the comment above persona.PlatformBlockFor for why that
+//     line is where it is, and TestLocalBlocksKeepEveryRule for what holds it.
+//   - 185 from deferring edit_file under the local profile (schemas 3,275 →
+//     3,090 over 26 tools rather than 27), less the ~16 its summary line costs
+//     in <deferred_tools>. See builtin.Register for why that tool and not the
+//     handle-based ones it is more expensive than.
+//
+// Both are behaviour changes on the local profile, unlike P62.6's three, and
+// the live-tier confirmation the item asks for (TestLiveWorkflow) is still
+// outstanding — the numbers above are what the change costs, not evidence that
+// it is free.
+//
 // The ceiling is the measured value plus ~5% headroom, so ordinary prose edits
 // to a persona block or a tool description do not trip it but a new
 // always-exposed tool or a new injected block does. It is an upper bound across
@@ -927,7 +945,7 @@ func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
 // accident. If the growth is deliberate, move this number and say in the commit
 // what was added and what it bought — a silent bump turns the budget back into
 // the invisible number it was written to make visible.
-const localBasePromptCeilingTokens = 5200
+const localBasePromptCeilingTokens = 4550
 
 // TestEffectiveSystem_localProfileBudget is P62.6's regression assertion. See
 // localBasePromptCeilingTokens for what the number means and what to do when
@@ -977,9 +995,9 @@ func TestBasePromptComposition_localProfile(t *testing.T) {
 	}
 	components := []component{
 		{"persona system prompt", base},
-		{"tool-use block", persona.ToolUseBlock()},
-		{"completing-tasks block", persona.CompletingTasksBlock()},
-		{"platform block", persona.PlatformBlock()},
+		{"tool-use block", persona.ToolUseBlockFor(true)},
+		{"completing-tasks block", persona.CompletingTasksBlockFor(true)},
+		{"platform block", persona.PlatformBlockFor(true)},
 		{"memory: context files", srv.memory.LoadContext()},
 		{"memory: project/user", srv.memory.Load()},
 		{"<skills_available>", skills.BuildIndex(workdir, srv.cfg.DataDir, srv.sessionEnabledSkills(""))},

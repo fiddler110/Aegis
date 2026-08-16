@@ -383,3 +383,36 @@ func mustRead(t *testing.T, path string) []byte {
 	}
 	return b
 }
+
+// A file with no headings is the one case where this tool cannot help at all,
+// and the message it returns is the model's only clue about what to do next.
+// Measured live (P62.10, qwen3:14b, `aegis chat` with edit_file deferred under
+// the local profile): a model asked to fix a two-line bug in a .py file called
+// edit_section three times running and got "temps.py has no markdown headings"
+// three times, tripping the tool-failure breaker before it recovered. The name
+// of a tool that *does* apply has to be in the error, and it has to be one that
+// is exposed under both prompt profiles — which edit_file is not.
+func TestEditSectionOnHeadinglessFileNamesTheToolThatWorks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "temps.py"), []byte("total = 0\ncount = 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := (&editSectionTool{root: root}).Execute(context.Background(), mustJSON(t, map[string]any{
+		"path": "temps.py",
+	}))
+	if err != nil {
+		t.Fatalf("edit_section listing failed: %v", err)
+	}
+	if !strings.Contains(res.Content, "multi_edit") {
+		t.Errorf("the no-headings message does not name a tool that works on this file: %q", res.Content)
+	}
+	// edit_file is deferred under the local profile, so pointing at it here
+	// costs the model a tool_search turn at exactly the moment it is already
+	// failing. The tool's Description carries the same rule.
+	if strings.Contains(res.Content, "edit_file") {
+		t.Errorf("the no-headings message points at a tool the local profile defers: %q", res.Content)
+	}
+	if desc := (&editSectionTool{root: root}).Description(); !strings.Contains(desc, "multi_edit") {
+		t.Errorf("edit_section's description does not name the fallback for a headingless file: %q", desc)
+	}
+}

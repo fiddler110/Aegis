@@ -126,7 +126,44 @@ var (
 	// (2026-08-09). That was shell until P39.18; it is now the typed
 	// threat_model_inventory tool, which was shell's only use here.
 	assessmentPhaseTools = append(append([]string{}, fillPhaseTools...), "yaml_validate", "threat_model_inventory")
+	// phase6Tools is the verify/fix + quality surface (P62.10). Phase 6 is
+	// typically where a build spends the most turns — MaxVerifyRounds fix rounds
+	// plus the quality pass, each its own fresh context — and until now it was
+	// the one phase that narrowed nothing at all, running on the session's whole
+	// registered surface. On the CLI path that includes web_search, which
+	// TestScopeToolsPerPhase asserts no content phase offers and which P39.14
+	// records as "the detour that opened a real run".
+	//
+	// The list is read off phase 6's own prompts rather than guessed, the way
+	// fillPhaseTools was. They say: read the suite first (read_file/glob/grep/ls),
+	// fix in place with fill_marker/edit_section/edit_file, never re-scaffold and
+	// never write_file a suite file — so write_file stays out for the same reason
+	// the fill phases dropped it. threat_model_inventory is the one addition:
+	// inventory.yaml is generated, not authored, so a failing inventory check is
+	// fixed by regenerating the sidecar, and hand-editing it is what the
+	// assessment phase's prompt forbids in the first place.
+	phase6Tools = append(append([]string{}, fillPhaseTools...), "threat_model_inventory")
 )
+
+// phase6Phase returns the synthetic Phase whose tool list scopes phase 6, or a
+// zero Phase (which scopeTools treats as "narrow nothing") when this plan's
+// phases declare no tools of their own.
+//
+// The gate on the plan is not incidental. phase6Tools is read off the built-in
+// threat-modeling plan's phase-6 prompts; a plan assembled from a skill's
+// `phases:` frontmatter declares no per-phase tools (planFromSpecs sets none),
+// and narrowing *its* verify round to a threat-model surface would take
+// capabilities away from a skill that never opted into narrowing — deep-research
+// wants web_search in a fix round exactly as much as a threat model does not.
+// Declared narrowing stays declared.
+func phase6Phase(plan []Phase) Phase {
+	for _, ph := range plan {
+		if len(ph.tools) > 0 {
+			return Phase{name: "verify-and-quality", tools: phase6Tools}
+		}
+	}
+	return Phase{name: "verify-and-quality"}
+}
 
 // Name returns the phase's log/notice label, for hosts that render progress.
 func (ph Phase) Name() string { return ph.name }
@@ -584,7 +621,11 @@ func Run(ctx context.Context, st *State, phases []Phase) error {
 		}
 	}
 	// All content phases complete — phase 6: verify + quality, each in its own
-	// fresh focused context.
+	// fresh focused context. Undo the last content phase's narrowing first, so
+	// phase 6 scopes from the session's surface rather than layering its list on
+	// top of whichever phase happened to run last.
+	restoreTools()
+	restoreTools = func() {}
 	return runPhasedVerifyAndQuality(ctx, st)
 }
 
@@ -667,6 +708,11 @@ func (st *State) freshPhaseConv(ph Phase, runDir string, pending []string, nudge
 // appending to the whole-build conversation. Bounded by MaxVerifyRounds and the
 // single quality pass, so it always terminates.
 func runPhasedVerifyAndQuality(ctx context.Context, st *State) error {
+	// P62.10: narrow to the phase's own surface for the whole round, the way
+	// every content phase does. Held across the loop rather than per turn
+	// because every iteration is the same phase; a re-opened content phase
+	// inside the loop narrows further on top of this and restores back to it.
+	defer st.scopeTools(phase6Phase(st.plan))()
 	verifyRounds := 0
 	overflowResets := 0
 	toolFailResets := 0 // P52.3 breaker's own budget, separate from overflowResets

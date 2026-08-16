@@ -28,6 +28,25 @@ import (
 const (
 	globMaxResults = 1000
 	grepMaxMatches = 500
+	// grepSpillMaxMatches is how far past the inline cap grep keeps collecting
+	// so the remainder can be spilled to a file (P64.1). glob needs no
+	// equivalent: it already collects every match and then cuts, so its
+	// remainder costs nothing extra to keep.
+	//
+	// It is a separate number from grepMaxMatches because the two bound
+	// different costs. grepMaxMatches bounds the model's *context*; this bounds
+	// the *walk*, and the walk is what CLAUDE.md's streaming-cancel note is
+	// about — cancelling ripgrep at the cap took a common pattern from 964ms to
+	// 46ms on a 40k-file tree, and collecting without limit would hand that
+	// back. 4x the inline cap, chosen on an ad-hoc measurement over this repo
+	// recorded with P64.1's write-up in releases.md: `func ` collects 2,000
+	// matches in ~90ms against ~50ms for 500 — the extra 40ms buys a 4x-larger
+	// recoverable set, where uncapped collection on the same query costs ~900ms
+	// for a set no model will page through anyway. Deliberately *not* left
+	// behind as a test: a wall-clock assertion over whatever repo the suite
+	// happens to run in is the flaky-by-construction shape this item's own
+	// "report, do not gate" rule exists to avoid.
+	grepSpillMaxMatches = 2000
 	// maxGrepLineBytes bounds one match line while streaming ripgrep's output.
 	// A minified bundle or a generated data file can be one enormous line, and
 	// the default bufio.Scanner buffer (64KB) would abort the whole search on
@@ -176,15 +195,14 @@ func (t *globTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if len(matches) == 0 {
 		return tool.Result{Content: "no files matched"}, nil
 	}
-	return tool.Result{Content: capGlob(matches)}, nil
+	return tool.Result{Content: capGlob(ctx, root, matches)}, nil
 }
 
 // capGlob joins matches, appending a truncation notice when the cap bites.
-func capGlob(matches []string) string {
-	if len(matches) <= globMaxResults {
-		return strings.Join(matches, "\n")
-	}
-	return strings.Join(matches[:globMaxResults], "\n") + truncNotice("glob", globMaxResults)
+// P64.3: the cut itself lives in capItems (truncate.go) with every other
+// result cap in the tree.
+func capGlob(ctx context.Context, root string, matches []string) string {
+	return spillItems(ctx, root, "glob", matches, globMaxResults, len(matches) > globMaxResults)
 }
 
 // executeRg lists files with ripgrep. The bool reports whether ripgrep ran to a
@@ -215,7 +233,7 @@ func (t *globTool) executeRg(ctx context.Context, rg, root, pattern string) (too
 	if len(matches) == 0 {
 		return tool.Result{Content: "no files matched"}, true
 	}
-	return tool.Result{Content: capGlob(matches)}, true
+	return tool.Result{Content: capGlob(ctx, root, matches)}, true
 }
 
 // matchGlob supports ** (any depth) in addition to standard path.Match syntax.
@@ -340,7 +358,11 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		for i, line := range strings.Split(string(data), "\n") {
 			if re.MatchString(line) {
 				out = append(out, fmt.Sprintf("%s:%d:%s", rel, i+1, strings.TrimRight(line, "\r")))
-				if len(out) >= grepMaxMatches {
+				// P64.1: keep walking past the inline cap up to the collection
+				// ceiling, so the matches beyond grepMaxMatches are recoverable
+				// from a spill file instead of discarded. The inline result is
+				// byte-identical to what it was.
+				if len(out) >= grepSpillMaxMatches {
 					return filepath.SkipAll
 				}
 			}
@@ -353,10 +375,7 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 	if len(out) == 0 {
 		return tool.Result{Content: "no matches"}, nil
 	}
-	content := strings.Join(out, "\n")
-	if len(out) >= grepMaxMatches {
-		content += truncNotice("grep", grepMaxMatches)
-	}
+	content := spillItems(ctx, root, "grep", out, grepMaxMatches, len(out) >= grepMaxMatches)
 	return tool.Result{Content: content}, nil
 }
 
@@ -371,7 +390,12 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 func (t *grepTool) executeRg(ctx context.Context, rg, root, pattern, glob string, ignoreCase bool) (tool.Result, bool) {
 	argv := []string{"--null", "--line-number", "--no-heading", "--color=never"}
 	argv = append(argv, rgArgsCommon()...)
-	argv = append(argv, "--max-count", strconv.Itoa(grepMaxMatches), "-e", pattern)
+	// Per-file, not total (ripgrep has no total limit). Raised to the spill
+	// ceiling with the total collection ceiling in P64.1, so the two backends
+	// still agree on how much they collect — a per-file limit left at the
+	// inline cap would let the Go walker spill 2,000 matches from one big file
+	// where ripgrep spilled 500.
+	argv = append(argv, "--max-count", strconv.Itoa(grepSpillMaxMatches), "-e", pattern)
 	if ignoreCase {
 		argv = append(argv, "-i")
 	}
@@ -417,6 +441,8 @@ func (t *grepTool) executeRg(ctx context.Context, rg, root, pattern, glob string
 		results = append(results, line)
 		if len(results) >= grepMaxMatches {
 			capped = true
+		}
+		if len(results) >= grepSpillMaxMatches {
 			break
 		}
 	}
@@ -437,10 +463,7 @@ func (t *grepTool) executeRg(ctx context.Context, rg, root, pattern, glob string
 		return tool.Result{Content: "no matches"}, true
 	}
 
-	content := strings.Join(results, "\n")
-	if capped {
-		content += truncNotice("grep", grepMaxMatches)
-	}
+	content := spillItems(ctx, root, "grep", results, grepMaxMatches, capped)
 	return tool.Result{Content: content}, true
 }
 

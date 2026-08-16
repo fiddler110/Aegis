@@ -80,7 +80,17 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if args.MaxChars > 0 {
 		limit = args.MaxChars
 	}
-	text = clip(text, limit)
+	// Head (P64.3): a fetched page's answer is above the fold — the tail of an
+	// HTML-to-text render is navigation, footers and cookie prose.
+	//
+	// Deliberately NOT spilled (P64.1), and this is the one exclusion beyond
+	// read_file's. The clipped text is about to be wrapped by trust.Wrap, which
+	// is what tells the model these bytes are untrusted and are data rather
+	// than instructions. Spilling would write the *unwrapped* remainder to a
+	// workspace file that read_file returns with no wrapper at all — turning a
+	// context-budget feature into a prompt-injection laundering path. The
+	// recovery path here is a second fetch, which stays inside the wrapper.
+	text, _ = TruncateHead(text, limit, "re-fetch with a larger max_chars, or fetch a more specific URL")
 	wrapped := trust.Wrap("web_untrusted_output", [][2]string{{"url", u.String()}}, "a URL fetched from the web", text, t.scanOutput)
 	return tool.Result{Content: wrapped}, nil
 }
@@ -418,6 +428,9 @@ func collapseBlankLines(s string) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
+// clip is a bare byte cut for short diagnostic snippets (an HTTP error body in
+// a Go error, not a model-facing result). Result truncation goes through
+// TruncateHead/TruncateTail — see truncate.go's posture table (P64.3).
 func clip(s string, n int) string {
 	if len(s) <= n {
 		return s

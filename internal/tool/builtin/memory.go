@@ -36,6 +36,18 @@ func (t *rememberTool) Execute(ctx context.Context, input json.RawMessage) (tool
 	return tool.Result{Content: "saved to project memory"}, nil
 }
 
+// SignatureTransparent drops remember's note from the loop signature (P64.2).
+// A durable fact worth recording is different every time it is recorded, so the
+// note is guaranteed-varying payload that says nothing about whether the agent
+// is advancing — the exact shape that let one interleaved write hide a repeated
+// call from the detector. save_skill deliberately does *not* declare this: a
+// skill body is a deliverable the model chose to author, not bookkeeping about
+// the work, and re-authoring the same skill turn after turn is a loop worth
+// catching.
+func (t *rememberTool) SignatureTransparent(json.RawMessage) bool { return true }
+
+var _ tool.SignatureTransparent = (*rememberTool)(nil)
+
 // --- save_skill ---
 
 type saveSkillTool struct{ src memory.Sources }

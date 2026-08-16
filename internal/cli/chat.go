@@ -235,7 +235,31 @@ func newChatCmd() *cobra.Command {
 			})
 
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, BuiltinSkills: enabledBuiltins, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, GitPreCommitTestCommand: cfg.Git.PreCommitTestCommand, GitPreCommitTestTimeout: time.Duration(cfg.Git.PreCommitTestTimeoutSec) * time.Second}); err != nil {
+			// The last of P62.10's four call sites, and the one that needed live
+			// evidence rather than a token count: `aegis chat --skill` is the
+			// harness every P38.1 re-test drives, and the phased drive layers
+			// its per-phase tool arrays on top of whatever is registered here,
+			// so deferring edit_file changes what those arrays resolve to
+			// mid-drive. Registering the full profile against a local model was
+			// costing 1,318 schema tokens over what the daemon sends for the
+			// same model — security_scan alone 818, more than four times the
+			// edit_file schema P62.9 spent its item arguing about.
+			//
+			// Measured on qwen3:14b before turning it on (2026-08-14, the
+			// seeded-bug task run end to end through this command, 16,384-token
+			// window, three runs per arm). The refutation P62.9 said to watch
+			// for — a turn spent on tool_search hunting for a tool the model
+			// knows by name — did not occur in any deferred-surface run. The
+			// task was solved in every one of them. What the deferred surface
+			// did cost is tool calls: 4-6 against a steady 3, because the model
+			// re-reads the file before a multi_edit where it would edit_file
+			// straight from the traceback. Run-to-run variance on this task is
+			// large enough to swamp that (a control arm failed outright twice by
+			// explaining the fix instead of applying it), so it is recorded as a
+			// caveat rather than a finding — see P62.9 in research/roadmap.md,
+			// which owns the edit_file half of this decision.
+			localProfile := cfg.Provider.LocalPromptProfile()
+			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, BuiltinSkills: enabledBuiltins, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, GitPreCommitTestCommand: cfg.Git.PreCommitTestCommand, GitPreCommitTestTimeout: time.Duration(cfg.Git.PreCommitTestTimeoutSec) * time.Second, LocalProfile: localProfile, ToolFamilies: cfg.Tools.Families}); err != nil {
 				return err
 			}
 
@@ -850,9 +874,10 @@ func buildChatSystem(cfg *config.Config, cwd string, enabledBuiltins []string, s
 		p, _ := persona.Get(personaName)
 		resolvedSystem = p.System
 	}
-	resolvedSystem = resolvedSystem + "\n\n" + persona.ToolUseBlock()
-	resolvedSystem = resolvedSystem + "\n\n" + persona.CompletingTasksBlock()
-	resolvedSystem = resolvedSystem + "\n\n" + persona.PlatformBlock()
+	local := cfg.Provider.LocalPromptProfile()
+	resolvedSystem = resolvedSystem + "\n\n" + persona.ToolUseBlockFor(local)
+	resolvedSystem = resolvedSystem + "\n\n" + persona.CompletingTasksBlockFor(local)
+	resolvedSystem = resolvedSystem + "\n\n" + persona.PlatformBlockFor(local)
 	src := memory.Sources{ProjectRoot: cwd, DataDir: cfg.DataDir}
 	if ctxFiles := src.LoadContext(); ctxFiles != "" {
 		resolvedSystem = resolvedSystem + "\n\n" + ctxFiles

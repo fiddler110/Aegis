@@ -42,10 +42,41 @@ type GuardConfig struct {
 	MaxRetries int
 }
 
+// The three shared blocks below — tool use, completing tasks, platform — are
+// injected into every session regardless of persona, and each has a local
+// variant selected by the *For functions (P62.9).
+//
+// The local variants say the same things in fewer words. That is the whole
+// design rule and it is worth stating, because the tempting version of this
+// change is to drop rules instead: every one of these rules was added after a
+// real run went wrong (narrating instead of calling a tool, answering in chat
+// instead of writing the requested file, a skeleton reported as finished, a
+// PowerShell command written in bash), and what a small model loses when a rule
+// is *removed* is exactly the question no unit test can answer. So nothing is
+// removed here except genuine duplication across the three blocks, and a test
+// asserts every rule still has a phrase in the local text.
+//
+// Measured 2026-08-14, windows/amd64: 1,001 estimated tokens across the three
+// default blocks against 581 across the three local ones — 20.4% of the
+// local-profile base prompt down to 13.5% of a smaller total. Windows is the
+// largest case; the platform block is much smaller on darwin/linux under both
+// profiles.
+
 // PlatformBlock returns a system-prompt section describing the execution
 // environment so the model generates correct shell commands for the current OS.
 // It is appended to every session's effective system prompt regardless of persona.
-func PlatformBlock() string {
+func PlatformBlock() string { return PlatformBlockFor(false) }
+
+// PlatformBlockFor returns the platform block for the active prompt profile.
+//
+// The local variant folds the Windows command table onto one line per group and
+// drops the trailing "call the tool immediately" sentence, which the tool-use
+// block's first rule already carries — the duplication is the single largest
+// saving here and costs nothing, since both blocks are always injected together.
+func PlatformBlockFor(local bool) string {
+	if local {
+		return localPlatformBlock()
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Execution Environment\nOS: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	switch runtime.GOOS {
@@ -80,6 +111,24 @@ Absolute paths use Windows drive letters: C:\Users\...`)
 	return b.String()
 }
 
+// localPlatformBlock is PlatformBlockFor(true). Same OS facts, same command
+// mapping, no worked examples and no duplicated call-the-tool rule.
+func localPlatformBlock() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Execution Environment\nOS: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	switch runtime.GOOS {
+	case "windows":
+		b.WriteString(`Shell: PowerShell. Every shell command MUST be valid PowerShell — Unix commands (ls, cat, grep, find, rm, chmod, echo, which) do NOT exist and will fail. Use instead:
+Get-ChildItem (ls; -Recurse -Filter for find), Get-Content (cat), Select-String (grep), Remove-Item (rm; add -Recurse -Force for rm -rf), Copy-Item (cp), Move-Item (mv), New-Item -ItemType Directory (mkdir), (Get-Command x).Source (which), $env:VAR ($VAR), Write-Output (echo).
+Paths: / and \ both work; absolute paths use drive letters (C:\Users\...).`)
+	case "darwin":
+		b.WriteString("Shell: /bin/sh (bash-compatible). Use standard Unix/POSIX commands and forward-slash paths.")
+	default:
+		b.WriteString("Shell: /bin/sh. Use standard Unix/POSIX commands and forward-slash paths.")
+	}
+	return b.String()
+}
+
 // completingTasksBlock is injected into every session regardless of persona.
 // It is kept here so the CLI and server paths share a single source of truth.
 const completingTasksBlock = `## Completing tasks
@@ -92,9 +141,31 @@ const completingTasksBlock = `## Completing tasks
 - If a tool result is truncated, note the truncation and decide whether you need the missing data before proceeding.
 - If a tool returns "unknown tool" or any error, do NOT give up. Try the correct tool: use shell to run commands, read_file to read a file, glob to list files by pattern, grep to search content, write_file to write output. Explain what failed, then continue with an alternative approach.`
 
+// localCompletingTasksBlock is CompletingTasksBlockFor(true): the same seven
+// rules, compressed. The two the local text keeps closest to verbatim are the
+// write_file ones, which are the rules the P25.x runs showed a small model
+// dropping first.
+const localCompletingTasksBlock = `## Completing tasks
+- Complete EVERY part of a compound instruction, not just the first.
+- Asked to write output to a path: call write_file with that path. Asked for a document, report, review or structured output with no path named: still call write_file, defaulting to a sensible name in the working directory (report.md, review.md, analysis.md). A chat response is never a substitute for the file.
+- A skeleton or outline is not a completed task: fill every section with real content first.
+- Do only what was explicitly asked. No unrequested files, features or error handling, and no remember call unless asked to remember something.
+- Finish by stating what you did and the file path — not an open-ended "How can I help?".
+- If a tool result is truncated, say so and decide whether you need the missing data before continuing.
+- If a tool errors or is unknown, do NOT give up: switch to shell, read_file, glob, grep or write_file, say what failed, and keep going.`
+
 // CompletingTasksBlock returns the shared task-completion rules that are
 // appended to every session's effective system prompt regardless of persona.
-func CompletingTasksBlock() string { return completingTasksBlock }
+func CompletingTasksBlock() string { return CompletingTasksBlockFor(false) }
+
+// CompletingTasksBlockFor returns the task-completion rules for the active
+// prompt profile.
+func CompletingTasksBlockFor(local bool) string {
+	if local {
+		return localCompletingTasksBlock
+	}
+	return completingTasksBlock
+}
 
 const toolUseBlock = `## Tool use
 - When any task step requires inspecting files, running commands, searching, or
@@ -112,8 +183,27 @@ const toolUseBlock = `## Tool use
   glob, shell) over network tools (web_search, web_fetch). Only reach for a
   network tool when the task actually needs information from outside this repo.`
 
+// localToolUseBlock is ToolUseBlockFor(true). The truncation rule is the one
+// that shrinks most, because the completing-tasks block states it too and the
+// two blocks are always injected together.
+const localToolUseBlock = `## Tool use
+- When a step needs a file read, a command run, a search or a URL fetched: call the tool IMMEDIATELY. Never write "I'll run...", "Let me check...", or any narration of intent, and never describe what a tool would return — call it and use the real output.
+- Base every factual claim about the codebase, system state or external data on tool output from this conversation, not prior knowledge.
+- A tool result is input to your work, not the end of it: after results arrive, keep going.
+- If a result is truncated, note it, then re-call or proceed with an explicit caveat.
+- For a task scoped to files in this repo, prefer local tools (read_file, grep, glob, shell) over network tools (web_search, web_fetch); reach outside the repo only when the task actually needs it.`
+
 // ToolUseBlock returns the shared tool-use rules injected into every session.
-func ToolUseBlock() string { return toolUseBlock }
+func ToolUseBlock() string { return ToolUseBlockFor(false) }
+
+// ToolUseBlockFor returns the shared tool-use rules for the active prompt
+// profile.
+func ToolUseBlockFor(local bool) string {
+	if local {
+		return localToolUseBlock
+	}
+	return toolUseBlock
+}
 
 // builtins and builtinOrder are populated at package init from the embedded
 // internal/persona/builtin/*.md files — see builtin.go. Declaring Tools in a

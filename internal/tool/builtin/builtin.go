@@ -197,7 +197,6 @@ func Register(reg *tool.Registry, opts Options) error {
 	tools := []tool.Tool{
 		&readTool{root: root, tracker: ft},
 		&writeTool{root: root, tracker: ft},
-		&editTool{root: root, tracker: ft},
 		&fillMarkerTool{root: root, tracker: ft},
 		&editSectionTool{root: root, tracker: ft},
 		&multieditTool{root: root, tracker: ft},
@@ -240,6 +239,26 @@ func Register(reg *tool.Registry, opts Options) error {
 		deferred = append(deferred, networkAndScanTools...)
 	} else {
 		tools = append(tools, networkAndScanTools...)
+	}
+	// edit_file is the one editing tool the local profile defers (P62.9). The
+	// five editing schemas are 1,299 of the local base prompt's 3,275 schema
+	// tokens, and the obvious cut points the wrong way: P39.16 shipped the
+	// handle-based tools precisely because small models fail edit_file's
+	// byte-exact old_string match — 12 consecutive edit_file failures became 7
+	// clean edit_section calls on the run that motivated it. So the tool to
+	// take out of the array is the one a small model uses worst, not the ones
+	// that replaced it. What is left still covers every edit shape:
+	// fill_marker for a placeholder, edit_section for a section, multi_edit for
+	// several changes at once, write_file for a whole file.
+	//
+	// Deferred, not removed: a surgical single-line or table-row change is
+	// still what edit_file is best at, tool_search loads it by name, and a
+	// drive phase that names it in ph.tools gets it loaded for that phase (see
+	// tool.Registry.ScopeExposed). The default profile is untouched.
+	if opts.LocalProfile {
+		deferred = append(deferred, &editTool{root: root, tracker: ft})
+	} else {
+		tools = append(tools, &editTool{root: root, tracker: ft})
 	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}

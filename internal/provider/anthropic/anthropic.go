@@ -310,7 +310,8 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	if err != nil {
 		return nil, err
 	}
-	if a.cache {
+	cache := a.cache && !req.SuppressCache
+	if cache {
 		cacheLastMessage(wmsgs)
 	}
 
@@ -332,9 +333,9 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	body, err := json.Marshal(wireRequest{
 		Model:       req.Model,
 		MaxTokens:   req.MaxTokens,
-		System:      buildSystem(req.System, a.cache),
+		System:      buildSystem(req.System, cache),
 		Messages:    wmsgs,
-		Tools:       buildTools(req.Tools, a.cache),
+		Tools:       buildTools(req.Tools, cache),
 		Temperature: temperature,
 		Thinking:    thinking,
 		Stream:      true,

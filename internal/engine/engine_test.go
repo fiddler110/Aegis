@@ -734,7 +734,7 @@ func TestRepairOrphanedToolUses(t *testing.T) {
 				provider.ToolResultBlock{ToolUseID: "1", Content: "ok"},
 			}},
 		}
-		got := repairOrphanedToolUses(msgs)
+		got := repairOrphanedToolUses(msgs, nil)
 		if len(got) != len(msgs) {
 			t.Errorf("len = %d, want %d (should be unchanged)", len(got), len(msgs))
 		}
@@ -747,7 +747,7 @@ func TestRepairOrphanedToolUses(t *testing.T) {
 				provider.ToolUseBlock{ID: "tu_1", Name: "shell"},
 			}},
 		}
-		got := repairOrphanedToolUses(msgs)
+		got := repairOrphanedToolUses(msgs, nil)
 		if len(got) != 3 {
 			t.Fatalf("len = %d, want 3 (synthetic result injected)", len(got))
 		}
@@ -782,7 +782,7 @@ func TestRepairOrphanedToolUses(t *testing.T) {
 				provider.ToolResultBlock{ToolUseID: "id1", Content: "data"},
 			}},
 		}
-		got := repairOrphanedToolUses(msgs)
+		got := repairOrphanedToolUses(msgs, nil)
 		if len(got) != 3 {
 			t.Fatalf("len = %d, want 3 (merged into existing user message)", len(got))
 		}

@@ -82,11 +82,20 @@ func newDebateCmd() *cobra.Command {
 				return err
 			}
 			reg := tool.NewRegistry()
+			// P62.10: same as the worker — a non-interactive command that loads
+			// cfg and must then honour what it says about the model. A debate is
+			// several full engine runs per round (propose/critique/rebut/
+			// arbitrate), so the per-turn schema cost is paid more times here than
+			// anywhere else in the CLI. The security domain's roles reach for
+			// security_scan, which the local profile defers rather than drops, so
+			// a role that needs it loads it by name.
 			if err := builtin.Register(reg, builtin.Options{
 				Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL,
 				SecurityScan:       security.OptionsFromConfig(cfg.Security),
 				DASTAllowedTargets: cfg.Security.DAST.AllowedTargets,
 				DASTAllowActive:    cfg.Security.DAST.AllowActive,
+				LocalProfile:       cfg.Provider.LocalPromptProfile(),
+				ToolFamilies:       cfg.Tools.Families,
 			}); err != nil {
 				return err
 			}

@@ -105,7 +105,7 @@ func TestSummarizeTruncatesOversizedBlock(t *testing.T) {
 	if !strings.Contains(sent, "truncated by compaction") {
 		t.Errorf("oversized block was not marked as truncated: %.200q", sent)
 	}
-	if n, budget := summarizeRequestTokens(sent), s.summarizeFitBudget(); n > budget {
+	if n, budget := summarizeRequestTokens(sent, ""), s.summarizeFitBudget(); n > budget {
 		t.Errorf("request still over budget: %d > %d", n, budget)
 	}
 	// Truncation is middle-out, so both ends of the block survive, and the
@@ -143,7 +143,7 @@ func TestSummarizeDropsOldestWhenTruncationInsufficient(t *testing.T) {
 		t.Fatalf("ForceCompact: changed=%v err=%v", changed, err)
 	}
 	sent := a.sentText(t)
-	if n, budget := summarizeRequestTokens(sent), s.summarizeFitBudget(); n > budget {
+	if n, budget := summarizeRequestTokens(sent, ""), s.summarizeFitBudget(); n > budget {
 		t.Errorf("request still over budget: %d > %d", n, budget)
 	}
 	if !strings.Contains(sent, "truncated by compaction") {
