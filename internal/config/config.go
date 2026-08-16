@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -1878,18 +1877,29 @@ func Load() (*Config, error) {
 	// (project-inclusive) config's Normalize error is fatal.
 	_ = baseCfg.Sandbox.Normalize()
 
-	// P27.9/FIND-11: recon_scan/dast_scan's target-authorization allowlist is
-	// sourced from the user/global baseline only, unconditionally — never
-	// from the project layer, trusted or not. This is stronger than the
-	// P27.1 trust gate above (which lets a *trusted* project widen
-	// permission/sandbox/mcp/hooks): a hostile or merely careless project
-	// .aegis/config.yaml widening this specific list would authorize an
-	// active scanner (recon_scan/dast_scan) against arbitrary Internet
-	// hosts, a different and broader risk shape than the project's own
-	// permission mode, so it stays out of the project's control even after
-	// `aegis trust`.
-	cfg.Security.DAST.AllowedTargets = baseCfg.Security.DAST.AllowedTargets
+	applyWorkspaceTrust(&cfg, &baseCfg, dir, trusted)
 
+	// P66.5/SEC-06, generalizing P27.9/FIND-11: the baselineOnly keys
+	// (data_dir, security.dast.allowed_targets) take their value from the
+	// user/global baseline unconditionally — never from the project layer,
+	// trusted or not. This is stronger than the P27.1 trust gate above (which
+	// lets a *trusted* project widen permission/sandbox/mcp/hooks) because
+	// their blast radius reaches past the workspace being trusted: an active
+	// scanner authorized against arbitrary Internet hosts, or the audit trail
+	// relocated into the repository that is being audited. See
+	// configTrustPolicy for the per-key reasoning.
+	applyBaselineOnlyKeys(&cfg, &baseCfg)
+
+	// SEC-02: a `commands:` override naming a relative path resolves against
+	// the workspace, so it names a binary the repository ships. Rejected even
+	// in a trusted workspace, hence after the freeze rather than inside it.
+	rejectRelativeCommandOverrides(&cfg, &baseCfg)
+
+	// Everything below reads or rewrites the *effective* values, so it runs
+	// after the freeze: resolving the API key for a provider the project asked
+	// for — and then had frozen away — would key the wrong service, and
+	// expanding $VAR before the diff would compare an expanded project value
+	// against an unexpanded baseline one and report a change that isn't there.
 	cfg.Provider.APIKey = ProviderAPIKey(cfg.Provider.Default)
 
 	// Expand $VAR / ${VAR} references in MCP auth tokens so secrets can be
@@ -1901,8 +1911,6 @@ func Load() (*Config, error) {
 	}
 	cfg.Search.APIKey = os.ExpandEnv(cfg.Search.APIKey)
 	cfg.Notify.Webhook = os.ExpandEnv(cfg.Notify.Webhook)
-
-	applyWorkspaceTrust(&cfg, &baseCfg, dir, trusted)
 
 	return &cfg, nil
 }
@@ -1918,61 +1926,18 @@ func WorkspaceTrustStorePath() string {
 	return filepath.Join(defaultDataDir(), "workspace_trust.json")
 }
 
-// securityRelevantDiff returns a human-readable line for each
-// security-relevant setting (per FIND-01/FIND-02: permission.*, sandbox.*,
-// mcp.servers, notify.webhook, hooks, plugins) where full differs from base.
-func securityRelevantDiff(full, base *Config) []string {
-	var diffs []string
-	if !reflect.DeepEqual(full.Permission, base.Permission) {
-		diffs = append(diffs, fmt.Sprintf("permission: %+v -> %+v", base.Permission, full.Permission))
-	}
-	if !reflect.DeepEqual(full.Sandbox, base.Sandbox) {
-		diffs = append(diffs, fmt.Sprintf("sandbox: %+v -> %+v", base.Sandbox, full.Sandbox))
-	}
-	if !reflect.DeepEqual(full.MCP, base.MCP) {
-		diffs = append(diffs, fmt.Sprintf("mcp.servers: %d configured -> %d configured", len(base.MCP), len(full.MCP)))
-	}
-	if full.Notify.Webhook != base.Notify.Webhook {
-		diffs = append(diffs, fmt.Sprintf("notify.webhook: %q -> %q", base.Notify.Webhook, full.Notify.Webhook))
-	}
-	if !reflect.DeepEqual(full.Hooks, base.Hooks) {
-		diffs = append(diffs, fmt.Sprintf("hooks: %d configured -> %d configured", len(base.Hooks), len(full.Hooks)))
-	}
-	// Plugins (P42.1): a project's plugins: entries register live tools that
-	// execute an arbitrary host command (internal/plugins.RegisterProcessTools),
-	// structurally identical to mcp.servers above — same gate applies.
-	if !reflect.DeepEqual(full.Plugins, base.Plugins) {
-		diffs = append(diffs, fmt.Sprintf("plugins: %d configured -> %d configured", len(base.Plugins), len(full.Plugins)))
-	}
-	// git.pre_commit_test_command (P46.2): the git_commit tool shells this out
-	// on the host before every commit — structurally the same arbitrary-host-
-	// command execution vector as hooks/plugins above, so a project cannot set
-	// or change it until the workspace is trusted.
-	if full.Git.PreCommitTestCommand != base.Git.PreCommitTestCommand {
-		diffs = append(diffs, fmt.Sprintf("git.pre_commit_test_command: %q -> %q", base.Git.PreCommitTestCommand, full.Git.PreCommitTestCommand))
-	}
-	// workspace.additional_roots (P52.13): each entry widens the confinement
-	// boundary every workspace-confined tool validates against. A cloned repo
-	// nominating "/" or "~" as an additional root would turn read_file into an
-	// arbitrary host read — exactly the class of silent widening this gate
-	// exists for. Per-root `aegis trust` is the second lock (see
-	// ResolveAdditionalRoots); this is the first.
-	if !reflect.DeepEqual(full.Workspace.AdditionalRoots, base.Workspace.AdditionalRoots) {
-		diffs = append(diffs, fmt.Sprintf("workspace.additional_roots: %d configured -> %d configured", len(base.Workspace.AdditionalRoots), len(full.Workspace.AdditionalRoots)))
-	}
-	return diffs
-}
-
 // applyWorkspaceTrust implements the P27.1 workspace-trust gate: a project's
 // .aegis/config.yaml is auto-merged with no confirmation today (FIND-02),
 // letting a cloned repository silently widen permission.mode, add an
 // attacker MCP server or process-tool plugin, set a notify.webhook
 // exfiltration channel, or run session_start/pre_tool_use hooks (FIND-01).
 // Until an operator explicitly trusts the current directory (`aegis trust`),
-// the security-relevant keys
-// are frozen to their user/global values — cfg (already unmarshalled with
-// the project layer applied) is mutated in place to fall back to baseline
-// (project layer excluded) for exactly those keys.
+// every key `configTrustPolicy` does not mark projectSettable is frozen to its
+// user/global value — cfg (already unmarshalled with the project layer
+// applied) is mutated in place to fall back to baseline (project layer
+// excluded) for those keys. Which keys those are is P66.5's subject: the
+// classification is exhaustive over Config and defaults to frozen, so this
+// function no longer carries a list of its own to fall out of date.
 // dir and trusted are resolved by Load before any project-controlled file is
 // read (P66.1), and passed in rather than recomputed here so that one trust
 // decision governs both the .env load and this freeze.
@@ -1998,14 +1963,7 @@ func applyWorkspaceTrust(cfg, baseline *Config, dir string, trusted bool) {
 		return
 	}
 
-	cfg.Permission = baseline.Permission
-	cfg.Sandbox = baseline.Sandbox
-	cfg.MCP = baseline.MCP
-	cfg.Notify.Webhook = baseline.Notify.Webhook
-	cfg.Hooks = baseline.Hooks
-	cfg.Plugins = baseline.Plugins
-	cfg.Git.PreCommitTestCommand = baseline.Git.PreCommitTestCommand
-	cfg.Workspace.AdditionalRoots = baseline.Workspace.AdditionalRoots
+	freezeToBaseline(cfg, baseline, func(p trustPolicy) bool { return p != projectSettable })
 	cfg.WorkspaceTrust.Frozen = true
 	cfg.WorkspaceTrust.Changes = diffs
 }

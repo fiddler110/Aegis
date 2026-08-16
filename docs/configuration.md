@@ -736,6 +736,15 @@ compaction:
 # fallback: naming a specific binary and quietly getting another defeats the
 # point of setting the key. An unset key that is simply not installed is only a
 # warning.
+#
+# This key redirects binaries Aegis execs, so it is frozen from untrusted
+# project config by the workspace-trust gate (see "Project Config and Workspace
+# Trust" below) — the grep tool is a *read* capability and is allowed silently
+# in plan mode, so a cloned repo pointing `ripgrep:` at its own binary would be
+# unprompted host execution. One extra rule applies even after `aegis trust`:
+# a project config value naming a *relative* path (`./tools/rg`) is dropped
+# with a warning, because it resolves against the workspace and so names a
+# binary the repository ships. Absolute paths and bare PATH names are fine.
 commands:
   ripgrep: rg        # grep/glob tools; markedly faster than the built-in walker
   git: git           # git tool, commit/diff/log, checkpoints
@@ -1358,6 +1367,48 @@ data_dir: ""
 
 ---
 
+## Project Config and Workspace Trust
+
+`.aegis/config.yaml` is committed to the repository, so checking out a repo is
+enough to hand Aegis its settings. Most settings are preferences and apply
+straight away. The rest — anything that can execute a host binary, open a
+network channel, widen the file-access boundary, or relax the permission gate —
+is **frozen to your own user/global values until you run `aegis trust` in that
+directory**. `aegis trust` shows exactly which settings the project would
+change before you accept them, and `aegis doctor` reports a frozen workspace.
+
+**A project may set these without trust** — they grant no capability:
+
+`log_level` · `default_persona` · `personas` · `skills` · `repomap` ·
+`compaction` · `output_guard` · `tui` · `swarm` · `tools` · `cost` ·
+and, under `provider:`, the model and tuning knobs — `model`, `small_model`,
+`max_tokens`, `max_retries`, `max_iterations`, `loop_threshold`,
+`zero_tool_nudge`, `temperature`, `seed`, `think`, `reasoning_effort`,
+`context_window`, `keep_alive`, `response_header_timeout`,
+`stream_idle_timeout`, `task_routing`, `tool_call_probe_trials`,
+`model_capabilities`.
+
+**Everything else needs `aegis trust`**, including `permission`, `sandbox`,
+`mcp`, `mcp_server`, `hooks`, `plugins`, `lsp`, `commands`, `server`,
+`security`, `git`, `workspace`, `notify`, `search`, `embeddings`, `diagram`,
+`cleanup`, and the rest of `provider:` (`default`, `base_url`, `headers`,
+`fallback`). The list is deliberately the complement of the one above rather
+than an enumeration of its own: a config key added to Aegis in a later release
+is frozen until somebody classifies it, so the boundary cannot quietly develop
+a hole (P66.5/SEC-02).
+
+**Two settings are never taken from project config, trusted or not**, because
+their effect reaches past the workspace you are trusting:
+
+- `data_dir` — it resolves the audit trail, the session database and the
+  tool-result spill directory. Set it globally or in the environment.
+- `security.dast.allowed_targets` — the authorization list for an *active*
+  scanner (P27.9).
+
+An attempt at either is reverted and logged.
+
+---
+
 ## The `.aegis/.env` File
 
 Place secrets that must not appear in version-controlled YAML into `.aegis/.env`:
@@ -1438,6 +1489,11 @@ provider:
 ```
 
 And set `ANTHROPIC_API_KEY` in your environment.
+
+`provider.default` decides which vendor (and which of your API keys) a run
+spends, so it is one of the trust-gated keys: run `aegis trust` in the project
+once, or set it globally. `model` and `max_tokens` apply either way — see
+[Project Config and Workspace Trust](#project-config-and-workspace-trust).
 
 ### Restrict shell commands in a project
 
@@ -1674,6 +1730,11 @@ provider:
     X-Gateway-Token: "your-token"
     X-Tenant-ID: "tenant-id"
 ```
+
+`base_url` and `headers` send every prompt and tool result to the named host,
+so both are trust-gated in project config — a gateway is normally a global
+setting anyway. See
+[Project Config and Workspace Trust](#project-config-and-workspace-trust).
 
 The gateway must proxy the provider's native paths:
 - Anthropic: `POST /v1/messages`

@@ -259,8 +259,23 @@ type SecurityPatch struct {
 
 // PatchProjectSecurity replaces the security: block in the project-level
 // .aegis/config.yaml, preserving all other sections.
+//
+// security.* became a workspace-trust-gated key in P66.5/SEC-03, so — exactly
+// as for PatchProjectSandbox above — a successful patch here also records the
+// current directory as trusted. This write is an explicit local operator action
+// (`aegis harden --project`, `/security-config`, `aegis security build-image`),
+// not a setting inherited from a cloned repository's pre-existing config, and
+// without this the operator's own write would be frozen back out on the next
+// load.
 func PatchProjectSecurity(p SecurityPatch) error {
-	return patchSecurity(ProjectConfigPath(), p)
+	if err := patchSecurity(ProjectConfigPath(), p); err != nil {
+		return err
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	return workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir)
 }
 
 // PatchGlobalSecurity replaces the security: block in the global config file.
