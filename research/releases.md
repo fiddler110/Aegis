@@ -8,7 +8,16 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-16 — **the P66 day plan is finished.** Written 2026-08-15 to be executed
+**Last updated:** 2026-08-16 (later the same day) — **the first five rows of the "Up next" ten are
+shipped**: P66.5, P66.7's LLM-01 remainder, P66.16, P66.10 and P66.9, one commit each, every commit
+independently `go build ./...` + `go test ./...` green rather than only the final tree. That empties
+Tier 1. Their records are below, and three of them **correct the finding they were built from** —
+VULN-03's suggested `::ffff:0:0/96` would have blocked the entire public internet, LLM-04 was
+dropping *all* tool calls on a 1-based backend rather than trailing ones, and P66.7's 11,611-token
+measurement was already stale. Two sub-items deliberately did not land and are now open on their own
+terms: SEC-07 (content-bound trust grants) and PERF-02 (`synchronous=NORMAL`).
+
+**Previously, 2026-08-16 — the P66 day plan is finished.** Written 2026-08-15 to be executed
 2026-08-16, it was ordered by dependency and blast radius rather than by severity, and all four
 blocks are done: P66.2 (toolchain, shipped 2026-08-15 — its own entry is below), then the two
 Criticals P66.1 and P66.4, then P66.3's read-only tier, then the cheap high-value block of P66.6,
@@ -187,6 +196,176 @@ fails all six 10-minute entries and neither latex entry.
 shadowing verbatim against a reverted `withStallBeat`. A follow-up commit (`c0c2196`) covers
 `internal/heartbeat` directly, so the new leaf package is tested on its own terms rather than only
 through its two callers.
+
+### P66.5 — invert the config freeze list
+
+Shipped as `0352112`. `securityRelevantDiff` was an enumerated denylist found incomplete four times
+(P42.1, P46.2, P52.13, P66); six independent discoveries of one structural problem is the argument
+for inverting rather than extending a fifth time. `internal/config/freeze.go` replaces the eight
+hand-written `if` blocks with a `configTrustPolicy` table classifying each path as
+`projectSettable` / `frozenUntilTrusted` / `baselineOnly`. `policyFor` walks a dotted path to its
+nearest classified ancestor and **defaults to frozen**, so fail-closed no longer depends on the
+table being complete — which is the property the old shape lacked. One reflection walk drives both
+the diff and the freeze, so the two can no longer disagree; that divergence *was* the old code's
+defect, repeated three times.
+
+Newly frozen: `commands`, `server`, `security`, `provider`, `lsp`, `mcp_server`, `search`,
+`embeddings`, `diagram`, `cleanup`. `provider` is refined by dotted entries so its 18 model/tuning
+knobs stay settable — the ordinary "this repo wants qwen3:14b" case must not need a trust prompt, and
+narrowing the frozen default is the only thing dotted paths are used for. `data_dir` and
+`security.dast.allowed_targets` are `baselineOnly`, applied *after* the freeze so an untrusted
+attempt still shows up in `WorkspaceTrust.Changes`.
+
+**One deviation from the item, and it is a correction to it.** The roadmap asked for `security.*` to
+be baseline-only on the `Security.DAST.AllowedTargets` precedent. That would have silently broken
+`PatchProjectSecurity`, which has six production call sites (`aegis harden --project`,
+`/security-config`, `PATCH /config/security`, image-pin writes from `security build-image`). It is
+`frozenUntilTrusted` instead, with `allowed_targets` keeping the P27.9 baseline-only treatment.
+SEC-03's substance — an untrusted repo disabling `egress_then_write` or the network allowlist — is
+closed either way. `PatchProjectSecurity` now records trust for cwd, following `PatchProjectSandbox`.
+
+`TestEveryConfigFieldDeclaresATrustPolicy` reflects over `Config`'s koanf-tagged fields and fails on
+any that declares no policy, checking the reverse direction too, with the same "the scan is still
+finding things" floor as the callsite test it is modelled on. Reflection over the type rather than a
+source grep: same guarantee, resolves dotted paths, cannot be fooled by formatting. Verified by
+deleting the `log_level` entry. `TestUnclassifiedConfigKeyIsFrozen` pins the fail-closed default
+separately. `rejectRelativeCommandOverrides` drops project-introduced relative-path `commands:`
+values even after `aegis trust`.
+
+SEC-02, SEC-03, SEC-06 closed. **SEC-07 did not land** and is now its own Tier 2 item: a
+content-bound trust grant has to gate the `.aegis/.env` load, which P66.1 deliberately resolves
+*before* any project-controlled file is read, so honouring it means either inverting P66.1's ordering
+or accepting a re-prompt that covers `config.yaml` but not `.env`. The well-defined subset this item
+builds was its prerequisite; the rest is not cheap.
+
+### P66.7, LLM-01 half — cap context-file injection, and let the budget test see it
+
+Shipped as `9482c87`, closing P66.7. `localContextFilesMaxBytes = 8000`, sited beside
+`localRepoMapMaxBytes` and applied only under the local profile.
+
+**The cap is derived, not measured off this repository, and the roadmap's number was stale.**
+`LoadContext()` measures 10,257 bytes / 2,560 tokens here today, not the recorded 11,611 tokens —
+sizing against that figure would have been sizing against a moving number, which is the failure mode
+the item itself warned about. The derivation, written into the comment: a 32,768 served window under
+the documented local config, a target of a quarter of it for the always-injected prefix so the LLM-16
+notice reports *transcript* growth rather than being tripped by the prefix alone, minus the
+4,550-token base ceiling and the ~1,000-byte repo map. 8,000 bytes is 2× the repo-map cap, on the
+stated ordering that hand-written project instructions are worth more per byte than a generated one.
+The comment also records what the cap does *not* do: nothing rescues Ollama's default 4,096 window,
+since the base prompt alone exceeds it.
+
+**Posture is deliberately asymmetric with the repo map.** An over-cap repo map is dropped whole —
+generated, ranked, degrades to nothing. Context files are the project's instructions, so they
+truncate head-first at a line boundary with `truncate.go`'s exact notice wording, notice bytes
+reserved *out of* the limit, and a file that arrives with nothing left gets an `[omitted: …]` notice
+rather than vanishing. `builtin.TruncateHead` could not be called — `internal/tool/builtin` already
+imports `internal/memory` — so the wording is duplicated with a comment naming P64.3 and the reason.
+Truncation runs *before* `wrapContextFile` so the `trust.Wrap` provenance envelope is never cut
+through. The 5s sources cache is keyed on the budget, so the daemon (capped) and `aegis chat`
+(uncapped) cannot be served each other's size.
+
+`TestEffectiveSystem_localProfileBudget` is no longer structurally blind: two subtests over a fixture
+carrying a realistic ~12,000-byte `CLAUDE.md` — bare workspace 4,336/4,550, with context files
+6,383/6,650 against a new `localInjectedPromptCeilingTokens`. The blindness check is the real
+assertion: setting the cap to 800,000 fails both new cases, so **cap removal is now caught**, which
+was the point of the item.
+
+### P66.16 — the OpenAI adapter was dropping tool calls
+
+Shipped as `444516e`, and **LLM-04 is worse than the finding recorded.** `chunkDecoder.tools` is
+keyed by the wire's `tc.Index`, but `Finish` walked a synthetic `0..len(tools)` range, correct only
+when the indices are exactly `{0..n-1}`. The review described dropped *tails*; in fact a lone call at
+index 1 gives `len == 1`, reads `tools[0]`, finds nil and continues — so a 1-based backend emits
+**zero** tool calls under a `finish_reason: "tool_calls"` stop, having already fired
+`EventToolUseStart`. This is on the adapter `docs/providers.md` recommends for local Ollama.
+`Finish` now sorts the map's actual keys, which covers 1-based, gapped and out-of-order indices and
+makes emission order deterministic wire-index order rather than map order.
+
+LLM-05: `toolAccum.callID(index)` returns the wire ID when present and `tu_<index>` otherwise,
+mirroring the native Ollama adapter. Keyed on the **wire index**, so the start event and `Finish`
+compute the same value without coordinating, and a synthesized ID cannot collide with a real one or
+with another call in the turn.
+
+`TestStreamToolUseStartAnnouncedOnceWhenIDArrivesLate` (the P33.3 split-ID stream) asserted the start
+event carried `ID: ""` and now asserts `tu_0`. That is the correct direction: the start fires before
+the ID is known so it gets the synthesized one, while the assembled call keeps the late-arriving real
+ID, which is what the wire requires. The TUI already handles it — `rekeyPendingTool` exists precisely
+to re-key a card appended under a synthetic start key once the real ID arrives.
+`TestStreamToolCallIndexingAndIDSynthesis` covers all six cases and every subtest fails against the
+unfixed adapter.
+
+### P66.10 — the bounded security remainder
+
+Shipped as `fd4f49b`. Three fixes.
+
+**ARCH-03** — the output guard read files back with a context lacking `WithWorkdir`/`WithExtraRoots`,
+attached only in `executeTool`, so on a custom workdir it silently validated nothing. Extracted
+`e.toolCtx(ctx)`, used by both `executeTool` and `collectWrittenFiles`.
+`TestGuardReadsBackFilesFromSessionWorkdir` runs the registry at a daemon temp dir and the engine at a
+different session one, and fails without the fix with `guard saw 0 file(s), want 1`.
+
+**VULN-03** — the blocklist was duplicated byte-for-byte in `internal/tool/builtin/web.go` and
+`internal/mcp/http.go`. Both copies are gone in favour of a new dependency-free leaf package,
+`internal/netblock`, holding the CIDR table plus `IsPrivate`, `SafeDialer` and `ValidateNotPrivate` —
+a new package rather than either existing file, because a cross-package import of
+`internal/tool/builtin` from `internal/mcp` is exactly what the old comment argued against. Added
+`IsUnspecified()`, `0.0.0.0/8`, `100.64.0.0/10`, `192.0.0.0/24`, `198.18.0.0/15` and
+`IsInterfaceLocalMulticast()`.
+
+**This one corrects the finding.** VULN-03's suggested remediation names `::ffff:0:0/96`, and adding
+it would have been a severe outage: `net.IPNet.Contains` reduces that CIDR via `To4()` to
+`0.0.0.0/0`, matching **every IPv4 address** — the entire public internet blocked. IPv4-mapped
+addresses were already handled correctly (`::ffff:127.0.0.1` is blocked). Recorded in the package
+comment and pinned by `TestIsPrivateLeavesPublicAddressesAlone`, which is the over-blocking guard
+this list did not previously have. Any future reading of VULN-03 should start here.
+
+**VULN-05** — `LocalBackend.Exec` buffered unbounded, so the 24 KiB shell cap applied only after a
+10-minute `cat /dev/urandom` was already in the daemon heap. `cmd.Run` with a `capWriter` on both
+streams, `maxCapturedOutput = 4 MiB` — well above the largest entry in `truncate.go`'s posture table
+(32 KiB git), so no realistic result is altered and downstream truncation is unchanged.
+`capWriter.Write` always returns `len(p)` so a short count cannot SIGPIPE the child. The cap keeps
+the **head** — keeping the tail of an unbounded stream needs either the defect or a ring buffer — and
+appends its notice last so it survives the shell tool's `TruncateTail`.
+
+### P66.9 — bound `bg_events`, and coalesce text deltas
+
+Shipped as `d4fb209`. The debate's cut of the latency half stands and was not revisited; unbounded
+growth was the item. `bg_events` was pruned only by whole-session delete, and the auto-pruner is
+gated on `Cleanup.SessionTTLDays`, which has no default.
+
+`DefaultBGEventRetention = 2000` rows per session, enforced inside `AppendBGEvent` and **deliberately
+not a config key** — the defect was precisely that the existing pruner depends on an unset one, so
+adding a second knob would have rebuilt it. `Store.SetBGEventRetention` exists for tests and
+embedders only, which is why `docs/configuration.md` gained nothing. Sweeps run every 128 appends,
+keeping the common path a single INSERT, worst case `retention + interval - 1` rows; the sweep is a
+bounded reverse scan over the existing `idx_bg_events_session` with no `COUNT(*)`, and a no-op under
+the bound.
+
+**A failure mode the item did not anticipate:** the first append a session makes *in a process* always
+sweeps. Without that, a session appending fewer than 128 events per daemon lifetime accumulates
+across restarts and reproduces the same unbounded growth in slower form — the interval alone is not a
+bound. It has its own test.
+
+The bound is safe because `bg_events` is a live catch-up buffer for
+`GET /sessions/{id}/events?since=N`, not a transcript — `session_messages` is the durable record — so
+what is dropped duplicates content held whole elsewhere. That reasoning is in the doc comment, since
+it is the whole licence for discarding rows.
+
+Coalescing folds pure `text`/`thinking` deltas over a 200ms window, flushing on kind change, window
+expiry, any non-delta event, and run end. "Pure" is checked with `reflect.DeepEqual` against
+`Event{Kind, Text}`, so a future field on `api.Event` makes such events **stop coalescing** rather
+than silently dropping the field. Replay holds because deltas of one kind concatenate in id order and
+the buffer flushes before any non-delta row, so a coalesced row can never overtake a tool call or
+`turn_done`.
+
+All four mechanisms were mutation-tested per this document's own method note — disabling the prune,
+removing the first-append sweep, disabling coalescing, removing the ordering flush — and each fails
+its own tests and no others.
+
+**PERF-02 (`synchronous=NORMAL`) did not land** and remains open. The two databases where it is
+unconditionally safe are `knowledge.db` and `longmem.db`; the only DSN in this item's reach was
+`sessions.db`, which is exactly the one the debate downgraded to Low over, since it carries
+checkpoints, the cost ledger and traces.
 
 ---
 

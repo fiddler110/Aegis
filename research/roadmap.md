@@ -10,17 +10,44 @@ adding items.
 
 ## Status
 
-**31 open items: 25 build (Tier 1-4) + 6 verification-only.**
+**42 open items: 36 build (Tier 1-4) + 6 verification-only. Tier 1 is empty.**
+
+**The P67 batch is a comparative reading of an external agent implementation**, not a review of this
+codebase. On 2026-08-16 the leaked Claude Code CLI source (`paperwave/claude-code-cli-leaked` @
+`main`, 1,001 files) was read against Aegis for mechanisms worth having here; the write-up, with the
+per-item evidence and the four ideas rejected, is at
+<https://claude.ai/code/artifact/ebdb26ce-2bfb-4939-871d-8e4407ca6e3d>. **P67.1**-**P67.14** are the
+fourteen that survived as filed items; a fifteenth — the render-fidelity constraint on transcript
+search — is folded into **P66.15**'s full-text-search bullet, where the feature it constrains was
+already parked. Three constraints apply to every P67 entry and are not repeated in them:
+
+- **That source is leaked proprietary code. Nothing may be transcribed from it.** Each item is a
+  design reading — a mechanism and the reasoning behind it — and needs an independent Go
+  implementation written from this document, not from that repository.
+- **The leak is partial.** `src/utils/**` is absent, so permission internals, `forkedAgent` and
+  `toolResultStorage` were legible only through call sites. Where an entry's claim about *their*
+  implementation rests on a call site rather than the code, it says so.
+- **Every claim about Aegis in these entries was checked against this tree**, at the file and line
+  cited, not against the docs. The claims about their side were not, and cannot be — treat them as
+  motivation, never as a specification.
 
 **The P66 batch is a full-stack code review**, not a feature line. Six specialist reviewers, an
 adversarial debate (advocate / refuter / arbitrator) and a static-analysis pass produced 70 findings
 against HEAD `3c2b57b`, recorded in [CodeReview.md](../CodeReview.md) with per-finding evidence. The
-items filed below (**P66.5**-**P66.23**) carry every finding worth acting on; each names the finding
-IDs it closes, so the review document is the rationale and this document is the work. **Eight of the
-batch shipped on 2026-08-15/16** — P66.2, P66.1, P66.4, P66.3, P66.6, P66.7's LLM-16 half, P66.8 and
-the P66.24 flake found while building P66.4 — including both Criticals and five of the six findings
-that were exploitable the day the review landed. Their build records, and the corrections several of
-them make to the item they were written from, are in [releases.md](releases.md).
+items filed below (**P66.11**-**P66.26**) carry every finding worth acting on; each names the finding
+IDs it closes, so the review document is the rationale and this document is the work. **Thirteen of
+the batch shipped on 2026-08-15/16** — P66.2, P66.1, P66.4, P66.3, P66.6, P66.7 (both halves), P66.8,
+the P66.24 flake found while building P66.4, and then P66.5, P66.16, P66.10 and P66.9 — including
+both Criticals and **all six** of the findings that were exploitable the day the review landed. Their
+build records, and the corrections several of them make to the item they were written from, are in
+[releases.md](releases.md).
+
+**Read those corrections before acting on CodeReview.md directly.** Three of the five items shipped
+in the second sitting contradict the finding they were built from: VULN-03's suggested
+`::ffff:0:0/96` addition would have blocked the entire public internet, LLM-04 drops *every* tool
+call on a 1-based backend rather than only trailing ones, and P66.7's 11,611-token figure was already
+stale when it was filed. Two sub-items were deliberately left undone and are refiled as **P66.25**
+(SEC-07) and **P66.26** (PERF-02) rather than being carried silently inside a closed item.
 
 Tiers 1-4 are **build work** — every item there requires writing code that doesn't exist yet.
 **Verification work** is its own track, not a tier: every item in it is code that is *already
@@ -29,30 +56,31 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 "go run a test" and "go design and build a feature" as the same kind of next action. See
 [Verification Work](#verification-work) below.
 
-- **Tier 1:** 1 — **P66.5**.
-- **Tier 2:** 7 — **P66.7** (LLM-01 remainder only), **P66.9**, **P66.10**, **P66.11**, **P66.12**,
-  **P66.16**, **P66.21**.
-- **Tier 3:** 3 — **P66.13**, **P66.14**, **P66.15**.
-- **Tier 4:** 14 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, plus the nine pre-existing:
-  **P65.4**, **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**,
-  **P25.9**, **P63.10**.
+- **Tier 1:** 0 — empty. **P66.5** shipped 2026-08-16, closing the last exploitable-today finding.
+- **Tier 2:** 9 — **P66.11**, **P66.12**, **P66.21**, **P66.25** (SEC-07, refiled), plus five from
+  P67: **P67.1**, **P67.2**, **P67.3**, **P67.4**, **P67.5**.
+- **Tier 3:** 7 — **P66.13**, **P66.14**, **P66.15**, plus four from P67: **P67.6**, **P67.7**,
+  **P67.8**, **P67.9**.
+- **Tier 4:** 20 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, **P66.26** (PERF-02,
+  refiled), the five from P67 (**P67.10**-**P67.14**), plus the nine pre-existing: **P65.4**,
+  **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
 - **Verification:** 6 — **P66.22**, **P38.1**, **P62.9**, **P65.2** (prompt half), **P65.3**
   (local half), **P62.8**.
 
-**What to do next.** The ten items to take in order, with the one-sentence case for each, are in
-[Up next](#up-next--the-ten-items-to-take-in-order) below. The reasoning behind the top of that list:
+**What to do next.** Rows 1-5 of the "Up next" ten shipped on 2026-08-16 (see
+[Up next](#up-next--the-ten-items-to-take-in-order) for the table as it now stands). What that
+leaves:
 
-**P66.5**, inverting the config freeze list, is the whole of Tier 1 and the last
-of the six exploitable-today findings. The day plan deliberately deferred it as a design change that
-wants its own test pass rather than the tail of a long day; P66.1 has now settled and P66.5 touches
-the same file.
+**Tier 1 is empty and there is no forced order left in the batch.** One sequencing fact survives:
+**P66.14 gates P66.22**, the live-tier run. P66.7 was the other gate and has now shipped, so P66.14
+is the only thing still standing between the batch and the measurement — it changes numbers P66.22
+would otherwise measure wrong, and measuring first answers a question nobody will have afterwards.
 
-After P66.5, Tier 1 is empty and the batch has no forced order left. Two sequencing facts survive it.
-**P66.7's LLM-01 remainder** is the natural follow-on to the LLM-16 half that shipped: the run-start
-notice makes the uncapped context-file injection *visible* on any run that hits it, so the cap can be
-designed against an observed number rather than a measured-once one. And **P66.7 and P66.14 both gate
-P66.22**, the live-tier run — they change three of the five numbers it measures, so measuring first
-answers a question nobody will have afterwards.
+**The two refiled sub-items are not equivalent in urgency.** **P66.25** (SEC-07, content-bound trust
+grants) is real work with a real gap behind it — a `git pull` that adds a `hooks:` block still
+re-prompts nothing — and P66.5 built its prerequisite, the well-defined security-relevant subset.
+**P66.26** (PERF-02) is Tier 4 and should stay there: it is a Low-severity durability trade on the
+one database that holds checkpoints, the cost ledger and traces.
 
 **Among verification items**, P38.1's live conformance re-run stays the highest-value one: it is the
 only open item anywhere whose outcome produces new information rather than new code, and three of the
@@ -104,18 +132,24 @@ second ranking: every row's tier and size come from the item's own `Priority:` l
 is what those tiers say once the two real sequencing constraints are honored. Each row's "why now"
 is the one-sentence case; the item's own entry below carries the evidence and closure condition.
 
+**Rows 1-5 shipped later the same day** — one commit each, each independently green, build records in
+[releases.md](releases.md). They are struck through rather than deleted, because three of them
+correct the finding they were built from and the row is where a reader looks first. **Rows 6-10 are
+the live list**, and nothing about their ordering changed: they had no dependency on rows 1-5 except
+#10's, which is now half-satisfied.
+
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **P66.5** — invert the config freeze list | T1 · M | All of Tier 1. Last of the six exploitable-today findings: `commands:` unfrozen means an untrusted repo gets arbitrary binary exec through `grep` — a `CapRead` tool, so **plan mode allows it silently**. `security.*`, `server.addr` and `data_dir` likewise. The denylist has been found incomplete four times (P42.1, P46.2, P52.13, now P66); invert it and add the grep-the-source invariant test. P66.1 has settled, same file. |
-| 2 | **P66.7** — cap context-file injection (LLM-01 remainder) | T2 · S | `CLAUDE.md` injects uncapped: 11,611 tokens measured here, 2.6x the enforced 4,550 ceiling. The LLM-16 notice now makes it visible per-run, so the cap can be sized against observed numbers. Also **gates #10**. |
-| 3 | **P66.16** — OpenAI adapter drops tool calls | T2 · S | Two correctness bugs on the adapter `docs/providers.md` recommends for local Ollama. `Finish` iterates `0..len` over a map keyed by wire index, so a 1-based backend drops calls *after* `EventToolUseStart` fired. Presents as "the model is behaving strangely." |
-| 4 | **P66.10** — bounded security remainder | T2 · S-M | Three sub-hour fixes: the guard reads files without `WithWorkdir` (validates *nothing* on custom workdirs); the SSRF list misses `0.0.0.0/8`, `::` and CGNAT, and is duplicated; `LocalBackend.Exec` buffers unbounded before the 24 KiB cap applies. |
-| 5 | **P66.9** — bound `bg_events` | T2 · S | Pruned only by whole-session delete, gated on `Cleanup.SessionTTLDays`, which **has no default** — so a default install grows without limit for the life of the install. The latency half of this finding was correctly cut in debate; growth is what survives. |
+| 1 | ~~**P66.5** — invert the config freeze list~~ **SHIPPED** `0352112` | T1 · M | All of Tier 1. Last of the six exploitable-today findings: `commands:` unfrozen means an untrusted repo gets arbitrary binary exec through `grep` — a `CapRead` tool, so **plan mode allows it silently**. Inverted to a `configTrustPolicy` table that defaults to frozen. `security.*` landed as `frozenUntilTrusted`, not baseline-only — that would have broken `PatchProjectSecurity`'s six call sites. SEC-07 refiled as **P66.25**. |
+| 2 | ~~**P66.7** — cap context-file injection (LLM-01 remainder)~~ **SHIPPED** `9482c87` | T2 · S | `CLAUDE.md` injected uncapped. **The 11,611-token figure was stale** — 10,257 bytes / 2,560 tokens when measured at build time — so the 8,000-byte cap was derived from the served window instead. The budget test now runs over a realistic `CLAUDE.md` fixture and fails if the cap is lifted. Ungates #10. |
+| 3 | ~~**P66.16** — OpenAI adapter drops tool calls~~ **SHIPPED** `444516e` | T2 · S | **Worse than filed:** `Finish` iterating `0..len` over a map keyed by wire index doesn't drop trailing calls on a 1-based backend, it emits **zero** — `len == 1` reads `tools[0]`, finds nil, continues. Fixed by sorting the map's real keys; IDs synthesized as `tu_<index>`. |
+| 4 | ~~**P66.10** — bounded security remainder~~ **SHIPPED** `fd4f49b` | T2 · S-M | All three landed; SSRF list deduplicated into `internal/netblock`. **VULN-03's suggested `::ffff:0:0/96` was rejected**: `Contains` reduces it via `To4()` to `0.0.0.0/0`, blocking the whole public internet. Pinned by an over-blocking guard test. |
+| 5 | ~~**P66.9** — bound `bg_events`~~ **SHIPPED** `d4fb209` | T2 · S | `DefaultBGEventRetention = 2000`, deliberately not a config key — the defect *was* a pruner gated on an unset one. The interval alone is not a bound: a session appending <128 events per daemon lifetime accumulates across restarts, so a process's first append always sweeps. PERF-02 refiled as **P66.26**. |
 | 6 | **P66.21** — doc corrections the review disproved | T2 · S | Three left (P66.8 closed the first). The `view.go` one is actively harmful: it asserts the pre-P35.13 `prompt_eval_count` claim and proposes remediation that must not be done. |
 | 7 | **P66.14** — reconcile the two compaction thresholds | T3 · M | The engine triggers at 2,048 on a 4,096 window; the summarizer refuses until 3,277 — so compaction lands with 819 tokens left for the completion. And the P62.4 calibration is inert on the documented `openai` + `:11434/v1` path, so **every user following the documented configuration runs the whole session on a 20-33% undercount**. Also gates #10. |
 | 8 | **P66.12** — staticcheck cleanup | T2 · S | 28 findings, no new defects — a good result worth banking. Closure is deleting `continue-on-error` from CI; until then the step is advisory and the next 28 accumulate the same way. |
 | 9 | **P66.11** — redaction + turn trace | T2 · M | `internal/share` redacts nothing at all. The `TurnTrace` half is the higher-leverage piece: stop reason, compaction event, guard verdict and retry record are all computed and discarded one line later, and every live-tier item in this document would be easier to close with them. |
-| 10 | **P66.22** — the live-tier run | Verification | Converts five estimated LLM-tier findings into measurements in one `TestLiveWorkflow` pass. **Must run after #2 and #7**, which change three of the five numbers. Shares its harness with P38.1, P62.9 and P65.2's prompt half — schedule all four in one sitting. |
+| 10 | **P66.22** — the live-tier run | Verification | Converts five estimated LLM-tier findings into measurements in one `TestLiveWorkflow` pass. **#2 has shipped, so only #7 still gates it.** Shares its harness with P38.1, P62.9 and P65.2's prompt half — schedule all four in one sitting. |
 
 **Two notes on the ordering.** **P66.13** (T3, M-L) is deliberately below the cut even though
 `aegis chat` bypassing the whole permission stack is the more serious defect: it needs `newChatCmd` —
@@ -125,123 +159,50 @@ item and is available whenever a local model is up; #10 is listed instead becaus
 cheaper to schedule as part of that same sitting.
 
 Rows 2-9 have no dependencies on each other and can be reordered freely — only #1 (Tier 1) and #10
-(sequenced behind #2 and #7) are fixed.
+(sequenced behind #2 and #7) are fixed. **As of the rows 1-5 sitting, the live remainder is #6, #7,
+#8, #9 in any order, then #10 behind #7.**
+
+**This reading predates the P67 batch** and is left as written rather than re-ranked — it is the
+record of what the tiers said on the morning of 2026-08-16. Three P67 items would enter the ten on a
+re-read, and one interacts with a row already on it:
+
+- **P67.1** (per-round tool-result cap) would sit around #4. It is the smallest item in either batch,
+  it closes a hole that parallelism opened in an otherwise fully-argued file, and it reuses the spill
+  path unchanged.
+- **P67.3** (call-purpose tag on provider requests) would sit just behind it — small on its own, and
+  the enabling seam for **P67.6**, which cannot be gated correctly without it.
+- **P67.6** (time-based micro-compaction) **touches the same question as row #7, P66.14**. P66.14
+  reconciles *when* compaction fires against context pressure; P67.6 adds a second, orthogonal
+  trigger based on cache temperature. Doing P66.14 first is right — reconcile the thresholds that
+  disagree before adding a third path into the same machinery — but whoever takes P66.14 should read
+  P67.6 first so the two triggers are designed as one decision rather than bolted together.
+
+The remaining P67 Tier-3 items (**P67.7**, **P67.8**, **P67.9**) are each larger than anything on the
+current ten and belong to a later sitting.
 
 ---
 
 ## Open Work — Tier 1
 
-**Status: 1 open**, from the P66 review batch (P66.2 shipped 2026-08-15; **P66.1, P66.4, P66.3 and
-P66.6 shipped 2026-08-16** — see [releases.md](releases.md) for what each landed and what was found
-while landing it). It is exploitable today with no dependency on anything else in this document.
-Evidence is in [CodeReview.md](../CodeReview.md) at the finding IDs named in its heading.
+**Status: 0 open — Tier 1 is empty.** Every finding the review classified as exploitable on the day
+it landed has now shipped: P66.2 (2026-08-15), then P66.1, P66.4, P66.3, P66.6 and finally **P66.5**
+(2026-08-16). See [releases.md](releases.md) for what each landed and what was found while landing
+it — several of those records correct the item they were built from, which is the part worth reading
+before trusting [CodeReview.md](../CodeReview.md) directly.
 
-### P66.5 — Invert the config freeze list
-
-`securityRelevantDiff` (`internal/config/config.go:1842-1927`) is an **enumerated denylist** of
-security-relevant keys frozen from untrusted project config, and the enumeration is incomplete in
-every direction the review looked:
-
-- **SEC-02** — `commands:` is unfrozen, and `internal/toolpath` execs a relative override. `grep` is
-  `CapRead` and therefore silently allowed in *plan* mode, so an untrusted repo gets arbitrary binary
-  execution through a read-capability tool.
-- **SEC-03** — `security.*` is unfrozen, so an untrusted repo turns off `egress_then_write` and the
-  network allowlist.
-- **SEC-06** — `server.addr`, `server.allow_remote` and `data_dir` are unfrozen.
-
-This is the same defect three times, and the project has already found it incomplete three times on
-its own (P42.1, P46.2, P52.13). That is six independent discoveries of one structural problem, which
-is the argument for inverting rather than extending: enumerate the **project-settable** keys, freeze
-everything else, and add the grep-the-source invariant test this repo already owns the pattern for
-(`TestEveryRegisterCallSiteDecidesTheLocalProfile`) so the build fails when a new `Config` field
-appears in neither list. Follow the `Security.DAST.AllowedTargets` precedent (`:1809`) for `data_dir`
-and `security.*` — baseline-only, never project-settable even after `aegis trust`. Reject
-relative-path `commands:` overrides from any project-sourced layer.
-
-Fold in SEC-07 if cheap: trust grants are permanent and content-blind, so a `git pull` that adds a
-`hooks:` block re-prompts nothing. Re-prompting on a change to the security-relevant subset falls out
-of having a well-defined subset, which is what this item builds.
-
-Closes SEC-02, SEC-03, SEC-06, SEC-07. Priority: Tier 1 — M. Sequence after P66.1 (same file).
+An item enters this tier when it is a real, currently-exploitable security or robustness gap that is
+small and has no dependency. Nothing currently qualifies; a new one would come from a review pass or
+a fired trigger on a Tier 4 entry, not from re-reading the existing findings.
 
 ---
 
 ## Open Work — Tier 2
 
-**Status: 7 open**, all from the P66 review batch (**P66.8** shipped 2026-08-16; **P66.7** is reduced
-to its LLM-01 half). Each is self-contained and independently shippable; none blocks or is blocked by
-another.
-
-### P66.7 — Context files are injected uncapped, and the budget test cannot see them (LLM-01 remainder)
-
-The local prompt budget is one of the most carefully disciplined things in the codebase — four
-shrinking mechanisms, a 4,550-token ceiling enforced by `TestEffectiveSystem_localProfileBudget`, a
-measured 37% cut in P62.6, and a repo map capped at 4,000 bytes. `memory.readIfExists`
-(`internal/memory/memory.go:232`) injects `CLAUDE.md`/`AGENTS.md` with **no cap at all**: measured
-**11,611 tokens on this repository**, 2.6x the entire enforced ceiling and 2.8x Ollama's default
-4,096-token window. The most carefully budgeted prompt in the project is blown by the file that
-documents the budget.
-
-The ceiling test is structurally blind to it because it runs over a bare fixture where every
-project-varying component is empty.
-
-**LLM-16 shipped 2026-08-16** as `5ed832d` (see [releases.md](releases.md)) — a run-start notice now
-fires when the uncompactable part of the request crosses 50% of the served window, so this item's
-condition is *visible* on any run that hits it rather than inferred from a one-off measurement. That
-was deliberately the cheap half: it needed no policy decision about what to truncate.
-
-**What remains is the cap and the test.** Apply a `localContextFilesMaxBytes` symmetric with
-`localRepoMapMaxBytes` (`internal/server/helpers.go:37`), which sits three lines away and caps a
-*smaller* block. Extend the budget test to run over a fixture carrying a realistic `CLAUDE.md`, or it
-keeps measuring only the components that never grow. Design the cap against a number the new notice
-actually reports, not against the 11,611-token figure alone — that one is scoped to *this*
-repository.
-
-Closes LLM-01 (LLM-16 closed). Priority: Tier 2 — S. Highest-value item in this tier for the local path.
-
-### P66.9 — Detached-run event writes are per-event, and `bg_events` is never bounded
-
-`internal/server/messages.go:251-260` wraps `send` for detached runs so every stream event —
-including every text delta — is JSON-marshalled and INSERTed as its own fsync-bound SQLite
-transaction, inline on the engine's stream-consumption goroutine, over a `SetMaxOpenConns(1)`
-connection. `tui.go:938` sets `Resumable = true` unconditionally, so this is the default interactive
-path.
-
-**The debate correctly cut the latency half of this finding.** `origSend` is a non-blocking channel
-enqueue that runs *before* the DB write, so no display latency is added, and 0.5 ms/event against
-local generation at ~33 ms/token is ~1.5% overhead — not the dominant per-token cost originally
-claimed. What survives, and is the real item, is **unbounded growth**: `bg_events` is pruned only by
-whole-session delete, and the auto-pruner is gated on `Cleanup.SessionTTLDays`, which **has no
-default**. On a default install the table grows without limit for the life of the install, storing
-rows that duplicate text `session_messages` already holds whole.
-
-Fix: a per-session `bg_events` retention bound in `internal/session/session.go` that does **not**
-depend on `Cleanup.SessionTTLDays` being configured. Then coalesce text deltas (one row per ~200ms
-or on a change of event kind, non-delta events written through immediately). Only afterwards consider
-`synchronous=NORMAL` — unconditionally for `knowledge.db` and `longmem.db`, and for `sessions.db`
-only with the durability trade written down, since it holds checkpoints, the cost ledger and traces
-(PERF-02, which the debate downgraded to Low for exactly that reason).
-
-Closes PERF-01, PERF-02. Priority: Tier 2 — S.
-
-### P66.10 — The bounded security remainder
-
-Three independent small fixes, grouped only because each is under an hour and none deserves its own
-heading:
-
-- **ARCH-03** — the output guard reads files back via `reader.Execute(ctx, …)`
-  (`internal/engine/engine.go:2354`) with a context lacking `WithWorkdir`/`WithExtraRoots`, which are
-  attached only in `executeTool`. On any session with a custom workdir the guard silently validates
-  nothing. Fix with an `e.toolCtx(ctx)` helper used by both `executeTool` and `collectWrittenFiles`,
-  shipped with a custom-workdir guard test.
-- **VULN-03** — the SSRF blocklist misses `0.0.0.0/8`, IPv6 `::` and `100.64.0.0/10`, verified against
-  the real resolver, and is duplicated in `internal/tool/builtin/web.go` and `internal/mcp/http.go`.
-  Add `IsUnspecified()` plus the missing ranges, and keep **one** copy.
-- **VULN-05** — `LocalBackend.Exec` buffers subprocess output unbounded, so the 24 KiB shell cap
-  applies only *after* a 10-minute `cat /dev/urandom` is already in the daemon heap, killing every
-  concurrent session. Use a capped writer for `CombinedOutput`.
-
-Closes ARCH-03, VULN-03, VULN-05. Priority: Tier 2 — S-M total.
+**Status: 9 open** — four from the P66 review batch and five from the P67 external-source reading.
+**P66.7, P66.9, P66.10 and P66.16 shipped 2026-08-16** (P66.8 earlier the same day), leaving P66.11,
+P66.12, P66.21 and the newly refiled **P66.25**. Each is self-contained and independently shippable;
+the one ordering constraint inside the tier is that **P67.3** builds the seam **P67.6** (Tier 3)
+needs, so taking P67.3 early costs nothing and unblocks later work.
 
 ### P66.11 — Nothing redacts, and the turn trace is too thin to debug a bad run
 
@@ -260,22 +221,6 @@ struct; **skip the OTel/Prometheus half**, which is a dependency decision this i
 make.
 
 Closes SEC-08, SEC-11, GAP-01. Priority: Tier 2 — M.
-
-### P66.16 — OpenAI adapter drops tool calls and never synthesizes an ID
-
-Two correctness defects on the adapter that the documented local-Ollama configuration actually uses
-(`docs/providers.md` recommends `provider.default: openai` against `:11434/v1`):
-
-- **LLM-04** — `openai.Finish` iterates `for i := 0; i < len(tools); i++` over a map keyed by **wire
-  index**. A 1-based or gapped index silently drops tool calls *after* `EventToolUseStart` has already
-  fired, so the engine sees a started call that never completes.
-- **LLM-05** — the adapter never synthesizes a tool-call ID, so a backend that omits one breaks
-  `tool_result` correlation.
-
-Both are small, both are on the path most local users are on, and both are the kind of defect that
-presents as "the model is behaving strangely."
-
-Closes LLM-04, LLM-05. Priority: Tier 2 — S.
 
 ### P66.12 — staticcheck cleanup
 
@@ -325,12 +270,152 @@ knowledge store (QUAL-14) and these sentences are why a maintainer would *not* l
 
 Closes ARCH-13, LLM-09, and the doc half of P66.13 (P66.8's doc half is closed). Priority: Tier 2 — S.
 
+### P66.25 — Trust grants are permanent and content-blind (SEC-07, refiled from P66.5)
+
+**Filed 2026-08-16**, carved out of P66.5 rather than left as an unhonored "fold in if cheap" clause.
+P66.5 shipped the inverted freeze list and with it a **well-defined security-relevant subset** of the
+config — which was SEC-07's missing prerequisite, and is why this is now a coherent item instead of a
+vague one. What did not ship is the re-prompt.
+
+A trust grant (`aegis trust`, `internal/workspacetrust`) is recorded once per directory and never
+re-examined. It says "this path is trusted", not "this *content* is trusted". So a `git pull` that
+adds a `hooks:` block, flips `security.*`, or introduces a `commands:` override re-prompts nothing:
+the operator approved a directory weeks ago and silently inherits whatever the repository has become
+since. P66.5 closed the untrusted case completely; this is the trusted-then-changed case.
+
+The shape is a content fingerprint over the security-relevant subset, stored with the grant, checked
+on load, re-prompting when it moves. **What makes it Tier 2 rather than trivial** — and what stopped
+it shipping inside P66.5 — is that the fingerprint has to cover `.aegis/.env` to be honest, and
+P66.1 deliberately resolves `.env` *before* any project-controlled file is read. Honouring both means
+either inverting P66.1's ordering (reading and parsing project config ahead of the trust decision,
+which is the ordering P66.1 exists to prevent) or accepting a documented hole where the re-prompt
+covers `config.yaml` but not `.env`. **Pick one and write down why** — an undocumented partial
+fingerprint is worse than either. It also changes the `workspacetrust` store format and the
+`Trust`/`IsTrusted` signatures used from `internal/cli` and `internal/server`, so it is a migration,
+not an edit.
+
+Closes SEC-07. Priority: Tier 2 — M. Sequence after P66.5 (shipped); read P66.1's record in
+[releases.md](releases.md) first, because the `.env` ordering is the whole difficulty.
+
+### P67.1 — Tool-result caps are per-call, and a parallel round multiplies them
+
+`internal/tool/builtin/truncate.go` carries the posture table for every tool result — which end
+survives, what happens to the remainder, how many notice bytes are reserved out of the cap — and
+every cap in it is **per call**. The table was written when a round was one result at a time. It no
+longer is: `Engine.runTools` (`internal/engine/engine.go:1769`) dispatches up to `maxParallelTools`
+concurrently, so a round of N read tools can each land at its own cap and produce N× the intended
+context bite inside a single user message. Nothing anywhere bounds the aggregate.
+
+The fix is a round-level budget layered *above* the existing caps, not a change to them: after the
+round's results are collected and before they are appended, if the combined size exceeds the budget,
+spill the largest results to `<workspace>/.aegis/spill/` — the mechanism already exists and already
+hands back a `read_file`-reachable path — until the total fits. Evaluate each round independently; a
+large result in this round and another in the next are both fine and neither should be touched.
+
+Two details worth pinning with the test rather than discovering later: notice bytes are reserved out
+of the cap, so a spilled result's replacement notice must be counted against the round budget too;
+and the spill must select by size, so a round of one huge result and four small ones spills the one,
+not all five.
+
+Priority: Tier 2 — S. No dependency. The smallest item in either open batch.
+
+### P67.2 — The prompt has a size invariant and no stability invariant
+
+`TestEffectiveSystem_localProfileBudget` fails the suite when the local base prompt crosses
+`localBasePromptCeilingTokens`, and CLAUDE.md states the rule it enforces: raising the ceiling is
+allowed, raising it silently is not. There is no equivalent guard on the axis that costs more per
+turn. Nothing stops a *volatile* value — a timestamp, a cost figure, a changing repo-map digest, a
+count that moves with session state — from being assembled into the system prefix, where it breaks
+the prompt cache on every single turn and shows up only as unexplained prefill cost.
+
+Build the prompt from **named sections** with two constructors: a default that is computed once and
+memoized for the life of the conversation, and an explicitly-named volatile one that recomputes per
+turn and **takes a written justification as a required argument**. Then a test computes every section
+twice and fails on any that differs without having been declared volatile. The naming does most of
+the enforcement; the test catches the rest.
+
+This is the same shape as the ceiling test on a different axis, and it composes with P66.7 — a
+context-file cap is easier to reason about when the rest of the prefix is known to be stable.
+
+Priority: Tier 2 — S-M. No dependency.
+
+### P67.3 — Provider requests carry no purpose, so one retry policy serves every caller
+
+`internal/provider/retry.go` applies a single policy to everything that passes through the adapter
+seam. Aegis makes far more kinds of call than that policy can be right for at once: the user's turn,
+compaction summaries, the guard's second pass, debate roles, swarm sub-agents, the tool-call probe,
+cron jobs. On a capacity or rate-limit error they all back off identically, including the ones no
+human is waiting on and whose failure is invisible.
+
+Thread a **call-purpose tag** through the adapter seam and key policy on it. The immediate payoff is
+retry: background work fails fast instead of amplifying load during exactly the window when the
+backend is already struggling, and the foreground turn is then free to retry harder than a
+one-size policy allows. Default new purposes to the conservative setting and make opting in explicit,
+so a call path added later does not silently acquire aggressive retry.
+
+The tag is worth more than the retry change alone. **P67.6 needs it** — a compaction trigger that
+fires on the main conversation must not fire for a sub-agent or an analysis-only caller, and the
+purpose tag is the correct discriminator for that. It would also give `internal/cost` a spend
+breakdown by call class, which today it cannot produce.
+
+Keep the existing `Retry-After` clamp at `MaxDelay` (`internal/provider/retry.go:86`) exactly as it
+is. It is what keeps provider backoff inside the 900s `MaxTurnStall` bound without the retry path
+needing heartbeats at all, and it should not be "fixed" into honoring the header unbounded.
+
+Priority: Tier 2 — S-M. No dependency. Enables P67.6.
+
+### P67.4 — A failed tool call leaves its siblings running to completion
+
+In a parallel round, `Engine.runTools` runs every call to completion regardless of what its siblings
+did. A round of four builds where the first fails still pays wall-clock for the other three, and
+their results are appended to a conversation the model is about to redirect anyway.
+
+Derive a per-round context from the turn context and cancel it on the first error, so sibling
+subprocesses die promptly while the turn itself continues normally. The parent/child split is the
+whole point: cancelling siblings must not cancel the turn.
+
+Two things to decide rather than assume. **Which failures qualify** — a `read_file` on a missing path
+is a normal negative result and must not kill the round, while a failing `shell` usually should; the
+capability classification the scheduler already computes (`Engine.serializeTool` →
+`tool.EffectiveCapability`) is the natural place to hang that policy. And **what the cancelled
+siblings report back** — the honest wording already exists in `interruptedMaybeRanText`, and the P65.1
+reasoning behind it applies unchanged here: a cancelled call that had already started may have landed
+its effects, and telling the model it did not run invites a destructive re-run.
+
+Shortening doomed rounds also shortens the aggregate wait that `MaxTurnStall` backstops, which is a
+second, smaller reason to want it.
+
+Priority: Tier 2 — S. No dependency.
+
+### P67.5 — Recall re-injects what it already injected, and says nothing about age
+
+`internal/memory/relevance.go` scores entries by TF-IDF over an mtime/size-cached corpus. The scoring
+is the right call for a local-first tool — no model round-trip, no cost — and this item does not
+change it. Three behaviors *around* it are missing:
+
+- **Already-surfaced dedupe.** Nothing filters entries injected on earlier turns of the same run, so a
+  top-scoring entry is re-injected every turn it keeps winning, spending the entry budget on context
+  the model already has.
+- **Freshness.** `FormatEntries` renders content with no indication of age. The mtime is already read
+  to key the cache (`cachedEntries`), so threading it through to the rendered entry costs one struct
+  field and no extra I/O — and a memory's age is often the thing that decides whether to trust it.
+- **Reference-vs-gotcha bias.** An entry that documents how to use a tool is near-useless when the
+  model is already using that tool successfully; an entry that records a *gotcha* about that same
+  tool is most valuable at exactly that moment. Bias scoring toward the latter when the tool in
+  question appears in the run's recent tool calls.
+
+The dedupe should filter before scoring, not after, so the entry budget is spent on candidates that
+can actually be used.
+
+Priority: Tier 2 — S. No dependency.
+
 ---
 
 ## Open Work — Tier 3
 
-**Status: 3 filed items**, all from the P66 review batch — each larger or sequence-dependent rather
-than urgent. P62.9, P65.2's prompt half and P65.3's local half all moved to
+**Status: 7 filed items** — three from the P66 review batch and four from the P67 external-source
+reading, each larger or sequence-dependent rather than urgent. P62.9, P65.2's prompt half and P65.3's
+local half all moved to
 [Verification Work](#verification-work) — in each case the code is already shipped and what remains
 is a live-run result, not a design or implementation task.
 
@@ -464,20 +549,186 @@ answer.
 - **Full-text search over session history.** Aegis is already SQLite-backed, so FTS5 over
   `session_messages` is close to free and would back a `/search` the TUI does not have. Co-located FTS
   triggers are the trap — an index failure can roll back canonical writes. **Promote when** someone
-  asks for cross-session search.
+  asks for cross-session search. **Second trap, added 2026-08-16 from the P67 reading:** the moment a
+  transcript is indexed there are *two* texts for every tool result — what the model saw and what the
+  user saw — and `truncate.go`'s spill notices and truncation banners are exactly where they diverge.
+  Index the **rendered** text, not the model-facing serialization, and pin the two together with a
+  test that flags both directions: text indexed but never rendered (a phantom hit, which is a bug) and
+  text rendered but not indexed (an undercount, which is tolerable). Deciding this after the index
+  exists means rebuilding it.
 - **Pinned distribution for skills and personas** (`aegis skills install git:host/user/repo@ref`),
   gated on the existing `internal/workspacetrust` grant. **Promote when** there is a second party
   publishing Aegis skills — this is distribution, not capability, and worth nothing until someone is on
   the other end of it.
 
+### P67.6 — Compaction fires on context pressure only, never on cache temperature
+
+Aegis compacts when the conversation approaches the context window. That is the right trigger for the
+problem it solves and the wrong trigger for a second problem it does not: a session resumed after a
+long gap re-processes a prefix the backend has already evicted, paying full prefill on stale tool
+results it is going to summarize away later anyway. The observation this item rests on is a
+scheduling one — **when the cache is already cold, clearing old tool results is free**, because the
+usual reason not to (you would invalidate the cache) has already happened.
+
+Add a second, orthogonal trigger: if the elapsed time since the last assistant message exceeds a
+threshold, replace all but the most recent N compactable tool results with a fixed sentinel string
+*before* the request goes out. Only tool results, only the compactable kinds (reads, searches,
+shell), never the model's own text.
+
+Three constraints, each of which is a bug if missed:
+
+- **Floor the keep-count at 1.** Clearing every result leaves the model with no working context at
+  all, and an off-by-one that keeps zero is easy to write and hard to see.
+- **Gate on call purpose, not on "is this the main loop".** Analysis-only callers must be able to
+  inspect a conversation without mutating it as a side effect. This is what **P67.3** builds, and why
+  this item is sequenced behind it.
+- **The sentinel is a wire format.** Once written into the conversation it is read back by the same
+  code on later turns; renaming it silently breaks accumulation, the same way the
+  `<read-files>`/`<modified-files>` tags do in the compaction summary.
+
+**Sequence after P66.14 and read together with it.** P66.14 reconciles the two existing compaction
+thresholds that disagree; adding a third path into that machinery before those two agree would design
+the new trigger against a broken baseline. This is also the item where the Ollama prefill behavior
+already recorded in this project matters: because `prompt_eval_count` reports the *full* prompt on a
+cache hit, the cost this trigger avoids is measurable rather than assumed.
+
+Priority: Tier 3 — M. Sequence after P67.3 (needs the purpose tag) and P66.14 (same machinery).
+
+### P67.7 — Tool calls are dispatched only after the whole model turn has streamed
+
+`Engine.turn` returns its `toolUses` slice after the stream drains
+(`internal/engine/engine.go:773`), and `runTools` is called on the finished slice
+(`internal/engine/engine.go:1024`). So the first tool call in a five-call round waits for the fifth to
+finish generating before it starts, even though it was fully specified long before.
+
+The scheduler itself is not the problem and should not change — per-call `tool.EffectiveCapability`,
+the read/write gating, the `waitFor` dependency graph and the same-path ordering are all correct, and
+are a better design than the contiguous-run partitioning the comparison source uses. What changes is
+where the scheduler's input comes from: feed it each tool call as that call's block completes in the
+stream, rather than handing it a complete slice.
+
+This is the largest engine change in either open batch and the one with the most invariants pointed at
+it, so the constraints are the substance of the item:
+
+- **Result order must stay deterministic.** Execution order already is not; the wire order of results
+  must remain receipt order regardless of completion order, or every replay and eval fixture moves.
+- **`Engine.startedTools` must be recorded at dispatch**, not at collection, or `repairOrphanedToolUses`
+  loses the distinction P65.1 exists to preserve — a call that started and may have landed its effects
+  versus one that never ran.
+- **A cancelled or failed stream must abandon in-flight calls**, and their results must not be
+  appended to a turn whose assistant message never completed.
+- **The stall bound covers the whole turn.** Starting tools earlier lengthens the window in which a
+  tool is running concurrently with generation, so the heartbeat chaining
+  (`internal/heartbeat`, a sub-agent's watch must never shadow its parent's) needs re-checking against
+  the new overlap, not assumed to carry over.
+
+Take **P67.4** first if both are wanted — sibling cancellation is much simpler to reason about on the
+current batch-dispatch model, and the policy it settles is one fewer thing to get right here.
+
+Priority: Tier 3 — L. Sequence after P67.4. The largest payoff of the batch on local models, where
+generation latency dominates.
+
+### P67.8 — Read-only shell classification is per-binary, so useful commands stay execute-gated
+
+`internal/tool/builtin/shell_readonly.go` allowlists whole binaries and rejects the command outright
+if any shell metacharacter appears. The conservatism is deliberate and correct as a default — a false
+positive here auto-approves a mutation under plan mode — but the file's own comments show where it
+runs out: `sort`, `tree` and `uniq` are excluded because each has a file-*writing* form, with the
+reasoning "no argument parsing makes them read-only." Argument parsing is precisely what is missing.
+
+Replace the binary allowlist with a **per-command configuration**: a table of permitted flags, each
+with an argument type (none / string / number), plus an optional regex and an optional predicate for
+cases flags cannot express, and a per-command switch for whether the tool honors POSIX `--`.
+Unlisted flags fail closed. That admits `sort` without `-o`, `tree` without `-o`, `uniq` with at most
+one positional, and opens up `rg`, `fd`, and read-only `git`/`gh` subcommands with their flags rather
+than only their bare forms.
+
+Three things this item must not lose:
+
+- **`argvStaysInRoot` still applies.** Flag-level parsing decides whether a command *can* be
+  read-only; path confinement decides whether this invocation is. Both, not either. Attached flag
+  values are path operands too — that is what VULN-02 rode in on.
+- **The exclusions that are not about writing stay excluded.** `env`/`printenv` dump the daemon's
+  process environment and therefore the provider keys; `ps` reaches the same data by another route;
+  `less`/`more` shell out. None of these become admissible under flag parsing, and the reasoning
+  comments explaining why must survive the rewrite — they are the part most likely to be lost and
+  most expensive to rediscover.
+- **Some flags are unsafe for reasons the flag name does not suggest.** The instructive example from
+  the comparison source: a directory-lister's `--list-details` flag internally execs `ls`, making it a
+  PATH-hijack surface. Every added flag needs the question asked, not just "does this write."
+
+Widening this classification widens two things simultaneously — what runs in parallel, and what plan
+mode approves without asking. That is why this is Tier 3 with its own test pass rather than a Tier 2
+afternoon.
+
+Priority: Tier 3 — M-L. No dependency. Security-sensitive: the test pass is the item, not an
+afterthought.
+
+### P67.9 — Terminal capability is inferred from `TERM`, not asked
+
+`internal/tui/imagerender.go:89` decides whether the terminal speaks the kitty graphics protocol by
+checking whether `TERM` contains `"kitty"`. The file is honest about the consequence: the kitty tier
+is opt-in only, and `aegis doctor` can report that it is *plausible*, not that it works.
+
+Terminals will answer the question directly. The obstacle is that a terminal which does not support a
+query simply stays silent, so the naive implementation needs a timeout — either too short to be
+reliable or too long to sit in startup. The trick that removes it: terminate each batch of queries
+with a **DA1 request (`CSI c`)**, which every terminal since the VT100 answers, and rely on terminals
+replying in order. If the answer to your query arrives before the DA1 reply, the feature exists; if
+DA1 comes first, it does not. No timeout anywhere, and one round-trip for the whole batch.
+
+Worth asking about in the same batch: kitty graphics, synchronized output (DECSET 2026), and true
+color. The payoff is an actual answer instead of a guess, `aegis doctor` reporting supported rather
+than plausible, and the kitty tier becoming defensible as an auto-selected tier rather than
+permanently opt-in.
+
+The awkward part is Bubbletea, not the protocol: responses arrive on the same input channel as
+keystrokes and must be recognized and routed before they reach the key handler, or a capability reply
+is delivered to the UI as garbage keys. `internal/termsafe` already has the sequence-parsing
+vocabulary this needs. Do the probe once at startup and cache it; do not re-query per frame.
+
+Priority: Tier 3 — M. No dependency.
+
 ---
 
 ## Open Work — Tier 4
 
-**Status: 13 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger)
-plus 4 from the P66 review batch. The P66 entries here are **deliberately grouped grab-bags**: each
-collects the Low-severity residue of one review domain. They are filed so no finding is lost, not
-because any of them should be scheduled. Take one only when already working in that file.
+**Status: 20 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger),
+6 from the P66 review batch and 5 from the P67 external-source reading. (This line read "13 open …
+plus 4 from P66" until 2026-08-16; it had not been updated when P66.23 was filed, and the Status
+block above was the correct count. It moved to 20 later that day when **P66.26** was refiled out of
+P66.9.)
+
+The P66 entries here are **deliberately grouped grab-bags**: each collects the Low-severity residue of
+one review domain. They are filed so no finding is lost, not because any of them should be scheduled.
+Take one only when already working in that file. The P67 entries are a different kind of parked: each
+is a capability Aegis does not have and nobody has asked for, filed with the specific trigger that
+would make it worth building.
+
+### P66.26 — `synchronous=NORMAL` on the three SQLite databases (PERF-02, refiled from P66.9)
+
+**Filed 2026-08-16**, carved out of P66.9 so a deliberately-skipped sub-item is visible rather than
+buried in a closed entry. Every SQLite database runs at the default `synchronous=FULL`, paying an
+fsync per transaction.
+
+The item splits cleanly, and only one half is contentious. **`knowledge.db` and `longmem.db` are
+unconditionally safe**: both are derived stores, rebuildable from their sources, and losing the tail
+of a write on power loss costs a re-index. Neither was in P66.9's reach — they live in
+`internal/knowledge` and `internal/memory`, not `internal/session` — which is the only reason they
+did not ship with it. **`sessions.db` is the contentious half**, and is why the debate downgraded
+PERF-02 to Low: it holds checkpoints (`/rewind`), the cost ledger and traces, so `NORMAL` trades a
+durability guarantee on the one database whose loss is not recoverable from elsewhere. Do that half
+only with the trade written down at the DSN, or not at all.
+
+Note that P66.9 already removed most of the pressure that motivated this: delta coalescing cut the
+`bg_events` insert rate by roughly the coalescing factor, and that table was the source of the
+fsync-per-token pattern the finding was reacting to. Re-measure before building — this document has
+twice recorded a fixed instrument inverting an already-acted-on verdict.
+
+**Promote when** a measurement on the *current* tree (post-P66.9) shows fsync cost still material on
+the local path, or when `knowledge.db` re-indexing becomes a noticed cost on its own.
+
+Closes PERF-02. Priority: Tier 4 — S. No dependency.
 
 ### P66.17 — Local-model path: the Low-severity residue
 
@@ -769,6 +1020,125 @@ rewrite with no complaint behind it either; not filed.
 keeping to a `/rewind` or a fork. Both conditions, not either.
 
 Priority: Tier 4 — no trigger, sequenced behind P65.2, changes what a well-understood command means.
+
+### P67.10 — Four seams the tool interface does not have
+
+`tool.Tool` is deliberately rendering-agnostic, and that is what lets one registry serve the TUI, the
+web UI, ACP and MCP. Nothing here changes that. Four *optional* seams are missing, each small on its
+own and none currently blocking anything:
+
+- **A per-tool equivalence predicate.** Loop detection currently normalizes call signatures centrally,
+  with two per-tool opt-outs beside it — `PollExempter` (hide the call entirely) and
+  `SignatureTransparent` (hide only its arguments). A tool-supplied "are these two inputs the same
+  call" predicate is the third member of that family and is a better factoring for tools whose inputs
+  are equivalent in ways a generic normalizer cannot see. If built, it goes in the same tests that
+  keep the existing two sets narrow and disjoint.
+- **Destructive as an axis distinct from write.** `tool.Capability` distinguishes read from write from
+  execute, but not reversible writes from irreversible ones (delete, overwrite, send). The permission
+  layer currently has no way to prompt harder for the second kind.
+- **Interrupt behavior.** When the user submits a new message while a tool is running, the choice is
+  cancel-and-discard or keep-running-and-queue. Aegis applies one answer to every tool; a long
+  `shell` build and a two-second `read_file` do not want the same one.
+- **A search hint for deferred tools.** `<deferred_tools>` prints `tool.Summarize`, which serves both
+  the prompt budget and discoverability with one string and is therefore optimized for neither. A
+  short keyword line, separate from the summary, would let a model find a deferred tool by capability
+  rather than by name.
+
+**Promote when** one of them is actually needed: a loop the current detector misses (predicate), a
+destructive tool auto-approved where it should not be (destructive axis), a user complaint about
+interruption (interrupt behavior), or a measured failure to find a deferred tool (search hint). Do not
+build all four together; they are related only by living on the same interface.
+
+Priority: Tier 4 — no fired trigger. Do not build speculatively.
+
+### P67.11 — Every budget is a ceiling; none expresses how much effort is wanted
+
+`internal/engine/budget.go` is entirely ceilings — `BudgetUSD`, `MaxTokensPerRun`, `MaxIterations`,
+`MaxWallClockPerRun`, `MaxTurnStall` — and all of them abort. There is no knob meaning "this task is
+worth 200K tokens of thoroughness, keep going until you have spent it or stopped making progress."
+
+The inverted form is coherent: nudge the run to continue while spend is below a target, and stop early
+when returns diminish — the workable test being several consecutive continuations whose token deltas
+are each below a small threshold, so a run that is still finding things keeps going and one that is
+circling stops.
+
+If ever built, it must be a **separate opt-in target with its own resettable stop**, not a second
+meaning layered onto an existing knob. A value that is simultaneously a floor and a ceiling is a
+footgun, and the existing abort semantics are load-bearing and asymmetric — stall and wall-clock
+aborts are fatal to a drive, loop and tool-failure aborts are resettable. The natural home is
+`internal/drive`, where "keep working until this phase is genuinely done" is already the model.
+
+**Promote when** a real drive run ends early with budget unspent and work unfinished. The
+diminishing-returns stop test is worth remembering separately from the rest of the idea; it is the
+part most likely to be useful in another context.
+
+Priority: Tier 4 — no fired trigger, speculative. Do not build speculatively.
+
+### P67.12 — Personas cannot accumulate anything across runs
+
+Personas are stateless prompts, and memory is session- and project-scoped. A persona that learns
+something durable about this codebase — a build quirk, a convention, a place where the obvious
+approach fails — has nowhere to put it that survives the run.
+
+The shape worth copying is a per-persona memory directory in one of three scopes: **user** (shared
+across projects), **project** (committed, shared with the team), and **local** (project-specific,
+never committed). The third is the one that carries most of the practical value, and it maps onto the
+`~/.aegis/personas/` vs `.aegis/personas/` split Aegis already has.
+
+Two implementation constraints, both cheap and both easy to miss: normalize paths before the
+containment check so `..` cannot escape the memory root, and sanitize the persona name for the
+filesystem — namespaced names carry characters Windows rejects outright.
+
+**Promote when** a persona is in repeated use on one project and its operator is re-explaining the
+same context each run. Until then this is storage without a demonstrated reader.
+
+Priority: Tier 4 — no fired trigger. Do not build speculatively.
+
+### P67.13 — There is no way to execute a plan without committing to it
+
+Plan mode describes intent; it cannot show the diff that intent would produce, because producing the
+diff means performing the writes. The mechanism that resolves this is a **copy-on-write overlay**:
+writes are redirected into an overlay directory after copying the original in, reads of
+already-written paths are served from the overlay, everything else reads through to the real tree, and
+execution stops at the first effect the overlay cannot contain — a non-read-only shell command, a
+network call, anything outside the workspace — recording a typed boundary describing where and why it
+stopped. Accepting promotes the overlay into the workspace; discarding costs a directory delete.
+
+Aegis has most of the substrate: `internal/sandbox` for isolation, `internal/swarm` for forked runs,
+`internal/checkpoint` for per-turn restore, and a permission layer that already classifies calls by
+capability. **P67.8**'s flag-level classifier is what would decide the shell boundary precisely rather
+than conservatively.
+
+The comparison source uses this for *speculation* — predicting the user's next prompt during idle time
+and pre-executing it. **That half is not recommended.** The prediction is the expensive, risky,
+low-confidence part; the overlay-and-boundary machinery is the durable part, and its first consumer
+should be an honest dry-run mode, where the value does not depend on guessing right.
+
+**Promote when** the overlay has a named first consumer — a `--dry-run` that shows a real diff is the
+plausible one. Building the overlay with no consumer produces an untested second write path, which is
+strictly worse than not having it.
+
+Priority: Tier 4 — no fired trigger, L. Do not build speculatively.
+
+### P67.14 — Hand-composed ANSI has no rule about transitions versus state
+
+Small, and filed as a discipline note rather than a feature. Where Aegis emits escape sequences
+directly — kitty graphics chunking in `internal/tui/imagerender.go`, the stripping and rewriting in
+`internal/termsafe` — there is no stated rule distinguishing sequences that express **state** from
+sequences that express a **transition**.
+
+The distinction has teeth. Style sequences computed as a diff from the previous style are transitions:
+two adjacent ones may be concatenated but the earlier one may never be dropped as redundant, because
+its reset codes are not guaranteed to be a subset of the later one's — and a dropped background reset
+leaks into the next erase via background-colour erase. State-setting sequences (an absolute cursor
+position, an explicit colour) can be collapsed to the last one freely. Optimizations that are correct
+for one class silently corrupt the other, on one terminal, months later.
+
+Write the rule down where those sequences are composed. **Promote to real work when** Aegis gains a
+frame-diff or output-batching layer that would be tempted to dedupe them — until then the comment is
+the whole deliverable.
+
+Priority: Tier 4 — no concrete trigger, XS. A comment, not a feature.
 
 ---
 
