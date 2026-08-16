@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/fsguard"
@@ -65,6 +66,63 @@ var ErrNotFound = errors.New("session not found")
 type Store struct {
 	db          *sql.DB
 	checkpoints CheckpointCleaner
+
+	// bg_events retention (P66.9). bgMu guards both fields.
+	bgMu         sync.Mutex
+	bgRetention  int
+	bgSincePrune map[string]int
+}
+
+// DefaultBGEventRetention is how many bg_events rows a single session keeps.
+// Older rows are dropped as new ones arrive (P66.9).
+//
+// The bound exists because bg_events had no bound at all: the rows were
+// removed only when the whole session was deleted, and the automatic pruner
+// that does that is gated on Cleanup.SessionTTLDays, which has no default. On
+// a default install the table therefore grew for the life of the install,
+// storing text that session_messages already holds whole. So this cap must
+// stay independent of any configuration — an unconfigured daemon gets it.
+//
+// The rows are a catch-up buffer, not a transcript: a detached run's events
+// are replayed by a client that reattaches via GET /sessions/{id}/events?since=N
+// while the run is in flight. The durable record of what the run produced is
+// session_messages. 2,000 events is comfortably more than one long turn emits
+// once text deltas are coalesced (see the detached-run send wrapper in
+// internal/server/messages.go), so a client that reattaches to a live run
+// still catches up in full; what is lost is only the far history of an old
+// run, which is exactly the part that duplicates session_messages.
+const DefaultBGEventRetention = 2000
+
+// bgPruneInterval is how many appends a session makes between retention
+// sweeps. Pruning on every insert would add a second write to every event;
+// sweeping periodically keeps the worst-case row count at
+// retention+bgPruneInterval-1 while leaving the common append a single INSERT.
+//
+// The counter is per session and in memory, so a restart forgets it — which is
+// why the first append a session makes in a given process always sweeps
+// (see shouldPruneBGEvents). Without that, a session appending fewer than
+// bgPruneInterval events per daemon lifetime would accumulate across restarts
+// and never be swept, which is the unbounded-growth bug in a slower form.
+const bgPruneInterval = 128
+
+// bgPruneCounterCap bounds the in-memory sweep-counter map. Sessions come and
+// go (and Delete removes its own entry), but a long-lived daemon that runs
+// many short background sessions would otherwise keep one int per session ID
+// forever. Dropping the whole map costs nothing but an extra sweep on each
+// surviving session's next append.
+const bgPruneCounterCap = 4096
+
+// SetBGEventRetention overrides the per-session bg_events cap for this store.
+// n <= 0 restores DefaultBGEventRetention. There is no config key for this —
+// the point of the bound is that it applies to an unconfigured install — so
+// this exists for tests and for embedders with an unusual event volume.
+func (s *Store) SetBGEventRetention(n int) {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+	if n <= 0 {
+		n = DefaultBGEventRetention
+	}
+	s.bgRetention = n
 }
 
 // CheckpointCleaner deletes checkpoint snapshots for a session. Session
@@ -111,7 +169,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, bgRetention: DefaultBGEventRetention, bgSincePrune: map[string]int{}}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -670,11 +728,64 @@ type BGEvent struct {
 	Data      string `json:"data"`
 }
 
-// AppendBGEvent saves an event JSON payload for a background session.
+// AppendBGEvent saves an event JSON payload for a background session, and
+// periodically drops that session's oldest events beyond the retention bound
+// (P66.9 — see DefaultBGEventRetention for why the bound is unconditional).
+// A failed sweep is logged, not returned: the append itself succeeded, and the
+// caller's event must not be reported as lost because housekeeping missed.
 func (s *Store) AppendBGEvent(ctx context.Context, sessionID, data string) error {
-	_, err := s.db.ExecContext(ctx,
+	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO bg_events (session_id, data, created_at) VALUES (?, ?, ?)`,
-		sessionID, data, time.Now().UnixMilli())
+		sessionID, data, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	if keep, ok := s.shouldPruneBGEvents(sessionID); ok {
+		if err := s.pruneBGEvents(ctx, sessionID, keep); err != nil {
+			slog.Default().Warn("prune bg_events", "session", sessionID, "err", err)
+		}
+	}
+	return nil
+}
+
+// shouldPruneBGEvents reports whether this append should sweep the session's
+// bg_events, and the row count to keep if so. The first append a session makes
+// in this process always sweeps; after that, every bgPruneInterval-th one does.
+func (s *Store) shouldPruneBGEvents(sessionID string) (int, bool) {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+	keep := s.bgRetention
+	if keep <= 0 {
+		keep = DefaultBGEventRetention
+	}
+	if s.bgSincePrune == nil {
+		s.bgSincePrune = map[string]int{}
+	}
+	if len(s.bgSincePrune) > bgPruneCounterCap {
+		s.bgSincePrune = map[string]int{}
+	}
+	n, seen := s.bgSincePrune[sessionID]
+	if !seen || n+1 >= bgPruneInterval {
+		s.bgSincePrune[sessionID] = 0
+		return keep, true
+	}
+	s.bgSincePrune[sessionID] = n + 1
+	return keep, false
+}
+
+// pruneBGEvents deletes everything but the newest keep events for a session.
+// The subquery finds the id of the keep-th newest row and deletes at or below
+// it, which the (session_id, id) index serves as a bounded reverse scan — no
+// COUNT(*) over the table and no work at all when the session is under the
+// bound (the subquery returns NULL and the delete matches nothing).
+func (s *Store) pruneBGEvents(ctx context.Context, sessionID string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM bg_events WHERE session_id = ? AND id <= (
+		     SELECT id FROM bg_events WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?
+		 )`,
+		sessionID, sessionID, keep)
 	return err
 }
 
@@ -813,6 +924,9 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	s.bgMu.Lock()
+	delete(s.bgSincePrune, id) // the session's rows are gone; don't keep its sweep counter
+	s.bgMu.Unlock()
 	if s.checkpoints != nil {
 		if err := s.checkpoints.DeleteForSession(ctx, id); err != nil {
 			slog.Default().Warn("delete session checkpoints", "session", id, "err", err)

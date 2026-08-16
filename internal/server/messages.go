@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -251,11 +252,16 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 	detached := sess.Background || resumable
 	if detached {
 		origSend := send
+		buf := newBGEventBuffer(bgCoalesceWindow, func(data string) {
+			_ = s.store.AppendBGEvent(context.Background(), id, data)
+		})
+		// Flushed on every return path below, so the last partial window of
+		// text is buffered before the handler exits (registered after
+		// sw.Close's defer, so it runs first).
+		defer buf.flush()
 		send = func(ev api.Event) {
 			origSend(ev) // best-effort SSE while client is connected
-			if data, jerr := json.Marshal(ev); jerr == nil {
-				_ = s.store.AppendBGEvent(context.Background(), id, string(data))
-			}
+			buf.add(ev)
 		}
 	}
 
@@ -503,6 +509,105 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 			ev.Message = fmt.Sprintf("Background session %q failed: %v", displayTitle(sess.Title, id), runErr)
 		}
 		s.notifier.Notify(context.Background(), ev)
+	}
+}
+
+// bgCoalesceWindow is how long a detached run's consecutive text (or thinking)
+// deltas accumulate before being written to bg_events as one row (P66.9).
+//
+// Every stream event used to be its own INSERT, so a 2,000-token answer wrote
+// 2,000 rows whose text session_messages already holds whole. At roughly one
+// token per 33 ms on a local model, a 200 ms window folds ~6 deltas into a row
+// while keeping a client that reattaches mid-run at most one window behind
+// what the SSE stream is showing — the SSE stream itself is untouched, since
+// origSend runs before any of this.
+const bgCoalesceWindow = 200 * time.Millisecond
+
+// bgEventBuffer coalesces a detached run's text deltas into one bg_events row
+// per window, writing everything else through immediately.
+//
+// Replay correctness rests on two properties. Deltas of one kind concatenate:
+// a client rebuilding the answer appends ev.Text in id order, so one event
+// carrying "abc" and three carrying "a","b","c" reconstruct identically.
+// And ordering is preserved: the buffer is flushed before any non-delta event
+// is written and before the run returns, so a coalesced row can never overtake
+// a tool call, a turn_done, or the tail of the answer.
+//
+// Only a *pure* delta is ever folded — an event whose kind is text/thinking
+// and which carries nothing but its text. An event of the same kind that also
+// carries, say, usage counts is written through unchanged rather than having
+// those fields silently dropped into a neighbour's row.
+type bgEventBuffer struct {
+	mu     sync.Mutex
+	write  func(data string)
+	window time.Duration
+
+	held    bool
+	kind    api.EventKind
+	text    strings.Builder
+	started time.Time
+}
+
+func newBGEventBuffer(window time.Duration, write func(data string)) *bgEventBuffer {
+	return &bgEventBuffer{write: write, window: window}
+}
+
+// isPureDelta reports whether ev is a text/thinking event carrying nothing but
+// its text — the only shape that is safe to concatenate with its neighbours.
+// Compared against a freshly built event rather than field by field so a new
+// field on api.Event makes such events stop coalescing (correct, if
+// conservative) instead of silently losing the field.
+func isPureDelta(ev api.Event) bool {
+	if ev.Kind != api.KindText && ev.Kind != api.KindThinking {
+		return false
+	}
+	return reflect.DeepEqual(ev, api.Event{Kind: ev.Kind, Text: ev.Text})
+}
+
+func (b *bgEventBuffer) add(ev api.Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !isPureDelta(ev) {
+		b.flushLocked()
+		b.writeEvent(ev)
+		return
+	}
+	if b.held && (b.kind != ev.Kind || time.Since(b.started) >= b.window) {
+		b.flushLocked()
+	}
+	if !b.held {
+		b.held = true
+		b.kind = ev.Kind
+		b.started = time.Now()
+		b.text.Reset()
+	}
+	b.text.WriteString(ev.Text)
+}
+
+// flush writes any held deltas. Safe to call more than once.
+func (b *bgEventBuffer) flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.flushLocked()
+}
+
+func (b *bgEventBuffer) flushLocked() {
+	if !b.held {
+		return
+	}
+	text := b.text.String()
+	kind := b.kind
+	b.held = false
+	b.text.Reset()
+	if text == "" {
+		return
+	}
+	b.writeEvent(api.Event{Kind: kind, Text: text})
+}
+
+func (b *bgEventBuffer) writeEvent(ev api.Event) {
+	if data, err := json.Marshal(ev); err == nil {
+		b.write(string(data))
 	}
 }
 
