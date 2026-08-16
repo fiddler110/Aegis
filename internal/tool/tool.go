@@ -169,10 +169,57 @@ func IsSignatureTransparent(t Tool, input json.RawMessage) bool {
 	return false
 }
 
+// toolTable is the registration table shared by a registry and every clone
+// taken from it. It carries its own mutex, which is the whole point (P66.4/
+// ARCH-01): Clone used to copy the map header by reference while handing the
+// clone a fresh zero-value mutex, so two registries wrote one map under two
+// different locks. Go's answer to that is `fatal error: concurrent map
+// writes`, which kills the daemon and every session on it — and the writers
+// were ordinary production paths (two sessions activating a skill, or one
+// session activating while an MCP server pushes tools/list_changed).
+//
+// The sharing itself is deliberate and stays: a tool registered on the parent
+// after a clone was taken — MCP's dynamic refresh, above all — must be
+// reachable through that clone. Only the locking was wrong.
+type toolTable struct {
+	mu    sync.RWMutex
+	tools map[string]Tool
+}
+
+func (tt *toolTable) get(name string) (Tool, bool) {
+	tt.mu.RLock()
+	defer tt.mu.RUnlock()
+	t, ok := tt.tools[name]
+	return t, ok
+}
+
+func (tt *toolTable) set(name string, t Tool) {
+	tt.mu.Lock()
+	defer tt.mu.Unlock()
+	tt.tools[name] = t
+}
+
 // Registry holds registered tools and tracks which are exposed.
+//
+// Lock order, where both are taken: Registry.mu before toolTable.mu, never the
+// reverse. Registry.mu guards local/exposed/deferred/schemaCache; toolTable.mu
+// guards the shared registration table.
 type Registry struct {
-	mu          sync.RWMutex
-	tools       map[string]Tool
+	mu    sync.RWMutex
+	table *toolTable
+
+	// local holds registrations scoped to this registry alone, shadowing the
+	// shared table. nil in a root registry (where writes go to the table);
+	// non-nil in every clone.
+	//
+	// This is the non-racing half of ARCH-01, which needed no scheduler luck:
+	// an Upsert on a clone wrote into the process-global map, so session A's
+	// session-scoped `skill` tool became session B's `skill` tool, carrying
+	// A's builtinEnabled list. That silently defeated the "dormant by default
+	// until named" guarantee across a session boundary. Session-scoped tools
+	// belong in a clone-local overlay, not in the shared table.
+	local map[string]Tool
+
 	exposed     map[string]bool
 	deferred    map[string]bool       // tool is known but loaded on demand via tool_search
 	schemaCache []provider.ToolSchema // nil means dirty; rebuilt on next Schemas call
@@ -181,10 +228,59 @@ type Registry struct {
 // NewRegistry creates an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		tools:    map[string]Tool{},
+		table:    &toolTable{tools: map[string]Tool{}},
 		exposed:  map[string]bool{},
 		deferred: map[string]bool{},
 	}
+}
+
+// putLocked records name -> t in this registry's write target: the clone-local
+// overlay for a clone, the shared table for a root registry. r.mu must be held
+// for writing.
+func (r *Registry) putLocked(name string, t Tool) {
+	if r.local != nil {
+		r.local[name] = t
+		return
+	}
+	r.table.set(name, t)
+}
+
+// lookupLocked resolves a name against the overlay first, then the shared
+// table. r.mu must be held.
+func (r *Registry) lookupLocked(name string) (Tool, bool) {
+	if t, ok := r.local[name]; ok {
+		return t, true
+	}
+	return r.table.get(name)
+}
+
+// rangeToolsLocked calls fn for every tool visible to r, overlay shadowing
+// table. r.mu must be held; fn must not touch either lock.
+func (r *Registry) rangeToolsLocked(fn func(name string, t Tool)) {
+	r.table.mu.RLock()
+	for name, t := range r.table.tools {
+		if _, shadowed := r.local[name]; shadowed {
+			continue
+		}
+		fn(name, t)
+	}
+	r.table.mu.RUnlock()
+	for name, t := range r.local {
+		fn(name, t)
+	}
+}
+
+// countToolsLocked returns how many tools are visible to r. r.mu must be held.
+func (r *Registry) countToolsLocked() int {
+	n := len(r.local)
+	r.table.mu.RLock()
+	for name := range r.table.tools {
+		if _, shadowed := r.local[name]; !shadowed {
+			n++
+		}
+	}
+	r.table.mu.RUnlock()
+	return n
 }
 
 // Info is a lightweight name+description pair used to advertise deferred tools
@@ -282,10 +378,10 @@ func (r *Registry) Register(t Tool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := t.Name()
-	if _, exists := r.tools[name]; exists {
+	if _, exists := r.lookupLocked(name); exists {
 		return fmt.Errorf("tool %q already registered", name)
 	}
-	r.tools[name] = t
+	r.putLocked(name, t)
 	r.exposed[name] = true
 	r.schemaCache = nil
 	return nil
@@ -293,11 +389,15 @@ func (r *Registry) Register(t Tool) error {
 
 // Upsert adds or replaces a tool and ensures it is exposed. Unlike Register it
 // never returns an error and is safe to call for tools that already exist.
+//
+// On a clone the tool is registered clone-locally: session-scoped tools
+// (activateSessionSkill's `skill` instance and the threat-model script tools)
+// go through here, and they must not become visible to other sessions.
 func (r *Registry) Upsert(t Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := t.Name()
-	r.tools[name] = t
+	r.putLocked(name, t)
 	r.exposed[name] = true
 	r.schemaCache = nil
 }
@@ -306,7 +406,7 @@ func (r *Registry) Upsert(t Tool) {
 func (r *Registry) SetExposed(name string, exposed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.tools[name]; ok {
+	if _, ok := r.lookupLocked(name); ok {
 		r.exposed[name] = exposed
 		r.schemaCache = nil
 	}
@@ -368,7 +468,7 @@ func (r *Registry) ScopeExposed(allow []string) (restore func()) {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			for name, was := range prev {
-				if _, still := r.tools[name]; still {
+				if _, still := r.lookupLocked(name); still {
 					r.exposed[name] = was
 				}
 			}
@@ -385,10 +485,10 @@ func (r *Registry) RegisterDeferred(t Tool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := t.Name()
-	if _, exists := r.tools[name]; exists {
+	if _, exists := r.lookupLocked(name); exists {
 		return fmt.Errorf("tool %q already registered", name)
 	}
-	r.tools[name] = t
+	r.putLocked(name, t)
 	r.exposed[name] = false
 	r.deferred[name] = true
 	r.schemaCache = nil
@@ -401,11 +501,11 @@ func (r *Registry) Deferred() []Info {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []Info
-	for name, t := range r.tools {
+	r.rangeToolsLocked(func(name string, t Tool) {
 		if r.deferred[name] && !r.exposed[name] {
 			out = append(out, Info{Name: t.Name(), Description: t.Description(), Summary: Summarize(t)})
 		}
-	}
+	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
@@ -418,7 +518,7 @@ func (r *Registry) Load(names ...string) []Tool {
 	defer r.mu.Unlock()
 	var loaded []Tool
 	for _, n := range names {
-		t, ok := r.tools[n]
+		t, ok := r.lookupLocked(n)
 		if !ok {
 			continue
 		}
@@ -439,35 +539,40 @@ func (r *Registry) SearchDeferred(query string) []Tool {
 	defer r.mu.RUnlock()
 	terms := strings.Fields(strings.ToLower(query))
 	var out []Tool
-	for name, t := range r.tools {
+	r.rangeToolsLocked(func(name string, t Tool) {
 		if !r.deferred[name] || r.exposed[name] {
-			continue
+			return
 		}
 		if len(terms) == 0 {
 			out = append(out, t)
-			continue
+			return
 		}
 		hay := strings.ToLower(t.Name() + " " + t.Description())
 		for _, term := range terms {
 			if strings.Contains(hay, term) {
 				out = append(out, t)
-				break
+				return
 			}
 		}
-	}
+	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
 	return out
 }
 
 // Clone returns a lightweight copy of the registry for session-scoped tool
-// exposure (P9): the underlying tool set (registration) is shared by
-// reference — a tool registered or dynamically upserted (e.g. MCP's
-// tools/list_changed refresh) on the original is visible through every
-// clone — but the exposed/deferred maps are independent copies. Calling Load
-// (via tool_search) on a clone only exposes a tool for whoever holds that
-// clone, instead of the process-global Registry a session's tool_search call
-// previously mutated permanently for every other concurrent or future
-// session and persona.
+// exposure (P9): the underlying registration table is shared — a tool
+// registered or dynamically upserted on the original (e.g. MCP's
+// tools/list_changed refresh) is visible through every clone — but the
+// exposed/deferred maps are independent copies, and so is the clone-local
+// overlay a clone's own Register/Upsert writes into. Calling Load (via
+// tool_search) on a clone only exposes a tool for whoever holds that clone,
+// instead of the process-global Registry a session's tool_search call
+// previously mutated permanently for every other concurrent or future session
+// and persona.
+//
+// Cloning a clone inherits the parent clone's overlay by copy, so a sub-agent
+// given a clone of its session's registry starts from that session's activated
+// skill tools and cannot mutate them for the session (ARCH-02).
 func (r *Registry) Clone() *Registry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -479,8 +584,13 @@ func (r *Registry) Clone() *Registry {
 	for k, v := range r.deferred {
 		deferred[k] = v
 	}
+	local := make(map[string]Tool, len(r.local))
+	for k, v := range r.local {
+		local[k] = v
+	}
 	return &Registry{
-		tools:    r.tools,
+		table:    r.table,
+		local:    local,
 		exposed:  exposed,
 		deferred: deferred,
 	}
@@ -561,18 +671,17 @@ func ExtraRootsFromContext(ctx context.Context) []sandbox.Root {
 func (r *Registry) Get(name string) (Tool, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	t, ok := r.tools[name]
-	return t, ok
+	return r.lookupLocked(name)
 }
 
 // All returns every registered tool, regardless of exposure/deferred state.
 func (r *Registry) All() []Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]Tool, 0, len(r.tools))
-	for _, t := range r.tools {
+	out := make([]Tool, 0, r.countToolsLocked())
+	r.rangeToolsLocked(func(_ string, t Tool) {
 		out = append(out, t)
-	}
+	})
 	return out
 }
 
@@ -592,10 +701,10 @@ func (r *Registry) Schemas() []provider.ToolSchema {
 	if r.schemaCache != nil { // double-check after acquiring write lock
 		return r.schemaCache
 	}
-	out := make([]provider.ToolSchema, 0, len(r.tools))
-	for name, t := range r.tools {
+	out := make([]provider.ToolSchema, 0, r.countToolsLocked())
+	r.rangeToolsLocked(func(name string, t Tool) {
 		if !r.exposed[name] {
-			continue
+			return
 		}
 		ts := provider.ToolSchema{
 			Name:        t.Name(),
@@ -606,7 +715,7 @@ func (r *Registry) Schemas() []provider.ToolSchema {
 			ts.OutputSchema = os.OutputSchema()
 		}
 		out = append(out, ts)
-	}
+	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	r.schemaCache = out
 	return out

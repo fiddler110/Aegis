@@ -122,6 +122,12 @@ trust grant per root. See [docs/configuration.md](docs/configuration.md).
   profile `edit_file` is deferred and the handle-based editors are not — a test
   pins that direction. A tool's `Description()` or error must never name a tool
   the active profile defers.
+- **Tool registry clones.** `Registry.Clone()` shares one `toolTable` (with its
+  own mutex) so a later parent registration — MCP's `tools/list_changed` above
+  all — reaches existing clones. A clone's own `Register`/`Upsert` goes to a
+  clone-local overlay instead, so session-scoped tools stay session-scoped.
+  Both directions are pinned by tests. Never give a sub-agent, debate role or
+  session `s.tools` itself; hand it a clone.
 - **Tool result size.** Caps live in `internal/tool/builtin/truncate.go`, which
   carries the posture table (which end survives, what happens to the remainder).
   Notice bytes are reserved *out of* the cap; remainders spill to

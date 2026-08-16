@@ -99,3 +99,48 @@ func TestCloneSharesLaterRegistrations(t *testing.T) {
 		t.Error("a tool registered on the original after cloning should still be visible through the clone")
 	}
 }
+
+// TestCloneUpsertStaysLocal is the other half of the sharing contract, and the
+// non-racing half of P66.4/ARCH-01. Registration on the *parent* is shared
+// (above); registration on a *clone* is not. Upsert on a clone used to write
+// into the process-global map, so session A's session-scoped `skill` instance —
+// carrying A's builtinEnabled list — silently became session B's, defeating
+// the "dormant by default until named" guarantee across a session boundary.
+func TestCloneUpsertStaysLocal(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(&fakeTool{name: "skill", desc: "shared skill tool"}); err != nil {
+		t.Fatal(err)
+	}
+	sessionA := r.Clone()
+	sessionB := r.Clone()
+
+	sessionScoped := &fakeTool{name: "skill", desc: "session A's skill tool"}
+	sessionA.Upsert(sessionScoped)
+	sessionA.Upsert(&fakeTool{name: "threat_model_script", desc: "activated by session A"})
+
+	if got, _ := sessionA.Get("skill"); got != sessionScoped {
+		t.Error("session A should see its own upserted instance")
+	}
+	if got, _ := sessionB.Get("skill"); got == sessionScoped {
+		t.Error("session A's upserted skill tool leaked into session B")
+	}
+	if got, _ := r.Get("skill"); got == sessionScoped {
+		t.Error("session A's upserted skill tool leaked into the daemon-wide registry")
+	}
+	for name, reg := range map[string]*Registry{"sibling clone": sessionB, "parent": r} {
+		if _, leaked := reg.Get("threat_model_script"); leaked {
+			t.Errorf("a tool session A registered on its clone leaked into the %s", name)
+		}
+	}
+
+	// A clone of a clone inherits the overlay by copy: a sub-agent starts from
+	// its parent session's activated tools without being able to mutate them.
+	child := sessionA.Clone()
+	if got, _ := child.Get("skill"); got != sessionScoped {
+		t.Error("a clone of a clone should inherit the parent clone's session-scoped tools")
+	}
+	child.Upsert(&fakeTool{name: "skill", desc: "child's own"})
+	if got, _ := sessionA.Get("skill"); got != sessionScoped {
+		t.Error("a sub-agent's Upsert must not reach back into its parent session")
+	}
+}

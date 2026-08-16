@@ -321,9 +321,34 @@ func (s *Server) sessionEnabledSkills(id string) []string {
 
 // sessionToolRegistry returns the session-scoped tool registry clone for id,
 // creating one from s.tools on first use.
+//
+// The Load fast path is not a micro-optimization (P66.4/ARCH-11):
+// LoadOrStore's argument is evaluated eagerly, and workdirFor/toolRegistryFor/
+// effectiveSystem call this on every prompt build and every drive phase — so
+// every call was cloning ~60 entries under a read lock on the global registry
+// and immediately discarding the result.
 func (s *Server) sessionToolRegistry(id string) *tool.Registry {
+	if v, ok := s.sessionTools.Load(id); ok {
+		return v.(*tool.Registry)
+	}
 	v, _ := s.sessionTools.LoadOrStore(id, s.tools.Clone())
 	return v.(*tool.Registry)
+}
+
+// subAgentToolRegistry returns the registry a spawned teammate should run
+// against: a fresh clone of its parent session's registry, so the teammate
+// starts from the parent's exposure and session-scoped tools but its own
+// tool_search loads stay its own (P66.4/ARCH-02).
+//
+// A spawn with no parent session — a detached background job whose session
+// context was severed — falls back to a clone of the daemon-wide registry.
+// Still a clone, not s.tools: an unparented teammate has even less claim to
+// mutate global exposure than a parented one.
+func (s *Server) subAgentToolRegistry(parentSessionID string) *tool.Registry {
+	if parentSessionID == "" {
+		return s.tools.Clone()
+	}
+	return s.sessionToolRegistry(parentSessionID).Clone()
 }
 
 // taskScopeFor returns the session's per-task file-write scope (P46.1),
@@ -1151,9 +1176,17 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		// *its* window, not the primary model's num_ctx (P52.4). Identical to
 		// today whenever the spawn runs on the global model.
 		spawnWin, _ := s.effectiveContextWindowFor(ctx, model)
+		// P66.4/ARCH-02: a clone of the parent session's registry, not
+		// s.tools. Handing a sub-agent the daemon-wide registry undid exactly
+		// what the P9 clone exists to prevent — its tool_search reached
+		// Registry.Load on the global registry and permanently exposed that
+		// tool's schema to every session created afterwards. Its own clone
+		// also means the teammate inherits the parent's preloaded persona
+		// tools and activated skill tools, instead of working from a different
+		// tool set for reasons nobody chose.
 		eng, err := engine.New(engine.Options{
 			Adapter:   s.modelAdapter(spawnWin),
-			Tools:     s.tools,
+			Tools:     s.subAgentToolRegistry(cfg.ParentSessionID),
 			Gate:      gate,
 			Compactor: s.compactor,
 			// A spawn had a Compactor but no window to measure against

@@ -95,11 +95,17 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 // always falling back to the daemon's default workspace; "" keeps that
 // default.
 func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.RunFunc {
+	// One clone for the whole debate: the roles share exposure with each other
+	// (a tool one role loaded is loaded for the rest of the debate, as it was
+	// when they all ran against s.tools) but not with the daemon, so a role's
+	// tool_search no longer permanently widens every other session's surface.
+	// Same defect as ARCH-02 in subAgentRunner, same shape (P66.4).
+	tools := s.tools.Clone()
 	return func(ctx context.Context, systemPrompt, prompt string) (string, error) {
 		gate, engineHooks := s.buildGate("build", s.approver(), persona.Persona{})
 		eng, err := engine.New(engine.Options{
 			Adapter:         s.adapter,
-			Tools:           s.tools,
+			Tools:           tools,
 			Gate:            gate,
 			Compactor:       s.compactor,
 			Hooks:           engineHooks,
