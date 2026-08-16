@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/netblock"
 )
 
 // TestMCPSSRFBlocksPrivateIPs is the FIND-10 regression: the HTTP/SSE MCP
@@ -19,14 +21,14 @@ func TestMCPSSRFBlocksPrivateIPs(t *testing.T) {
 		if parsed == nil {
 			t.Fatalf("net.ParseIP(%s) failed", ip)
 		}
-		if !mcpIsPrivateIP(parsed) {
-			t.Errorf("mcpIsPrivateIP(%s) = false, want true", ip)
+		if !netblock.IsPrivate(parsed) {
+			t.Errorf("netblock.IsPrivate(%s) = false, want true", ip)
 		}
 	}
 	for _, ip := range []string{"8.8.8.8", "1.1.1.1"} {
 		parsed := net.ParseIP(ip)
-		if mcpIsPrivateIP(parsed) {
-			t.Errorf("mcpIsPrivateIP(%s) = true, want false", ip)
+		if netblock.IsPrivate(parsed) {
+			t.Errorf("netblock.IsPrivate(%s) = true, want false", ip)
 		}
 	}
 }
@@ -60,15 +62,15 @@ func TestMCPValidateNotPrivateBlocksRedirectTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if err := mcpValidateNotPrivate(context.Background(), u); err == nil {
-		t.Error("expected mcpValidateNotPrivate to reject a loopback redirect target")
+	if err := netblock.ValidateNotPrivate(context.Background(), u); err == nil {
+		t.Error("expected netblock.ValidateNotPrivate to reject a loopback redirect target")
 	}
 
 	u2, err := url.Parse("http://1.1.1.1/mcp")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if err := mcpValidateNotPrivate(context.Background(), u2); err != nil {
+	if err := netblock.ValidateNotPrivate(context.Background(), u2); err != nil {
 		t.Errorf("expected a public address to pass, got: %v", err)
 	}
 }

@@ -2104,20 +2104,33 @@ func registeredToolNames(reg *tool.Registry) string {
 	return strings.Join(names, ", ")
 }
 
+// toolCtx decorates ctx with everything a tool call needs to resolve the same
+// way regardless of *which* engine path invoked it: the registry actually
+// governing this run, the per-session workdir (P25.1) and the extra workspace
+// roots.
+//
+// It is a helper rather than three lines inside executeTool because
+// executeTool is not the only caller of a tool — collectWrittenFiles reads
+// files back for the output guard by calling read_file directly. Before P66.10
+// that second path used the bare run context, so read_file fell back to its
+// construction-time root (the daemon workspace) and, on any session with a
+// custom workdir, the guard silently validated nothing (ARCH-03). Any future
+// direct tool invocation must go through here too.
+func (e *Engine) toolCtx(ctx context.Context) context.Context {
+	ctx = tool.WithRegistry(ctx, e.tools)
+	if e.workdir != "" {
+		ctx = tool.WithWorkdir(ctx, e.workdir)
+	}
+	return tool.WithExtraRoots(ctx, e.extraRoots)
+}
+
 // executeTool looks up and runs a single tool, converting failures into
 // model-visible error results rather than aborting the whole run.
 func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (string, bool) {
 	if e.tools == nil {
 		return fmt.Sprintf("no tools available (requested %q)", tu.Name), true
 	}
-	// Let a meta-tool (tool_search) discover the registry actually governing
-	// this run — which, when the caller scopes exposure per session, is a
-	// clone rather than the tool's own construction-time reference.
-	ctx = tool.WithRegistry(ctx, e.tools)
-	if e.workdir != "" {
-		ctx = tool.WithWorkdir(ctx, e.workdir)
-	}
-	ctx = tool.WithExtraRoots(ctx, e.extraRoots)
+	ctx = e.toolCtx(ctx)
 	t, ok := e.tools.Get(tu.Name)
 	if !ok {
 		return fmt.Sprintf("unknown tool %q; registered tools: %s", tu.Name, registeredToolNames(e.tools)), true
@@ -2345,6 +2358,9 @@ func (e *Engine) collectWrittenFiles(ctx context.Context) []guard.FileContent {
 	if !ok {
 		return nil
 	}
+	// Same decoration executeTool applies: without it read_file resolves
+	// against its construction-time root, not this session's workdir (ARCH-03).
+	ctx = e.toolCtx(ctx)
 	sort.Strings(paths) // deterministic order for reproducible prompts/tests
 	if len(paths) > maxGuardFiles {
 		paths = paths[:maxGuardFiles]

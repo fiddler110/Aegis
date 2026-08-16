@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/netblock"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/trust"
 	"golang.org/x/net/html"
@@ -22,17 +22,19 @@ const maxWebBytes = 2 << 20 // 2 MiB cap on fetched bodies
 
 // ssrfClient is a shared HTTP client whose transport enforces SSRF protection
 // on every new connection. Reusing one client allows TCP/TLS connection pooling
-// across fetch and search calls.
+// across fetch and search calls. The blocklist and the dialer live in
+// internal/netblock, which is also what the MCP HTTP client uses — P66.10
+// collapsed the two copies that had drifted (VULN-03).
 var ssrfClient = &http.Client{
 	Timeout: 30 * time.Second,
 	Transport: &http.Transport{
-		DialContext: ssrfSafeDialer,
+		DialContext: netblock.SafeDialer,
 	},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("too many redirects")
 		}
-		return validateNotPrivate(req.Context(), req.URL)
+		return netblock.ValidateNotPrivate(req.Context(), req.URL)
 	},
 }
 
@@ -114,69 +116,6 @@ func (t *fetchTool) get(ctx context.Context, rawURL string) ([]byte, string, err
 		return nil, "", err
 	}
 	return data, resp.Header.Get("Content-Type"), nil
-}
-
-// ssrfSafeDialer resolves the target address and rejects connections to
-// private/loopback/link-local IPs, preventing SSRF attacks.
-func ssrfSafeDialer(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	for _, ip := range ips {
-		if isPrivateIP(ip.IP) {
-			return nil, fmt.Errorf("blocked: %s resolves to private/internal address %s", host, ip.IP)
-		}
-	}
-	var d net.Dialer
-	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
-}
-
-// validateNotPrivate checks a URL's hostname against private IP ranges.
-func validateNotPrivate(ctx context.Context, u *url.URL) error {
-	host := u.Hostname()
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return err
-	}
-	for _, ip := range ips {
-		if isPrivateIP(ip.IP) {
-			return fmt.Errorf("blocked: redirect to private/internal address %s (%s)", host, ip.IP)
-		}
-	}
-	return nil
-}
-
-var privateRanges = []*net.IPNet{
-	mustParseCIDR("10.0.0.0/8"),
-	mustParseCIDR("172.16.0.0/12"),
-	mustParseCIDR("192.168.0.0/16"),
-	mustParseCIDR("127.0.0.0/8"),
-	mustParseCIDR("169.254.0.0/16"),
-	mustParseCIDR("::1/128"),
-	mustParseCIDR("fc00::/7"),
-	mustParseCIDR("fe80::/10"),
-}
-
-func isPrivateIP(ip net.IP) bool {
-	for _, r := range privateRanges {
-		if r.Contains(ip) {
-			return true
-		}
-	}
-	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
-}
-
-func mustParseCIDR(s string) *net.IPNet {
-	_, n, err := net.ParseCIDR(s)
-	if err != nil {
-		panic(err)
-	}
-	return n
 }
 
 // --- search (pluggable provider; DuckDuckGo HTML scrape is the zero-config default) ---

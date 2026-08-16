@@ -8,12 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/netblock"
 )
 
 const maxMCPResponseBytes = 16 << 20 // 16 MiB
@@ -22,91 +22,24 @@ const maxMCPResponseBytes = 16 << 20 // 16 MiB
 // protection on every new connection (FIND-10). An HTTP/SSE MCP server
 // address comes from config, which can be sourced from a project's
 // .aegis/config.yaml — i.e. from an untrusted repo — so it needs the same
-// private/loopback/link-local dialer guard as web_fetch
-// (internal/tool/builtin's ssrfSafeDialer). Kept as a small, deliberate
-// duplicate here rather than a cross-package import of internal/tool/builtin,
-// matching how internal/security's networkPrivateRanges is already kept
-// decoupled from internal/tool/builtin for the same reason (see
-// internal/security/target.go).
+// private/loopback/link-local dialer guard as web_fetch.
+//
+// That guard used to be a deliberate copy of internal/tool/builtin's, to avoid
+// a cross-package import of the tool package. The copy is what let the range
+// table drift (VULN-03: both copies missed 0.0.0.0/8, :: and CGNAT), so P66.10
+// moved it to internal/netblock — a dependency-free leaf both callers can
+// import without importing each other.
 var mcpHTTPClient = &http.Client{
 	Timeout: 30 * time.Second,
 	Transport: &http.Transport{
-		DialContext: mcpSSRFSafeDialer,
+		DialContext: netblock.SafeDialer,
 	},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("too many redirects")
 		}
-		return mcpValidateNotPrivate(req.Context(), req.URL)
+		return netblock.ValidateNotPrivate(req.Context(), req.URL)
 	},
-}
-
-// mcpSSRFSafeDialer resolves the target address and rejects connections to
-// private/loopback/link-local IPs, preventing an HTTP/SSE MCP server address
-// (which may be sourced from untrusted project config) from being used to
-// reach internal network services.
-func mcpSSRFSafeDialer(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	for _, ip := range ips {
-		if mcpIsPrivateIP(ip.IP) {
-			return nil, fmt.Errorf("blocked: %s resolves to private/internal address %s", host, ip.IP)
-		}
-	}
-	var d net.Dialer
-	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
-}
-
-// mcpValidateNotPrivate checks a URL's hostname against private IP ranges;
-// used as a CheckRedirect hook so a 3xx response from an MCP server can't
-// redirect the client to an internal address after the initial connection
-// was already validated.
-func mcpValidateNotPrivate(ctx context.Context, u *url.URL) error {
-	host := u.Hostname()
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return err
-	}
-	for _, ip := range ips {
-		if mcpIsPrivateIP(ip.IP) {
-			return fmt.Errorf("blocked: redirect to private/internal address %s (%s)", host, ip.IP)
-		}
-	}
-	return nil
-}
-
-var mcpPrivateRanges = []*net.IPNet{
-	mustParseCIDRMCP("10.0.0.0/8"),
-	mustParseCIDRMCP("172.16.0.0/12"),
-	mustParseCIDRMCP("192.168.0.0/16"),
-	mustParseCIDRMCP("127.0.0.0/8"),
-	mustParseCIDRMCP("169.254.0.0/16"),
-	mustParseCIDRMCP("::1/128"),
-	mustParseCIDRMCP("fc00::/7"),
-	mustParseCIDRMCP("fe80::/10"),
-}
-
-func mcpIsPrivateIP(ip net.IP) bool {
-	for _, r := range mcpPrivateRanges {
-		if r.Contains(ip) {
-			return true
-		}
-	}
-	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
-}
-
-func mustParseCIDRMCP(s string) *net.IPNet {
-	_, n, err := net.ParseCIDR(s)
-	if err != nil {
-		panic(err)
-	}
-	return n
 }
 
 // NewHTTP connects to an MCP server over HTTP+SSE. The endpoint is the base

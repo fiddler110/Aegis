@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/memory"
+	"github.com/fiddler110/aegis/internal/netblock"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -608,14 +609,14 @@ Output written on doc.pdf (12 pages, 98304 bytes).
 func TestSSRFBlocksPrivateIPs(t *testing.T) {
 	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1"} {
 		parsed := net.ParseIP(ip)
-		if !isPrivateIP(parsed) {
-			t.Errorf("isPrivateIP(%s) = false, want true", ip)
+		if !netblock.IsPrivate(parsed) {
+			t.Errorf("netblock.IsPrivate(%s) = false, want true", ip)
 		}
 	}
 	for _, ip := range []string{"8.8.8.8", "1.1.1.1"} {
 		parsed := net.ParseIP(ip)
-		if isPrivateIP(parsed) {
-			t.Errorf("isPrivateIP(%s) = true, want false", ip)
+		if netblock.IsPrivate(parsed) {
+			t.Errorf("netblock.IsPrivate(%s) = true, want false", ip)
 		}
 	}
 }
