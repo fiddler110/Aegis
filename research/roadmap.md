@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-15. This document tracks only **open** work and what's next. For
+**Last updated:** 2026-08-16. This document tracks only **open** work and what's next. For
 shipped-feature history, batch origins, pass-by-pass narrative, refutation records and full design
 rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading with a
 `Priority:` line in its body — `scripts/roadmap-status.sh` parses exactly that shape, so keep it when
@@ -12,13 +12,15 @@ adding items.
 
 **31 open items: 25 build (Tier 1-4) + 6 verification-only.**
 
-**2026-08-15: the P66 batch is a full-stack code review**, not a feature line. Six specialist
-reviewers, an adversarial debate (advocate / refuter / arbitrator) and a static-analysis pass
-produced 70 findings against HEAD `3c2b57b`, recorded in [CodeReview.md](../CodeReview.md) with
-per-finding evidence. The 23 items filed below (**P66.1**-**P66.23**) carry every finding worth
-acting on; each names the finding IDs it closes, so the review document is the rationale and this
-document is the work. Two are Critical and four more are exploitable today — the first time this
-roadmap has had a non-empty Tier 1 since the P55 line closed.
+**The P66 batch is a full-stack code review**, not a feature line. Six specialist reviewers, an
+adversarial debate (advocate / refuter / arbitrator) and a static-analysis pass produced 70 findings
+against HEAD `3c2b57b`, recorded in [CodeReview.md](../CodeReview.md) with per-finding evidence. The
+items filed below (**P66.5**-**P66.23**) carry every finding worth acting on; each names the finding
+IDs it closes, so the review document is the rationale and this document is the work. **Eight of the
+batch shipped on 2026-08-15/16** — P66.2, P66.1, P66.4, P66.3, P66.6, P66.7's LLM-16 half, P66.8 and
+the P66.24 flake found while building P66.4 — including both Criticals and five of the six findings
+that were exploitable the day the review landed. Their build records, and the corrections several of
+them make to the item they were written from, are in [releases.md](releases.md).
 
 Tiers 1-4 are **build work** — every item there requires writing code that doesn't exist yet.
 **Verification work** is its own track, not a tier: every item in it is code that is *already
@@ -27,11 +29,9 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 "go run a test" and "go design and build a feature" as the same kind of next action. See
 [Verification Work](#verification-work) below.
 
-- **Tier 1:** 1 — **P66.5**. (**P66.2** shipped 2026-08-15; **P66.1** and **P66.4**, the
-  two Criticals, **P66.3**, the read-only tier, and **P66.6**, the approval dialog, shipped
-  2026-08-16.)
+- **Tier 1:** 1 — **P66.5**.
 - **Tier 2:** 7 — **P66.7** (LLM-01 remainder only), **P66.9**, **P66.10**, **P66.11**, **P66.12**,
-  **P66.16**, **P66.21**. (**P66.8** shipped and **P66.24** was filed and fixed, both 2026-08-16.)
+  **P66.16**, **P66.21**.
 - **Tier 3:** 3 — **P66.13**, **P66.14**, **P66.15**.
 - **Tier 4:** 14 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, plus the nine pre-existing:
   **P65.4**, **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**,
@@ -39,29 +39,23 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 - **Verification:** 6 — **P66.22**, **P38.1**, **P62.9**, **P65.2** (prompt half), **P65.3**
   (local half), **P62.8**.
 
-**What to do next.** **The day plan is finished** — all four blocks are done (P66.2; the two
-Criticals P66.1 and P66.4; P66.3; then P66.6, P66.7's LLM-16 half and P66.8). What the plan never
-covered is now the whole of Tier 1: **P66.5**, inverting the config freeze list, which the plan
-deliberately deferred (see [Explicitly not tomorrow](#explicitly-not-tomorrow)) and which is
-unblocked — P66.1 has had a day to settle and P66.5 touches the same file.
+**What to do next.** **P66.5**, inverting the config freeze list, is the whole of Tier 1 and the last
+of the six exploitable-today findings. The day plan deliberately deferred it as a design change that
+wants its own test pass rather than the tail of a long day; P66.1 has now settled and P66.5 touches
+the same file.
 
-After P66.5, Tier 1 is empty and the batch has no forced order left. Two things are worth naming
-anyway. **P66.7's LLM-01 remainder** is the natural follow-on to what just shipped: the startup
-notice now makes the uncapped context-file injection *visible* on any run that hits it, so the cap
-can be designed against an observed number rather than a measured-once one. It also still gates
-**P66.22**, the live-tier run: the warning half changed nothing about prompt content, so the cap and
-P66.14 are both still ahead of the three numbers P66.22 measures.
+After P66.5, Tier 1 is empty and the batch has no forced order left. Two sequencing facts survive it.
+**P66.7's LLM-01 remainder** is the natural follow-on to the LLM-16 half that shipped: the run-start
+notice makes the uncapped context-file injection *visible* on any run that hits it, so the cap can be
+designed against an observed number rather than a measured-once one. And **P66.7 and P66.14 both gate
+P66.22**, the live-tier run — they change three of the five numbers it measures, so measuring first
+answers a question nobody will have afterwards.
 
-The P38.1 guidance below is unchanged and still correct, but it is not the highest-value next
-action: it was written when every tier was empty, and P66.5 is the last of the six findings that
-were exploitable the day the review landed.
-
-**What to do next (pre-P66, retained).** P38.1's live conformance re-run is the single
-highest-value next action *among verification items*: it is
-the only open item anywhere whose outcome produces new information rather than new code, and three of
-the other verification items (P38.1 itself, P62.9's remaining live-tier evidence, P65.2's prompt
-half) all close on the *same* harness — a local model driving `aegis chat --skill
-threat-modeling`. One live-tier setup answers all three:
+**Among verification items**, P38.1's live conformance re-run stays the highest-value one: it is the
+only open item anywhere whose outcome produces new information rather than new code, and three of the
+other verification items (P38.1 itself, P62.9's remaining live-tier evidence, P65.2's prompt half)
+all close on the *same* harness — a local model driving `aegis chat --skill threat-modeling`. One
+live-tier setup answers all three:
 
 - **P38.1** — the conformance verdict itself (see its entry for the closure condition and reproduce
   steps).
@@ -100,223 +94,12 @@ instead, regardless of how large or urgent the underlying question is.
 
 ---
 
-## Execution plan for the P66 batch
-
-**Written 2026-08-15 to be executed 2026-08-16.** This is the day plan for Tier 1 plus the two
-cheapest Tier 2 items. It is ordered by dependency and by blast radius, not by severity — P66.2 is
-not the most serious item but it must be the first commit, because it changes the toolchain every
-subsequent test run uses.
-
-**Working rules for the day.** One item per commit, each with its test. Run `go test ./...`
-(36s, all 68 packages green today) before every commit, so any breakage is attributable to the item
-in hand. The suite passing is *not* sufficient evidence for this batch — four of these items fix
-defects that live in a fully green tree, and each names the test that must newly exist.
-
-#### Block 1 — Toolchain, ~30 min — **DONE 2026-08-15**
-
-**P66.2.** Shipped. `go.mod` pins `toolchain go1.26.6`; `govulncheck ./...` prints
-`No vulnerabilities found` (was seven stdlib CVEs, six reachable) and `go test ./...` is green.
-`.github/workflows/ci.yml` runs both tools on the ubuntu leg, installing each with
-`GOTOOLCHAIN="$(go env GOVERSION)"` — the trap comment beside the install step is the P66.12 note,
-taking the pin from the resolved toolchain rather than hardcoding a version that would drift from
-`go.mod`. Verified against go1.26.6, not just the go1.26.5 in the review: the pinned install yields a
-staticcheck that analyzes the tree (28 findings) instead of 21 compile errors.
-
-`staticcheck` is `continue-on-error: true` for now, because those 28 findings are **P66.12's** work
-and this item is not licensed to fix them. Deleting that line is part of P66.12.
-
-#### Block 2 — The two Criticals, ~3 hours — **DONE 2026-08-16**
-
-**P66.1.** Shipped as `92f72be`. All four parts landed: trust is resolved before any
-project-controlled file is read (so `.aegis/.env` is skipped entirely for an untrusted directory),
-`AEGIS_*` keys are dropped and logged from `.env` even when trusted, the baseline layer is built over
-an `environSnapshot()` taken before `loadDotEnv`, and `applyWorkspaceTrust` no longer forges
-`Trusted = true` from a missing `config.yaml`. SEC-09 folded in: `unsandboxedAutoExecError` now covers
-`ModeAuto` as well as `AutoApproveExec` under the same `allow_unsandboxed_auto_exec` opt-out.
-
-Both named tests exist in `internal/config/dotenv_trust_test.go`, plus the non-`AEGIS_` loader-variable
-half and a blast-radius guard that a genuine operator-set `AEGIS_*` still applies and does not read as
-a project change. Every one was confirmed failing against the unfixed tree before the fix landed.
-`TestWorkspaceTrustNoProjectConfigIsTrusted` asserted the behaviour this item reverses and was
-rewritten as `TestWorkspaceTrustNoProjectConfigFreezesNothing`. No loader-variable denylist, per the
-arbitration.
-
-**P66.4.** Shipped as `46dde08`. `tools` moved into a `toolTable` carrying its own mutex (lock order:
-`Registry.mu` before `toolTable.mu`); a clone's own `Register`/`Upsert` now writes a clone-local
-overlay shadowing the shared table, which is the fix for the deterministic cross-session leak.
-`subAgentToolRegistry` hands each spawn a clone of its parent session's registry — `SpawnConfig`
-already carried `ParentSessionID`, so no new plumbing — and `debate.go:102` had the identical
-one-line defect and was fixed with it. Lazy clone at `sessionToolRegistry` (ARCH-11). ARCH-08's
-residual closed as a side effect exactly as predicted.
-
-`TestConcurrentSkillActivationAcrossSessions` reproduced the reported race verbatim under `-race`
-before the fix (two clones' `Upsert` on one map, from `activateSessionSkill`), and also fails on the
-deterministic leak without `-race`. `TestCloneUpsertStaysLocal` pins the overlay contract in both
-directions including clone-of-clone; `TestSubAgentToolSearchDoesNotWidenTheDaemon` guards ARCH-02 on
-identity as well as effect.
-
-*Found in passing, and fixed (**P66.24**, same day).* `internal/mcp`'s `TestSamplingHandler` and
-`TestToolsChangedNotification` each started `go io.Copy(io.Discard, serverReader)` **and** a
-`json.Decoder` on that same pipe. The two readers competed, and when the drain goroutine won the
-initialize request the fake server never replied — `c.initialize(context.Background())` has no
-deadline, so the package hung until the 10-minute test timeout killed the whole suite. Hit once
-during this block and not reproducible in six isolated re-runs, which is the profile of a flake that
-fires on a loaded CI box and gets dismissed as infrastructure.
-
-The drain now starts *after* the initialize read (one reader on the pipe at a time), and an `initCtx`
-helper bounds every handshake at 10s so a future regression is a named failure in seconds rather than
-a suite-wide timeout. Verified by stress rather than by re-running: `-race -count=120` over the two
-tests hangs to the 241s timeout on the old code, with `io.Copy` at `mcp_test.go:238` in the panic
-stack, and finishes in 2.6s on the fixed code.
-
-#### Block 3 — The read-only tier, ~3 hours — **DONE 2026-08-16**
-
-**P66.3.** Shipped. Everything the two read-only argv paths must agree on now lives in
-`internal/tool/builtin/argv_confine.go`: one union git-flag denylist (`deniedGitFlags`, including
-`--no-index`), one attached-value-aware flag matcher, one path-candidate extractor, and
-`validateReadOnlyGitArgv`, which both `gitTool.Execute` and `readOnlyGitCommand` now call on the
-same argv. `git.go`'s `deniedGitArgPrefixes`/`validateGitArgs` and `shell_readonly.go`'s
-`gitConfigOverrideFlags`/`shellArgsStayInRoot` are gone. The budget note's three spellings all
-landed; the item did not overrun.
-
-*Three deviations from the plan worth knowing.*
-
-**`-p` came off the denylist rather than onto it.** The union of the two lists would have denied it,
-but `-p` is the pager alias — an external program — only in the *pre-subcommand* position, and
-neither call path can reach that position: the git tool takes the subcommand as its own field and
-prepends it, and the shell classifier requires the first token after `git` to be an allowlisted
-subcommand. Post-subcommand `-p` is `--patch` and is read-only, so denying it (as the shell path did)
-cost `git log -p` for nothing. `--paginate` stays denied — it has no post-subcommand meaning to lose.
-
-**Three more argv0 drops than the plan named, and they close VULN-02 at its root.** Beyond `ps`,
-`less` and `more` (SEC-04), `sort`, `tree` and `uniq` came off `readOnlyShellArgv0` as well: each has
-a documented file-*writing* form (`sort -o FILE`, `tree -o FILE`, `uniq INPUT OUTPUT`), so no
-argument parsing makes them read-only. Confinement stops those forms escaping the workspace, but a
-write *inside* the workspace is still a write and plan mode allows `CapRead` silently. The review's
-own VULN-02 fix section reached the same conclusion for `sort`; `tree` and `uniq` are the same
-criterion applied consistently, which is the whole argument of this item. A regression case pins that
-this did not cost `grep -o` (`--only-matching`), the one allowlisted `-o` that is a read.
-
-**The separated `-o <path>` spelling needed no case of its own** — its value is a bare operand, and
-operand confinement was already being added. The helper handles `--flag=value` and `-ovalue`; the
-third spelling falls out.
-
-*Verified against the unfixed tree, not just green afterwards.* A worktree at `184497d` accepted all
-eight escapes: the six shell classifications (`git diff --output=`, `sort --output=`, `sort -o`
-attached, `ps auxwwe`, `less`, `more`) all returned `CapRead`, and the git tool ran both
-`--no-index` and the escaping pathspec without a refusal. VULN-01 reproduced verbatim on Windows —
-`git diff --no-index -- NUL <abs path>` through the `CapRead` git tool returned the full contents of
-a file outside the workspace.
-
-The deliverable is `TestReadOnlyGitArgvAgreesAcrossBothPaths` (`argv_confine_test.go`), a table of 19
-argvs asserting the two paths reach the same verdict, with the shell string *derived* from the argv
-so equivalence is guaranteed by construction rather than by proofreading.
-`TestReadOnlyTierRefusesEscapesInPlanMode` states the property in plan-mode terms and records the one
-real asymmetry between the paths: the shell tool refuses by declining the `CapRead` downgrade, while
-the git tool is statically `CapRead` and is always reached, so it must refuse inside `Execute`.
-
-Closed VULN-01 (+SEC-05), VULN-02, VULN-11, SEC-04, SEC-10.
-
-#### Block 4 — Cheap, high-value, low-risk, ~2 hours — **DONE 2026-08-16**
-
-**P66.6.** Shipped as `f72e116`. Sanitized at ingestion (`stream.go`'s `KindApprovalRequest`), with
-`StripControlSeqs` rather than `StripDangerousSeqs` — the dialog applies its own lipgloss styling
-*after* ingestion, verified by reading the render path, so model-supplied SGR can only fight the
-TUI's own colours.
-
-*Two things the item's own description would have missed.* The suggested **"allow always" rule
-pattern** carried the escape too, so even the one covered path (`shell`, patched under P28.1) leaked —
-via `suggestRulePattern`, which `renderShellCall`'s stripping never saw. And a single strip over
-`string(ev.ToolInput)` is **not sufficient**: a real provider delivers the payload as the
-six-character JSON escape for ESC, which is plain ASCII on the wire and only becomes a control byte
-when `renderWriteDiff` unmarshals `content`. Raw ESC bytes are the *other* shape, and they make the
-JSON unparseable — which drops the preview into `renderApprovalPreview`'s generic excerpt branch that
-prints the bytes verbatim. `sanitizeToolInputJSON` does both passes.
-
-Checked before shipping: `approvalState.input` is render-only (the approval response carries just the
-id), so sanitizing cannot alter the call that actually runs.
-
-The closure condition needed one honest amendment. A literal `ContainsRune(out, 0x1b) == false` can
-never pass, because the dialog's own chrome *is* ESC bytes — lipgloss emits truecolor SGR for the
-frame and option list even under `NO_COLOR`. `TestApprovalDialogStripsControlSequencesFromToolInput`
-removes SGR only (`\x1b\[[0-9;]*m`, the sole form the TUI emits) and asserts no ESC survives that, so
-anything left is by construction an escape the event smuggled in. Eight carriers across both render
-paths, all eight confirmed failing against the unfixed tree.
-
-**P66.7, LLM-16 half.** Shipped as `5ed832d`. One `KindNotice` at run construction when
-`tokenest(system) + requestOverhead` crosses `oversizedSystemPercent` of the served window, naming
-both numbers and taking its remedy clause verbatim from `ollamainfo.Result.Describe()` so `/status`
-and this read as one voice. Silent when the window is unknown — that is "not known yet", not "tiny".
-
-**The threshold is 50%, not the review's ~60%,** and the disagreement was resolved rather than split:
-`compactionTrigger` is floored at `window/2`, so `window/2` is the lowest estimate at which proactive
-compaction can fire at all. A fixed prompt at that point puts every turn over the trigger from its
-first message — the state actually worth naming — and 60% leaves a band of runs sitting in it
-unwarned. `TestOversizedSystemPromptThresholdMutation` hardcodes 49%/51% so it discriminates: the
-constant at 60 fails the "just above" case and at 40 fails the "just below" case (both run).
-
-Nothing about prompt *content* changed. The `localContextFilesMaxBytes` cap and the realistic-`CLAUDE.md`
-budget fixture (LLM-01) stay open under P66.7.
-
-**P66.8.** Shipped as `35e8f95`, and it was two defects, not one. The timeouts were the reported half;
-the beat could not have arrived anyway, because `withStallBeat` was a bare `context.WithValue` and a
-sub-agent's engine installed its watch over the same key.
-
-`internal/heartbeat` (new) carries the beat chain. It is a **leaf package** because the three parties
-sit on opposite sides of the import graph — `internal/tool` already imports `internal/provider`, so no
-home inside any of the three is reachable from the other two. `agent.go` now bounds each *individual*
-wait at `maxAgentDuration` and beats on every completion (per teammate, per debate role); the
-aggregate batch/debate contexts stay as the outer cap and are admissible **precisely because** they
-decompose into sub-900s waits with observable activity between them. The per-wait bound is what fixes
-sequential and loop mode, where one teammate could previously spend the whole batch budget on a single
-silent wait. `admissionAdapter` beats every 30s while queued — the one wait in the codebase *known* to
-be alive while producing nothing, which is what licenses a blind ticker there and nowhere else.
-
-The docs were corrected rather than deleted: the true relation is "above every **per-call** bound",
-and an aggregate above 900s is admissible only if it decomposes. That sentence now appears in
-`config.go`, `docs/configuration.md` and CLAUDE.md, which also closes P66.21's first bullet.
-
-`TestToolTimeoutsStayUnderTheStallBound` mirrors `TestResultCapsCanBindBeforeTheContextWindow`, and
-its **grep-the-source half** counts the `context.WithTimeout` sites in the package and requires the
-tables to name all 13 — so a new timeout cannot be added without a decision, which is exactly how the
-two agent bounds drifted 40 and 80 minutes above a limit the docs claimed they were under. Mutation
-checks run, not asserted: the pre-P66.8 per-teammate wait fails at 40m0s; `stallBound` at 5 minutes
-fails all six 10-minute entries and neither latex entry.
-`TestChildStallWatchDoesNotHideItsParent` pins the chain in both directions and reproduces the
-shadowing verbatim against a reverted `withStallBeat`.
-
-#### If the day is short
-
-**P66.2, P66.1, P66.4** — in that order. Those are the one-line CVE fix and the two Criticals, and
-they are mutually independent once P66.2 lands. Everything else can wait a day without the risk
-profile changing.
-
-#### Explicitly not tomorrow
-
-**P66.5** (invert the freeze list) is Tier 1 and M-sized, and it touches the same file as P66.1. Land
-P66.1 first and let it settle; inverting the freeze list is a design change that wants a clear head
-and its own test pass, not the tail end of a long day.
-
-**P66.13** and **P66.14** are Tier 3 for a reason — P66.13 needs `newChatCmd` split before either bug
-is fixable, and that refactor should not be started in the same session as five security fixes.
-
-**P66.22** (the live-tier run) must wait for P66.7 and P66.14, which change three of the five numbers
-it measures. *Still true after Block 4:* P66.7's LLM-16 half added a notice and changed no prompt
-content, so the cap half is still ahead of it.
-
-**All four blocks are now done.** This plan is retained as the record of what was built and what was
-found while building it — several of the notes above correct the item they were written from — not as
-outstanding work.
-
----
-
 ## Open Work — Tier 1
 
-**Status: 1 open**, from the P66 review batch (P66.2 shipped 2026-08-15; **P66.1 and P66.4, the two
-Criticals, P66.3, the read-only tier, and P66.6, the approval dialog, shipped 2026-08-16** — see the
-Block 2, 3 and 4 notes in the execution plan above, and [releases.md](releases.md) for the
-rationale). It is exploitable today with no dependency on anything else in this document. Evidence is
-in [CodeReview.md](../CodeReview.md) at the finding IDs named in its heading.
+**Status: 1 open**, from the P66 review batch (P66.2 shipped 2026-08-15; **P66.1, P66.4, P66.3 and
+P66.6 shipped 2026-08-16** — see [releases.md](releases.md) for what each landed and what was found
+while landing it). It is exploitable today with no dependency on anything else in this document.
+Evidence is in [CodeReview.md](../CodeReview.md) at the finding IDs named in its heading.
 
 ### P66.5 — Invert the config freeze list
 
@@ -367,7 +150,7 @@ documents the budget.
 The ceiling test is structurally blind to it because it runs over a bare fixture where every
 project-varying component is empty.
 
-**LLM-16 shipped 2026-08-16** as `5ed832d` (see the Block 4 note above) — a run-start notice now
+**LLM-16 shipped 2026-08-16** as `5ed832d` (see [releases.md](releases.md)) — a run-start notice now
 fires when the uncompactable part of the request crosses 50% of the served window, so this item's
 condition is *visible* on any run that hits it rather than inferred from a one-off measurement. That
 was deliberately the cheap half: it needed no policy decision about what to truncate.

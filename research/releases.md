@@ -8,6 +8,188 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
+**Last updated:** 2026-08-16 — **the P66 day plan is finished.** Written 2026-08-15 to be executed
+2026-08-16, it was ordered by dependency and blast radius rather than by severity, and all four
+blocks are done: P66.2 (toolchain, shipped 2026-08-15 — its own entry is below), then the two
+Criticals P66.1 and P66.4, then P66.3's read-only tier, then the cheap high-value block of P66.6,
+P66.7's LLM-16 half and P66.8. One item per commit, each with its test, `go test ./...` green before
+each — the suite passing was never sufficient evidence for this batch, because four of these items
+fixed defects that lived in a fully green tree. What follows is the record of what shipped **and of
+what was found while shipping it**: several of these notes correct the roadmap item they were written
+from, and those corrections are the durable part.
+
+### P66.1 — gate `.aegis/.env` on workspace trust, and make the baseline honest
+
+Shipped as `92f72be`. All four parts landed: trust is resolved before any project-controlled file is
+read (so `.aegis/.env` is skipped entirely for an untrusted directory), `AEGIS_*` keys are dropped and
+logged from `.env` even when trusted, the baseline layer is built over an `environSnapshot()` taken
+before `loadDotEnv`, and `applyWorkspaceTrust` no longer forges `Trusted = true` from a missing
+`config.yaml`. SEC-09 folded in: `unsandboxedAutoExecError` now covers `ModeAuto` as well as
+`AutoApproveExec` under the same `allow_unsandboxed_auto_exec` opt-out.
+
+Both named tests exist in `internal/config/dotenv_trust_test.go`, plus the non-`AEGIS_` loader-variable
+half and a blast-radius guard that a genuine operator-set `AEGIS_*` still applies and does not read as
+a project change. Every one was confirmed failing against the unfixed tree before the fix landed.
+`TestWorkspaceTrustNoProjectConfigIsTrusted` asserted the behaviour this item reverses and was
+rewritten as `TestWorkspaceTrustNoProjectConfigFreezesNothing`. No loader-variable denylist, per the
+arbitration.
+
+### P66.4 — give the shared tool table its own mutex, and clones their own overlay
+
+Shipped as `46dde08`. `tools` moved into a `toolTable` carrying its own mutex (lock order:
+`Registry.mu` before `toolTable.mu`); a clone's own `Register`/`Upsert` now writes a clone-local
+overlay shadowing the shared table, which is the fix for the deterministic cross-session leak.
+`subAgentToolRegistry` hands each spawn a clone of its parent session's registry — `SpawnConfig`
+already carried `ParentSessionID`, so no new plumbing — and `debate.go:102` had the identical
+one-line defect and was fixed with it. Lazy clone at `sessionToolRegistry` (ARCH-11). ARCH-08's
+residual closed as a side effect exactly as predicted.
+
+`TestConcurrentSkillActivationAcrossSessions` reproduced the reported race verbatim under `-race`
+before the fix (two clones' `Upsert` on one map, from `activateSessionSkill`), and also fails on the
+deterministic leak without `-race`. `TestCloneUpsertStaysLocal` pins the overlay contract in both
+directions including clone-of-clone; `TestSubAgentToolSearchDoesNotWidenTheDaemon` guards ARCH-02 on
+identity as well as effect.
+
+### P66.24 — stop two MCP tests from hanging the whole suite
+
+Found in passing while building P66.4, and fixed the same day. `internal/mcp`'s `TestSamplingHandler`
+and `TestToolsChangedNotification` each started `go io.Copy(io.Discard, serverReader)` **and** a
+`json.Decoder` on that same pipe. The two readers competed, and when the drain goroutine won the
+initialize request the fake server never replied — `c.initialize(context.Background())` has no
+deadline, so the package hung until the 10-minute test timeout killed the whole suite. Hit once during
+the block and not reproducible in six isolated re-runs, which is the profile of a flake that fires on
+a loaded CI box and gets dismissed as infrastructure.
+
+The drain now starts *after* the initialize read (one reader on the pipe at a time), and an `initCtx`
+helper bounds every handshake at 10s so a future regression is a named failure in seconds rather than
+a suite-wide timeout. Verified by stress rather than by re-running: `-race -count=120` over the two
+tests hangs to the 241s timeout on the old code, with `io.Copy` at `mcp_test.go:238` in the panic
+stack, and finishes in 2.6s on the fixed code.
+
+### P66.3 — one argv path-confinement path for the read-only tier
+
+Shipped as `c1f1a8d`. Everything the two read-only argv paths must agree on now lives in
+`internal/tool/builtin/argv_confine.go`: one union git-flag denylist (`deniedGitFlags`, including
+`--no-index`), one attached-value-aware flag matcher, one path-candidate extractor, and
+`validateReadOnlyGitArgv`, which both `gitTool.Execute` and `readOnlyGitCommand` now call on the
+same argv. `git.go`'s `deniedGitArgPrefixes`/`validateGitArgs` and `shell_readonly.go`'s
+`gitConfigOverrideFlags`/`shellArgsStayInRoot` are gone. The budget note's three spellings all
+landed; the item did not overrun.
+
+*Three deviations from the plan worth knowing.*
+
+**`-p` came off the denylist rather than onto it.** The union of the two lists would have denied it,
+but `-p` is the pager alias — an external program — only in the *pre-subcommand* position, and
+neither call path can reach that position: the git tool takes the subcommand as its own field and
+prepends it, and the shell classifier requires the first token after `git` to be an allowlisted
+subcommand. Post-subcommand `-p` is `--patch` and is read-only, so denying it (as the shell path did)
+cost `git log -p` for nothing. `--paginate` stays denied — it has no post-subcommand meaning to lose.
+
+**Three more argv0 drops than the plan named, and they close VULN-02 at its root.** Beyond `ps`,
+`less` and `more` (SEC-04), `sort`, `tree` and `uniq` came off `readOnlyShellArgv0` as well: each has
+a documented file-*writing* form (`sort -o FILE`, `tree -o FILE`, `uniq INPUT OUTPUT`), so no
+argument parsing makes them read-only. Confinement stops those forms escaping the workspace, but a
+write *inside* the workspace is still a write and plan mode allows `CapRead` silently. The review's
+own VULN-02 fix section reached the same conclusion for `sort`; `tree` and `uniq` are the same
+criterion applied consistently, which is the whole argument of this item. A regression case pins that
+this did not cost `grep -o` (`--only-matching`), the one allowlisted `-o` that is a read.
+
+**The separated `-o <path>` spelling needed no case of its own** — its value is a bare operand, and
+operand confinement was already being added. The helper handles `--flag=value` and `-ovalue`; the
+third spelling falls out.
+
+*Verified against the unfixed tree, not just green afterwards.* A worktree at `184497d` accepted all
+eight escapes: the six shell classifications (`git diff --output=`, `sort --output=`, `sort -o`
+attached, `ps auxwwe`, `less`, `more`) all returned `CapRead`, and the git tool ran both
+`--no-index` and the escaping pathspec without a refusal. VULN-01 reproduced verbatim on Windows —
+`git diff --no-index -- NUL <abs path>` through the `CapRead` git tool returned the full contents of
+a file outside the workspace.
+
+The deliverable is `TestReadOnlyGitArgvAgreesAcrossBothPaths` (`argv_confine_test.go`), a table of 19
+argvs asserting the two paths reach the same verdict, with the shell string *derived* from the argv
+so equivalence is guaranteed by construction rather than by proofreading.
+`TestReadOnlyTierRefusesEscapesInPlanMode` states the property in plan-mode terms and records the one
+real asymmetry between the paths: the shell tool refuses by declining the `CapRead` downgrade, while
+the git tool is statically `CapRead` and is always reached, so it must refuse inside `Execute`.
+
+Closed VULN-01 (+SEC-05), VULN-02, VULN-11, SEC-04, SEC-10.
+
+### P66.6 — sanitize the approval dialog at ingestion
+
+Shipped as `f72e116`. Sanitized at ingestion (`stream.go`'s `KindApprovalRequest`), with
+`StripControlSeqs` rather than `StripDangerousSeqs` — the dialog applies its own lipgloss styling
+*after* ingestion, verified by reading the render path, so model-supplied SGR can only fight the
+TUI's own colours.
+
+*Two things the item's own description would have missed.* The suggested **"allow always" rule
+pattern** carried the escape too, so even the one covered path (`shell`, patched under P28.1) leaked —
+via `suggestRulePattern`, which `renderShellCall`'s stripping never saw. And a single strip over
+`string(ev.ToolInput)` is **not sufficient**: a real provider delivers the payload as the
+six-character JSON escape for ESC, which is plain ASCII on the wire and only becomes a control byte
+when `renderWriteDiff` unmarshals `content`. Raw ESC bytes are the *other* shape, and they make the
+JSON unparseable — which drops the preview into `renderApprovalPreview`'s generic excerpt branch that
+prints the bytes verbatim. `sanitizeToolInputJSON` does both passes.
+
+Checked before shipping: `approvalState.input` is render-only (the approval response carries just the
+id), so sanitizing cannot alter the call that actually runs.
+
+The closure condition needed one honest amendment. A literal `ContainsRune(out, 0x1b) == false` can
+never pass, because the dialog's own chrome *is* ESC bytes — lipgloss emits truecolor SGR for the
+frame and option list even under `NO_COLOR`. `TestApprovalDialogStripsControlSequencesFromToolInput`
+removes SGR only (`\x1b\[[0-9;]*m`, the sole form the TUI emits) and asserts no ESC survives that, so
+anything left is by construction an escape the event smuggled in. Eight carriers across both render
+paths, all eight confirmed failing against the unfixed tree.
+
+### P66.7, LLM-16 half — say so when the fixed prompt crowds the window
+
+Shipped as `5ed832d`. One `KindNotice` at run construction when `tokenest(system) + requestOverhead`
+crosses `oversizedSystemPercent` of the served window, naming both numbers and taking its remedy
+clause verbatim from `ollamainfo.Result.Describe()` so `/status` and this read as one voice. Silent
+when the window is unknown — that is "not known yet", not "tiny".
+
+**The threshold is 50%, not the review's ~60%,** and the disagreement was resolved rather than split:
+`compactionTrigger` is floored at `window/2`, so `window/2` is the lowest estimate at which proactive
+compaction can fire at all. A fixed prompt at that point puts every turn over the trigger from its
+first message — the state actually worth naming — and 60% leaves a band of runs sitting in it
+unwarned. `TestOversizedSystemPromptThresholdMutation` hardcodes 49%/51% so it discriminates: the
+constant at 60 fails the "just above" case and at 40 fails the "just below" case (both run).
+
+Nothing about prompt *content* changed. The `localContextFilesMaxBytes` cap and the realistic-`CLAUDE.md`
+budget fixture (LLM-01) stay open under P66.7.
+
+### P66.8 — put the stall bound above the timeouts it backstops
+
+Shipped as `35e8f95`, and it was two defects, not one. The timeouts were the reported half; the beat
+could not have arrived anyway, because `withStallBeat` was a bare `context.WithValue` and a
+sub-agent's engine installed its watch over the same key.
+
+`internal/heartbeat` (new) carries the beat chain. It is a **leaf package** because the three parties
+sit on opposite sides of the import graph — `internal/tool` already imports `internal/provider`, so no
+home inside any of the three is reachable from the other two. `agent.go` now bounds each *individual*
+wait at `maxAgentDuration` and beats on every completion (per teammate, per debate role); the
+aggregate batch/debate contexts stay as the outer cap and are admissible **precisely because** they
+decompose into sub-900s waits with observable activity between them. The per-wait bound is what fixes
+sequential and loop mode, where one teammate could previously spend the whole batch budget on a single
+silent wait. `admissionAdapter` beats every 30s while queued — the one wait in the codebase *known* to
+be alive while producing nothing, which is what licenses a blind ticker there and nowhere else.
+
+The docs were corrected rather than deleted: the true relation is "above every **per-call** bound",
+and an aggregate above 900s is admissible only if it decomposes. That sentence now appears in
+`config.go`, `docs/configuration.md` and CLAUDE.md, which also closes P66.21's first bullet.
+
+`TestToolTimeoutsStayUnderTheStallBound` mirrors `TestResultCapsCanBindBeforeTheContextWindow`, and
+its **grep-the-source half** counts the `context.WithTimeout` sites in the package and requires the
+tables to name all 13 — so a new timeout cannot be added without a decision, which is exactly how the
+two agent bounds drifted 40 and 80 minutes above a limit the docs claimed they were under. Mutation
+checks run, not asserted: the pre-P66.8 per-teammate wait fails at 40m0s; `stallBound` at 5 minutes
+fails all six 10-minute entries and neither latex entry.
+`TestChildStallWatchDoesNotHideItsParent` pins the chain in both directions and reproduces the
+shadowing verbatim against a reverted `withStallBeat`. A follow-up commit (`c0c2196`) covers
+`internal/heartbeat` directly, so the new leaf package is tested on its own terms rather than only
+through its two callers.
+
+---
+
 **Last updated:** 2026-08-15 (later the same day) — **P66.2 shipped**, the first commit of the P66
 review batch and the one the day plan puts first for a reason that has nothing to do with its
 severity: it changes the toolchain every subsequent test run in the batch executes on, so landing it
