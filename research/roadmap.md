@@ -39,7 +39,10 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 - **Verification:** 6 — **P66.22**, **P38.1**, **P62.9**, **P65.2** (prompt half), **P65.3**
   (local half), **P62.8**.
 
-**What to do next.** **P66.5**, inverting the config freeze list, is the whole of Tier 1 and the last
+**What to do next.** The ten items to take in order, with the one-sentence case for each, are in
+[Up next](#up-next--the-ten-items-to-take-in-order) below. The reasoning behind the top of that list:
+
+**P66.5**, inverting the config freeze list, is the whole of Tier 1 and the last
 of the six exploitable-today findings. The day plan deliberately deferred it as a design change that
 wants its own test pass rather than the tail of a long day; P66.1 has now settled and P66.5 touches
 the same file.
@@ -91,6 +94,38 @@ instead, regardless of how large or urgent the underlying question is.
 **Tier 2** = cheap, no-dependency wins — user-facing polish or small self-contained hardening.
 **Tier 3** = real value but larger or sequence-dependent (blocks or is blocked by other work).
 **Tier 4** = low urgency, no trigger, or explicitly parked pending demand — do not build speculatively.
+
+---
+
+## Up next — the ten items to take in order
+
+**Written 2026-08-16**, after the P66 day plan closed. This is a *reading* of the tiers, not a
+second ranking: every row's tier and size come from the item's own `Priority:` line, and the order
+is what those tiers say once the two real sequencing constraints are honored. Each row's "why now"
+is the one-sentence case; the item's own entry below carries the evidence and closure condition.
+
+| # | Item | Tier / size | Why now |
+|---|------|-------------|---------|
+| 1 | **P66.5** — invert the config freeze list | T1 · M | All of Tier 1. Last of the six exploitable-today findings: `commands:` unfrozen means an untrusted repo gets arbitrary binary exec through `grep` — a `CapRead` tool, so **plan mode allows it silently**. `security.*`, `server.addr` and `data_dir` likewise. The denylist has been found incomplete four times (P42.1, P46.2, P52.13, now P66); invert it and add the grep-the-source invariant test. P66.1 has settled, same file. |
+| 2 | **P66.7** — cap context-file injection (LLM-01 remainder) | T2 · S | `CLAUDE.md` injects uncapped: 11,611 tokens measured here, 2.6x the enforced 4,550 ceiling. The LLM-16 notice now makes it visible per-run, so the cap can be sized against observed numbers. Also **gates #10**. |
+| 3 | **P66.16** — OpenAI adapter drops tool calls | T2 · S | Two correctness bugs on the adapter `docs/providers.md` recommends for local Ollama. `Finish` iterates `0..len` over a map keyed by wire index, so a 1-based backend drops calls *after* `EventToolUseStart` fired. Presents as "the model is behaving strangely." |
+| 4 | **P66.10** — bounded security remainder | T2 · S-M | Three sub-hour fixes: the guard reads files without `WithWorkdir` (validates *nothing* on custom workdirs); the SSRF list misses `0.0.0.0/8`, `::` and CGNAT, and is duplicated; `LocalBackend.Exec` buffers unbounded before the 24 KiB cap applies. |
+| 5 | **P66.9** — bound `bg_events` | T2 · S | Pruned only by whole-session delete, gated on `Cleanup.SessionTTLDays`, which **has no default** — so a default install grows without limit for the life of the install. The latency half of this finding was correctly cut in debate; growth is what survives. |
+| 6 | **P66.21** — doc corrections the review disproved | T2 · S | Three left (P66.8 closed the first). The `view.go` one is actively harmful: it asserts the pre-P35.13 `prompt_eval_count` claim and proposes remediation that must not be done. |
+| 7 | **P66.14** — reconcile the two compaction thresholds | T3 · M | The engine triggers at 2,048 on a 4,096 window; the summarizer refuses until 3,277 — so compaction lands with 819 tokens left for the completion. And the P62.4 calibration is inert on the documented `openai` + `:11434/v1` path, so **every user following the documented configuration runs the whole session on a 20-33% undercount**. Also gates #10. |
+| 8 | **P66.12** — staticcheck cleanup | T2 · S | 28 findings, no new defects — a good result worth banking. Closure is deleting `continue-on-error` from CI; until then the step is advisory and the next 28 accumulate the same way. |
+| 9 | **P66.11** — redaction + turn trace | T2 · M | `internal/share` redacts nothing at all. The `TurnTrace` half is the higher-leverage piece: stop reason, compaction event, guard verdict and retry record are all computed and discarded one line later, and every live-tier item in this document would be easier to close with them. |
+| 10 | **P66.22** — the live-tier run | Verification | Converts five estimated LLM-tier findings into measurements in one `TestLiveWorkflow` pass. **Must run after #2 and #7**, which change three of the five numbers. Shares its harness with P38.1, P62.9 and P65.2's prompt half — schedule all four in one sitting. |
+
+**Two notes on the ordering.** **P66.13** (T3, M-L) is deliberately below the cut even though
+`aegis chat` bypassing the whole permission stack is the more serious defect: it needs `newChatCmd` —
+683 lines wrapping a 615-line closure — split before either bug is testable, and that enabling
+refactor does not belong in a batch of small fixes. **P38.1** is the highest-value *verification*
+item and is available whenever a local model is up; #10 is listed instead because P38.1's own run is
+cheaper to schedule as part of that same sitting.
+
+Rows 2-9 have no dependencies on each other and can be reordered freely — only #1 (Tier 1) and #10
+(sequenced behind #2 and #7) are fixed.
 
 ---
 
