@@ -93,13 +93,29 @@ func fakeServer(r io.Reader, w io.Writer) {
 	}
 }
 
+// initCtx bounds an initialize handshake against a pipe-based fake server.
+//
+// Client.call blocks on its response channel with no deadline of its own, so a
+// fake server that never answers hangs the test until Go's 10-minute package
+// timeout panics and takes the whole `go test ./...` run with it — a failure
+// mode that reads as CI flakiness rather than as this package's bug (P66.24).
+// Ten seconds is far longer than a pipe handshake can legitimately take and far
+// shorter than the package timeout, so a regression here is a named test
+// failure in seconds.
+func initCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func newPipeClient(t *testing.T) *Client {
 	t.Helper()
 	clientReader, serverWriter := io.Pipe()
 	serverReader, clientWriter := io.Pipe()
 	go fakeServer(serverReader, serverWriter)
 	c := newClient("test", clientReader, clientWriter, nil)
-	if err := c.initialize(context.Background()); err != nil {
+	if err := c.initialize(initCtx(t)); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
 	return c
@@ -194,12 +210,17 @@ func TestToolsChangedNotification(t *testing.T) {
 		enc := json.NewEncoder(serverWriter)
 		defer serverWriter.Close()
 
-		// Drain client→server traffic so writes don't block.
-		go io.Copy(io.Discard, serverReader)
-
 		var req srvReq
 		_ = dec.Decode(&req) // initialize
 		_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": *req.ID, "result": map[string]any{"protocolVersion": protocolVersion}})
+
+		// Only now drain the rest of the client→server traffic
+		// (notifications/initialized and anything after) so the client's
+		// writes never block. Starting this *before* the read above put two
+		// readers on one pipe: whichever won got the initialize request, and
+		// when io.Copy won, dec.Decode blocked forever and no response was
+		// ever sent (P66.24).
+		go io.Copy(io.Discard, serverReader)
 
 		// Send tools/list_changed notification to client.
 		_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
@@ -213,7 +234,7 @@ func TestToolsChangedNotification(t *testing.T) {
 		default:
 		}
 	}
-	if err := c.initialize(context.Background()); err != nil {
+	if err := c.initialize(initCtx(t)); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
 
@@ -234,12 +255,13 @@ func TestSamplingHandler(t *testing.T) {
 		enc := json.NewEncoder(serverWriter)
 		defer serverWriter.Close()
 
-		// Drain client→server traffic so writes don't block.
-		go io.Copy(io.Discard, serverReader)
-
 		var req srvReq
 		_ = dec.Decode(&req) // initialize
 		_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": *req.ID, "result": map[string]any{"protocolVersion": protocolVersion}})
+
+		// Drain only after the initialize read — see the note in
+		// TestToolsChangedNotification (P66.24).
+		go io.Copy(io.Discard, serverReader)
 
 		// Send a sampling/createMessage request to the client.
 		samplingID := 42
@@ -266,7 +288,7 @@ func TestSamplingHandler(t *testing.T) {
 			Model:   "test-model",
 		}, nil
 	}
-	if err := c.initialize(context.Background()); err != nil {
+	if err := c.initialize(initCtx(t)); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
 
@@ -325,7 +347,7 @@ func TestSamplingHandlerNil(t *testing.T) {
 
 	c := newClient("test", clientReader, clientWriter, nil)
 	// Sampling is nil — client should respond with an RPC error.
-	if err := c.initialize(context.Background()); err != nil {
+	if err := c.initialize(initCtx(t)); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
 

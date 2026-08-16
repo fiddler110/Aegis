@@ -10,7 +10,7 @@ adding items.
 
 ## Status
 
-**35 open items: 29 build (Tier 1-4) + 6 verification-only.**
+**34 open items: 28 build (Tier 1-4) + 6 verification-only.**
 
 **2026-08-15: the P66 batch is a full-stack code review**, not a feature line. Six specialist
 reviewers, an adversarial debate (advocate / refuter / arbitrator) and a static-analysis pass
@@ -29,8 +29,8 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 
 - **Tier 1:** 3 — **P66.3**, **P66.5**, **P66.6**. (**P66.2** shipped 2026-08-15; **P66.1** and
   **P66.4**, the two Criticals, shipped 2026-08-16.)
-- **Tier 2:** 9 — **P66.7**, **P66.8**, **P66.9**, **P66.10**, **P66.11**, **P66.12**, **P66.16**,
-  **P66.21**, **P66.24**.
+- **Tier 2:** 8 — **P66.7**, **P66.8**, **P66.9**, **P66.10**, **P66.11**, **P66.12**, **P66.16**,
+  **P66.21**. (**P66.24** was filed and fixed on 2026-08-16.)
 - **Tier 3:** 3 — **P66.13**, **P66.14**, **P66.15**.
 - **Tier 4:** 14 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, plus the nine pre-existing:
   **P65.4**, **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**,
@@ -144,12 +144,19 @@ deterministic leak without `-race`. `TestCloneUpsertStaysLocal` pins the overlay
 directions including clone-of-clone; `TestSubAgentToolSearchDoesNotWidenTheDaemon` guards ARCH-02 on
 identity as well as effect.
 
-*Found in passing, not fixed:* `internal/mcp`'s `TestSamplingHandler` (`mcp_test.go:239`) starts
-`go io.Copy(io.Discard, serverReader)` **and** a `json.Decoder` on that same pipe. The two readers
-compete, and when the drain goroutine wins the initialize request the fake server never replies —
-`c.initialize(context.Background())` has no deadline, so the package hangs until the 10-minute test
-timeout kills the whole suite. Hit once during this block, not reproducible in 6 isolated re-runs.
-Filed as **P66.24**.
+*Found in passing, and fixed (**P66.24**, same day).* `internal/mcp`'s `TestSamplingHandler` and
+`TestToolsChangedNotification` each started `go io.Copy(io.Discard, serverReader)` **and** a
+`json.Decoder` on that same pipe. The two readers competed, and when the drain goroutine won the
+initialize request the fake server never replied — `c.initialize(context.Background())` has no
+deadline, so the package hung until the 10-minute test timeout killed the whole suite. Hit once
+during this block and not reproducible in six isolated re-runs, which is the profile of a flake that
+fires on a loaded CI box and gets dismissed as infrastructure.
+
+The drain now starts *after* the initialize read (one reader on the pipe at a time), and an `initCtx`
+helper bounds every handshake at 10s so a future regression is a named failure in seconds rather than
+a suite-wide timeout. Verified by stress rather than by re-running: `-race -count=120` over the two
+tests hangs to the 241s timeout on the old code, with `io.Copy` at `mcp_test.go:238` in the panic
+stack, and finishes in 2.6s on the fixed code.
 
 #### Block 3 — The read-only tier, ~3 hours
 
@@ -458,28 +465,6 @@ knowledge store (QUAL-14) and these sentences are why a maintainer would *not* l
   on native Ollama it is accurate — and proposing remediation that should not be done (LLM-09).
 
 Closes ARCH-13, LLM-09, and the doc half of P66.8/P66.13. Priority: Tier 2 — S.
-
-### P66.24 — `TestSamplingHandler` can hang the whole suite for ten minutes
-
-Found while running the suite for P66.4, not by review. `internal/mcp/mcp_test.go:239` starts
-`go io.Copy(io.Discard, serverReader)` to drain client→server traffic, and then reads the initialize
-request from **that same pipe** with a `json.Decoder`. The two readers race. When the drain goroutine
-wins, the fake server's `dec.Decode` blocks forever and never sends the initialize response — and the
-client side calls `c.initialize(context.Background())`, which has no deadline, so the test hangs
-until Go's 10-minute package timeout panics and takes the entire `go test ./...` run with it.
-
-Observed once; not reproducible in six isolated re-runs of the package (~1s each), which is exactly
-the profile of a test that will fire on a loaded CI box and be dismissed as infrastructure.
-
-Fix: give the fake server one reader (decode the initialize request, then drain), and put a deadline
-on the test's `initialize` context so the failure mode is a named test failure in seconds rather than
-a suite-wide timeout. Check `TestSamplingHandlerNil` and the other pipe-based fakes in that file for
-the same shape while there.
-
-This matters more than a normal flake because the batch's own working rule is "run `go test ./...`
-before every commit": a suite that can hang for ten minutes at random is a rule people stop following.
-
-Priority: Tier 2 — S.
 
 ---
 
