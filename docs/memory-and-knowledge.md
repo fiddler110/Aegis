@@ -254,6 +254,10 @@ At session start, Aegis loads memory in this order:
 4. User skills (`~/.aegis/skills/*.md`)
 5. Repo map (`.aegis/repomap.json` → injected into system prompt)
 
+Alongside those, Aegis injects the project's context files — `AGENTS.md`, `CLAUDE.md` and `.aegis/context.md` from the workspace root, in that order — into every session's system prompt.
+
+Under the **local prompt profile** (a loopback/local `base_url`, see [Providers](providers.md)) those context files are held to a combined 8,000-byte budget, spent in the order above. A file that runs past the budget keeps its beginning and carries a `[truncated: …]` notice naming `read_file` as the way to get the rest; a file that arrives with nothing left gets an `[omitted: …]` notice instead of being dropped silently. The budget is not configurable, and it does not apply on the default (cloud) profile. It exists because these files are injected on *every* turn and are the one always-injected block that grows with the project — an unbounded `CLAUDE.md` can cost more than the whole rest of the local base prompt. If yours is being truncated, that is the signal to split the detail into skills (loaded on demand) and keep the context file to what every turn genuinely needs.
+
 Memory files are cached for 5 seconds — file edits are picked up within a few seconds without restarting Aegis. Each memory file's integrity is re-checked against its `.integrity` sidecar on every (post-cache) load — see [Project Memory](#project-memory) above.
 
 The project knowledge base and long-term entity store are *not* injected into the system prompt — they're queried on demand via the `project_knowledge` and `entity_recall` tools, keeping their (potentially large) content out of every turn's token budget.

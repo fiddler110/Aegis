@@ -947,26 +947,109 @@ func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
 // the invisible number it was written to make visible.
 const localBasePromptCeilingTokens = 4550
 
-// TestEffectiveSystem_localProfileBudget is P62.6's regression assertion. See
-// localBasePromptCeilingTokens for what the number means and what to do when
-// this fails.
+// localInjectedPromptCeilingTokens is the second half of the budget, added by
+// P66.7. localBasePromptCeilingTokens above measures a bare workspace, where
+// every project-varying component is empty — which made it structurally blind
+// to the one block that actually grows with a project (LLM-01: CLAUDE.md was
+// injected with no cap at all). This ceiling covers the same prompt assembled
+// over a workspace that *has* a real, over-cap CLAUDE.md, so the number the
+// suite pins is the prefix a real local session sends.
+//
+// It is the base ceiling plus what localContextFilesMaxBytes is allowed to
+// cost: 8,000 bytes at tokenest's ASCII rate is ~2,000 tokens, and the `#
+// <name>` header plus the trust.Wrap provenance envelope add ~100 more. The
+// gap between the two constants is therefore the cap, expressed in tokens —
+// if it ever exceeds that, the cap is not binding and this test says so.
+//
+// Raise this only together with localContextFilesMaxBytes, and for the same
+// reason; raising it alone means the cap stopped working.
+const localInjectedPromptCeilingTokens = localBasePromptCeilingTokens + 2100
+
+// TestEffectiveSystem_localProfileBudget is P62.6's regression assertion,
+// extended by P66.7. See localBasePromptCeilingTokens and
+// localInjectedPromptCeilingTokens for what the numbers mean and what to do
+// when this fails.
+//
+// Two fixtures, because they answer different questions. The bare workspace
+// pins the prompt the project itself authors (personas, deferred-tools block,
+// tool schemas). The context-file workspace pins what a real project adds on
+// top, and is the arm that fails if the context-file cap is removed: the
+// fixture is deliberately larger than localContextFilesMaxBytes, so an
+// uncapped injection lands well over the second ceiling.
 func TestEffectiveSystem_localProfileBudget(t *testing.T) {
-	srv, reg := newLocalProfileServer(t)
+	for _, tc := range []struct {
+		name        string
+		contextFile bool
+		ceiling     int
+	}{
+		{"bare workspace", false, localBasePromptCeilingTokens},
+		{"with context files", true, localInjectedPromptCeilingTokens},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, reg := newLocalProfileServer(t, tc.contextFile)
+			system := srv.effectiveSystem(personaBaseSystem(t), "")
+			schemas := reg.Schemas()
+
+			systemTokens := tokenest.Estimate(system)
+			schemaTokens := tokenest.Tools(schemas)
+			total := systemTokens + schemaTokens
+
+			t.Logf("local-profile prompt: system=%d tokens (%d bytes), tool schemas=%d tokens (%d tools), total=%d tokens (ceiling %d)",
+				systemTokens, len(system), schemaTokens, len(schemas), total, tc.ceiling)
+
+			if total > tc.ceiling {
+				t.Errorf("local-profile prompt is %d estimated tokens, over the %d-token budget (system=%d, tool schemas=%d over %d tools).\n"+
+					"Run `go test ./internal/server/ -run TestBasePromptComposition_localProfile -v` for the per-component breakdown.\n"+
+					"If the growth is deliberate, raise the ceiling and note what was added.",
+					total, tc.ceiling, systemTokens, schemaTokens, len(schemas))
+			}
+		})
+	}
+}
+
+// TestEffectiveSystem_contextFilesAreCapped is P66.7's direct assertion, kept
+// separate from the ceiling test so the failure message says which of the two
+// things broke. It pins three properties of the cap: it binds under the local
+// profile, it truncates rather than dropping (a context file is instructions,
+// and silently losing them is the failure this cap must not introduce), and it
+// does not apply off the local profile.
+func TestEffectiveSystem_contextFilesAreCapped(t *testing.T) {
+	srv, _ := newLocalProfileServer(t, true)
+	capped := srv.memory.LoadContextCapped(localContextFilesMaxBytes)
+	uncapped := srv.memory.LoadContext()
+
+	if len(uncapped) <= localContextFilesMaxBytes {
+		t.Fatalf("fixture is %d bytes, not over the %d-byte cap — the test would pass with the cap removed", len(uncapped), localContextFilesMaxBytes)
+	}
+	if len(capped) >= len(uncapped) {
+		t.Errorf("context files were not capped: %d bytes capped vs %d uncapped", len(capped), len(uncapped))
+	}
+	// The header and provenance envelope ride outside the content budget, so
+	// allow a small margin over the cap itself rather than pinning it exactly.
+	if over := len(capped) - localContextFilesMaxBytes; over > 400 {
+		t.Errorf("capped context files are %d bytes, %d over the %d-byte cap — more than the header/envelope overhead accounts for", len(capped), over, localContextFilesMaxBytes)
+	}
+	if !strings.Contains(capped, "[truncated:") {
+		t.Error("capped context files carry no truncation notice; a model cannot tell it is reading a partial instruction file")
+	}
+	if !strings.Contains(capped, "# CLAUDE.md") {
+		t.Error("capped context files dropped CLAUDE.md entirely; the posture is head-kept truncation, not omission")
+	}
+	// The assembled prompt must carry the capped form, not the raw file.
 	system := srv.effectiveSystem(personaBaseSystem(t), "")
-	schemas := reg.Schemas()
+	if !strings.Contains(system, "[truncated:") {
+		t.Error("effectiveSystem injected the uncapped context files under the local profile")
+	}
 
-	systemTokens := tokenest.Estimate(system)
-	schemaTokens := tokenest.Tools(schemas)
-	total := systemTokens + schemaTokens
-
-	t.Logf("local-profile base prompt: system=%d tokens (%d bytes), tool schemas=%d tokens (%d tools), total=%d tokens (ceiling %d)",
-		systemTokens, len(system), schemaTokens, len(schemas), total, localBasePromptCeilingTokens)
-
-	if total > localBasePromptCeilingTokens {
-		t.Errorf("local-profile base prompt is %d estimated tokens, over the %d-token budget (system=%d, tool schemas=%d over %d tools).\n"+
-			"Run `go test ./internal/server/ -run TestBasePromptComposition_localProfile -v` for the per-component breakdown.\n"+
-			"If the growth is deliberate, raise localBasePromptCeilingTokens and note what was added.",
-			total, localBasePromptCeilingTokens, systemTokens, schemaTokens, len(schemas))
+	// Off the local profile the cap does not apply, exactly as with the repo
+	// map: the whole point of the local profile is that it is the constrained
+	// one.
+	srv.cfg.Provider.BaseURL = "https://api.anthropic.com"
+	if srv.cfg.Provider.LocalPromptProfile() {
+		t.Fatal("remote base_url still detects as the local prompt profile; the rest of this check is meaningless")
+	}
+	if remote := srv.effectiveSystem(personaBaseSystem(t), ""); strings.Contains(remote, "[truncated:") {
+		t.Error("the context-file cap applied off the local prompt profile")
 	}
 }
 
@@ -979,7 +1062,7 @@ func TestEffectiveSystem_localProfileBudget(t *testing.T) {
 //
 // Run with -v to see the table.
 func TestBasePromptComposition_localProfile(t *testing.T) {
-	srv, reg := newLocalProfileServer(t)
+	srv, reg := newLocalProfileServer(t, true)
 	base := personaBaseSystem(t)
 	system := srv.effectiveSystem(base, "")
 	schemas := reg.Schemas()
@@ -998,7 +1081,7 @@ func TestBasePromptComposition_localProfile(t *testing.T) {
 		{"tool-use block", persona.ToolUseBlockFor(true)},
 		{"completing-tasks block", persona.CompletingTasksBlockFor(true)},
 		{"platform block", persona.PlatformBlockFor(true)},
-		{"memory: context files", srv.memory.LoadContext()},
+		{"memory: context files", srv.memory.LoadContextCapped(localContextFilesMaxBytes)},
 		{"memory: project/user", srv.memory.Load()},
 		{"<skills_available>", skills.BuildIndex(workdir, srv.cfg.DataDir, srv.sessionEnabledSkills(""))},
 		{"<repo_map>", srv.repoMapFor(workdir)},
@@ -1049,7 +1132,7 @@ func TestBasePromptComposition_localProfile(t *testing.T) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "\nP62.6 local-profile base prompt composition (empty workspace)\n\n")
+	fmt.Fprintf(&b, "\nP62.6 local-profile base prompt composition (workspace with an over-cap CLAUDE.md, P66.7)\n\n")
 	fmt.Fprintf(&b, "%-28s %10s %10s %8s\n", "component", "bytes", "est.tokens", "%tokens")
 	for _, c := range components {
 		tk := tokenest.Estimate(c.text)
@@ -1119,11 +1202,19 @@ func TestBasePromptComposition_localProfile(t *testing.T) {
 
 // newLocalProfileServer builds a Server wired the way a local-model session is:
 // a loopback base_url (which LocalPromptProfile auto-detects), the real builtin
-// tool registry registered with LocalProfile set, and an empty workspace so no
-// repo map, memory, or skills inflate the measurement.
-func newLocalProfileServer(t *testing.T) (*Server, *tool.Registry) {
+// tool registry registered with LocalProfile set, and a workspace with no repo
+// map, memory, or skills so nothing incidental inflates the measurement.
+//
+// contextFile writes a realistic, deliberately over-cap CLAUDE.md into the
+// workspace (P66.7). With it false the fixture is the bare one P62.6 measured,
+// where every project-varying component is empty — the state that made the
+// budget test blind to LLM-01.
+func newLocalProfileServer(t *testing.T, contextFile bool) (*Server, *tool.Registry) {
 	t.Helper()
 	root := t.TempDir()
+	if contextFile {
+		writeContextFileFixture(t, root)
+	}
 	store, err := session.Open(filepath.Join(root, "s.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -1189,6 +1280,41 @@ func newLocalProfileServer(t *testing.T) (*Server, *tool.Registry) {
 	srv.workspace = root
 	srv.memory = memory.Sources{ProjectRoot: root, DataDir: cfg.DataDir}
 	return srv, reg
+}
+
+// contextFileFixtureBytes is the size writeContextFileFixture targets. It is
+// this repository's own CLAUDE.md rounded up — a curated, actively trimmed
+// file, not a pathological one — and it is over localContextFilesMaxBytes,
+// which is the point: a fixture under the cap would leave the budget test as
+// blind to the cap's removal as the bare fixture was to LLM-01.
+const contextFileFixtureBytes = 12000
+
+// writeContextFileFixture writes a CLAUDE.md of roughly contextFileFixtureBytes
+// into root. The content is shaped like a real one — a build section, a testing
+// section, an architecture table and a run of invariant paragraphs — because
+// the measurement is token-density-sensitive and a block of filler characters
+// would price differently from English prose with code spans in it.
+func writeContextFileFixture(t *testing.T, root string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("# CLAUDE.md\n\nGuidance for agents working in this repository.\n\n" +
+		"## Build & Run\n\n```bash\ngo build -o ./app ./cmd/app\ngo run ./cmd/app\n```\n\n" +
+		"## Testing\n\n```bash\ngo test ./...\ngo test -race ./...\n```\n\n" +
+		"## Architecture\n\n| Package | Role |\n|---------|------|\n" +
+		"| `internal/engine` | Agent loop: model turns, tool dispatch, compaction, budgets |\n" +
+		"| `internal/server` | HTTP daemon; wires sessions, tools, permissions, personas |\n" +
+		"| `internal/tool` | Tool interface and registry (register/expose separation) |\n\n" +
+		"## Invariants worth knowing before you edit\n\n")
+	for i := 1; b.Len() < contextFileFixtureBytes; i++ {
+		fmt.Fprintf(&b, "- **Invariant %d.** The %s path holds a property that a second call site can "+
+			"silently bypass, so `internal/pkg%d` pins it with a test rather than a comment. Changing "+
+			"the shape here means changing `Registry.Clone()` and the %d call sites that depend on it; "+
+			"raising the bound is allowed, raising it silently is not. See docs/notes%d.md for the "+
+			"measurement this number came from and what it bought.\n", i, []string{"read", "write", "dispatch", "compaction"}[i%4], i, 10+i, i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // personaBaseSystem returns the system prompt a session gets by default — the

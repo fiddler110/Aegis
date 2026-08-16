@@ -36,6 +36,38 @@ import (
 // default profile never applies this cap.
 const localRepoMapMaxBytes = 4000
 
+// localContextFilesMaxBytes caps the project context files (AGENTS.md,
+// CLAUDE.md, .aegis/context.md) injected under the local prompt profile
+// (P66.7, LLM-01). Before this they were the one always-injected block with no
+// bound at all, which is how the most carefully budgeted prompt in the project
+// came to be blown by the file documenting the budget.
+//
+// The number is derived, not measured off one repository — LLM-01's 11,611
+// tokens were this repo's CLAUDE.md at the time, and it reads 2,560 tokens
+// today, so sizing against it would be sizing against a number that moves.
+// The derivation:
+//
+//   - The served window under the documented local configuration is 32,768
+//     (docs/providers.md pins num_ctx in a Modelfile). The always-injected
+//     prefix should fit in a quarter of it — 8,192 tokens — so the three
+//     quarters left for the transcript are what the LLM-16 50%-of-window
+//     notice is spent reporting on, rather than the prefix tripping it alone.
+//   - Of that quarter, localBasePromptCeilingTokens already claims 4,550
+//     (persona blocks + <deferred_tools> + tool schemas) and localRepoMapMaxBytes
+//     another ~1,000. That leaves ~2,600 tokens ≈ 10,400 bytes.
+//   - 8,000 bytes (~2,000 tokens at tokenest's ASCII rate) takes that with
+//     room to spare, and lands on exactly twice localRepoMapMaxBytes — which
+//     is the ordering worth stating: hand-written project instructions are
+//     worth more per byte than a generated repo map, so they get double its
+//     room, while still staying under half the base-prompt ceiling.
+//
+// Nothing here rescues Ollama's *default* 4,096-token window: the base prompt
+// alone exceeds it, which is a fact about the default, not about this cap. The
+// cap's job is to stop context files from being the multiplier on top.
+//
+// The default profile never applies this cap, exactly as with the repo map.
+const localContextFilesMaxBytes = 8000
+
 // effectiveSystem combines the session's base system prompt with platform
 // context, loaded project/user memory, skills, and context files (AGENTS.md,
 // CLAUDE.md). sessionID selects which on-demand-activated built-in skills
@@ -50,7 +82,17 @@ func (s *Server) effectiveSystem(base, sessionID string) string {
 	parts = append(parts, persona.ToolUseBlockFor(local))
 	parts = append(parts, persona.CompletingTasksBlockFor(local))
 	parts = append(parts, persona.PlatformBlockFor(local))
-	if ctx := s.memory.LoadContext(); ctx != "" {
+	// Note the posture difference from the repo map below: an over-cap repo map
+	// is dropped whole, because it is generated, ranked and degrades gracefully
+	// to nothing. Context files are the project's instructions — dropping them
+	// whole would change how the session behaves, so they are truncated
+	// head-first with a notice instead. See localContextFilesMaxBytes and
+	// memory.LoadContextCapped.
+	contextBudget := 0
+	if local {
+		contextBudget = localContextFilesMaxBytes
+	}
+	if ctx := s.memory.LoadContextCapped(contextBudget); ctx != "" {
 		parts = append(parts, ctx)
 	}
 	if mem := s.memory.Load(); mem != "" {

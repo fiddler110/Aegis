@@ -26,8 +26,12 @@ type sourcesCache struct {
 	// load caches Sources.Load output
 	loadVal    string
 	loadExpiry time.Time
-	// ctx caches Sources.LoadContext output
+	// ctx caches Sources.LoadContextCapped output. ctxCap records the byte
+	// budget it was produced under, so a caller asking for a different cap
+	// than the cached one recomputes instead of being served the other
+	// caller's size (the daemon and `aegis chat` pass different budgets).
 	ctxVal    string
+	ctxCap    int
 	ctxExpiry time.Time
 	// relevance caches LoadRelevant's entries + document-frequency table
 	// (P8.5), invalidated on the underlying files' mtime/size rather than a
