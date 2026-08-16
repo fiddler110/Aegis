@@ -248,19 +248,29 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 
 	case api.KindApprovalRequest:
+		// P66.6 (SEC-14): the tool name and its arguments are model-controlled
+		// and land in the one dialog a human answers, so they are sanitized
+		// here at ingestion rather than in each preview renderer — approval.go
+		// routes four tools through renderToolCall and everything else through
+		// renderApprovalPreview, and neither the diff path nor the generic
+		// JSON excerpt strips anything, so a per-renderer fix would only hold
+		// until the next branch is added. The reason string is daemon-authored,
+		// but it renders in the same header and costs nothing to sanitize.
+		toolName := stripControlSeqs(ev.Tool)
+		input := sanitizeToolInputJSON(string(ev.ToolInput))
 		m.approval = &approvalState{
-			toolName: ev.Tool,
-			input:    string(ev.ToolInput),
-			reason:   ev.ApprovalReason,
+			toolName: toolName,
+			input:    input,
+			reason:   stripControlSeqs(ev.ApprovalReason),
 			id:       ev.ApprovalID,
-			pattern:  suggestRulePattern(string(ev.ToolInput)),
+			pattern:  suggestRulePattern(input),
 		}
 		m.status = "approval required"
 		// Blur the composer so its cursor stops implying it's the thing
 		// listening (P25.4a) — the approval dialog is the only visual and
 		// input focus target until it's answered.
 		m.ta.Blur()
-		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + ev.Tool}
+		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + toolName}
 
 	case api.KindSteer:
 		// A steering instruction was injected mid-run. Flush any partial model
