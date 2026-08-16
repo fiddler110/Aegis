@@ -22,6 +22,14 @@ type shellTool struct {
 	sb         sandbox.Backend // optional; nil = inline local exec (legacy path)
 }
 
+// maxShellTimeoutSec is the ceiling a caller-supplied timeout_sec is clamped
+// to. Package-level rather than a const inside Execute so
+// TestToolTimeoutsStayUnderTheStallBound can enumerate it alongside every other
+// per-call bound — the same reason maxShellOutput is package-level, and the
+// same failure mode: a bound no test can name is a bound that drifts above the
+// stall detector without anything noticing.
+const maxShellTimeoutSec = 600
+
 func newShellTool(root string, timeoutSec int, mgr *task.Manager, sb sandbox.Backend) *shellTool {
 	if timeoutSec <= 0 {
 		timeoutSec = 120
@@ -100,10 +108,9 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		return tool.Result{Content: hint, IsError: true}, nil
 	}
 
-	const maxTimeoutSec = 600
 	timeout := time.Duration(t.timeoutSec) * time.Second
 	if args.TimeoutSec > 0 {
-		timeout = time.Duration(min(args.TimeoutSec, maxTimeoutSec)) * time.Second
+		timeout = time.Duration(min(args.TimeoutSec, maxShellTimeoutSec)) * time.Second
 	}
 	root := effectiveRoot(ctx, t.root)
 

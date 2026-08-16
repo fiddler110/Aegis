@@ -12,6 +12,7 @@ import (
 	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/debate"
+	"github.com/fiddler110/aegis/internal/heartbeat"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -313,7 +314,28 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 		}, nil
 	}
 
-	spawn := func(agentCtx context.Context, wa workflowAgent, extraContext string) (string, error) {
+	// spawn runs one teammate. Two P66.8 obligations live here rather than at the
+	// four call sites below, so no workflow mode can be added without them:
+	//
+	//   - Every teammate wait is bounded by maxAgentDuration individually, not
+	//     only by the batch context. The batch bound is len(agents)+1 teammates
+	//     wide — 40 minutes at three agents — and a *sequential* or *loop* mode
+	//     spends that on one wait if the first teammate never returns. The
+	//     engine's stall detector is beaten on tool-execution edges, so that gap
+	//     is silence to the parent run, and 900s of it is a fatal ErrTurnStalled.
+	//     Bounding each wait at 600s puts the longest possible silent gap under
+	//     the stall bound by construction; the batch context still caps the whole
+	//     fan-out.
+	//   - Completion is reported to the parent's stall detector. The in-process
+	//     swarm backend chains its child engine's beats up automatically now
+	//     (tool.WithHeartbeat), but the subprocess backend runs in another
+	//     process and cannot, so a teammate finishing is the observable activity
+	//     this path has to volunteer.
+	spawn := func(batchCtx context.Context, wa workflowAgent, extraContext string) (string, error) {
+		agentCtx, agentCancel := context.WithTimeout(batchCtx, maxAgentDuration)
+		defer agentCancel()
+		defer heartbeat.Beat(batchCtx)
+
 		prompt := wa.Prompt
 		if extraContext != "" {
 			prompt = extraContext + "\n\n---\n\n" + prompt
@@ -347,6 +369,11 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 		return res.Output, nil
 	}
 
+	// The batch bound. It is deliberately wider than DefaultMaxTurnStallSec and
+	// is allowed to be: spawn bounds each individual wait at maxAgentDuration
+	// and beats on every completion, so this aggregate can never be reached
+	// without observable activity in between. See
+	// TestToolTimeoutsStayUnderTheStallBound, which enumerates both kinds.
 	agentCtx, agentCancel := context.WithTimeout(ctx, maxAgentDuration*time.Duration(max(len(agents), 1)+1))
 	defer agentCancel()
 
@@ -454,7 +481,16 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 	}
 
 	childMode := clampMode(swarm.ParentModeFromContext(ctx), "build")
+	// Each role is bounded and beats on completion for the same reason the
+	// workflow spawn does (P66.8): debateCtx below is 2*rounds+2 teammates wide
+	// — 80 minutes at the default clamp — and debate.Run spends it one role at a
+	// time, so without a per-role bound a single wedged proposer is 80 minutes of
+	// silence to the parent run and dies at 900s as a fatal ErrTurnStalled.
 	runRole := func(roleCtx context.Context, systemPrompt, prompt string) (string, error) {
+		roleCtx, roleCancel := context.WithTimeout(roleCtx, maxAgentDuration)
+		defer roleCancel()
+		defer heartbeat.Beat(ctx)
+
 		cfg := swarm.SpawnConfig{
 			Name:         fmt.Sprintf("debate-%s", uuid.NewString()[:8]),
 			Team:         "debate",
@@ -502,6 +538,9 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 	if debateMaxRounds > debate.MaxRoundsCeiling {
 		debateMaxRounds = debate.MaxRoundsCeiling
 	}
+	// The aggregate debate bound, wider than DefaultMaxTurnStallSec for the same
+	// reason the workflow batch bound is: runRole caps each individual role at
+	// maxAgentDuration and beats on each one finishing.
 	debateCtx, debateCancel := context.WithTimeout(ctx, maxAgentDuration*time.Duration(2*debateMaxRounds+2))
 	defer debateCancel()
 

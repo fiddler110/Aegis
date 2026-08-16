@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/heartbeat"
 )
 
 // admissionAdapter bounds how many requests are in flight against one backend
@@ -72,6 +74,14 @@ type admissionAdapter struct {
 // than a single local server can absorb) and a silent multi-minute stall would
 // otherwise look like a hung model.
 const slowAdmissionWait = 60 * time.Second
+
+// admissionBeatInterval is how often a queued request reports itself alive to
+// the engine's stall detector (P66.8). It is a small fraction of the 900s stall
+// bound rather than a value tuned against the queue: the beat's only job is to
+// keep the gap between two beats comfortably under that bound, and a wake every
+// thirty seconds costs nothing against a request that is already waiting on a
+// GPU.
+const admissionBeatInterval = 30 * time.Second
 
 // WithAdmissionControl returns base wrapped so at most maxInFlight of its
 // streams run concurrently; the rest block in Stream until a slot frees.
@@ -149,11 +159,24 @@ func (a *admissionAdapter) Stream(ctx context.Context, req Request) (<-chan Even
 		// waits rather than only in hindsight.
 		a.logger.Debug("provider admission: queued behind in-flight request(s)",
 			"provider", a.base.Name(), "depth", cap(a.sem))
+		// P66.8 / ARCH-04: a queued request produces no stream event by
+		// definition — it has not reached the backend yet — so to the engine's
+		// stall detector it is indistinguishable from a hung one, and several
+		// sessions against one Ollama server at the default depth of 1 queue
+		// silently. Past the 900s bound the queued run was killed as "the turn
+		// is hung, not slow", fatally, when it was in fact waiting its turn
+		// exactly as designed. This is the one wait in the codebase that is
+		// *known* to be alive while producing nothing, which is what licenses a
+		// blind ticker here and nowhere else: the slot is held by another
+		// in-flight request that the detector is already watching.
+		stopBeat := heartbeat.While(ctx, admissionBeatInterval)
 		select {
 		case a.sem <- struct{}{}:
 		case <-ctx.Done():
+			stopBeat()
 			return nil, ctx.Err()
 		}
+		stopBeat()
 	}
 	if waited := time.Since(start); waited >= slowAdmissionWait {
 		a.logger.Warn("provider admission: request waited a long time for a slot; consider raising provider.max_concurrent_requests or reducing concurrent agents",

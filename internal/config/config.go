@@ -518,21 +518,35 @@ func (c CostConfig) MaxWallClockPerRun() time.Duration {
 // DefaultMaxTurnStallSec is the shipped cost.max_turn_stall (P39.17): fifteen
 // minutes of complete silence before a turn is called hung.
 //
-// The number is chosen to be a *backstop*, not a competitor. Three
-// layer-specific timeouts already bound pieces of a turn, and the stall detector
-// must not fire before any of them has had its chance, or it would convert a
-// precise, locally-reported failure into a vague one:
+// The number is chosen to be a *backstop*, not a competitor. Layer-specific
+// timeouts already bound pieces of a turn, and the stall detector must not fire
+// before any of them has had its chance, or it would convert a precise,
+// locally-reported failure into a vague one:
 //
 //   - provider.stream_idle_timeout — 10 minutes (sse.DefaultStreamIdleTimeout),
 //     the gap between two streamed chunks.
 //   - the shell tool's per-call ceiling — 600s = 10 minutes, the longest a
 //     single tool call can legitimately block with no output.
 //   - the cron job timeout — 10 minutes.
+//   - every other per-call tool bound, enumerated by
+//     builtin.TestToolTimeoutsStayUnderTheStallBound.
 //
-// Fifteen minutes clears all three with margin. It is also far below the hours a
+// Fifteen minutes clears them all with margin. It is also far below the hours a
 // legitimate phased drive runs for, which is the gap P39.17 was filed about: the
 // 2026-08-09 hang had been silent 14 minutes when it was noticed by hand, and
 // nothing in the harness would ever have noticed it.
+//
+// **The relation is "above every *per-call* bound", not "above every timeout",
+// and the distinction is load-bearing** (P66.8 / ARCH-04). Two bounds in
+// internal/tool/builtin are deliberately larger — the agent tool's workflow
+// batch (up to 9 teammates) and its debate (up to 2*rounds+2 roles) — and until
+// P66.8 that made this comment false rather than nuanced: 40 and 80 minutes of
+// silence against a 900s bound, aborting a healthy fan-out as a fatal
+// ErrTurnStalled. What makes them admissible now is that each decomposes into
+// per-teammate waits capped at 10 minutes with a heartbeat between them, so an
+// aggregate bound can never be *reached* without observable activity. A future
+// timeout above 900s needs the same treatment or it is a regression; the
+// enumerating test above is what enforces the choice.
 const DefaultMaxTurnStallSec = 900
 
 // MaxTurnStall returns cost.max_turn_stall as a time.Duration, or 0 when set to

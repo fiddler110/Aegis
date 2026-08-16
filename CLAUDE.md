@@ -140,6 +140,13 @@ trust grant per root. See [docs/configuration.md](docs/configuration.md).
   `MaxWallClockPerRun` (off by default), plus `MaxTurnStall` (900s, on) which is
   the only bound covering tool execution. Stall and wall-clock aborts are fatal
   to a drive; loop/tool-failure aborts are resettable.
+- **The stall bound sits above every *per-call* timeout, not every timeout.**
+  `TestToolTimeoutsStayUnderTheStallBound` enumerates them; a new one goes in that
+  table. An *aggregate* bound above 900s (the agent tool's fan-out and debate) is
+  admissible only if it decomposes into sub-900s waits that beat in between —
+  otherwise a healthy long call dies as a fatal `ErrTurnStalled`. Beats ride
+  `internal/heartbeat`, which **chains**: a sub-agent's watch must never shadow
+  its parent's.
 - **Loop detection.** `PollExempter` hides a call entirely (polls only);
   `SignatureTransparent` hides only its arguments (bookkeeping only, never a
   model-chosen search query). Tests keep both sets narrow and disjoint.

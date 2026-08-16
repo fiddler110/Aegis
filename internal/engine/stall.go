@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/heartbeat"
 )
 
 // stallWatch is P39.17's per-turn stall detector: it ends a run that has stopped
@@ -168,23 +170,31 @@ func (s *stallWatch) override(err error) error {
 	return err
 }
 
-// stallBeatKey carries the run's detector down to turn() and the tool
+// withStallBeat carries the run's detector down to turn() and the tool
 // executors. It travels in the context rather than in five signatures because it
 // is run-scoped state that must also reach the goroutines of a parallel tool
 // round — the same reason tool.WithRegistry/WithWorkdir already ride there. The
 // value is never read for behaviour, only beaten on.
-type stallBeatKey struct{}
-
+//
+// It delegates to internal/heartbeat, which *chains* rather than shadows
+// (P66.8 / ARCH-04). Before that, this function was a bare context.WithValue on
+// a key of its own, so a sub-agent's engine — running under a context derived
+// from its parent's tool context — installed its detector over the same key and
+// hid the parent's. Every child beat landed on the child, the parent's watch saw
+// nothing for the whole fan-out, and a healthy multi-agent round was aborted as
+// ErrTurnStalled, which is fatal to a drive. The chain also lets the agent tool
+// and the provider admission queue beat, which is why the plumbing had to move
+// into a leaf package: internal/tool imports internal/provider, so no home
+// inside those three is reachable from the other two.
 func withStallBeat(ctx context.Context, s *stallWatch) context.Context {
 	if s == nil || s.limit <= 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, stallBeatKey{}, s)
+	return heartbeat.With(ctx, s.beat)
 }
 
-// beat is the call site's view of the detector: a no-op when none is attached.
+// beat is the call site's view of the detector: a no-op when none is attached,
+// and a beat on *every* watch in the chain when several are.
 func beat(ctx context.Context) {
-	if s, ok := ctx.Value(stallBeatKey{}).(*stallWatch); ok {
-		s.beat()
-	}
+	heartbeat.Beat(ctx)
 }

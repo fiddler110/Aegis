@@ -424,12 +424,22 @@ cost:
   # carry a default.
   #
   # 15 minutes is a backstop, not a competitor: it deliberately sits above every
-  # narrower timeout (provider.stream_idle_timeout at 10 minutes, the shell
-  # tool's 600s per-call ceiling, cron's 10-minute job bound) so those report
-  # their own precise failure first. It is also the only bound that covers the
-  # tool-execution half of a turn at all. Like the wall-clock abort, a stall is
-  # fatal to the phased drive rather than a resumable reset — a fresh context
-  # would be handed straight back to whatever is wedged.
+  # narrower *per-call* timeout (provider.stream_idle_timeout at 10 minutes, the
+  # shell tool's 600s per-call ceiling, cron's 10-minute job bound, every
+  # per-call bound in the tool package) so those report their own precise
+  # failure first. It is also the only bound that covers the tool-execution half
+  # of a turn at all. Like the wall-clock abort, a stall is fatal to the phased
+  # drive rather than a resumable reset — a fresh context would be handed
+  # straight back to whatever is wedged.
+  #
+  # Two *aggregate* bounds are deliberately larger: an `agent` workflow batch
+  # and a `debate` run may span up to 40 and 80 minutes respectively. They are
+  # safe because each is decomposed into per-teammate waits capped at 10 minutes
+  # that report progress in between, so the aggregate can never be reached
+  # without activity the detector sees. A queued request waiting on
+  # provider.max_concurrent_requests reports itself alive the same way. Before
+  # that (P66.8) a healthy multi-agent round was aborted here as "the turn is
+  # hung, not slow" — the one diagnosis a drive cannot recover from.
   max_turn_stall: 900
 
   # 0 = unlimited. Refuses to start a new turn once a session's cumulative
