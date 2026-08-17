@@ -484,8 +484,9 @@ the new trigger against a broken baseline. This is also the item where the Ollam
 already recorded in this project matters: because `prompt_eval_count` reports the *full* prompt on a
 cache hit, the cost this trigger avoids is measurable rather than assumed.
 
-**The live tier has now shown the state this item is really about (2026-08-16).** Under a forced
-read-chain at a 24,576-token window, compaction fired on **eleven of fifteen turns**, each time
+**The live tier has now shown the state this item is really about (2026-08-16), on two different
+local models.** Under a forced read-chain at a 24,576-token window, compaction fired on **eleven of
+fifteen turns**, each time
 summarizing two messages and leaving the conversation at ~90% full so the next turn re-crossed the
 trigger immediately; prefill went from ~4.5s to ~18s at the first compaction and never came back.
 P62.7's minimum-yield rule suppressed none of them. Whatever this item gates compaction on, it has to
@@ -1078,12 +1079,17 @@ sitting, 2026-08-16*):
 - **LLM-01 — met.** Local profile 4,871 provider-reported first-turn tokens against 8,393 default,
   neither clamped at the 16,384 window. With a realistic over-cap `CLAUDE.md`, the deterministic
   budget measures 6,383 estimated tokens against a 6,650 ceiling — the 11,611-token figure this item
-  was filed on is three fixes stale.
+  was filed on is three fixes stale. The same prompt costs **5,775 / 9,591** on
+  `aegis-qwen35-9b:32k`: the ceiling is in `tokenest` units, not in any tokenizer's, and ~19% spread
+  between two local models is normal rather than a regression.
 - **LLM-02 — met, and it found the *next* question.** Compaction fires exactly where the shared
   trigger says (85% of 24,576 ≈ 20,889). What it does after that is the finding: **eleven
   compactions in fifteen turns, each summarizing two messages and leaving the context at ~90% full**,
   so every subsequent turn re-crosses the trigger. Prefill quadruples at the first compaction and
   stays there. P62.7's minimum-yield rule suppressed none of the eleven — read that before **P67.6**.
+  **Reproduced identically on a second model** (`aegis-qwen35-9b:32k`: same 11 compactions, same
+  11→9, prefill 2.3s → 9.2s), where it settles at ~96% full rather than ~90%. It is a property of
+  compaction's yield, not of one model.
 - **LLM-03 — not read directly.** The fix is in and the path is right; `estimated=false` on every
   `done` event and estimates tracking served counts to ~11% are consistent with a calibrating
   session, but the sample count itself lives in a session trace, and the live-tier daemons delete
@@ -1217,8 +1223,16 @@ run** for the second watch item.
 that a single run means something, plus a default-prose control for the prose-attributable failures
 above. Both are runs, not code.
 
-**Two more runs, 2026-08-16 (`qwen3:14b-32k`, deferred-surface arm), and they argue for the second
-option.** Neither touched `tool_search` — the detour this item watches for is now unobserved at n=5
+**A second model closes the first watch item, 2026-08-16.** On `aegis-qwen35-9b:32k` the whole
+`TestLiveWorkflow` tier passes, including the seeded-bug task — the first time it has been solved on
+this tier. With `edit_file` deferred, the model went straight to `multi_edit` (5 tool calls, 13.8s,
+no `tool_search`, no detour). The guard arm solved the same task the long way and is the better
+record: `edit_section` errored, `multi_edit` errored, and the model re-read the file and got the next
+`multi_edit` right — recovery in two calls, no breaker trip. **The deferred surface is reachable and
+the compressed prose holds; what is unmeasured is now only turn *cost* against an exposed-`edit_file`
+control.**
+
+**Two runs on `qwen3:14b-32k` the same day argue for replacing the task rather than repeating it.** Neither touched `tool_search` — the detour this item watches for is now unobserved at n=5
 across two sittings. But both failed the task: one rewrote `temps.py`, re-ran it, and reported a
 confidently wrong average; the other ran the script once, read the `TypeError`, and stopped without
 editing anything. With the 2026-08-14 control arm failing outright twice as well, **the seeded-bug

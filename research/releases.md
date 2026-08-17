@@ -42,9 +42,11 @@ reading:
 
 ### The live-tier sitting, 2026-08-16 — the compaction A/B finally measured something
 
-Row #1 of the "Up next" ten: one setup, five items. **Model:** `qwen3:14b-32k` (Q4_K_M, `num_ctx
-32768` pinned in the Modelfile, fully resident in VRAM), Ollama on `:11434`, `-count=1` throughout,
-windows/amd64. Two items closed, two moved, one did not run.
+Row #1 of the "Up next" ten: one setup, five items. **Models:** `qwen3:14b-32k` (Q4_K_M) first, then
+everything except P38.1 again on `aegis-qwen35-9b:32k` (Qwen3.5-9B-MTP, UD-Q4_K_XL) — both with
+`num_ctx 32768` pinned in the Modelfile and fully resident in VRAM. Ollama on `:11434`, `-count=1`
+throughout, windows/amd64. Two items closed, two moved, one did not run — and the second model
+turned P62.9's open watch item into a positive result, so read that subsection too.
 
 **What the sitting produced, item by item:**
 
@@ -164,6 +166,43 @@ worth building.
 
 `GuardNoMetaLeak` passed — no `PASS.`/`FAIL:`/`VERDICT:` leakage — and logged the *"model ended its
 turn with no text — asking it for a plain-text answer"* corrective, which is the P25.3 path working.
+
+#### Second model, same day: `aegis-qwen35-9b:32k` (Qwen3.5-9B-MTP, UD-Q4_K_XL, `num_ctx 32768`)
+
+Everything above except P38.1, re-run against a second local model. **`TestLiveWorkflow` passes in
+full — all three subtests — which is the first time the seeded-bug task has ever been solved on this
+tier.** Five tool calls, 13.8s: `shell` (reproduce) → `read_file` → `shell` (inspect the CSV) →
+`multi_edit` → `shell` (verify). No `tool_search`, no detour, no approval.
+
+**This is the arm P62.9 was actually asking for.** With `edit_file` deferred under the local profile,
+the model went straight to `multi_edit` with a one-line anchored edit — `total += row["temp"]` →
+`total += float(row["temp"])` — and the outcome check passed. The guard subtest, working the same
+task the long way, is the more interesting record: it tried `edit_section` (error), then `multi_edit`
+(error), then re-read the file with `Get-Content` and got `multi_edit` right on the next attempt.
+**Two failed edits and a self-directed re-read, not a tool-failure-breaker trip** — the recovery path
+P39.16's handle-based tools were built for, working. The error *text* is not in the SSE stream, only
+its length, which is the same blind spot P65.2 hits.
+
+The A/B reproduces the compaction thrash exactly, at a different model, tokenizer and speed:
+
+| | gate on | gate off |
+|---|---|---|
+| wall | **3m24s** | **3m34s** |
+| total prefill | **110,812ms** | **111,457ms** |
+| turns / reads / compactions | 15 / 14 / 11 | 15 / 14 / 11 |
+
+0.6% apart — noise again, now at n=2 models. Prefill steps from ~2.3s to ~9.2s at the first
+compaction and stays flat; eleven compactions, every one of them 11→9 messages. The one difference
+worth noting is **where it settles: ~96-97% full**, against ~90% on `qwen3:14b-32k`, with the prompt
+still creeping up turn over turn (20,200 → 20,724). The trigger is the same 20,889; this model simply
+generates less per turn, so each cycle re-crosses it from closer to the ceiling. The phenomenon is a
+property of compaction's yield, not of one model's verbosity.
+
+**One number for LLM-01 that only a second model can show:** the same prompt bytes cost **5,775 /
+9,591** first-turn tokens here (local / default) against **4,871 / 8,393** on `qwen3:14b-32k` — ~19%
+more for an identical prompt. The budget in `localBasePromptCeilingTokens` is estimated in
+`tokenest`'s units, and a ceiling in estimated tokens is not a promise about any particular
+tokenizer's count. Worth remembering before a future measurement is read as a regression.
 
 #### What this sitting did not close
 
