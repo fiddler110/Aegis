@@ -8,7 +8,14 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-17 (third record the same day) — **the top five of the "Up next" ten
+**Last updated:** 2026-08-17 (fourth record the same day) — **P66.13 shipped**, the top of the
+rewritten "Up next" list and the most serious defect left in the open set. `aegis chat` built a bare
+one-layer permission gate where the daemon stacks five. Record: [The gate stack finally has one
+home](#the-gate-stack-finally-has-one-home-2026-08-17-p6613). The extraction found a **fourth** bare
+gate the review had not (`aegis debate`), a **fifth partial** one (the subprocess worker, two layers
+behind), and a hook-chain bug in the daemon itself.
+
+**Last updated (previous):** 2026-08-17 (third record the same day) — **the top five of the "Up next" ten
 shipped**: **P67.3**, **P66.25**, **P67.4**, **P67.5** and **P67.2**, one commit each, no live-model
 work in any of them. Records below under [The top five, 2026-08-17](#the-top-five-2026-08-17).
 Three of the five correct the item they were built from, which is the part worth reading: P67.5's
@@ -58,6 +65,76 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### The gate stack finally has one home, 2026-08-17 (P66.13)
+
+Row #1 of the rewritten "Up next" list, and the most serious *defect* left in the open set. Closes
+**QUAL-01**, **QUAL-02**, **QUAL-03**, **QUAL-06**, **ARCH-05** and **ARCH-06**.
+
+**The item was right about the shape and understated the count.** It named four instances of one root
+cause with `aegis chat` as the second path. Extracting the constructor turned up two more, plus a bug
+in the daemon that nothing had reported:
+
+- **A fourth bare gate, unreported.** `internal/cli/debate.go` built
+  `permission.New(ModeBuild, AutoDeny{})` directly, so an operator's deny rules and
+  `egress_then_write` were inert for every debate role. Nobody had looked, because the review's four
+  instances were all in `chat.go`.
+- **A fifth, partial.** `internal/cli/worker.go` hand-rolled three of the five layers — it had been
+  fixed for P10.1 and then drifted two behind. The per-task write scope (P46.1) and the persona-tool
+  gate were absent, so a `scope` tool call in a subprocess teammate confined nothing at all.
+- **The daemon dropped the user's exec hooks whenever a contextual policy was on.** `buildGate`'s
+  contextual branch built a fresh `hooks.NewMulti(s.audit, ctxGate)`, replacing `s.hooks` rather than
+  composing with it — so turning on `egress_then_write` or a network allowlist silently disabled
+  every configured `PreToolUse`/`PostToolUse` hook for the run. The two features are unrelated;
+  nothing connected them but that one line. Composing instead of replacing is the fix.
+
+**What shipped.** Two new packages, and the count of things that must be got right per entry point
+drops from "read the daemon and copy it" to one call each:
+
+- **`internal/enginecfg`** — `BuildGate` (the five-layer stack, with the evaluation order documented
+  once), `CostLimits`/`Limits.Apply` (the run bounds, plus the three provider-side ones ARCH-06 found
+  missing on the CLI), `BuiltinOptions` (the config-derived half of the 27-field struct),
+  `OutputGuard`/`GuardModel`, `ExecHooks`, `ConfigRules`, `Approver`.
+- **`internal/sysprompt`** — the block renderers and the two local-profile byte caps the daemon and
+  the CLI must agree on. Assembly stays with the daemon: `promptSections` carries the P67.2
+  stable/volatile split, which is a property of a long-lived session and means nothing to a one-shot
+  process.
+
+**What `aegis chat` gained**, all of it previously configured-and-inert: `permission.rules` deny
+rules, `security.egress_then_write` and the network allowlist, the persona-tool and write-scope
+layers, a persona's own deny rules (`--persona` reached the prompt and not the gate),
+`max_iterations`, `loop_threshold`, `redact_secrets`, the output guard, user `hooks:`, the
+`commands:`/toolpath resolver (so `grep` had been falling back to the pure-Go walker there
+regardless of config), `<deferred_tools>`, the debate-integration block, and both local-profile
+prompt caps — on the path that *is* the local-model path.
+
+**One behavior change worth naming rather than burying:** `aegis chat` now honors
+`permission.auto_approve_exec`, which the daemon and the subprocess worker already honored and it
+alone ignored. `--yes` remains the per-invocation opt-in for everyone else.
+
+**The enabling refactor.** `newChatCmd` was 683 lines wrapping a 615-line `RunE` closure holding both
+bugs (QUAL-03). It is now a flag struct plus `runChat`, with `readChatPrompt`, `openChatLog`,
+`prepareChatSkills`, `buildChatGate`, `buildChatEngine`, `emitChatSummary` and a `chatDrive` type
+carrying `runPhased`/`runLinear`. That is what makes the two bugs assertions instead of code
+readings.
+
+**The instrument.** `TestEveryEngineCallSiteDecidesItsGate` scans every production `engine.New` and
+fails when one neither takes a gate from `enginecfg.BuildGate` nor says in a preceding comment why it
+has none — the same grep-the-source shape as
+`TestEveryRegisterCallSiteDecidesTheLocalProfile`, which is the instrument this defect class actually
+responds to. Two sites legitimately have no gate and now say so: the tool-call probe (synthetic
+in-memory tools, nothing to mediate) and the eval harness (handed its `Options` whole by the scenario
+that defines it). Backed by three behavioral tests in `internal/cli` — a config deny rule, a persona
+deny rule, and the `<deferred_tools>` block — the first of which was mutation-checked by nulling the
+rule pass-through and confirming it fails.
+
+**One finding corrected.** QUAL-01 lists `internal/cli/dryrun.go` as having "no gate at all". True and
+harmless: `dry-run` builds no engine and executes nothing. It is a preview of the registered tool
+surface, which is why the fix it needed was `BuiltinOptions` (so the preview matches a real run),
+not a gate. The invariant test scans `engine.New` sites for exactly this reason.
+
+**Verified:** full `go test ./...`, `go vet ./...`, `staticcheck` clean, `-race` on
+`internal/{cli,server,enginecfg,sysprompt}`.
 
 ### The top five, 2026-08-17
 

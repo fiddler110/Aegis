@@ -118,6 +118,11 @@ func (r *Result) FinalText() string {
 // s.Turns in sequence on a single conversation, collecting a Result. It does
 // not fail the test itself — pair it with Check/RunAndCheck or AssertGolden.
 func Run(ctx context.Context, s Scenario) (*Result, error) {
+	// Gate: deliberately none of this package's business. A scenario is handed
+	// its engine.Options whole by the fixture that defines it, so the gate — like
+	// the adapter and the tool set — is whatever that scenario is exercising. A
+	// gate imposed here would make every scenario test this package's policy
+	// instead of the behavior it was written for (P66.13).
 	eng, err := engine.New(s.Options)
 	if err != nil {
 		return nil, fmt.Errorf("eval: build engine for scenario %q: %w", s.Name, err)

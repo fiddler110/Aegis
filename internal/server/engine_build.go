@@ -2,14 +2,12 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/enginecfg"
 	"github.com/fiddler110/aegis/internal/guard"
-	"github.com/fiddler110/aegis/internal/hooks"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
@@ -32,10 +30,7 @@ func roundCapFor(workdir string) engine.RoundCapFunc {
 }
 
 func (s *Server) approver() permission.Approver {
-	if s.cfg.Permission.AutoApproveExec {
-		return permission.AutoApprove{}
-	}
-	return permission.AutoDeny{}
+	return enginecfg.Approver(s.cfg)
 }
 
 // providerUnconfiguredErr returns a helpful error message that names the
@@ -76,173 +71,53 @@ func (s *Server) resolveModel(p persona.Persona, sessionModel string) string {
 	return s.personaModel(p)
 }
 
-// guardModel picks the model output-guard verdict calls run on. In order:
-// an explicit output_guard.model, then — on a *cloud* provider — the configured
-// provider.small_model, the same preference session titles (sessions.go) and
-// compaction (server.go) have; otherwise the session model itself.
-//
-// The small-model preference exists because a small non-thinking model makes
-// the guard's strict "reply exactly PASS" contract actually satisfiable and
-// keeps the extra call cheap; running the verdict on a deep/thinking session
-// model tripled turn latency and fail-closed nearly every passing answer in the
-// P25.3 live eval. That reasoning holds on Anthropic/OpenAI, where the two
-// models are separate remote capacity.
-//
-// It inverts on a single local Ollama server (P59.5). The guard fires on every
-// final answer plus its corrective retries, and each call naming a model other
-// than the resident one can evict that resident model and force a full cold
-// reload on the next turn — on a 16GB-VRAM box, every post-guard turn. That is
-// precisely the churn the bounded keep_alive default
-// (providerfactory.defaultOllamaKeepAlive) and the P33.9 load_duration
-// telemetry were built to eliminate, and a cold reload costs far more than the
-// verdict call saves. So locally the guard runs on the model already loaded,
-// and an operator with the VRAM to hold two picks the second one deliberately
-// via output_guard.model rather than inheriting it from a key meant for
-// compaction and titles.
+// guardModel and outputGuardConfig bind the daemon's config to the shared
+// resolvers, where the reasoning behind each lives (enginecfg/guard.go). They
+// stay as methods because the call sites below read better for it, not because
+// the daemon decides either differently from `aegis chat`.
 func (s *Server) guardModel(sessionModel string) string {
-	if m := strings.TrimSpace(s.cfg.OutputGuard.Model); m != "" {
-		return m
-	}
-	if s.isOllamaProvider() {
-		return sessionModel
-	}
-	if s.cfg.Provider.SmallModel != "" {
-		return s.cfg.Provider.SmallModel
-	}
-	return sessionModel
+	return enginecfg.GuardModel(s.cfg, sessionModel)
 }
 
-// outputGuardConfig merges the global output-guard default with a persona's
-// override into a guard.Config.
 func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
-	c := guard.Config{
-		Mode:       s.cfg.OutputGuard.Mode,
-		Rubric:     s.cfg.OutputGuard.Rubric,
-		MaxRetries: s.cfg.OutputGuard.MaxRetries,
-	}
-	if p.Guard != nil {
-		if p.Guard.Disabled {
-			// A loaded (non-built-in) persona is untrusted content (P7.5),
-			// the same as its Mode and Rules fields: honoring "output_guard:
-			// none" unconditionally would let a project-level persona.md
-			// silently switch off the last safety net with no warning
-			// surfaced anywhere. Built-in personas are reviewed and shipped
-			// with Aegis, so they remain trusted to disable the guard.
-			if p.Loaded {
-				s.logger.Warn("ignoring output_guard: none from untrusted (loaded) persona", "persona", p.Name)
-			} else {
-				return guard.Config{Disabled: true}
-			}
-		}
-		if p.Guard.Mode != "" {
-			c.Mode = p.Guard.Mode
-		}
-		if len(p.Guard.Schema) > 0 {
-			c.Schema = p.Guard.Schema
-		}
-		if p.Guard.Rubric != "" {
-			c.Rubric = p.Guard.Rubric
-		}
-		if p.Guard.MaxRetries > 0 {
-			c.MaxRetries = p.Guard.MaxRetries
-		}
-	}
-	return c
+	return enginecfg.OutputGuardConfig(s.cfg, p, s.logger)
 }
 
-// buildGate assembles the shared permission gate stack, used by every engine
-// run the daemon starts, top-level or sub-agent, so a spawned teammate can't
-// bypass an operator's security posture just because it took a different code
-// path to get an engine (P10.1).
+// buildGate binds the daemon's live state to the shared gate stack
+// (enginecfg.BuildGate), which is where the layers and their evaluation order
+// are documented. Mode clamping happens above this call (resolveSessionMode /
+// clampMode); an empty persona.Persona{} skips the persona-specific layers
+// (rules/tools), which is what sub-agent and debate runs pass since they have no
+// persona of their own.
 //
-// The stack is built inside-out but evaluated outermost-first. In evaluation
-// order:
-//
-//	Scope → PersonaTool → Rules → Contextual → Mode
-//
-// This doc comment is the one place that order is stated (P63.6). The layers
-// below deliberately do not restate their own position relative to each other:
-// three of them once did, each claiming to be "the outermost", and two were
-// wrong — every one had been correct when written and none was updated as a
-// layer was added above it. A wrong ordering claim on a permission stack is
-// worse than no claim, so add new layers to the list here and describe only
-// what each layer *does* at its own site.
-//
-// Every layer except Mode is conditional, so a given run may skip some: the
-// contextual gate needs egress-then-write or a network allowlist configured,
-// the rule and persona-tool layers need rules/tools to exist. Mode clamping
-// happens above this call (resolveSessionMode / clampMode); an empty
-// persona.Persona{} skips the persona-specific layers (rules/tools), which is
-// what sub-agent runs pass since they have no persona of their own.
+// Only three things here are the daemon's and cannot live in the shared
+// constructor: the permission rules are read under permMu because an "allow
+// always" approval adds one at runtime, the audit sink is a daemon-owned file,
+// and s.hooks already carries the user's configured exec hooks.
 func (s *Server) buildGate(mode string, approver permission.Approver, p persona.Persona) (engine.Gate, engine.Hooks) {
-	baseGate := permission.New(permission.ParseMode(mode), approver)
-
-	var gate engine.Gate = baseGate
-	engineHooks := s.hooks
-
-	// Wrap with contextual security policies if any are enabled.
-	if s.cfg.Security.EgressThenWrite || len(s.cfg.Security.NetworkAllowList) > 0 {
-		ctxGate := permission.NewContextualGate(baseGate, permission.ContextualOpts{
-			EgressThenWrite:  s.cfg.Security.EgressThenWrite,
-			NetworkAllowList: s.cfg.Security.NetworkAllowList,
-			Registry:         s.tools,
-			OnDecision: func(d permission.ContextualDecision) {
-				if s.audit != nil {
-					s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
-				}
-			},
-		})
-		gate = ctxGate
-		engineHooks = hooks.NewMulti(s.audit, ctxGate)
-	}
-
-	// Text-based allow/deny rules. An explicit deny always blocks; an explicit
-	// allow grants without prompting; otherwise the call falls through to the
-	// gate(s) wrapped above.
 	s.permMu.Lock()
 	rules := append([]permission.Rule{}, s.permRules...)
 	s.permMu.Unlock()
-	if len(p.Rules) > 0 {
-		if pr, err := permission.ParseRules(p.Rules); err == nil {
-			rules = append(rules, filterPersonaRules(pr, p, s.logger)...)
-		} else {
-			s.logger.Warn("ignoring invalid persona rules", "persona", p.Name, "err", err)
-		}
-	}
-	if len(rules) > 0 {
-		gate = permission.NewRuleGate(gate, rules,
-			permission.WithRuleObserver(func(d permission.ContextualDecision) {
-				if s.audit != nil {
-					s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
-				}
-			}))
-	}
 
-	// A persona's declared Tools list is advisory only (P7.5: never a security
-	// boundary) — it warns or prompts, and the real allow/deny rules it wraps
-	// still decide.
-	if len(p.Tools) > 0 {
-		gate = permission.NewPersonaToolGate(gate, p.Name, p.Tools, approver, s.logger,
-			func(d permission.ContextualDecision) {
-				if s.audit != nil {
-					s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
-				}
-			})
-	}
-
-	// Per-task file-write scope (P46.1). It binds hardest: an out-of-scope
-	// write is refused even when a text allow-rule would grant it, since the
-	// scope is a further restriction the model/skill opted into for one task,
-	// not a competing permission. That is why it goes on last — anything added
-	// after it would relax a containment the run asked for. A no-op until a
-	// `scope` tool call activates a scope on the run's context.
-	gate = permission.NewScopeGate(gate, func(d permission.ContextualDecision) {
-		if s.audit != nil {
-			s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
-		}
+	return enginecfg.BuildGate(enginecfg.GateOptions{
+		Mode:       mode,
+		Approver:   approver,
+		Persona:    p,
+		Security:   s.cfg.Security,
+		Registry:   s.tools,
+		Rules:      rules,
+		Hooks:      s.hooks,
+		OnDecision: s.recordPolicyDecision,
+		Logger:     s.logger,
 	})
+}
 
-	return gate, engineHooks
+// recordPolicyDecision writes one gate decision to the audit trail. Passed to
+// every layer of the stack, so a decision is recorded wherever it was made.
+func (s *Server) recordPolicyDecision(d permission.ContextualDecision) {
+	if s.audit != nil {
+		s.audit.PolicyDecision(d.Tool, d.Cap, d.Rule, string(d.Decision), d.Reason)
+	}
 }
 
 // preloadPersonaTools exposes any deferred tool named in a persona's advisory
@@ -341,9 +216,7 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	// small model can have a very different window from the global default.
 	ctxWin, _ := s.effectiveContextWindowFor(context.Background(), model)
 
-	var guardFn guard.Func
-	var guardRetries int
-	var guardFormat json.RawMessage
+	var guardOpts enginecfg.GuardOptions
 	if guardEnabled {
 		// The guard verdict runs on its own model (usually provider.small_model),
 		// so it gets that model's window too rather than the run model's (P52.4).
@@ -352,22 +225,13 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		if gm != model {
 			guardWin, _ = s.effectiveContextWindowFor(context.Background(), gm)
 		}
-		gc := s.outputGuardConfig(p)
-		guardFn, guardRetries = guard.Resolve(gc, s.modelAdapter(guardWin), gm)
-		// P59.8: a schema guard's requirement is expressible to the backend
-		// ahead of generation, so the corrective retry is decoded under it
-		// instead of being asked in prose and checked afterwards. Only schema
-		// mode has a machine-checkable shape — an llm-mode rubric is prose, and
-		// there is nothing to compile.
-		if guardFn != nil && gc.Mode == "schema" {
-			guardFormat = guard.SchemaFormat(gc.Schema)
-		}
+		guardOpts = enginecfg.OutputGuard(s.cfg, p, s.modelAdapter(guardWin), gm, s.logger)
 	}
 
 	if tracker == nil {
 		tracker = cost.NewTracker()
 	}
-	eng, err := engine.New(engine.Options{
+	opts := engine.Options{
 		Adapter: s.modelAdapter(ctxWin),
 		Tools:   tools,
 		Gate:    gate,
@@ -376,29 +240,19 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		// daemon sends (compaction, the guard, a spawn, a title) declares its
 		// own purpose at its own call site, so this stays the only foreground
 		// tag in the server.
-		Purpose:                  provider.PurposeForeground,
-		Compactor:                s.compactor,
-		Hooks:                    engineHooks,
-		Cost:                     tracker,
-		Temperature:              s.cfg.Provider.Temperature,
-		Seed:                     s.cfg.Provider.Seed,
-		BudgetUSD:                s.cfg.Cost.BudgetUSD,
-		MaxTokensPerRun:          s.cfg.Cost.MaxTokensPerRun,
-		MaxGeneratedTokensPerRun: s.cfg.Cost.MaxGeneratedTokensPerRun,
-		MaxWallClockPerRun:       s.cfg.Cost.MaxWallClockPerRun(),
-		MaxTurnStall:             s.cfg.Cost.MaxTurnStall(),
-		Model:                    model,
-		MaxTokens:                s.cfg.Provider.MaxTokens,
-		MaxIterations:            s.cfg.Provider.MaxIterations,
-		LoopThreshold:            s.cfg.Provider.LoopThreshold,
-		ContextWindowTokens:      ctxWin,
-		ContextWindowFloor:       func() int { return provider.RaisedContextWindow(s.adapter) },
-		SteerChan:                steerCh,
-		OutputGuard:              guardFn,
-		OutputGuardMaxRetries:    guardRetries,
-		OutputGuardFormat:        guardFormat,
-		ZeroToolNudgeMaxRetries:  s.cfg.Provider.ZeroToolNudge,
-		ToolCallShim:             s.cfg.Provider.ToolCallShimEnabled(),
+		Purpose:                 provider.PurposeForeground,
+		Compactor:               s.compactor,
+		Hooks:                   engineHooks,
+		Cost:                    tracker,
+		Temperature:             s.cfg.Provider.Temperature,
+		Seed:                    s.cfg.Provider.Seed,
+		Model:                   model,
+		MaxTokens:               s.cfg.Provider.MaxTokens,
+		ContextWindowTokens:     ctxWin,
+		ContextWindowFloor:      func() int { return provider.RaisedContextWindow(s.adapter) },
+		SteerChan:               steerCh,
+		ZeroToolNudgeMaxRetries: s.cfg.Provider.ZeroToolNudge,
+		ToolCallShim:            s.cfg.Provider.ToolCallShimEnabled(),
 		// P67.1: the per-call caps in truncate.go are per *call*; this bounds
 		// what a parallel round contributes in aggregate.
 		RoundResultCap: roundCapFor(workdir),
@@ -408,11 +262,18 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		// telemetry field, so it was inert on the documented openai + :11434/v1
 		// configuration.
 		SharedContextWindow: providerfactory.CertainlyOllama(s.cfg.Provider),
-		RedactSecrets:       s.cfg.Security.RedactSecrets,
 		Logger:              s.logger,
 		Workdir:             workdir,
 		ExtraRoots:          s.workspaceRootsFor(workdir),
-	})
+	}
+	// P66.13/ARCH-06: the run bounds come from one shared reading of config, so
+	// a new one reaches the CLI paths too instead of being set here and
+	// forgotten there.
+	enginecfg.CostLimits(s.cfg).Apply(&opts)
+	guardOpts.Apply(&opts)
+	// Gate: set above from s.buildGate, which is enginecfg.BuildGate bound to the
+	// daemon's live rules and audit sink.
+	eng, err := engine.New(opts)
 	if err != nil {
 		return nil, "", err
 	}

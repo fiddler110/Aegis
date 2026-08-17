@@ -16,7 +16,6 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cron"
-	"github.com/fiddler110/aegis/internal/hooks"
 	"github.com/fiddler110/aegis/internal/mcp"
 	"github.com/fiddler110/aegis/internal/notify"
 	"github.com/fiddler110/aegis/internal/permission"
@@ -26,48 +25,18 @@ import (
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
+	"github.com/fiddler110/aegis/internal/sysprompt"
 	"github.com/fiddler110/aegis/internal/task"
-	"github.com/fiddler110/aegis/internal/tool"
 )
 
-// localRepoMapMaxBytes caps the repo map injected under the local prompt
-// profile (P25.6): a large repo map is one of the heavier always-injected
-// blocks, and small local models pay for it in prompt-processing latency on
-// every turn regardless of whether the task touches most of the repo. The
-// default profile never applies this cap.
-const localRepoMapMaxBytes = 4000
-
-// localContextFilesMaxBytes caps the project context files (AGENTS.md,
-// CLAUDE.md, .aegis/context.md) injected under the local prompt profile
-// (P66.7, LLM-01). Before this they were the one always-injected block with no
-// bound at all, which is how the most carefully budgeted prompt in the project
-// came to be blown by the file documenting the budget.
-//
-// The number is derived, not measured off one repository — LLM-01's 11,611
-// tokens were this repo's CLAUDE.md at the time, and it reads 2,560 tokens
-// today, so sizing against it would be sizing against a number that moves.
-// The derivation:
-//
-//   - The served window under the documented local configuration is 32,768
-//     (docs/providers.md pins num_ctx in a Modelfile). The always-injected
-//     prefix should fit in a quarter of it — 8,192 tokens — so the three
-//     quarters left for the transcript are what the LLM-16 50%-of-window
-//     notice is spent reporting on, rather than the prefix tripping it alone.
-//   - Of that quarter, localBasePromptCeilingTokens already claims 4,550
-//     (persona blocks + <deferred_tools> + tool schemas) and localRepoMapMaxBytes
-//     another ~1,000. That leaves ~2,600 tokens ≈ 10,400 bytes.
-//   - 8,000 bytes (~2,000 tokens at tokenest's ASCII rate) takes that with
-//     room to spare, and lands on exactly twice localRepoMapMaxBytes — which
-//     is the ordering worth stating: hand-written project instructions are
-//     worth more per byte than a generated repo map, so they get double its
-//     room, while still staying under half the base-prompt ceiling.
-//
-// Nothing here rescues Ollama's *default* 4,096-token window: the base prompt
-// alone exceeds it, which is a fact about the default, not about this cap. The
-// cap's job is to stop context files from being the multiplier on top.
-//
-// The default profile never applies this cap, exactly as with the repo map.
-const localContextFilesMaxBytes = 8000
+// The two local-profile byte caps now live in internal/sysprompt so the CLI's
+// one-shot prompt assembly applies the same ones (P66.13/QUAL-02, which found
+// `aegis chat` applying neither — on the path that *is* the local-model path).
+// Kept as local aliases so the call sites below read unchanged.
+const (
+	localRepoMapMaxBytes      = sysprompt.LocalRepoMapMaxBytes
+	localContextFilesMaxBytes = sysprompt.LocalContextFilesMaxBytes
+)
 
 // promptSection is one named block of the assembled system prompt (P67.2).
 //
@@ -172,16 +141,12 @@ func (s *Server) promptSections(base, sessionID string) []promptSection {
 		// is dropped whole, because it is generated, ranked and degrades gracefully
 		// to nothing. Context files are the project's instructions — dropping them
 		// whole would change how the session behaves, so they are truncated
-		// head-first with a notice instead. See localContextFilesMaxBytes and
+		// head-first with a notice instead. See sysprompt.ContextFilesBudget and
 		// memory.LoadContextCapped.
 		volatileSection("memory: context files",
 			"AGENTS.md, CLAUDE.md and .aegis/context.md are re-read from disk each turn; the user edits them and the agent writes them, and a session running against instructions the file no longer carries is a worse failure than a cache miss.",
 			func() string {
-				contextBudget := 0
-				if local {
-					contextBudget = localContextFilesMaxBytes
-				}
-				return s.memory.LoadContextCapped(contextBudget)
+				return s.memory.LoadContextCapped(sysprompt.ContextFilesBudget(local))
 			}),
 		volatileSection("memory: project/user",
 			"the `memory` tool appends facts during the run; memoizing would hide from the next turn the very fact the model just chose to remember.",
@@ -195,15 +160,15 @@ func (s *Server) promptSections(base, sessionID string) []promptSection {
 			"loadRepoMap rebuilds the map when the workspace has changed since indexing, which is exactly what the agent spends the conversation doing; a memoized map describes the repository as it was at the first turn.",
 			func() string {
 				repoMap := s.repoMapFor(workdir)
-				if repoMap == "" || (local && len(repoMap) > localRepoMapMaxBytes) {
+				if !sysprompt.RepoMapFits(repoMap, local) {
 					return ""
 				}
 				return repoMap
 			}),
 		volatileSection("<deferred_tools>",
 			"the inventory is the complement of what is exposed, and that moves within a conversation: tool_search loads a deferred tool, persona preloading exposes more, and MCP's tools/list_changed rewrites the parent registry that every clone shares.",
-			func() string { return deferredToolsBlock(s.toolRegistryFor(sessionID)) }),
-		stableSection("debate block", func() string { return debateIntegrationBlock(s.cfg.Security.Debate) }),
+			func() string { return sysprompt.DeferredToolsBlock(s.toolRegistryFor(sessionID)) }),
+		stableSection("debate block", func() string { return sysprompt.DebateIntegrationBlock(s.cfg.Security.Debate) }),
 	}
 }
 
@@ -225,73 +190,6 @@ func (s *Server) effectiveSystem(base, sessionID string) string {
 		}
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-// debateIntegrationBlock returns the P12.5 opt-in instruction text wiring the
-// `agent` tool's debate mode into the two existing security workflows that
-// benefit from adversarial review, or "" if neither toggle is enabled (the
-// default — debate multiplies model calls per item, so this is never
-// injected silently). Both toggles can be on independently; the block only
-// mentions the ones actually enabled.
-func debateIntegrationBlock(cfg config.DebateIntegrationConfig) string {
-	if !cfg.ThreatModel && !cfg.Triage {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("## Debate mode (P12)\n")
-	if cfg.ThreatModel {
-		b.WriteString("- Threat modeling: before writing an identified threat/mitigation pair into the threat model document, call the `agent` tool with mode:\"debate\" and claim set to that threat/mitigation pair. Adjust the entry's severity/mitigation per the arbiter's verdict before finalizing it.\n")
-	}
-	if cfg.Triage {
-		b.WriteString("- Security-audit triage: before suppressing a borderline or disputed-severity scan finding via the baseline, call the `agent` tool with mode:\"debate\" and claim set to the finding (severity, location, rationale). Only suppress if the verdict upholds the low-risk assessment.\n")
-	}
-	return b.String()
-}
-
-// toExecSpecs converts config hook entries into hooks.ExecSpec values.
-func toExecSpecs(cfgHooks []config.HookConfig) []hooks.ExecSpec {
-	specs := make([]hooks.ExecSpec, 0, len(cfgHooks))
-	for _, h := range cfgHooks {
-		specs = append(specs, hooks.ExecSpec{
-			Event:      h.Event,
-			Command:    h.Command,
-			Tools:      h.Tools,
-			TimeoutSec: h.TimeoutSec,
-		})
-	}
-	return specs
-}
-
-// deferredToolsBlock advertises tools that are registered but not exposed by
-// default (P4.6). The model loads them on demand with the tool_search tool.
-//
-// One line per tool, and that line is the tool's Summary rather than its full
-// Description (P62.6). Printing the manuals made this block 2,953 tokens — 38%
-// of the local profile's entire base prompt, spent on 26 tools that are *not
-// loaded*, against 3,614 for the 27 that are. Deferral had stopped being a
-// saving.
-//
-// Nothing is lost to discovery by shortening it, which is what makes this
-// cheap: tool_search matches its query against the full Name+Description via
-// Registry.SearchDeferred, and that text lives in the registry, not in the
-// prompt. A scanner name or a synonym that no longer appears here still finds
-// its tool, and the full description comes back with the schema on load.
-func deferredToolsBlock(reg *tool.Registry) string {
-	if reg == nil {
-		return ""
-	}
-	deferred := reg.Deferred()
-	if len(deferred) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString("<deferred_tools>\n")
-	sb.WriteString("These tools are not loaded yet. When a task needs one, call `tool_search` with keywords to load it before use.\n")
-	for _, d := range deferred {
-		fmt.Fprintf(&sb, "- %s: %s\n", d.Name, d.Summary)
-	}
-	sb.WriteString("</deferred_tools>")
-	return sb.String()
 }
 
 // repoMapOptions renders the `repomap:` config section as build options

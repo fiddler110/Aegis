@@ -13,10 +13,10 @@ import (
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/enginecfg"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/providerfactory"
-	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -151,15 +151,18 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	}
 
 	reg := tool.NewRegistry()
-	// P62.10: carry the daemon's prompt profile across the process boundary,
-	// like the gate stack (P10.1) and the sandbox (P10.2) above. This worker
-	// reconstructs cfg from disk and then has to actually consult it: without
-	// this it registered the cloud surface regardless of the configured model,
-	// so a teammate spawned under a local model paid ~1,300 schema tokens the
-	// daemon had already decided that model should not spend. Nothing becomes
-	// unreachable — the profile defers rather than removes, and tool_search
-	// loads any of it on demand.
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, Sandbox: workerSandbox, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile(), ToolFamilies: cfg.Tools.Families}); err != nil {
+	// P62.10: carry the daemon's prompt profile and option set across the
+	// process boundary, like the gate stack (P10.1) and the sandbox (P10.2).
+	regOpts := enginecfg.BuiltinOptions(cfg, cwd)
+	regOpts.Sandbox = workerSandbox
+	// LocalProfile is decided by enginecfg.BuiltinOptions (P62.10/P66.13): this
+	// worker reconstructs cfg from disk and then has to actually consult it —
+	// without that it registered the cloud surface regardless of the configured
+	// model, so a teammate spawned under a local model paid ~1,300 schema tokens
+	// the daemon had already decided that model should not spend. Nothing becomes
+	// unreachable — the profile defers rather than removes, and tool_search loads
+	// any of it on demand.
+	if err := builtin.Register(reg, regOpts); err != nil {
 		return "", cost.Snapshot{}, err
 	}
 
@@ -171,27 +174,30 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	if cfg.Permission.AutoApproveExec {
 		approver = permission.AutoApprove{}
 	}
-	// Same gate-stack composition as the daemon's in-process path
-	// (server.buildGate, P10.1): a bare mode gate here let a subprocess
-	// teammate route straight around an operator's egress-then-write policy
-	// or deny rule, exactly the bypass P10.1 closed for in-process sub-agents
-	// — this backend needed the identical fix since it builds its engine in a
-	// wholly separate process with no access to the daemon's live Server
-	// state. cfg.Permission.Rules covers persisted rules (project/global
-	// config); a rule added via an "allow always" approval that hasn't been
-	// persisted yet is the one gap a separate process can't see.
-	baseGate := permission.New(permission.ParseMode(spec.Config.Mode), approver)
-	var gate engine.Gate = baseGate
-	if cfg.Security.EgressThenWrite || len(cfg.Security.NetworkAllowList) > 0 {
-		gate = permission.NewContextualGate(baseGate, permission.ContextualOpts{
-			EgressThenWrite:  cfg.Security.EgressThenWrite,
-			NetworkAllowList: cfg.Security.NetworkAllowList,
-			Registry:         reg,
-		})
-	}
-	if rules, rerr := permission.ParseRules(cfg.Permission.Rules); rerr == nil && len(rules) > 0 {
-		gate = permission.NewRuleGate(gate, rules)
-	}
+	// Same gate stack as every other engine Aegis builds (enginecfg.BuildGate,
+	// P10.1/P66.13): a bare mode gate here let a subprocess teammate route
+	// straight around an operator's egress-then-write policy or deny rule,
+	// exactly the bypass P10.1 closed for in-process sub-agents — this backend
+	// needed the identical fix since it builds its engine in a wholly separate
+	// process with no access to the daemon's live Server state. It had been
+	// hand-rolling three of the five layers, and had drifted two behind: the
+	// per-task write scope (P46.1) and the persona-tool gate were absent, so a
+	// `scope` call in a subprocess teammate silently confined nothing.
+	//
+	// cfg.Permission.Rules covers persisted rules (project/global config); a
+	// rule added via an "allow always" approval that hasn't been persisted yet
+	// is the one gap a separate process can't see. A subprocess teammate has no
+	// persona of its own, so the persona layers stay inert here — but they are
+	// now inert by the stack's own rule rather than by absence.
+	gate, engineHooks := enginecfg.BuildGate(enginecfg.GateOptions{
+		Mode:     spec.Config.Mode,
+		Approver: approver,
+		Security: cfg.Security,
+		Registry: reg,
+		Rules:    enginecfg.ConfigRules(cfg, logger),
+		Hooks:    enginecfg.EngineHooks(enginecfg.ExecHooks(cfg, logger)),
+		Logger:   logger,
+	})
 
 	budgetUSD := cfg.Cost.BudgetUSD
 	if spec.RemainingBudgetUSD > 0 {
@@ -206,6 +212,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		Adapter:        adapter,
 		Tools:          reg,
 		Gate:           gate,
+		Hooks:          engineHooks,
 		Cost:           tracker,
 		Purpose:        provider.PurposeSubAgent, // P67.3
 		RoundResultCap: roundCapFor(cwd),         // P67.1

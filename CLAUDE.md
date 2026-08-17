@@ -80,6 +80,8 @@ none is reachable.
 | `internal/tool` | `Tool` interface + `Registry` (register/expose separation) |
 | `internal/tool/builtin` | 50+ built-in tools |
 | `internal/permission` | Modes `plan`/`build`/`auto`, allow/deny rules, advisory persona tool gate |
+| `internal/enginecfg` | The engine-construction decisions every entry point must make identically: gate stack, run limits, `builtin.Options`, output guard, hooks |
+| `internal/sysprompt` | System-prompt blocks and local-profile byte caps the daemon and CLI must agree on |
 | `internal/persona` | 22 built-in system prompts + user/project `.md` personas |
 | `internal/skills` | Progressive-disclosure skills (project/user files + embedded built-ins) |
 | `internal/drive` | Phased skill drive: multi-phase builds as fresh context-reset runs |
@@ -126,6 +128,16 @@ is a deliberate, documented hole. See [docs/configuration.md](docs/configuration
   profile `edit_file` is deferred and the handle-based editors are not — a test
   pins that direction. A tool's `Description()` or error must never name a tool
   the active profile defers.
+- **One engine constructor's worth of decisions.** The permission gate stack,
+  the run limits, `builtin.Options`' config-derived half, the output guard and
+  the hook chain live in `internal/enginecfg` and are built there, not at each
+  `engine.New`. Adding a permission layer or a run bound means editing that
+  package once. `TestEveryEngineCallSiteDecidesItsGate` fails when a new
+  `engine.New` neither takes a gate from `enginecfg.BuildGate` nor says in a
+  preceding comment why it has none; `TestEveryRegisterCallSiteDecidesTheLocalProfile`
+  does the same for the tool profile. A bare `permission.New` at an `engine.New`
+  is the P66.13 bypass — the mode gate alone, with no rules, contextual policy,
+  persona-tool or scope layer.
 - **Tool registry clones.** `Registry.Clone()` shares one `toolTable` (with its
   own mutex) so a later parent registration — MCP's `tools/list_changed` above
   all — reaches existing clones. A clone's own `Register`/`Upsert` goes to a

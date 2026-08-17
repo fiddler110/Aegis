@@ -12,10 +12,10 @@ import (
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/debate"
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/enginecfg"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/providerfactory"
-	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
@@ -89,14 +89,9 @@ func newDebateCmd() *cobra.Command {
 			// anywhere else in the CLI. The security domain's roles reach for
 			// security_scan, which the local profile defers rather than drops, so
 			// a role that needs it loads it by name.
-			if err := builtin.Register(reg, builtin.Options{
-				Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL,
-				SecurityScan:       security.OptionsFromConfig(cfg.Security),
-				DASTAllowedTargets: cfg.Security.DAST.AllowedTargets,
-				DASTAllowActive:    cfg.Security.DAST.AllowActive,
-				LocalProfile:       cfg.Provider.LocalPromptProfile(),
-				ToolFamilies:       cfg.Tools.Families,
-			}); err != nil {
+			// LocalProfile and the rest of the config-derived option set are decided
+			// by enginecfg.BuiltinOptions (P62.10/P66.13) rather than re-listed here.
+			if err := builtin.Register(reg, enginecfg.BuiltinOptions(cfg, cwd)); err != nil {
 				return err
 			}
 
@@ -104,12 +99,26 @@ func newDebateCmd() *cobra.Command {
 			defer stop()
 
 			tracker := cost.NewTracker()
+			// P66.13: a fourth bare gate, not in the review's four instances —
+			// found by extracting the constructor. `aegis debate` built
+			// permission.New(ModeBuild, AutoDeny{}) directly, so an operator's
+			// deny rules and egress-then-write policy were inert for every
+			// debate role. A role has no persona of its own, and AutoDeny is
+			// kept deliberately: a debate role is an analysis run that should
+			// never sit waiting for an approval nobody is watching for.
+			gate, engineHooks := enginecfg.BuildGate(enginecfg.GateOptions{
+				Mode:     string(permission.ModeBuild),
+				Approver: permission.AutoDeny{},
+				Security: cfg.Security,
+				Registry: reg,
+				Rules:    enginecfg.ConfigRules(cfg, nil),
+			})
 			runRole := func(roleCtx context.Context, systemPrompt, prompt string) (string, error) {
-				gate := permission.New(permission.ModeBuild, permission.AutoDeny{})
 				eng, err := engine.New(engine.Options{
 					Adapter:         adapter,
 					Tools:           reg,
 					Gate:            gate,
+					Hooks:           engineHooks,
 					Cost:            tracker,
 					Purpose:         provider.PurposeDebate, // P67.3
 					RoundResultCap:  roundCapFor(cwd),       // P67.1

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/skills"
 )
 
@@ -22,7 +23,7 @@ func TestBuildChatSystemAdvertisesEnabledBuiltinSkill(t *testing.T) {
 	cfg := &config.Config{DataDir: dataDir}
 	cfg.Skills.BuiltinEnabled = []string{"threat-modeling"}
 
-	sys := buildChatSystem(cfg, t.TempDir(), cfg.Skills.BuiltinEnabled, "", "")
+	sys := buildChatSystem(cfg, t.TempDir(), cfg.Skills.BuiltinEnabled, "", persona.Persona{}, nil)
 	if !strings.Contains(sys, "<skills_available>") {
 		t.Fatalf("system prompt missing <skills_available> block:\n%s", sys)
 	}
@@ -40,7 +41,7 @@ func TestBuildChatSystemOmitsSkillsIndexWhenNoneEnabled(t *testing.T) {
 	}
 	cfg := &config.Config{DataDir: dataDir} // Skills.BuiltinEnabled left empty
 
-	sys := buildChatSystem(cfg, t.TempDir(), cfg.Skills.BuiltinEnabled, "", "")
+	sys := buildChatSystem(cfg, t.TempDir(), cfg.Skills.BuiltinEnabled, "", persona.Persona{}, nil)
 	if strings.Contains(sys, "<skills_available>") {
 		t.Errorf("system prompt unexpectedly advertises skills with none enabled:\n%s", sys)
 	}

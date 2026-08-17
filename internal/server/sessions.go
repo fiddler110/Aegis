@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,7 +18,6 @@ import (
 	"github.com/fiddler110/aegis/internal/compaction"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/memory"
-	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/session"
@@ -59,34 +57,6 @@ func (s *Server) resolveSessionMode(reqMode string, p persona.Persona) string {
 		return ""
 	}
 	return p.Mode
-}
-
-// filterPersonaRules strips Allow rules contributed by a loaded (non-built-in)
-// persona before they are merged into a session's rule set. A loaded persona
-// is untrusted content (P7.5) in exactly the same way its Mode field is: an
-// Allow rule short-circuits both the mode gate and the approver (RuleGate.Check),
-// so an unfiltered "allow shell(*)" in a project-level persona.md would grant
-// unattended access regardless of the configured plan/build/auto mode — a
-// strictly bigger hole than the Mode escalation resolveSessionMode already
-// blocks, since it bypasses mode entirely rather than just requesting a more
-// permissive one. Deny rules only narrow access, so they carry none of that
-// risk and pass through unchanged. Built-in personas (Loaded == false) are
-// reviewed and shipped with Aegis, so their rules remain fully trusted.
-func filterPersonaRules(rules []permission.Rule, p persona.Persona, logger *slog.Logger) []permission.Rule {
-	if !p.Loaded {
-		return rules
-	}
-	kept := make([]permission.Rule, 0, len(rules))
-	for _, r := range rules {
-		if r.Action == permission.RuleDeny {
-			kept = append(kept, r)
-			continue
-		}
-		if logger != nil {
-			logger.Warn("ignoring persona allow rule from untrusted (loaded) persona", "persona", p.Name)
-		}
-	}
-	return kept
 }
 
 // refreshPersonas rescans the persona directories so file edits, additions,

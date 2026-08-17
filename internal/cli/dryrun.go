@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/enginecfg"
 	"github.com/fiddler110/aegis/internal/memory"
-	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
@@ -64,7 +64,16 @@ func newDryRunCmd() *cobra.Command {
 			local := cfg.Provider.LocalPromptProfile()
 			fmt.Fprintf(out, "\n=== Registered Tools (%s prompt profile) ===\n", profileLabel(local))
 			reg := tool.NewRegistry()
-			if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, KrokiURL: cfg.Diagram.KrokiURL, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: local, ToolFamilies: cfg.Tools.Families}); err != nil {
+			// LocalProfile and the rest of the config-derived option set come
+			// from enginecfg.BuiltinOptions (P66.13/QUAL-06), so this preview
+			// reports the tool surface a real run would get rather than a
+			// separately-maintained approximation of it.
+			//
+			// dry-run builds no engine and executes nothing, which is why it
+			// needs no permission gate — the P66.13 finding that it "has no
+			// gate at all" is true and harmless. TestEveryEngineCallSiteDecidesItsGate
+			// scans engine.New sites for exactly that reason.
+			if err := builtin.Register(reg, enginecfg.BuiltinOptions(cfg, cwd)); err != nil {
 				fmt.Fprintf(out, "(error registering tools: %v)\n", err)
 			} else {
 				schemas := reg.Schemas()

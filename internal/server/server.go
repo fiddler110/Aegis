@@ -29,6 +29,7 @@ import (
 	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/embed"
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/enginecfg"
 	"github.com/fiddler110/aegis/internal/filetracker"
 	"github.com/fiddler110/aegis/internal/hooks"
 	"github.com/fiddler110/aegis/internal/knowledge"
@@ -52,7 +53,6 @@ import (
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/fiddler110/aegis/internal/toolcallprobe"
-	"github.com/fiddler110/aegis/internal/toolpath"
 )
 
 const maxRequestBody = 10 << 20 // 10 MiB
@@ -680,7 +680,23 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// actual tool-call time sees the fully constructed Server — same pattern
 	// as cronRun/s.cronPermCheck above.
 	knowledgeProvider := builtin.KnowledgeProviderFunc(func(root string) (*knowledge.Store, error) { return s.knowledgeStoreFor(root) })
-	if err := builtin.Register(reg, builtin.Options{Root: cwd, DataDir: cfg.DataDir, Commands: toolpath.New(cfg.Commands), KrokiURL: cfg.Diagram.KrokiURL, Tasks: taskMgr, Cron: cronSched, Sandbox: sb, FileTracker: ft, LSP: lspMgr, TodoList: todoList, Search: builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}, TeamTasks: teamTasks, MailboxRoot: swarm.MailboxRoot(cfg.DataDir), Knowledge: knowledgeStore, KnowledgeProvider: knowledgeProvider, LongMem: longMemStore, BuiltinSkills: cfg.Skills.BuiltinEnabled, SecurityScan: security.OptionsFromConfig(cfg.Security), DASTAllowedTargets: cfg.Security.DAST.AllowedTargets, DASTAllowActive: cfg.Security.DAST.AllowActive, LocalProfile: cfg.Provider.LocalPromptProfile(), ToolFamilies: cfg.Tools.Families, GitPreCommitTestCommand: cfg.Git.PreCommitTestCommand, GitPreCommitTestTimeout: time.Duration(cfg.Git.PreCommitTestTimeoutSec) * time.Second}); err != nil {
+	regOpts := enginecfg.BuiltinOptions(cfg, cwd)
+	regOpts.Tasks = taskMgr
+	regOpts.Cron = cronSched
+	regOpts.Sandbox = sb
+	regOpts.FileTracker = ft
+	regOpts.LSP = lspMgr
+	regOpts.TodoList = todoList
+	regOpts.Search = builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}
+	regOpts.TeamTasks = teamTasks
+	regOpts.MailboxRoot = swarm.MailboxRoot(cfg.DataDir)
+	regOpts.Knowledge = knowledgeStore
+	regOpts.KnowledgeProvider = knowledgeProvider
+	regOpts.LongMem = longMemStore
+	// LocalProfile and the rest of the config-derived option set are decided by
+	// enginecfg.BuiltinOptions (P62.10/P66.13); everything assigned above is host
+	// wiring only the daemon has, which is why it is assigned rather than shared.
+	if err := builtin.Register(reg, regOpts); err != nil {
 		store.Close()
 		return nil, err
 	}
@@ -843,7 +859,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
 	s.notifier = notify.New(cfg.Notify.Desktop, cfg.Notify.Webhook, logger)
-	s.execHook = hooks.NewExec(toExecSpecs(cfg.Hooks), logger)
+	s.execHook = enginecfg.ExecHooks(cfg, logger)
 	if s.execHook != nil {
 		s.hooks = hooks.NewMulti(s.audit, s.execHook)
 	} else {

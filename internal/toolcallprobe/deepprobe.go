@@ -166,6 +166,11 @@ func RunDeepFill(ctx context.Context, adapter provider.Adapter, model string) (D
 		return DeepResult{}, err
 	}
 
+	// Gate: none, deliberately. The probe registers two synthetic in-memory tools
+	// (fillTool, markerFillTool) that touch nothing outside this function — there
+	// is no filesystem, network or process effect for a permission layer to
+	// mediate, and a gate here would only be able to refuse the probe its own
+	// instrument (P66.13).
 	eng, err := engine.New(engine.Options{
 		Adapter:   adapter,
 		Tools:     reg,

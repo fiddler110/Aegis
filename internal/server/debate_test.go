@@ -20,6 +20,7 @@ import (
 	"github.com/fiddler110/aegis/internal/debate"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/session"
+	"github.com/fiddler110/aegis/internal/sysprompt"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
@@ -72,7 +73,7 @@ func TestDebateIntegrationBlockPerToggle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := debateIntegrationBlock(tc.cfg)
+			got := sysprompt.DebateIntegrationBlock(tc.cfg)
 			for _, s := range tc.wantContain {
 				if !strings.Contains(got, s) {
 					t.Errorf("block missing %q:\n%s", s, got)

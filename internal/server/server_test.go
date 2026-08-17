@@ -31,6 +31,7 @@ import (
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/swarm"
+	"github.com/fiddler110/aegis/internal/sysprompt"
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tokenest"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -1085,8 +1086,8 @@ func TestBasePromptComposition_localProfile(t *testing.T) {
 		{"memory: project/user", srv.memory.Load()},
 		{"<skills_available>", skills.BuildIndex(workdir, srv.cfg.DataDir, srv.sessionEnabledSkills(""))},
 		{"<repo_map>", srv.repoMapFor(workdir)},
-		{fmt.Sprintf("<deferred_tools> (%d tools)", len(reg.Deferred())), deferredToolsBlock(reg)},
-		{"debate block", debateIntegrationBlock(srv.cfg.Security.Debate)},
+		{fmt.Sprintf("<deferred_tools> (%d tools)", len(reg.Deferred())), sysprompt.DeferredToolsBlock(reg)},
+		{"debate block", sysprompt.DebateIntegrationBlock(srv.cfg.Security.Debate)},
 	}
 
 	// Assembly cross-check: effectiveSystem joins the non-empty parts with a
@@ -1484,8 +1485,8 @@ func TestEffectiveSystem_DeferredToolsOrderIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outAB := deferredToolsBlock(regAB)
-	outBA := deferredToolsBlock(regBA)
+	outAB := sysprompt.DeferredToolsBlock(regAB)
+	outBA := sysprompt.DeferredToolsBlock(regBA)
 	if outAB != outBA {
 		t.Errorf("deferredToolsBlock depends on registration order:\n--- registered A,B ---\n%s\n--- registered B,A ---\n%s", outAB, outBA)
 	}
