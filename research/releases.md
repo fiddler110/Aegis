@@ -8,7 +8,16 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-16 (third sitting the same day) — **five more of the "Up next" ten
+**Last updated:** 2026-08-16 (fourth sitting the same day) — **the live-tier sitting ran**, against a
+reachable `qwen3:14b-32k` on `:11434`. It is row #1 of the "Up next" ten and the first measurement
+this line has produced since 2026-08-14. The full record is [The live-tier sitting,
+2026-08-16](#the-live-tier-sitting-2026-08-16--the-compaction-ab-finally-measured-something) below;
+the short version is that **P62.2's A/B measured something for the first time** (its fixture was
+defeated by a one-word tool argument and had to be rebuilt mid-sitting), **P65.3's local half is
+answered**, and **P38.1 did not run** — it needs a permission the session did not have, not a model
+server.
+
+**Last updated (previous):** 2026-08-16 (third sitting the same day) — **five more of the "Up next" ten
 shipped**: **P66.14**, **P66.11**, **P67.1**, **P66.21** and **P66.12**. Tier 2 is down to five items,
 one of them the only remaining P66 entry. Every change is `go build ./...` + `go test ./...` +
 `staticcheck ./...` green — and `staticcheck` is now a **blocking** CI step, which is P66.12's actual
@@ -17,7 +26,8 @@ closure condition rather than the 28 findings themselves.
 **Row 3 of that ten did not run.** The live-tier sitting (P66.22 plus four verification items) needs a
 reachable model server and nothing was listening on `:11434`; it is a measurement, so there is no
 partial credit and nothing to substitute for it. It is now row #1 of the ten with **both of its gates
-closed**, which is a more useful outcome than a fifth build item would have been.
+closed**, which is a more useful outcome than a fifth build item would have been. *(It ran later the
+same day — see the record below.)*
 
 **Three of these records correct or retire something already in the tree**, which is the part worth
 reading:
@@ -29,6 +39,144 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### The live-tier sitting, 2026-08-16 — the compaction A/B finally measured something
+
+Row #1 of the "Up next" ten: one setup, five items. **Model:** `qwen3:14b-32k` (Q4_K_M, `num_ctx
+32768` pinned in the Modelfile, fully resident in VRAM), Ollama on `:11434`, `-count=1` throughout,
+windows/amd64. Two items closed, two moved, one did not run.
+
+**What the sitting produced, item by item:**
+
+| Item | Outcome |
+|---|---|
+| **P62.2 / P65.3 local half** | **Measured, first time ever.** The A/B ran with compaction actually firing — after its fixture was found defeated and rebuilt. Numbers below. |
+| **P66.22 / LLM-01** | **Measured.** Local profile 4,871 provider-reported first-turn tokens vs 8,393 default, both against a 16,384 window neither saturated. The deterministic budget test reports 4,336 estimated bare / 6,383 with an over-cap context file (ceilings 4,550 / 6,650) — the 11,611-token figure P66.7 was filed on is now three fixes stale. |
+| **P66.22 / LLM-02** | **Confirmed fixed, and a new phenomenon found.** Compaction fires — repeatedly. See "compaction thrash" below. |
+| **P62.9** | **Two more runs, and the answer is still "the task is too weak to arm this".** Both failed the outcome check, in two different ways, with `edit_file` deferred. |
+| **P38.1** | **Did not run.** It needs an unattended agent with auto-approved host shell, which this session was not permitted to launch. Nothing about the item changed. |
+
+#### The fixture was defeated by `{"limit":1}`, and that is the finding
+
+`TestLiveWorkflowCompactionPrefixCacheGate`'s first run of the day came back **PASS-shaped and
+empty**: 12 turns per arm, wall 16s vs 15s, prefill 953ms vs 951ms, and the instrument check
+correctly failing both arms with *"no compaction actually ran, so this run measures nothing about
+the gate"*. The cause is one tool argument. The chain files were 60 numbered lines with the pointer
+on the last one; the model called `read_file {"limit":1,"path":"data_04.txt"}` on every file, got a
+**29-byte** result, and walked the whole chain at ~55 tokens per turn instead of ~1,950. The prompt
+grew 4,951 → 5,560 against a 24,576 window across twelve turns and never came near the trigger.
+
+This is the *same* failure the fixture's own doc comment already records once (the first version was
+batched into two turns by `CapRead` concurrency), arriving through a different door: the fixture
+forced *sequencing* structurally but left *payload size* to the model's discretion, and
+`read_file`'s paging window is exactly the lever for that. The rebuild makes each file **a single
+physical line** — payload and `next:` pointer on the same line — so a line-count window cannot
+shrink a result whose whole payload is line one. A `strings.Count(content, "\n") != 1` assertion in
+the generator holds the property, because a stray `\n` in a format string would silently restore the
+defect and the A/B would go back to measuring nothing while looking fine.
+
+**The instrument check is what saved this.** It was added because the fixture's first version came
+back green and empty; it did the same job again today against a completely different cause. That is
+the argument for asserting *mechanism* alongside a reported measurement.
+
+#### P62.2 — the prefix-cache gate costs nothing measurable at a 24,576 window
+
+Both arms, 14-file chain, `num_ctx 24576`, `max_tokens 8192`, model unloaded before each arm so the
+pin took (window reported as 24576 *from config* in both):
+
+| | gate on | gate off |
+|---|---|---|
+| wall | **4m58s** | **5m03s** |
+| total prefill (turns 1..n) | **213,118ms** | **219,038ms** |
+| turns | 15 | 15 |
+| reads | 14 | 14 |
+| shrinking turns | 1 | 1 |
+| compactions | 11 | 11 |
+
+A 2.7% prefill difference in favour of the gate, on a sample of one, with the two arms tracking each
+other turn for turn (turn 4: 17,877ms vs 17,860ms). **That is noise, and the honest reading is that
+this workload cannot tell the two settings apart** — not that the gate is free in general. The
+regime it was designed for is the one P62.8 still has never measured (a >200,000-token window, where
+`shouldPrune` switches from the 25%-free ratio to a fixed 40k buffer); nothing here speaks to it.
+
+#### The finding the A/B was not looking for: compaction thrash, every turn, freeing nothing
+
+Both arms show the same shape, and it is more interesting than the gate:
+
+```
+turn  3: prompt= 15329 prefill=  4570ms
+turn  4: prompt= 19146 prefill= 17877ms   <- first compaction
+turn  5: prompt= 19152 prefill= 17768ms
+...
+turn 14: prompt= 19502 prefill= 18572ms
+notice: context ~87% full — compacted 11→9 messages   (x11)
+```
+
+Eleven compactions in fifteen turns, one per turn from turn 4 onward, each summarizing exactly **two
+messages** and leaving the conversation at ~90% of the window — so the next turn crosses the trigger
+again immediately. Prefill quadruples the turn compaction starts (4.5s → 17.9s) and never comes
+back down, because a rewritten history is a broken prefix every single turn. The run spends **~87%
+of its wall clock in prefill**.
+
+This is not the gate's doing (it is identical with the gate off) and it is not the trigger
+disagreeing with itself (P66.14 fixed that; the trigger fires exactly where it says it will, at 85%
+of 24,576 ≈ 20,889). It is that **compaction's yield per invocation is smaller than one turn's
+growth** on this workload: `keepRecent`'s tail plus the base prompt already fill the window, so
+there is only ever a two-message head to summarize. P62.7's minimum-yield rule is the mechanism
+meant to hold compaction off in exactly this state, and it did not suppress a single one of these
+eleven — worth a look before **P67.6** gates compaction on anything further.
+
+**P65.3's Question 2 is answered by the same table**, and answered yes: on a local backend, a
+summarizer call between turns raises the next turn's prefill by roughly **4x** and keeps it there.
+The mechanism half (cloud) shipped 2026-08-15; this is the local half it was waiting on.
+
+#### P66.22 / LLM-01 — the prompt numbers, measured
+
+`TestLiveWorkflow/LocalPromptProfileReducesFirstTurnTokens` passed with neither count clamped:
+**local = 4,871**, **default = 8,393** provider-reported first-turn tokens, window 16,384 *from
+config* on both. The daemon's own notice on the default arm — *"system prompt and tool schemas are
+~8487 tokens of a 16384-token context window"* — is P66.7's warning working as designed.
+
+Against a realistic project the deterministic half is now the tighter instrument:
+`TestEffectiveSystem_localProfileBudget` reports **4,336** estimated tokens bare and **6,383** with
+an over-cap `CLAUDE.md` present (ceilings 4,550 and 6,650). LLM-01 was filed on an 11,611-token
+estimate for the context files alone; P66.7's cap has since bound it to ~2,000. The estimate and the
+provider's count agree to within ~11% on the same shape of prompt, which is as close as a heuristic
+and a tokenizer are expected to get.
+
+#### P62.9 — two more runs, same verdict as 2026-08-14, for a new reason
+
+`TestLiveWorkflow/FixSeededBug`, `edit_file` deferred (local profile), two runs:
+
+- **Run 1** — 3 tool calls (`shell`, `write_file`, `shell`), 43.6s, no detour, no approval, non-zero
+  usage. It rewrote `temps.py`, re-ran it, and produced `Average temperature: 22.50°C` where the
+  task wants `75` — a **wrong fix, verified by the model and still wrong**.
+- **Run 2** — 1 tool call. It ran the script, read the `TypeError`, and stopped without editing
+  anything. The outcome check re-ran the script and got the original traceback back.
+
+Neither run touched `tool_search`, which is the detour P62.9 was actually watching for — consistent
+with 2026-08-14 and now at n=5 across sittings. But **the task cannot arm the comparison it is
+being used for**: the failure mode both times was task competence, not tool reachability, and
+2026-08-14 recorded the `edit_file`-exposed control failing outright twice as well. P62.9's own
+closure condition asks for n≥10 per arm *or a task whose edit is unambiguous enough that a single
+run means something*; five runs across two sittings say the second half of that sentence is the one
+worth building.
+
+`GuardNoMetaLeak` passed — no `PASS.`/`FAIL:`/`VERDICT:` leakage — and logged the *"model ended its
+turn with no text — asking it for a plain-text answer"* corrective, which is the P25.3 path working.
+
+#### What this sitting did not close
+
+- **P38.1** — blocked on permission to run an unattended agent with auto-approved host shell, not on
+  the model server. The fresh target copy was staged and the recipe unchanged.
+- **LLM-10** (model reload between the tool-call probe and the first real turn) and **ARCH-04** (a
+  fan-out or debate call tripping `MaxTurnStall` before its own timeout) — neither is observable
+  from the workflow tier as it stands; both want a session trace (`aegis sessions trace <id>`) from
+  a run whose data dir survives, which these throwaway-daemon tests delete.
+- **LLM-03** — the fix is in and the path is right, but *"non-zero calibration sample count"* was
+  not read directly: the tests' daemons keep their sessions in temp data dirs that are removed on
+  cleanup. What was observed is consistent with it (`estimated=false` usage on every `done` event,
+  estimates tracking the served counts to ~11%), which is evidence, not the closure condition.
 
 ### P66.14 — one compaction trigger, and a calibration that reaches the documented path
 

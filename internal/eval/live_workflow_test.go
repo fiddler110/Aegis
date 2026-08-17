@@ -833,10 +833,23 @@ const (
 // everything there was still inside the keepRecent tail. Sequencing is not
 // something a prompt can ask for here; it has to be impossible to batch.
 //
-// So each file's last line names the next one, and the order is not guessable
+// So each file's text names the next one, and the order is not guessable
 // from the current filename. The model cannot read file N+1 until file N comes
 // back, which makes one read per turn a property of the fixture rather than a
 // request.
+//
+// **Each file is a single physical line, and that is load-bearing** (measured
+// 2026-08-16, qwen3:14b-32k). The payload used to be 60 numbered lines with the
+// pointer on the last one, which read_file's own paging window defeats
+// outright: the model called `read_file {"limit":1}` on every file, got a
+// 29-byte result back, and walked the whole chain for ~55 tokens per turn
+// instead of ~1,950. Both arms ran 12 turns, grew from 4,951 to 5,560 prompt
+// tokens against a 24,576 window, and the instrument check below correctly
+// reported that neither had compacted — a green-looking A/B that measured
+// nothing, which is precisely the failure mode this fixture's first version
+// had. A cap on the *lines* returned cannot shrink a result whose whole payload
+// is on line one, so an `offset`/`limit` window is no longer a way out: any
+// read of one of these files costs its full payload.
 //
 // P62.2's write-up rules out the alternatives: waiting for the condition on a
 // real drive (three drives produced three different workloads) and restoring
@@ -864,23 +877,33 @@ func writeCompactionFixture(t *testing.T) string {
 	}
 	for pos, n := range order {
 		var b strings.Builder
-		fmt.Fprintf(&b, "# Record %02d (step %d of %d)\n\n", n, pos+1, len(order))
-		// ~60 lines of distinct prose, about 1,950 tokens per file. Sized from the
-		// measured base (7,119) and trigger (~20,889): the chain crosses the
-		// trigger around its eighth read, leaving six more reads to happen *after*
-		// compaction has run, and well over keepRecent's 8 messages of history
-		// ahead of the tail by the time it does.
-		for line := 1; line <= 60; line++ {
-			fmt.Fprintf(&b, "record %02d line %02d: measurement %d at station %d, tolerance %d.%d\n",
-				n, line, n*1000+line, line*7%13, n, line)
+		fmt.Fprintf(&b, "record %02d (step %d of %d): ", n, pos+1, len(order))
+		// ~120 distinct clauses, about 1,950 tokens per file, all on one physical
+		// line. Sized from the measured base (7,119) and trigger (~20,889): the
+		// chain crosses the trigger around its eighth read, leaving six more reads
+		// to happen *after* compaction has run, and well over keepRecent's 8
+		// messages of history ahead of the tail by the time it does.
+		for clause := 1; clause <= 120; clause++ {
+			fmt.Fprintf(&b, "record %02d clause %03d: measurement %d at station %d, tolerance %d.%d; ",
+				n, clause, n*1000+clause, clause*7%13, n, clause)
 		}
+		// The pointer rides the same line as the payload, so a read that returns
+		// the pointer has already paid for the payload.
 		if pos+1 < len(order) {
-			fmt.Fprintf(&b, "\nnext: data_%02d.txt\n", order[pos+1])
+			fmt.Fprintf(&b, "next: data_%02d.txt\n", order[pos+1])
 		} else {
-			b.WriteString("\nnext: END\n")
+			b.WriteString("next: END\n")
 		}
 		name := filepath.Join(dir, fmt.Sprintf("data_%02d.txt", n))
-		if err := os.WriteFile(name, []byte(b.String()), 0o644); err != nil {
+		content := b.String()
+		// The single-line property is the whole defence against a paged read (see
+		// the doc comment); assert it rather than trusting the loop above to keep
+		// it, since a stray \n in the format strings would silently restore the
+		// defect and the A/B would go back to measuring nothing.
+		if strings.Count(content, "\n") != 1 || !strings.HasSuffix(content, "\n") {
+			t.Fatalf("fixture file data_%02d.txt must be exactly one line: %d newlines", n, strings.Count(content, "\n"))
+		}
+		if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -888,10 +911,11 @@ func writeCompactionFixture(t *testing.T) string {
 }
 
 func compactionPrompt() string {
-	return "Read the file data_01.txt with the read_file tool. The last line of every file names the " +
-		"next file to read. Follow that chain one file at a time, reading each file as you reach it, " +
-		"until you reach a file whose last line is 'next: END'. Do not guess filenames and do not read " +
-		"a file before the chain leads you to it. When the chain ends, reply with the single word DONE."
+	return "Read the file data_01.txt with the read_file tool. Every file ends with 'next: <filename>', " +
+		"which names the next file to read. Follow that chain one file at a time, reading each file as " +
+		"you reach it, until you reach a file that ends with 'next: END'. Do not guess filenames and do " +
+		"not read a file before the chain leads you to it. When the chain ends, reply with the single " +
+		"word DONE."
 }
 
 // TestLiveWorkflowCompactionPrefixCacheGate is the P62.2 measurement: run the

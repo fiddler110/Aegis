@@ -146,9 +146,15 @@ because what it produces is information nobody has. Both of its gates (P66.14, P
 which is the strongest reason to take it first: the instrument is built and the thresholds it reads are
 no longer inconsistent.
 
+**It ran on 2026-08-16 and row #1 is now partly closed** — LLM-01, LLM-02 and P65.3's local half are
+measured, P62.2's A/B has its first non-empty result, and what remains has split into three different
+kinds of blocker rather than one sitting. The row's `Why now` cell below says which. The one-line
+summary: the compaction A/B's fixture was being defeated by `read_file {"limit":1}` and had to be
+rebuilt before anything could be measured at all.
+
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **P66.22 + the live-tier sitting** | Verification | One `TestLiveWorkflow` setup answers **five** items: P66.22's five estimated LLM-tier findings, **P38.1**'s conformance verdict, **P62.9**'s n≥10 arms plus the unrun default-prose control, **P65.2**'s prompt half and **P65.3**'s local half. Still the only open work anywhere that produces new information rather than new code. Both gates shipped; needs a model server and `-count=1`. Read the P66.14 record first — the prune-thrash band it was expected to observe no longer exists. |
+| 1 | **P66.22 + the live-tier sitting** — *ran 2026-08-16, partially closed* | Verification | **P65.3 is closeable and P62.2 has its first real measurement; P38.1 did not run.** What is left is no longer one sitting: **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** all need something the workflow tier cannot show — a surviving data dir and `aegis sessions trace <id>`. That harness change is the highest-value next step here, and it is small. Read the sitting's record in [releases.md](releases.md) before re-running anything. |
 | 2 | **P67.3** — call-purpose tag on provider requests | T2 · S-M | One retry policy currently serves the user's turn, compaction, the guard, debate roles, swarm sub-agents, the probe and cron alike — so background work amplifies load during exactly the window the backend is struggling. Small on its own, and the enabling seam **P67.6** cannot be gated correctly without it. Keep the `Retry-After` clamp at `MaxDelay` exactly as it is. |
 | 3 | **P66.25** — content-bound trust grants (SEC-07) | T2 · M | The only security item left in the open set. A grant says "this path is trusted", never "this content is trusted", so a `git pull` adding a `hooks:` block re-prompts nothing. P66.5 shipped its prerequisite. **Decide the `.env` question explicitly** — P66.1 resolves `.env` before any project-controlled file by design, so either invert that or document the partial fingerprint; an undocumented partial is worse than either. |
 | 4 | **P67.4** — cancel siblings when a parallel call fails | T2 · S | A round of four builds where the first fails still pays wall-clock for the other three and appends results to a conversation about to be redirected. Also shortens the aggregate wait `MaxTurnStall` backstops. On the list ahead of its size because it settles the cancellation policy **P67.7** would otherwise have to settle mid-refactor. |
@@ -477,6 +483,14 @@ thresholds that disagree; adding a third path into that machinery before those t
 the new trigger against a broken baseline. This is also the item where the Ollama prefill behavior
 already recorded in this project matters: because `prompt_eval_count` reports the *full* prompt on a
 cache hit, the cost this trigger avoids is measurable rather than assumed.
+
+**The live tier has now shown the state this item is really about (2026-08-16).** Under a forced
+read-chain at a 24,576-token window, compaction fired on **eleven of fifteen turns**, each time
+summarizing two messages and leaving the conversation at ~90% full so the next turn re-crossed the
+trigger immediately; prefill went from ~4.5s to ~18s at the first compaction and never came back.
+P62.7's minimum-yield rule suppressed none of them. Whatever this item gates compaction on, it has to
+be able to say "not again this turn" in that state — the measurement is in
+[releases.md](releases.md) (*The live-tier sitting, 2026-08-16*).
 
 Priority: Tier 3 — M. Sequence after P67.3 (needs the purpose tag) and P66.14 (same machinery).
 
@@ -1057,6 +1071,27 @@ setup.
 on `:11434`). Nothing about the item changed — it is a measurement, so there is no partial credit and
 nothing to substitute for it. Both of its gates shipped that day instead.
 
+**It ran later the same day against `qwen3:14b-32k`. Three of the five closure conditions are met;
+two are not observable from this tier.** Full record in [releases.md](releases.md) (*The live-tier
+sitting, 2026-08-16*):
+
+- **LLM-01 — met.** Local profile 4,871 provider-reported first-turn tokens against 8,393 default,
+  neither clamped at the 16,384 window. With a realistic over-cap `CLAUDE.md`, the deterministic
+  budget measures 6,383 estimated tokens against a 6,650 ceiling — the 11,611-token figure this item
+  was filed on is three fixes stale.
+- **LLM-02 — met, and it found the *next* question.** Compaction fires exactly where the shared
+  trigger says (85% of 24,576 ≈ 20,889). What it does after that is the finding: **eleven
+  compactions in fifteen turns, each summarizing two messages and leaving the context at ~90% full**,
+  so every subsequent turn re-crosses the trigger. Prefill quadruples at the first compaction and
+  stays there. P62.7's minimum-yield rule suppressed none of the eleven — read that before **P67.6**.
+- **LLM-03 — not read directly.** The fix is in and the path is right; `estimated=false` on every
+  `done` event and estimates tracking served counts to ~11% are consistent with a calibrating
+  session, but the sample count itself lives in a session trace, and the live-tier daemons delete
+  their data dirs on cleanup.
+- **LLM-10 and ARCH-04 — not observable from this tier at all.** Both want `aegis sessions trace
+  <id>` against a surviving data dir. Closing them needs a harness change (keep the data dir, read
+  the trace) or a hand-run session, not another workflow run.
+
 **Closure conditions**, each a number this review could only estimate:
 
 - **LLM-01** — the measured base-prompt token count with a realistic `CLAUDE.md` present, against the
@@ -1141,6 +1176,12 @@ required). It prints a `phased mode` notice and resets context each phase.
 `inventory.py --check` all pass, **unattended, in one invocation**. Met once, 2026-07-24 on
 FirewallRuleAnalyzer; not repeated since.
 
+**2026-08-16: scheduled with the live-tier sitting and did not run.** The model server was reachable
+and the target copy staged; the run itself was refused, because the recipe is an unattended agent
+with auto-approved host shell (`--yes` plus `auto_approve_exec`) and the session driving it was not
+permitted to launch that. Nothing about the item changed. This is a standing property of the recipe,
+not a one-off: whoever runs it next either runs it by hand or grants the permission deliberately.
+
 Priority: Verification — every load-bearing harness fix the re-tests have root-caused has shipped
 (P39.5-P39.18, P47.1-P47.9, P52.12, P57.1). This item stays open only as the conformance **umbrella**,
 closeable once a live built-in drive is confirmed to reach a verify-clean suite unattended, in one
@@ -1176,6 +1217,15 @@ run** for the second watch item.
 that a single run means something, plus a default-prose control for the prose-attributable failures
 above. Both are runs, not code.
 
+**Two more runs, 2026-08-16 (`qwen3:14b-32k`, deferred-surface arm), and they argue for the second
+option.** Neither touched `tool_search` — the detour this item watches for is now unobserved at n=5
+across two sittings. But both failed the task: one rewrote `temps.py`, re-ran it, and reported a
+confidently wrong average; the other ran the script once, read the `TypeError`, and stopped without
+editing anything. With the 2026-08-14 control arm failing outright twice as well, **the seeded-bug
+task is measuring model competence, not tool reachability** — n≥10 on it would buy a tighter estimate
+of the wrong quantity. Replacing the task is the cheaper close. Record in
+[releases.md](releases.md).
+
 Priority: Verification — the code is in; what remains is verification competing with P38.1 for the
 same scarce live tier, and they can be run in one sitting.
 
@@ -1197,6 +1247,14 @@ the engine, at the moment the model's context is fullest.
 
 **Promote when:** P38.1's re-run is done and the live tier is free — the prompt change wants the same
 harness, so running them together costs one setup instead of two.
+
+**2026-08-16: the harness cannot see what this item needs to judge.** The live tier ran twenty-two
+compactions across the two P62.2 arms — the skeleton prompt was exercised repeatedly — but a
+compaction's *summary text* never reaches the SSE stream, so the run reports that compaction happened
+and nothing about what it kept. Judging skeleton-fill against terse-bullet output needs the summary
+itself: either a session trace from a run whose data dir survives, or a notice/event carrying the
+summary. That is a small harness change, and it is now this item's real blocker rather than tier
+availability.
 
 Priority: Verification — real value, unblocked, code already built, gated on live evidence rather
 than on design.
@@ -1227,10 +1285,17 @@ pass did not have. The dropped-`Usage` gap found while answering Question 1 (com
 `EventDone.Usage` entirely rather than attributing it) is a separate, adjacent item — not required to
 close this one, worth its own line if someone wants session cost totals to include it.
 
-**Promote when:** a live local-tier session is available — same harness as P38.1/P62.9/P65.2.
+**Question 2 is answered, 2026-08-16: yes, and by about 4x.** The P62.2 apparatus ran with compaction
+actually firing (its fixture had to be rebuilt first — see [releases.md](releases.md)). Prefill per
+turn was ~4.0-4.6s for the three turns before the first summarizer call and **17.8-18.6s for every
+turn after it**, identical with the prefix-cache gate on and off, on a 24,576-token window. A
+summarization between turns does measurably raise the next turn's prefill on a local backend, and it
+does not recover while compaction keeps firing. The dropped-`Usage` gap named above is still separate
+and still open.
 
-Priority: Verification → mechanism closed; the local half stays open behind the same live-tier gate
-as the other three items above.
+Priority: Verification → **closeable**. Both questions are answered; what remains is deciding whether
+the 4x is worth acting on, which belongs with **P67.6** (gating compaction on cache temperature)
+rather than here.
 
 ### P62.8 — The prefix-cache gate's large-window regime has never been measured
 
