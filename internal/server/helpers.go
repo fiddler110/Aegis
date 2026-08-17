@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -68,49 +69,160 @@ const localRepoMapMaxBytes = 4000
 // The default profile never applies this cap, exactly as with the repo map.
 const localContextFilesMaxBytes = 8000
 
+// promptSection is one named block of the assembled system prompt (P67.2).
+//
+// The prompt already has a size invariant — localBasePromptCeilingTokens fails
+// the suite when the local base prompt grows — but it had no *stability*
+// invariant, which is the axis that costs more per turn. Anything that varies
+// turn to turn (a timestamp, a running cost figure, a count that moves with
+// session state) assembled into the system prefix breaks the provider's prompt
+// cache on every single turn, and shows up only as unexplained prefill cost.
+// Naming the blocks and forcing each one to declare which kind it is does most
+// of the enforcement; TestPromptSections_StabilityInvariant catches the rest.
+type promptSection struct {
+	name  string
+	build func() string
+	// volatile marks a section that is deliberately recomputed every turn.
+	// rationale is the written justification volatileSection requires — the
+	// point of the constructor is that adding a per-turn block costs a
+	// sentence of explanation, in the file, at the call site.
+	volatile  bool
+	rationale string
+}
+
+// stableSection declares a block whose text is fixed for the life of a
+// conversation. It is computed once per session and memoized (see
+// Server.sectionText), so a stable section that is secretly not stable would
+// serve stale text rather than merely costing cache misses — which is why the
+// stability test treats an undeclared difference as a failure and not a
+// warning.
+func stableSection(name string, build func() string) promptSection {
+	return promptSection{name: name, build: build}
+}
+
+// volatileSection declares a block that must be recomputed on every turn, and
+// takes the reason as a required argument (P67.2). An empty justification is a
+// programming error, not a runtime condition: the list is built on every
+// effectiveSystem call and by the tests, so the panic fires the first time the
+// section is constructed rather than in production only.
+func volatileSection(name, justification string, build func() string) promptSection {
+	if strings.TrimSpace(justification) == "" {
+		panic("server: volatile prompt section " + name + " needs a written justification (P67.2)")
+	}
+	return promptSection{name: name, build: build, volatile: true, rationale: justification}
+}
+
+// promptSectionKey keys the per-conversation memo for stable sections.
+//
+// Getting this key right matters more than the cache does: a wrong key serves
+// one session the other's prompt, which is worse than recomputing. sessionID is
+// in it because almost every section reads session-scoped state — the session's
+// workdir, its skill activations, its tool-registry clone — so a process-global
+// memo would be plainly wrong. local is in it because the memoized sections are
+// the three persona blocks and the debate block, and the persona blocks are
+// selected by the local prompt profile, which is derived from
+// provider.base_url; the daemon does not rewrite config at runtime, but keying
+// on the one input those sections actually branch on costs nothing and removes
+// the question.
+type promptSectionKey struct {
+	section string
+	local   bool
+}
+
+// sectionText renders one section, memoizing it per conversation when the
+// section is stable. The memo is dropped with the rest of a session's in-memory
+// state in handleDeleteSession, which is also what bounds it: entries are a few
+// KB per live session and never outlive the session.
+func (s *Server) sectionText(sessionID string, sec promptSection, local bool) string {
+	if sec.volatile {
+		return sec.build()
+	}
+	v, _ := s.promptSectionCache.LoadOrStore(sessionID, &sync.Map{})
+	perSession := v.(*sync.Map)
+	key := promptSectionKey{section: sec.name, local: local}
+	if cached, ok := perSession.Load(key); ok {
+		return cached.(string)
+	}
+	text := sec.build()
+	perSession.Store(key, text)
+	return text
+}
+
+// promptSections lists the system prompt's blocks in assembly order, each
+// declared stable (memoized for the conversation) or volatile with a written
+// reason (P67.2). effectiveSystem renders this list; the stability test walks
+// the same list, so neither can drift from the other.
+//
+// The split came out asymmetric, and that is the honest answer rather than a
+// missed optimization: only the config-derived prose blocks are safe to memoize.
+// Every other block reads state Aegis itself mutates mid-conversation, and
+// correctness beats the cache — a section that cannot be memoized safely is
+// declared volatile with the reason, not served stale.
+func (s *Server) promptSections(base, sessionID string) []promptSection {
+	local := s.cfg.Provider.LocalPromptProfile()
+	workdir := s.workdirFor(sessionID)
+	return []promptSection{
+		volatileSection("persona system prompt",
+			"not a computed block at all — it is the caller's argument, and the session's system prompt is swapped by /persona mid-conversation while persona files hot-reload under a fixed name.",
+			func() string { return base }),
+		stableSection("tool-use block", func() string { return persona.ToolUseBlockFor(local) }),
+		stableSection("completing-tasks block", func() string { return persona.CompletingTasksBlockFor(local) }),
+		stableSection("platform block", func() string { return persona.PlatformBlockFor(local) }),
+		// Note the posture difference from the repo map below: an over-cap repo map
+		// is dropped whole, because it is generated, ranked and degrades gracefully
+		// to nothing. Context files are the project's instructions — dropping them
+		// whole would change how the session behaves, so they are truncated
+		// head-first with a notice instead. See localContextFilesMaxBytes and
+		// memory.LoadContextCapped.
+		volatileSection("memory: context files",
+			"AGENTS.md, CLAUDE.md and .aegis/context.md are re-read from disk each turn; the user edits them and the agent writes them, and a session running against instructions the file no longer carries is a worse failure than a cache miss.",
+			func() string {
+				contextBudget := 0
+				if local {
+					contextBudget = localContextFilesMaxBytes
+				}
+				return s.memory.LoadContextCapped(contextBudget)
+			}),
+		volatileSection("memory: project/user",
+			"the `memory` tool appends facts during the run; memoizing would hide from the next turn the very fact the model just chose to remember.",
+			func() string { return s.memory.Load() }),
+		volatileSection("<skills_available>",
+			"activateSessionSkill layers a built-in skill onto this session mid-conversation (e.g. /threat-model), and project/user skill files are picked up without a restart.",
+			func() string {
+				return skills.BuildIndex(workdir, s.cfg.DataDir, s.sessionEnabledSkills(sessionID))
+			}),
+		volatileSection("<repo_map>",
+			"loadRepoMap rebuilds the map when the workspace has changed since indexing, which is exactly what the agent spends the conversation doing; a memoized map describes the repository as it was at the first turn.",
+			func() string {
+				repoMap := s.repoMapFor(workdir)
+				if repoMap == "" || (local && len(repoMap) > localRepoMapMaxBytes) {
+					return ""
+				}
+				return repoMap
+			}),
+		volatileSection("<deferred_tools>",
+			"the inventory is the complement of what is exposed, and that moves within a conversation: tool_search loads a deferred tool, persona preloading exposes more, and MCP's tools/list_changed rewrites the parent registry that every clone shares.",
+			func() string { return deferredToolsBlock(s.toolRegistryFor(sessionID)) }),
+		stableSection("debate block", func() string { return debateIntegrationBlock(s.cfg.Security.Debate) }),
+	}
+}
+
 // effectiveSystem combines the session's base system prompt with platform
 // context, loaded project/user memory, skills, and context files (AGENTS.md,
 // CLAUDE.md). sessionID selects which on-demand-activated built-in skills
 // (see activateSessionSkill) are layered on top of the persistently
 // configured set; pass "" where no session is in scope (e.g. tests).
+//
+// The blocks and their order live in promptSections (P67.2); this function is
+// only the join, so that what goes into the prompt and how it is assembled stay
+// one list rather than two.
 func (s *Server) effectiveSystem(base, sessionID string) string {
-	var parts []string
-	if base != "" {
-		parts = append(parts, base)
-	}
 	local := s.cfg.Provider.LocalPromptProfile()
-	parts = append(parts, persona.ToolUseBlockFor(local))
-	parts = append(parts, persona.CompletingTasksBlockFor(local))
-	parts = append(parts, persona.PlatformBlockFor(local))
-	// Note the posture difference from the repo map below: an over-cap repo map
-	// is dropped whole, because it is generated, ranked and degrades gracefully
-	// to nothing. Context files are the project's instructions — dropping them
-	// whole would change how the session behaves, so they are truncated
-	// head-first with a notice instead. See localContextFilesMaxBytes and
-	// memory.LoadContextCapped.
-	contextBudget := 0
-	if local {
-		contextBudget = localContextFilesMaxBytes
-	}
-	if ctx := s.memory.LoadContextCapped(contextBudget); ctx != "" {
-		parts = append(parts, ctx)
-	}
-	if mem := s.memory.Load(); mem != "" {
-		parts = append(parts, mem)
-	}
-	workdir := s.workdirFor(sessionID)
-	if sk := skills.BuildIndex(workdir, s.cfg.DataDir, s.sessionEnabledSkills(sessionID)); sk != "" {
-		parts = append(parts, sk)
-	}
-	repoMap := s.repoMapFor(workdir)
-	if repoMap != "" && !(local && len(repoMap) > localRepoMapMaxBytes) {
-		parts = append(parts, repoMap)
-	}
-	if dt := deferredToolsBlock(s.toolRegistryFor(sessionID)); dt != "" {
-		parts = append(parts, dt)
-	}
-	if db := debateIntegrationBlock(s.cfg.Security.Debate); db != "" {
-		parts = append(parts, db)
+	var parts []string
+	for _, sec := range s.promptSections(base, sessionID) {
+		if text := s.sectionText(sessionID, sec, local); text != "" {
+			parts = append(parts, text)
+		}
 	}
 	return strings.Join(parts, "\n\n")
 }

@@ -273,6 +273,14 @@ type Server struct {
 	// it resets on daemon restart and never touches config, so built-ins stay
 	// dormant by default and are only ever pulled in by an explicit request.
 	sessionSkills sync.Map // string → []string
+
+	// promptSectionCache memoizes the *stable* system-prompt sections per
+	// session (P67.2): sessionID → *sync.Map keyed by promptSectionKey. Only
+	// sections declared with stableSection land here; a volatile one is
+	// recomputed every turn by design. Cleared for a session in
+	// handleDeleteSession alongside the other per-session maps, which is what
+	// keeps it from growing without bound in a long-lived daemon.
+	promptSectionCache sync.Map // string → *sync.Map
 }
 
 // activateSessionSkill turns on a built-in skill for one session: it's added

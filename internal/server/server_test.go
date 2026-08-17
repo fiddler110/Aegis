@@ -1356,6 +1356,111 @@ func TestEffectiveSystem_ByteStable(t *testing.T) {
 	}
 }
 
+// TestPromptSections_StabilityInvariant is P67.2, the stability analogue of
+// TestEffectiveSystem_localProfileBudget's size ceiling. The size test says the
+// prefix is not too big; this one says it does not move. A block that varies
+// turn to turn — a timestamp, a running cost, a count that tracks session state
+// — breaks the provider's prompt cache on every turn and is visible only as
+// unexplained prefill cost, so every section is computed twice and any
+// difference that was not declared with volatileSection fails.
+//
+// The fixture is the local-profile server with context files, because that is
+// the arm where every section is non-empty; a section that renders "" in a bare
+// workspace cannot be caught differing.
+func TestPromptSections_StabilityInvariant(t *testing.T) {
+	srv, _ := newLocalProfileServer(t, true)
+	sections := srv.promptSections(personaBaseSystem(t), "")
+	if len(sections) == 0 {
+		t.Fatal("no prompt sections; the invariant would hold vacuously")
+	}
+
+	seen := make(map[string]bool, len(sections))
+	for _, sec := range sections {
+		if sec.name == "" {
+			t.Error("prompt section with an empty name; the failure messages here name sections, and an anonymous one is what P67.2 removed")
+		}
+		if seen[sec.name] {
+			t.Errorf("duplicate prompt section name %q — the memo is keyed on the name, so two sections sharing one would serve each other's text", sec.name)
+		}
+		seen[sec.name] = true
+		if sec.build == nil {
+			t.Fatalf("prompt section %q has no builder", sec.name)
+		}
+		if sec.volatile && strings.TrimSpace(sec.rationale) == "" {
+			t.Errorf("volatile prompt section %q carries no justification", sec.name)
+		}
+		if !sec.volatile && sec.rationale != "" {
+			t.Errorf("stable prompt section %q carries a volatility justification; it is either volatile or it is not", sec.name)
+		}
+
+		first := sec.build()
+		second := sec.build()
+		if first == second || sec.volatile {
+			continue
+		}
+		t.Errorf("prompt section %q is not stable across two computations but was not declared volatile.\n"+
+			"It is memoized for the life of the conversation, so this serves stale text as well as costing cache misses.\n"+
+			"Either make it deterministic, or declare it with volatileSection and say in one sentence why it must recompute per turn.\n"+
+			"--- first ---\n%s\n--- second ---\n%s", sec.name, first, second)
+	}
+}
+
+// TestPromptSectionCache_MemoizesStablePerSession pins the two halves of P67.2's
+// caching contract that the stability test cannot see: a stable section is built
+// once per conversation, and the memo is keyed per session — a shared one would
+// hand session B the workdir, skills and tool inventory of session A.
+func TestPromptSectionCache_MemoizesStablePerSession(t *testing.T) {
+	srv, _ := newLocalProfileServer(t, false)
+
+	stableBuilds := 0
+	stable := stableSection("test: stable", func() string {
+		stableBuilds++
+		return "stable text"
+	})
+	if got := srv.sectionText("sess-1", stable, true); got != "stable text" {
+		t.Fatalf("sectionText = %q, want %q", got, "stable text")
+	}
+	if got := srv.sectionText("sess-1", stable, true); got != "stable text" {
+		t.Fatalf("cached sectionText = %q, want %q", got, "stable text")
+	}
+	if stableBuilds != 1 {
+		t.Errorf("stable section built %d times for one session, want 1 (it is not memoized)", stableBuilds)
+	}
+	srv.sectionText("sess-2", stable, true)
+	if stableBuilds != 2 {
+		t.Errorf("stable section built %d times across two sessions, want 2 (the memo is not keyed per session)", stableBuilds)
+	}
+	// The profile is part of the key too: the persona blocks branch on it.
+	srv.sectionText("sess-1", stable, false)
+	if stableBuilds != 3 {
+		t.Errorf("stable section built %d times, want 3 — the local-profile flag is not part of the cache key", stableBuilds)
+	}
+
+	volatileBuilds := 0
+	vol := volatileSection("test: volatile", "test fixture", func() string {
+		volatileBuilds++
+		return "volatile text"
+	})
+	srv.sectionText("sess-1", vol, true)
+	srv.sectionText("sess-1", vol, true)
+	if volatileBuilds != 2 {
+		t.Errorf("volatile section built %d times, want 2 (it was memoized despite being declared volatile)", volatileBuilds)
+	}
+}
+
+// TestVolatileSectionRequiresJustification: the required-argument half of P67.2
+// is only real if an empty string is rejected. It panics rather than returning
+// an error because the section list is constructed on every effectiveSystem
+// call — there is no caller in a position to handle it.
+func TestVolatileSectionRequiresJustification(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("volatileSection accepted an empty justification")
+		}
+	}()
+	volatileSection("test: unjustified", "   ", func() string { return "" })
+}
+
 // TestEffectiveSystem_DeferredToolsOrderIndependent is P39.1's map-iteration
 // regression guard: tool.Registry.Deferred() ranges a Go map (randomized
 // iteration order) and relies entirely on its trailing sort.Slice for stable

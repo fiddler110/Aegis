@@ -297,6 +297,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	s.sessionWorkdirs.Delete(id)
 	s.sessionSkills.Delete(id)
 	s.taskScopes.Delete(id)
+	s.promptSectionCache.Delete(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
