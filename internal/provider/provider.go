@@ -145,6 +145,15 @@ type Request struct {
 	// evicting exactly the KV cache PreservePrefixCache exists to protect.
 	// Ignored by adapters that don't do prompt caching.
 	SuppressCache bool
+	// Purpose declares what kind of call this is — the user's turn, a
+	// compaction summary, the guard's second pass, a probe (P67.3). No adapter
+	// puts it on the wire: it is read by the decorators between the caller and
+	// the backend, starting with retry, which cannot pick a sensible policy
+	// without knowing whether anyone is waiting. Zero value
+	// (PurposeUnspecified) means "not declared" and resolves to the baseline
+	// policy, so an untagged call path behaves exactly as it did before this
+	// field existed. See purpose.go.
+	Purpose Purpose
 }
 
 // StopReason explains why the model stopped generating.

@@ -83,6 +83,11 @@ func Run(ctx context.Context, adapter provider.Adapter, model string) (Result, e
 		}},
 		Tools:     []provider.ToolSchema{SmokeTool},
 		MaxTokens: SmokeMaxTokens,
+		// P67.3: nobody is waiting on a capability probe, and its own contract
+		// already treats an unreachable server as "unknown" rather than as a
+		// verdict — so retrying it hard against a struggling backend buys a
+		// result nobody needs at the moment it costs most.
+		Purpose: provider.PurposeProbe,
 	})
 	if err != nil {
 		return Result{}, err

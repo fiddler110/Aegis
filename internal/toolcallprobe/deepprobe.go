@@ -170,6 +170,7 @@ func RunDeepFill(ctx context.Context, adapter provider.Adapter, model string) (D
 		Adapter:   adapter,
 		Tools:     reg,
 		Model:     model,
+		Purpose:   provider.PurposeProbe, // P67.3
 		MaxTokens: deepFillMaxTokens,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})

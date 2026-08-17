@@ -290,9 +290,12 @@ func newChatCmd() *cobra.Command {
 			compactor, ctxWin := driveCompaction(context.Background(), cfg, adapter, logger)
 
 			eng, err := engine.New(engine.Options{
-				Adapter:   adapter,
-				Tools:     reg,
-				Gate:      gate,
+				Adapter: adapter,
+				Tools:   reg,
+				Gate:    gate,
+				// P67.3: the CLI drive is a person waiting at a terminal, same
+				// as a TUI session — the one call class worth retrying harder.
+				Purpose:   provider.PurposeForeground,
 				Compactor: compactor,
 				// P67.1: the per-call caps in truncate.go bound one result; this
 				// bounds what a parallel round contributes in aggregate.

@@ -316,7 +316,16 @@ type Options struct {
 	// from a slow one, but "nothing at all has happened since" is not a
 	// judgement call. See stall.go for what counts as activity and why the
 	// default sits above every layer-specific timeout rather than racing them.
-	MaxTurnStall        time.Duration
+	MaxTurnStall time.Duration
+	// Purpose tags every model call this engine makes with the kind of run it
+	// is serving (P67.3) — a user's turn, a swarm sub-agent, a debate role, a
+	// probe. The engine does nothing with it beyond putting it on the request;
+	// it is read past the adapter seam, first by the retry decorator, which
+	// otherwise has to treat a sub-agent's turn and the user's own as the same
+	// call. The zero value (provider.PurposeUnspecified) leaves the request
+	// untagged, which resolves to the baseline policy and to whatever
+	// run-scoped default the launcher put on the context.
+	Purpose             provider.Purpose
 	Model               string
 	MaxTokens           int
 	Temperature         *float64
@@ -435,6 +444,7 @@ type Engine struct {
 	maxTokens           int
 	temperature         *float64
 	seed                *int
+	purpose             provider.Purpose // P67.3: call-purpose tag stamped on every request
 	maxIterations       int
 	loopThreshold       int
 	contextWindowTokens int
@@ -612,6 +622,7 @@ func New(opts Options) (*Engine, error) {
 		maxTokens:           maxTok,
 		temperature:         opts.Temperature,
 		seed:                opts.Seed,
+		purpose:             opts.Purpose,
 		maxIterations:       maxIter,
 		loopThreshold:       loopThreshold,
 		contextWindowTokens: opts.ContextWindowTokens,
@@ -1701,6 +1712,10 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		MaxTokens:   e.maxTokens,
 		Temperature: e.temperature,
 		Seed:        e.seed,
+		// P67.3: what kind of run this turn belongs to. Set once at
+		// construction because it is a property of the engine's caller, not of
+		// the turn — every turn of a sub-agent's run is a sub-agent turn.
+		Purpose: e.purpose,
 		// P59.8: non-empty only on a schema-guard corrective retry. Adapters
 		// that cannot constrain decoding ignore it, and the guard's own check
 		// still decides — so this never becomes a correctness dependency on a

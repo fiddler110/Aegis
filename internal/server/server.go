@@ -1200,6 +1200,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			Adapter:   s.modelAdapter(spawnWin),
 			Tools:     s.subAgentToolRegistry(cfg.ParentSessionID),
 			Gate:      gate,
+			Purpose:   provider.PurposeSubAgent, // P67.3
 			Compactor: s.compactor,
 			// A spawn had a Compactor but no window to measure against
 			// (ContextWindowTokens was left 0), so the engine's *per-turn*

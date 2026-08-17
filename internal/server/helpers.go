@@ -380,6 +380,11 @@ func buildSamplingHandler(adapter provider.Adapter, model string, maxTokens int,
 			System:    req.SystemPrompt,
 			Messages:  msgs,
 			MaxTokens: mt,
+			// P67.3: an MCP server's sampling request is somebody else's call
+			// made on our credentials and our backend. It gets the fail-fast
+			// policy — the alternative is an external server's retry loop
+			// multiplied by ours during a capacity window.
+			Purpose: provider.PurposeSampling,
 		})
 		if err != nil {
 			return mcp.SamplingResponse{}, fmt.Errorf("mcp sampling: %w", err)

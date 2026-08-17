@@ -676,6 +676,11 @@ func (s *Summarizer) summarize(ctx context.Context, prefix []provider.Message) (
 			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: userText}}},
 		},
 		SuppressCache: true,
+		// P67.3: a summary is not the user's turn, even though it is made
+		// during one. Tagged per call rather than per run because the same
+		// summarizer serves every session, and because P67.6 needs compaction
+		// distinguishable from the conversation it is compacting.
+		Purpose: provider.PurposeCompaction,
 	}
 	stream, err := s.adapter.Stream(ctx, req)
 	if err != nil {

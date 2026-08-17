@@ -110,6 +110,7 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.
 			Compactor:       s.compactor,
 			Hooks:           engineHooks,
 			Cost:            tracker,
+			Purpose:         provider.PurposeDebate, // P67.3
 			BudgetUSD:       s.cfg.Cost.BudgetUSD,
 			MaxTokensPerRun: s.cfg.Cost.MaxTokensPerRun,
 			Model:           s.cfg.Provider.Model,

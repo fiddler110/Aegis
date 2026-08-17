@@ -589,6 +589,23 @@ provider:
 
 Set to `0` to disable retries.
 
+**`max_retries` is a baseline, not a flat count (P67.3).** Aegis makes several kinds of call through one
+adapter, and the retry decorator now knows which kind it is looking at:
+
+| Call class | Calls in it | Policy relative to `max_retries` |
+|---|---|---|
+| Foreground | your turn (TUI/CLI session) | two extra attempts — a human is absorbing the wait either way |
+| Attended | compaction, the output guard, sub-agents, debate roles, anything untagged | the baseline, unchanged |
+| Background | the tool-call probe, session-title generation, MCP sampling | at most one retry, and backoff capped at 5s |
+
+Background work fails fast so it stops amplifying load during exactly the window a backend is
+rate-limiting or out of capacity — and every one of those calls either has a non-model fallback or is
+allowed to report "unknown". Anything untagged keeps today's behavior, so setting `max_retries: 0`
+still disables retries everywhere, including for your own turn.
+
+A server-supplied `Retry-After` is still honored up to that class's backoff cap and never beyond it,
+which is what keeps provider backoff inside the `cost.max_turn_stall` bound.
+
 ---
 
 ## Provider Failover

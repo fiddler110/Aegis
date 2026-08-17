@@ -111,7 +111,8 @@ func newDebateCmd() *cobra.Command {
 					Tools:           reg,
 					Gate:            gate,
 					Cost:            tracker,
-					RoundResultCap:  roundCapFor(cwd), // P67.1
+					Purpose:         provider.PurposeDebate, // P67.3
+					RoundResultCap:  roundCapFor(cwd),       // P67.1
 					BudgetUSD:       cfg.Cost.BudgetUSD,
 					MaxTokensPerRun: cfg.Cost.MaxTokensPerRun,
 					Model:           cfg.Provider.Model,

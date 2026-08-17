@@ -941,6 +941,10 @@ func (s *Server) generateTitle(sessionID, firstMessage string) {
 		Messages: []provider.Message{
 			{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: prompt}}},
 		},
+		// P67.3: cosmetic and already fault-tolerant — every failure path here
+		// falls back to deriveTitle. It is the clearest case in the codebase
+		// for failing fast rather than backing off four times.
+		Purpose: provider.PurposeTitle,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -368,9 +368,15 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		tracker = cost.NewTracker()
 	}
 	eng, err := engine.New(engine.Options{
-		Adapter:                  s.modelAdapter(ctxWin),
-		Tools:                    tools,
-		Gate:                     gate,
+		Adapter: s.modelAdapter(ctxWin),
+		Tools:   tools,
+		Gate:    gate,
+		// P67.3: newEngine builds the engine for a session turn — the one call
+		// class with a human watching this exact stream. Everything else the
+		// daemon sends (compaction, the guard, a spawn, a title) declares its
+		// own purpose at its own call site, so this stays the only foreground
+		// tag in the server.
+		Purpose:                  provider.PurposeForeground,
 		Compactor:                s.compactor,
 		Hooks:                    engineHooks,
 		Cost:                     tracker,

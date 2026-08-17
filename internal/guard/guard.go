@@ -198,6 +198,7 @@ func LLMGuard(adapter provider.Adapter, model, rubric string) Func {
 				{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: prompt}}},
 			},
 			SuppressCache: true,
+			Purpose:       provider.PurposeGuard, // P67.3
 		})
 		if err != nil {
 			return true, "", StatusSkippedTransportError // transport failure, not a verdict — fail open

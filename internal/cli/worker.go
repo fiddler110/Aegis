@@ -207,7 +207,8 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		Tools:          reg,
 		Gate:           gate,
 		Cost:           tracker,
-		RoundResultCap: roundCapFor(cwd), // P67.1
+		Purpose:        provider.PurposeSubAgent, // P67.3
+		RoundResultCap: roundCapFor(cwd),         // P67.1
 		// A subprocess teammate talks to the same model server as its parent, so
 		// it inherits the same backend identification (P66.14/LLM-03).
 		SharedContextWindow: providerfactory.CertainlyOllama(cfg.Provider),
