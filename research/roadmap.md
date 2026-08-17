@@ -1325,6 +1325,59 @@ Priority: Verification — every load-bearing harness fix the re-tests have root
 closeable once a live built-in drive is confirmed to reach a verify-clean suite unattended, in one
 invocation, on a local model. No code work remains; it is live-run tracking.
 
+### P68.3 — The tier's task was a boolean, so it could not rank anything
+
+**Filed and shipped 2026-08-17, out of P68.2's underpowered re-run.** P68.2 ran three arms at n=6 and
+returned p ≈ 0.45. The diagnosis is not that six runs is too few — it is that
+`TestLiveWorkflow/FixSeededBug` is **pass/fail, so a run yields one bit**, and no n a live tier can
+afford rescues an instrument that coarse. Three structural defects, all measured rather than argued:
+
+1. **One bit per run.** Six runs, six bits.
+2. **It bottoms out.** Five of six control runs scored zero by *giving up after a single tool call*.
+   A task most runs score zero on cannot rank two models, let alone two configurations.
+3. **No cross-turn dependency.** Its ideal path is three tool calls, so a model never carries a fact
+   from an early turn to a late one — which is exactly the failure P68.2 found in the wild. **The
+   tier's discriminating task was structurally blind to the defect the tier had just caught.**
+
+**Shipped: `TriageTask`** (`internal/eval/triagetask.go`), a graded security-triage task scored out
+of 12 — five discovery points, 2 precision, 2 integrity, 2 remediation, 1 no-regression. Nine
+pure-stdlib Python files (no pytest, no pip: a missing dependency and a weak model must not produce
+the same red), five planted issues spanning trivial-to-cross-file, and one file clean on purpose.
+Grading is entirely mechanical — parse a JSON report, run a suite, hash the protected files — because
+an LLM judge would put a second model's variance *inside* the instrument.
+
+`SeededBugTask` is **kept and relabelled as the tier's control**: small, unambiguous, and a harness
+that fails it is failing at driving a model rather than at a hard problem. The two answer different
+questions and the tier now runs both.
+
+**Measured the same day, n=3 per model:**
+
+| model | scores | mean |
+|---|---|---|
+| `aegis-qwen35-9b:32k` | 9, 11, 12 | **10.7 / 12** |
+| `qwen3:14b-32k` (mitigated) | 3, 2, 3 | **2.7 / 12** |
+
+Complete separation at n=3 (exact Mann-Whitney, p = 0.10 two-sided — the floor for this n), against
+the old task's p ≈ 0.45 at n=6. **This is the closure condition P62.9 has been asking for**: a task
+whose result means something at a single-digit n.
+
+The 14b's failure is also now *specific* rather than a bare red: it **never wrote `findings.json` in
+any of three runs** despite greping extensively. That is a reporting-step failure, not a
+tool-reachability one, and it is the kind of thing the old task could not have said.
+
+**The first live run found a defect in the grader**, which is recorded because it is the argument for
+running a new instrument before trusting it: a run that left the project unable to import collapsed
+all three run-dependent criteria onto one truncated `Traceback (most recent call last):` — a rubric
+printing the same non-diagnosis three times. Breaking the code is now charged **once**, to
+`no_regression`, with the actual exception named; discovery is explicitly unaffected, so a broken
+build cannot erase a correct audit. Pinned by
+`TestTriageBrokenProjectIsChargedOnceAndDiagnosed`.
+
+**What is open:** nothing in this item. What it hands onward is a usable instrument — the arm-versus-arm
+comparisons P68.2 could not make (mitigation on/off, template corrected/stock, and the sampling
+parameters `docs/local-model-tuning.md` currently recommends on judgement alone) are now runnable at
+an n a sitting can afford.
+
 ### P62.9 — The exposed-schema half of the base prompt: five editing tools and three prose blocks
 
 **Built 2026-08-14** (local-profile base prompt 4,907 → 4,317 estimated tokens): `edit_file` deferred
@@ -1350,6 +1403,11 @@ in 4-6 tool calls against a steady 3 with `edit_file` exposed, but a control arm
 exposed also failed the task outright twice (by explaining the fix in prose instead of applying it),
 so single-run differences on this task are inside the noise, and **no default-prose control has been
 run** for the second watch item.
+
+**Superseded in part by P68.3, 2026-08-17.** The second half of the sentence below is the half that
+was right, and it has now been built: `TriageTask` is graded out of 12 and separated two models
+completely at **n=3** (10.7 vs 2.7), where this task returned p ≈ 0.45 at n=6. Re-running *this*
+task at n≥10 would buy a tighter estimate of the wrong quantity, exactly as recorded below.
 
 **What would close it:** the same task at n≥10 per arm, or a task whose edit is unambiguous enough
 that a single run means something, plus a default-prose control for the prose-attributable failures

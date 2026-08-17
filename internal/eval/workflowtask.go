@@ -48,13 +48,92 @@ type WorkflowTask struct {
 	Name string
 	// Files maps a relative path to its initial content.
 	Files map[string]string
+	// PassMark is the score at or above which the task counts as passed, for
+	// the cross-harness Compare which needs a boolean. Zero means "every point"
+	// — the right default for a task with a single correct outcome.
+	PassMark int
 	// prompt builds the instruction sent to the agent. It takes the resolved
 	// interpreter path because the task's whole point is running a script, and
 	// on Windows "python3" frequently is not the interpreter.
 	prompt func(interpreter string) string
-	// verify re-derives the outcome from the directory itself, returning one
-	// string per failed expectation (empty = the task was actually completed).
-	verify func(dir, interpreter string) []string
+	// grade re-derives the outcome from the directory itself as a set of
+	// independently-earned criteria.
+	grade func(dir, interpreter string) []Criterion
+}
+
+// Criterion is one independently checkable expectation and what it was worth.
+//
+// Grading a task as a set of criteria rather than a boolean is the P68.3 change,
+// and the reason is arithmetic. The seeded-bug task this package started with
+// was pass/fail, so a run yielded exactly one bit; at the n=6 a live tier can
+// afford, 0/6 against 2/6 is p ≈ 0.45 and no amount of care in reading it makes
+// it a result. The same six runs against twelve criteria yield 72 bits, and —
+// more importantly — a model that gives up early lands on a *score* rather than
+// sharing a zero with a model that tried and failed. Every criterion here must
+// therefore be earnable independently: a rubric whose points all fall together
+// is a boolean with extra steps.
+type Criterion struct {
+	// ID is a short stable slug, so a score table can be diffed across runs.
+	ID string
+	// Points is what this criterion is worth when fully earned.
+	Points int
+	// Earned is what it actually scored, 0..Points. Partial credit is allowed
+	// (the precision criterion degrades one point per false positive).
+	Earned int
+	// Detail explains a shortfall in terms of what was found on disk, and is
+	// what appears in the failure list. Empty when fully earned.
+	Detail string
+}
+
+// TaskScore is the graded outcome of one run.
+type TaskScore struct {
+	Criteria []Criterion
+	Earned   int
+	Possible int
+}
+
+// Score totals a criteria list.
+func Score(criteria []Criterion) TaskScore {
+	s := TaskScore{Criteria: criteria}
+	for _, c := range criteria {
+		s.Earned += c.Earned
+		s.Possible += c.Points
+	}
+	return s
+}
+
+// Failures renders every criterion that did not score full marks, for the
+// binary-shaped callers (the tier's t.Errorf loop, Compare's message).
+func (s TaskScore) Failures() []string {
+	var out []string
+	for _, c := range s.Criteria {
+		if c.Earned >= c.Points {
+			continue
+		}
+		detail := c.Detail
+		if detail == "" {
+			detail = "not earned"
+		}
+		out = append(out, fmt.Sprintf("%s (%d/%d): %s", c.ID, c.Earned, c.Points, detail))
+	}
+	return out
+}
+
+// Table renders the per-criterion breakdown for a test log. This is the output
+// worth reading: the total says how well a model did, the table says *how* it
+// failed, and those are different questions — a model that scored 4 by finding
+// four issues and fixing none is not the same model as one that scored 4 by
+// finding one and fixing both.
+func (s TaskScore) Table() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "score %d/%d", s.Earned, s.Possible)
+	for _, c := range s.Criteria {
+		fmt.Fprintf(&b, "\n    %-28s %d/%d", c.ID, c.Earned, c.Points)
+		if c.Detail != "" {
+			fmt.Fprintf(&b, "  %s", c.Detail)
+		}
+	}
+	return b.String()
 }
 
 // SeededBugTask is the two-file temps.py/temps.csv project from the P25
@@ -88,7 +167,7 @@ if __name__ == "__main__":
 		prompt: func(interpreter string) string {
 			return "Run `" + interpreter + " temps.py`, diagnose and fix the bug, then re-run it to confirm the fix works."
 		},
-		verify: verifySeededBugFix,
+		grade: gradeSeededBugFix,
 	}
 }
 
@@ -109,12 +188,26 @@ func (t WorkflowTask) Materialize(dir string) error {
 // Prompt returns the instruction to send to the agent.
 func (t WorkflowTask) Prompt(interpreter string) string { return t.prompt(interpreter) }
 
-// Outcome re-derives whether the task was actually completed, by inspecting and
-// re-running what is on disk. It never consults the agent's own account of what
-// it did — a claim of success is the thing being measured, not evidence.
+// Grade re-derives the task's score by inspecting and re-running what is on
+// disk. It never consults the agent's own account of what it did — a claim of
+// success is the thing being measured, not evidence.
+func (t WorkflowTask) Grade(dir, interpreter string) TaskScore {
+	return Score(t.grade(dir, interpreter))
+}
+
+// Outcome is Grade reduced to the boolean the cross-harness comparison needs.
 func (t WorkflowTask) Outcome(dir, interpreter string) TaskOutcome {
-	failures := t.verify(dir, interpreter)
-	return TaskOutcome{Task: t.Name, Passed: len(failures) == 0, Failures: failures}
+	score := t.Grade(dir, interpreter)
+	mark := t.PassMark
+	if mark <= 0 {
+		mark = score.Possible
+	}
+	return TaskOutcome{
+		Task:     t.Name,
+		Passed:   score.Earned >= mark,
+		Failures: score.Failures(),
+		Score:    score,
+	}
 }
 
 // TaskOutcome is one harness's result on one task.
@@ -123,7 +216,10 @@ type TaskOutcome struct {
 	Harness  string
 	Passed   bool
 	Failures []string
-	Elapsed  time.Duration
+	// Score is the per-criterion breakdown behind Passed. A comparison that
+	// reads only Passed throws away most of what the run measured.
+	Score   TaskScore
+	Elapsed time.Duration
 	// Err is set when the harness itself could not be run to completion
 	// (missing binary, timeout, non-zero exit). Distinct from a failed
 	// outcome: an agent that ran and got it wrong is a data point, an agent
@@ -147,23 +243,32 @@ func (o TaskOutcome) String() string {
 	return s
 }
 
-// verifySeededBugFix checks the three things that make the seeded bug actually
-// fixed, in the order they fail informatively.
-func verifySeededBugFix(dir, interpreter string) []string {
-	var failures []string
+// gradeSeededBugFix checks the three things that make the seeded bug actually
+// fixed. It is expressed as criteria for uniformity with TriageTask, but they
+// are deliberately all-or-nothing (PassMark 0 = every point): this task has one
+// correct outcome, and pretending otherwise would invent partial credit the
+// task cannot actually justify.
+func gradeSeededBugFix(dir, interpreter string) []Criterion {
+	notCheating := Criterion{ID: "no_cheat", Points: 1, Earned: 1}
+	runs := Criterion{ID: "script_runs", Points: 1}
+	correct := Criterion{ID: "correct_average", Points: 1}
+
 	src, err := os.ReadFile(filepath.Join(dir, "temps.py"))
 	if err != nil {
-		return []string{fmt.Sprintf("temps.py is unreadable after the run: %v", err)}
+		notCheating.Earned, notCheating.Detail = 0, fmt.Sprintf("temps.py is unreadable after the run: %v", err)
+		return []Criterion{notCheating, runs, correct}
 	}
 	// The obvious way to make a failing script pass is to stop it doing the
 	// work. Both cheats are worth catching explicitly, because a harness
 	// comparison is worthless if "passed" can mean "deleted the problem".
 	text := string(src)
-	if !strings.Contains(text, "temps.csv") {
-		failures = append(failures, "temps.py no longer reads temps.csv — the data source was removed rather than the bug fixed")
-	}
-	if !strings.Contains(text, "csv") {
-		failures = append(failures, "temps.py no longer uses the csv module — the values were likely hardcoded")
+	switch {
+	case !strings.Contains(text, "temps.csv"):
+		notCheating.Earned = 0
+		notCheating.Detail = "temps.py no longer reads temps.csv — the data source was removed rather than the bug fixed"
+	case !strings.Contains(text, "csv"):
+		notCheating.Earned = 0
+		notCheating.Detail = "temps.py no longer uses the csv module — the values were likely hardcoded"
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -172,14 +277,19 @@ func verifySeededBugFix(dir, interpreter string) []string {
 	cmd.Dir = dir
 	out, runErr := cmd.CombinedOutput()
 	if runErr != nil {
-		return append(failures, fmt.Sprintf("temps.py still fails when re-run: %v\n%s", runErr, strings.TrimSpace(string(out))))
+		runs.Detail = fmt.Sprintf("temps.py still fails when re-run: %v\n%s", runErr, strings.TrimSpace(string(out)))
+		correct.Detail = "not evaluated — the script does not run"
+		return []Criterion{notCheating, runs, correct}
 	}
+	runs.Earned = 1
 	// 72, 85 and 68 average to exactly 75, so the correct answer is checkable
 	// without parsing float formatting.
-	if !strings.Contains(string(out), "75") {
-		failures = append(failures, fmt.Sprintf("temps.py runs but does not print the correct average (expected 75): %q", strings.TrimSpace(string(out))))
+	if strings.Contains(string(out), "75") {
+		correct.Earned = 1
+	} else {
+		correct.Detail = fmt.Sprintf("temps.py runs but does not print the correct average (expected 75): %q", strings.TrimSpace(string(out)))
 	}
-	return failures
+	return []Criterion{notCheating, runs, correct}
 }
 
 // Harness runs an agent against a prepared directory. Aegis implements it via

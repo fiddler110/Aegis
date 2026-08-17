@@ -8,7 +8,13 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-17 — **a chat template was deleting tool calls from history**, found while
+**Last updated:** 2026-08-17 (second record the same day) — **the tier's own task was the bottleneck**.
+P68.2's re-run returned p ≈ 0.45, and the diagnosis was the instrument, not the sample size: the task
+was pass/fail. **P68.3** replaced it with a graded 12-point security-triage task that separates two
+models completely at n=3. Record: [The tier's task was a
+boolean](#the-tiers-task-was-a-boolean-2026-08-17-p683).
+
+**Last updated (previous):** 2026-08-17 — **a chat template was deleting tool calls from history**, found while
 asking why `aegis-qwen35-9b:32k` outperforms `qwen3:14b-32k` on the workflow tier. Most of the answer
 turned out not to be the models. Record: [The template that ate the tool
 calls](#the-template-that-ate-the-tool-calls-2026-08-17) below. **P68.2 was filed and closed the same day**: the end-to-end re-run (n=6 per arm) came back underpowered and is reported as such, and the reusable procedure is now [docs/local-model-tuning.md](../docs/local-model-tuning.md).
@@ -44,6 +50,60 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### The tier's task was a boolean, 2026-08-17 (P68.3)
+
+**P68.2's re-run came back at p ≈ 0.45, and the honest diagnosis was not "six runs is too few".**
+`TestLiveWorkflow/FixSeededBug` is pass/fail, so a run yields **one bit**; five of six control runs
+scored zero by *giving up after a single tool call*; and its ideal path is three tool calls, so a
+model never has to carry a fact from an early turn to a late one. That last point is the damning one:
+**the tier's discriminating task was structurally blind to the class of defect the tier had just
+caught in P68.2.**
+
+**Shipped: `TriageTask`** — a graded security-triage task scored out of 12. Nine pure-stdlib Python
+files (no pytest, no pip: a missing dependency and a weak model must not produce the same red), five
+planted issues from trivial to cross-file, one file clean on purpose:
+
+| criterion | points | what it stops |
+|---|---|---|
+| discovery (5 × 1) | 5 | — |
+| precision | 2 | naming every file in every category without reading anything |
+| integrity | 2 | editing the test suite the remediation points are read from |
+| remediation (2 × 1) | 2 | — |
+| no-regression | 1 | "fixing" traversal by refusing every path |
+
+Grading is entirely mechanical — parse a JSON report, run a suite, hash the protected files. **No LLM
+judge**, deliberately: a judge model puts a second model's variance inside the instrument, and the
+instrument is the thing being trusted. `SeededBugTask` is kept and relabelled as the tier's
+**control** — small and unambiguous, so a harness that fails it is failing at driving a model.
+
+**Measured the same day, n=3 per model:**
+
+| model | scores | mean |
+|---|---|---|
+| `aegis-qwen35-9b:32k` | 9, 11, 12 | **10.7 / 12** |
+| `qwen3:14b-32k` (mitigated) | 3, 2, 3 | **2.7 / 12** |
+
+Complete separation at **n=3** (exact Mann-Whitney p = 0.10 two-sided, the floor for this n) against
+the old task's p ≈ 0.45 at n=6. And the failures are now *specific*: the 14b **never wrote
+`findings.json` in any of three runs** despite greping extensively — a reporting-step failure, which
+a boolean would have rendered as the same red as "gave up immediately".
+
+**The first live run found a defect in the grader, and that is the part worth keeping.** A run that
+left the project unable to import collapsed all three run-dependent criteria onto one truncated
+`Traceback (most recent call last):` — a rubric printing the same non-diagnosis three times, which is
+precisely the "criteria that fall together" failure the rubric's own doc comment warns about.
+Breaking the code is now charged **once**, to `no_regression`, naming the actual exception; discovery
+is explicitly unaffected, so a broken build cannot erase a correct audit. This is the third time this
+document has recorded a fresh instrument being wrong on its first real use, and the third time the
+thing that caught it was checking mechanism rather than reading the number.
+
+Tests: eleven in `internal/eval/triagetask_test.go`, led by `TestTriageFixtureStartsVulnerable` —
+the two security tests must **fail** and the two functional tests **pass** before an agent touches
+anything, or the task measures nothing while looking green (the P62.2 failure, twice).
+`go build ./...` + `go test ./...` + `staticcheck ./...` green.
+
+---
 
 ### The template that ate the tool calls, 2026-08-17
 

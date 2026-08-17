@@ -199,6 +199,73 @@ func TestLiveWorkflow(t *testing.T) {
 		}
 	})
 
+	// SecurityTriage is the tier's *discriminating* instrument (P68.3), as
+	// distinct from FixSeededBug above, which is its control. The distinction
+	// matters for how a red here is read: FixSeededBug failing means the harness
+	// or the model cannot drive a three-call loop at all, while this subtest
+	// reports a score and only fails below a mark a usable model should clear.
+	//
+	// It deliberately does *not* assert workflow shape. Tool-call budgets and
+	// detour checks belong on a task with one known-good path; here the whole
+	// point is that several strategies are legitimate — audit first then fix,
+	// or fix as you go — and scoring them identically is what makes the number
+	// comparable across models.
+	t.Run("SecurityTriage", func(t *testing.T) {
+		triage := TriageTask()
+		triageDir := writeSeededBugFixture(t, triage)
+
+		// This task needs its own workspace — auditing "every .py file here"
+		// would otherwise sweep up the seeded-bug fixture and score findings
+		// against files that are not part of the answer key. The daemon roots
+		// itself at the process working directory, so the fixture switch is a
+		// chdir, which is safe for the same reason the outer one is: nothing in
+		// this file runs in parallel.
+		if err := os.Chdir(triageDir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(fixtureDir) })
+
+		cl := newLiveWorkflowDaemon(t, baseURL, model, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+
+		if win, src := servedContextWindow(t, cl); insufficientWindowReason(win, src) != "" {
+			t.Skip(insufficientWindowReason(win, src))
+		}
+
+		meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		guardOff := false
+		events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
+			Text:         triage.Prompt(pythonExe),
+			GuardEnabled: &guardOff,
+		})
+		if err != nil {
+			t.Fatalf("PostMessage: %v", err)
+		}
+
+		start := time.Now()
+		summary := drainWorkflowEvents(t, events)
+		elapsed := time.Since(start)
+
+		score := triage.Grade(triageDir, pythonExe)
+		// The score table is the output worth reading, and it is logged whether
+		// the subtest passes or fails: a run that clears the mark still says
+		// which of the five issues a model can and cannot see, and that is the
+		// per-model detail a pass/fail line throws away.
+		t.Logf("run took %s, %d tool call(s): %v", elapsed.Round(time.Millisecond), len(summary.toolCalls), summary.toolCalls)
+		t.Logf("%s", score.Table())
+
+		if summary.errText != "" {
+			t.Errorf("engine reported an error: %s", summary.errText)
+		}
+		if score.Earned < triage.PassMark {
+			t.Errorf("scored %d/%d, want >= %d", score.Earned, score.Possible, triage.PassMark)
+		}
+	})
+
 	t.Run("GuardNoMetaLeak", func(t *testing.T) {
 		cl := newLiveWorkflowDaemon(t, baseURL, model, "")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

@@ -219,8 +219,32 @@ AEGIS_EVAL_MODEL=aegis-qwen3-14b:32k \
 ```
 
 `-count=1` is mandatory — Go's test cache cannot see that the model server changed, so a cached pass
-looks exactly like a reproduced one. Raise `-timeout` above the 10-minute default; the tier's three
+looks exactly like a reproduced one. Raise `-timeout` above the 10-minute default; the tier's
 subtests together exceed it on a local model.
+
+Two subtests answer different questions, and it is worth reading them differently:
+
+- **`FixSeededBug`** is the **control**: a three-tool-call run/fix/verify loop. A model that fails it
+  cannot drive an agent loop at all. It is pass/fail and says nothing finer.
+- **`SecurityTriage`** is the **discriminator**: a graded audit-and-fix task scored out of 12, which
+  is what to use when comparing two models or two Modelfile settings. Run it alone with
+  `-run 'TestLiveWorkflow$/SecurityTriage'`.
+
+The score table is what to read, not the total:
+
+```
+score 11/12
+    found_hardcoded_credential   1/1
+    found_unsafe_deserialization 1/1
+    precision                    1/2  1 finding(s) name a file that does not have that problem: ...
+    fixed_sql_injection          1/1
+    no_regression                1/1
+```
+
+Two models can reach the same total for opposite reasons — one that audits well and cannot edit, one
+that edits well and never reports — and the per-criterion rows are the only place that distinction
+survives. **Three runs is enough to compare two models** (measured: complete separation at n=3), which
+is the practical reason to prefer this subtest over the control for tuning decisions.
 
 ---
 
@@ -296,7 +320,23 @@ across 6 runs here and 2 more on 2026-08-16 (**0/8** in total).
 The seeded-bug task is known to be too weak to settle differences of this size — that is
 [P62.9](../research/roadmap.md)'s own standing conclusion, and this run reinforces rather than
 overturns it. Treat the end-to-end table as consistent with the probe, not as independent
-confirmation of it.
+confirmation of it. **It has since been replaced as the tier's discriminating task** (P68.3); the
+graded results below are the ones to use for comparisons.
+
+### The two models on the graded task
+
+`TestLiveWorkflow/SecurityTriage`, n=3 per model, same day:
+
+| model | scores | mean |
+|---|---|---|
+| `aegis-qwen35-9b:32k` | 9, 11, 12 | **10.7 / 12** |
+| `qwen3:14b-32k` (with Aegis's template mitigation) | 3, 2, 3 | **2.7 / 12** |
+
+Complete separation at n=3. The 14b's failure is specific and repeatable: it **never wrote
+`findings.json` in any of the three runs**, despite greping the codebase extensively — it does the
+searching and never produces the artifact. That is a reporting-step failure rather than a
+tool-reachability one, and it is the sort of thing a pass/fail task reports as the same red as
+"gave up immediately".
 
 ### What is *not* measured here
 
