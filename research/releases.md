@@ -204,6 +204,20 @@ more for an identical prompt. The budget in `localBasePromptCeilingTokens` is es
 `tokenest`'s units, and a ceiling in estimated tokens is not a promise about any particular
 tokenizer's count. Worth remembering before a future measurement is read as a regression.
 
+#### P65.3 — closed
+
+Both halves are now answered, so the item leaves the roadmap. **Question 1 (cloud)** shipped
+2026-08-15: `provider.Request.SuppressCache`, set by the summarizer and the guard, honored by the
+Anthropic adapter, pinned by `TestPromptCachingSuppressedPerRequest`. **Question 2 (local)** is the
+measurement above — a summarizer call between turns raises the next turn's prefill by ~4x on
+`qwen3:14b-32k` (4.5s → 18s) and ~4x on `aegis-qwen35-9b:32k` (2.3s → 9.2s), and it does not recover
+while compaction keeps firing. Whether that 4x is worth acting on is **P67.6**'s decision, not this
+item's.
+
+One adjacent gap found while answering Question 1 stays open and is *not* part of this closure: the
+compaction and guard call sites never read `ev.Usage` off the stream, so their token cost is invisible
+to Aegis rather than merely unattributed. Worth its own item if session cost totals should include it.
+
 #### What this sitting did not close
 
 - **P38.1** — blocked on permission to run an unattended agent with auto-approved host shell, not on
