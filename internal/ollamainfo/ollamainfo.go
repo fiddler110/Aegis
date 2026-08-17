@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -346,6 +347,80 @@ func NativeToolSupport(ctx context.Context, nativeBase, model string) (bool, boo
 		}
 	}
 	return false, true
+}
+
+// TemplateDropsToolCalls reports whether model's chat template discards an
+// assistant message's tool calls when that same message also carries prose.
+// The second return says whether the template was observable at all; an
+// unreachable server or a model with no template field tells us nothing, and
+// the caller must not treat that as "fine".
+//
+// The defect is a legacy Go text/template rendering the assistant turn as
+// `{{ if .Content }}…{{ else if .ToolCalls }}…{{ end }}` — content and tool
+// calls as mutually exclusive branches. Qwen3's stock Ollama template does
+// exactly this, and translate emits both fields on any turn where the model
+// narrated before calling, so the call vanishes from the rendered history and
+// the model sees a tool result for a call it has no record of making. Measured
+// on qwen3:14b-32k: asked which path it had just read, it named a different one
+// 3/3 at temperature 0, and 3/3 correctly once the prose was withheld.
+//
+// Jinja templates (Ollama's newer renderer, e.g. Qwen3.5) render both and are
+// reported as fine.
+func TemplateDropsToolCalls(ctx context.Context, nativeBase, model string) (bool, bool) {
+	tmpl, ok := showTemplate(ctx, nativeBase, model)
+	if !ok {
+		return false, false
+	}
+	return templateDropsToolCalls(tmpl), true
+}
+
+// toolCallsElseBranch matches an `else if`/`else with` whose condition mentions
+// .ToolCalls — the marker for "tool calls render only when the preceding
+// branch (content) did not".
+var toolCallsElseBranch = regexp.MustCompile(`\{\{-?\s*else\s+(if|with)\b[^}]*\.ToolCalls`)
+
+// templateDropsToolCalls is the pure detector behind TemplateDropsToolCalls,
+// split out so it can be tested against captured templates without a server.
+func templateDropsToolCalls(tmpl string) bool {
+	// Jinja templates use {% %} statements; Ollama picks its renderer the same
+	// way. They carry no Go `else if` at all, so the regex below would not match
+	// anyway — but checking first keeps the intent legible and makes a future
+	// Jinja template containing the literal text harmless.
+	if strings.Contains(tmpl, "{%") {
+		return false
+	}
+	return toolCallsElseBranch.MatchString(tmpl)
+}
+
+// showTemplate returns /api/show's chat template for model. ok is false when
+// the request fails or the field is absent.
+func showTemplate(ctx context.Context, nativeBase, model string) (string, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]string{"model": model, "name": model})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nativeBase+"/api/show", bytes.NewReader(body))
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	var out struct {
+		Template string `json:"template"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", false
+	}
+	if out.Template == "" {
+		return "", false
+	}
+	return out.Template, true
 }
 
 // showCapabilities returns /api/show's capabilities list for model. ok is false

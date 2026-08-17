@@ -33,7 +33,7 @@ func TestP5216EchoOnlyOnAmbiguousRound(t *testing.T) {
 			provider.ToolResultBlock{ToolUseID: "tu_1", Content: "3 matches"},
 		),
 	}
-	out := translate("", msgs)
+	out := translate("", msgs, false)
 
 	var results []wireMessage
 	for _, m := range out {
@@ -67,7 +67,7 @@ func TestP5216EchoDisambiguatesSameToolParallelCalls(t *testing.T) {
 			provider.ToolResultBlock{ToolUseID: "tu_2", Content: "main body"},
 		),
 	}
-	out := translate("", msgs)
+	out := translate("", msgs, false)
 
 	want := []struct{ path, body string }{
 		{"internal/engine/engine.go", "engine body"},

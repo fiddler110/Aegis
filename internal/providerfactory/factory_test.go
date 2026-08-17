@@ -184,6 +184,13 @@ func TestBuild_UnsupportedFallbackProviderSkippedNotFatal(t *testing.T) {
 // conversation.
 func TestBuildOne_OllamaDefaultsKeepAliveResident(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The adapter also reads /api/show once per model to detect the
+		// tool-call-dropping chat template; only the chat request carries
+		// keep_alive, so answer the probe and assert on nothing else.
+		if r.URL.Path != "/api/chat" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		var body struct {
 			KeepAlive *string `json:"keep_alive"`
 		}
@@ -218,6 +225,13 @@ func TestBuildOne_OllamaDefaultsKeepAliveResident(t *testing.T) {
 // "-1" (pin forever) — the default only fills the unset case.
 func TestBuildOne_OllamaKeepAliveExplicitWins(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The adapter also reads /api/show once per model to detect the
+		// tool-call-dropping chat template; only the chat request carries
+		// keep_alive, so answer the probe and assert on nothing else.
+		if r.URL.Path != "/api/chat" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		var body struct {
 			KeepAlive *string `json:"keep_alive"`
 		}

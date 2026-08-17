@@ -8,7 +8,12 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-16 (fourth sitting the same day) — **the live-tier sitting ran**, against a
+**Last updated:** 2026-08-17 — **a chat template was deleting tool calls from history**, found while
+asking why `aegis-qwen35-9b:32k` outperforms `qwen3:14b-32k` on the workflow tier. Most of the answer
+turned out not to be the models. Record: [The template that ate the tool
+calls](#the-template-that-ate-the-tool-calls-2026-08-17) below; the open half is **P68.2**.
+
+**Last updated (previous):** 2026-08-16 (fourth sitting the same day) — **the live-tier sitting ran**, against a
 reachable `qwen3:14b-32k` on `:11434`. It is row #1 of the "Up next" ten and the first measurement
 this line has produced since 2026-08-14. The full record is [The live-tier sitting,
 2026-08-16](#the-live-tier-sitting-2026-08-16--the-compaction-ab-finally-measured-something) below;
@@ -39,6 +44,74 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### The template that ate the tool calls, 2026-08-17
+
+**The question was "why does `aegis-qwen35-9b:32k` work better than `qwen3:14b-32k`".** Most of the
+answer is not a property of either model. Ollama renders history server-side from the model's own
+chat template, and the two models ship *different kinds* of template: the 9b a **Jinja** one
+(Ollama's newer renderer), the 14b the stock **Go text/template**, whose assistant branch reads
+
+```
+{{ if .Content }}{{ .Content }}{{ else if .ToolCalls }}<tool_call>…{{ end }}
+```
+
+Content and tool calls are mutually exclusive. `translate` emits both on every turn where the model
+narrated before calling, so on the 14b **the call was being deleted from the rendered history** —
+the model saw a tool result for a call it had no record of making, and the arguments (paths, edits,
+commands) went with it.
+
+**Measured**, temperature 0, three trials per arm. History: prose + `read_file{path:"srv/etc/config.txt"}`
++ result, then "which path did you read?"
+
+| arm | correct |
+|---|---|
+| `qwen3:14b-32k`, as sent today | **0/3** — answered `/etc/config.txt` |
+| `qwen3:14b-32k`, prose withheld | **3/3** |
+| `qwen3:14b-32k`, template's `else if` split into two `if`s | **3/3** |
+| `aegis-qwen35-9b:32k` (Jinja) | **3/3** |
+
+A one-shot tool call is fine on both (3/3 each, including multi-line arguments with escaped quotes),
+which is why the toolcall probe never caught this: **the defect only exists in multi-turn history**,
+which is everything the engine does.
+
+**The obvious fix does not work.** Splitting the turn into two messages — prose, then call — was
+tried first and measured 0/3, unchanged: Ollama coalesces adjacent same-role messages before
+templating, so the pair arrives at the template as the same content-plus-calls message. Worth
+recording because it is the change a reader of the template would reach for.
+
+**What shipped.** `ollamainfo.TemplateDropsToolCalls` reads `/api/show`'s template and detects the
+`else if … .ToolCalls` shape (Jinja templates are reported clean). The adapter asks once per model,
+persists the verdict in `internal/modelcaps` so the next process reads it from disk, warns once, and
+withholds the prose on affected models so the call survives. It is **off unless wired**
+(`ollama.WithTemplateProbe`) — `internal/providerfactory` is the only site that talks to a real
+Ollama, so a test stub or a non-Ollama endpoint issues no surprise request, and a model with a
+correct template keeps today's exact bytes and its prefix cache.
+
+Withholding prose is the lesser loss, not a good outcome: the narration is commentary, the call
+carries the arguments the rest of the history refers back to. **The better fix is on the model
+side** — rebuild with an assistant branch that renders `.Content` and `.ToolCalls` in sequence, which
+keeps both (verified: 3/3) — and the warning says so.
+
+**Detector verified live** against five local models: `qwen3:14b-32k` and `qwen2.5-coder:1.5b`
+flagged; `aegis-qwen35-9b:32k`, `gemma4:12b` and a template-corrected 14b clear.
+
+**Two existing records are now suspect**, which is the part worth carrying forward. `qwen2.5-coder:1.5b`
+is affected, and it is the model behind **P52.16**'s `toolResultEcho` measurement (32/40 → 38/40) —
+that experiment was run through a template that was deleting the calls being correlated. And
+**P62.9**'s verdict that "the seeded-bug task is measuring model competence, not tool reachability"
+rests on two 14b failures whose shape (rewriting a file, then reporting a confidently wrong result)
+is what a model does when it cannot see what it just did. Neither is retracted here — both need a
+re-run, which is **P68.2**.
+
+Tests: `internal/ollamainfo/template_test.go` pins the detector against **templates captured from a
+real server** (`testdata/`) rather than synthetic ones, because the defect is a property of
+vendor-shipped templates and a fixture would keep passing after they changed shape.
+`internal/provider/ollama/toolcallprose_test.go` pins both directions of the switch, the
+once-per-model probe, the cross-process persistence, and that an unreadable template is *not*
+persisted. `go build ./...` + `go test ./...` green.
+
+---
 
 ### The live-tier sitting, 2026-08-16 — the compaction A/B finally measured something
 

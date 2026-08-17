@@ -1090,7 +1090,8 @@ Priority: Tier 4 — no concrete trigger, XS. A comment, not a feature.
 
 ## Verification Work
 
-**Status: 5 open** (**P65.3** closed 2026-08-16; its record is in [releases.md](releases.md)). Every
+**Status: 6 open** (**P68.2** filed 2026-08-17; **P65.3** closed 2026-08-16, its record is in
+[releases.md](releases.md)). Every
 item here has its code already written and merged — nothing below is a design or implementation task.
 Each is closed by running a live-model harness and recording the result the item's closure condition
 names, not by writing more code. They are **not tiered**: tiering answers "how urgent is this build,"
@@ -1104,6 +1105,58 @@ permission rather than a schedule slot, and P62.9 needs a better task rather tha
 whole track is parked at row #10 of [Up next](#up-next--the-ten-items-to-take-in-order) by choice**;
 what is written below each item is what the run established, so a future sitting starts from evidence
 rather than from the pre-run plan.
+
+### P68.2 — The stock Qwen3 chat template deletes tool calls from history, and it confounded two sittings
+
+**Filed 2026-08-17. The mitigation shipped the same day; what is open is what it changes on the
+tier.** Ollama renders history server-side from the model's own chat template, and Qwen3's stock
+**Go text/template** writes the assistant turn as:
+
+```
+{{ if .Content }}{{ .Content }}{{ else if .ToolCalls }}<tool_call>…{{ end }}
+```
+
+Content and tool calls are **mutually exclusive branches**. `translate` in
+`internal/provider/ollama` sets both fields on any turn where the model narrated before calling —
+which a thinking model does most turns — so **the call is silently deleted from the rendered
+history** and the model then sees a `<tool_response>` for a call it has no record of making.
+
+**Measured on `qwen3:14b-32k`**, temperature 0, history = prose + `read_file{path:"srv/etc/config.txt"}`
++ result, then asked which path it read:
+
+| arm | correct |
+|---|---|
+| as captured (prose + call) | **0/3** — answered `/etc/config.txt` |
+| prose withheld | **3/3** |
+| prose kept, template's `else if` split into two `if`s | **3/3** |
+| `aegis-qwen35-9b:32k` (ships a **Jinja** template) | **3/3** |
+
+Two things follow. First, **this is most of the "the 9b is just better" impression**: the 9b's Jinja
+template renders prose *and* the call, so it was never losing arguments the 14b was losing. Second,
+it **confounds every multi-turn measurement taken on an affected model** — `qwen2.5-coder:1.5b`, the
+model behind P52.16's `toolResultEcho` numbers, is affected too, and P62.9's two 14b failures on
+2026-08-16 (one rewrote `temps.py` and reported a confidently wrong average) are exactly the shape a
+model shows when it cannot see what it just did.
+
+**Shipped 2026-08-17:** `ollamainfo.TemplateDropsToolCalls` reads the template from `/api/show` and
+detects the `else if … .ToolCalls` shape; the adapter asks once per model, persists the verdict in
+`internal/modelcaps`, warns, and withholds the prose so the call survives. Detector verified live:
+`qwen3:14b-32k` and `qwen2.5-coder:1.5b` flagged, `aegis-qwen35-9b:32k` and `gemma4:12b` clear.
+**Splitting the turn into two messages was tried first and does not work** — Ollama coalesces
+adjacent same-role messages before templating, so the pair arrives as the same message and is
+dropped identically (0/3, unchanged).
+
+**Closure conditions:**
+
+- `TestLiveWorkflow` re-run on **stock** `qwen3:14b-32k` with the mitigation active, against the
+  2026-08-16 baseline where it failed the seeded-bug task twice. If it now passes, P62.9's "the task
+  is measuring model competence" reading is wrong and the task is worth keeping.
+- The same run against a **template-corrected** build of the same model, which keeps the narration
+  the mitigation has to discard. If the corrected build beats the mitigated one, the right fix is a
+  documented Modelfile rather than a provider workaround, and this becomes a docs item.
+
+Priority: Verification — it shares the live tier with row #10's bundle and should be run in the same
+sitting, before any further n≥10 work on P62.9.
 
 ### P66.22 — The LLM-tier findings are all estimates; one live run converts them to measurements
 

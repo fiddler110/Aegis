@@ -27,7 +27,7 @@ func TestTranslateToolResultUsesName(t *testing.T) {
 			provider.ToolResultBlock{ToolUseID: "id1", Content: "3 results"},
 		}},
 	}
-	wire := translate("be terse", msgs)
+	wire := translate("be terse", msgs, false)
 	if len(wire) != 3 {
 		t.Fatalf("got %d messages, want 3: %+v", len(wire), wire)
 	}
@@ -66,7 +66,7 @@ func TestTranslateReusedToolIDsResolvePositionally(t *testing.T) {
 		}},
 	}
 
-	wire := translate("", msgs)
+	wire := translate("", msgs, false)
 	if len(wire) != 4 {
 		t.Fatalf("got %d messages, want 4: %+v", len(wire), wire)
 	}
@@ -79,8 +79,8 @@ func TestTranslateReusedToolIDsResolvePositionally(t *testing.T) {
 
 	// Byte-stability: serializing turn 1's prefix must be unchanged by
 	// appending turn 2 — the property Ollama's prefix cache depends on.
-	prefixOnly := translate("", msgs[:2])
-	full := translate("", msgs)
+	prefixOnly := translate("", msgs[:2], false)
+	full := translate("", msgs, false)
 	b1, err := json.Marshal(prefixOnly)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestTranslateImage(t *testing.T) {
 			provider.ImageBlock{MediaType: "image/jpeg", Data: "aGk="},
 		},
 	}}
-	wire := translate("", msgs)
+	wire := translate("", msgs, false)
 	if len(wire) != 1 {
 		t.Fatalf("got %d messages, want 1: %+v", len(wire), wire)
 	}
@@ -769,12 +769,30 @@ func TestStreamLatchesThinkRejectionPerModel(t *testing.T) {
 // fakeCapStore is a minimal in-memory CapabilityStore standing in for
 // *modelcaps.Store, so this package's tests stay free of the store's file I/O.
 type fakeCapStore struct {
-	mu       sync.Mutex
-	rejected map[string]bool
-	writes   int
+	mu          sync.Mutex
+	rejected    map[string]bool
+	drops       map[string]bool
+	writes      int
+	dropsWrites int
 }
 
-func newFakeCapStore() *fakeCapStore { return &fakeCapStore{rejected: map[string]bool{}} }
+func newFakeCapStore() *fakeCapStore {
+	return &fakeCapStore{rejected: map[string]bool{}, drops: map[string]bool{}}
+}
+
+func (f *fakeCapStore) TemplateDropsToolCalls(model string) (bool, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.drops[model]
+	return v, ok
+}
+
+func (f *fakeCapStore) SetTemplateDropsToolCalls(model string, drops bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.drops[model] = drops
+	f.dropsWrites++
+}
 
 func (f *fakeCapStore) ThinkRejected(model string) (bool, bool) {
 	f.mu.Lock()

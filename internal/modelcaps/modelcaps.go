@@ -99,6 +99,14 @@ type Record struct {
 	ThinkRejected *bool `json:"think_rejected,omitempty"`
 	// ToolCalling is the persisted conformance sample, nil until one is taken.
 	ToolCalling *ToolCalling `json:"tool_calling,omitempty"`
+	// TemplateDropsToolCalls latches whether the model's chat template discards
+	// an assistant turn's tool calls when the same turn also carries prose (see
+	// ollamainfo.TemplateDropsToolCalls). Unlike ThinkRejected this is written
+	// in both directions: it is read off the template rather than inferred from
+	// a failure, so "observed fine" is a real verdict worth caching. It is
+	// fingerprint-scoped like every other field, so rebuilding the model with a
+	// corrected template retires the record.
+	TemplateDropsToolCalls *bool `json:"template_drops_tool_calls,omitempty"`
 	// UpdatedAt is when this record last changed, for a human reading the file.
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -264,6 +272,36 @@ func (s *Store) SetThinkRejected(model string, rejected bool) {
 	} else {
 		rec.ThinkRejected = nil
 	}
+	s.stampLocked(model, rec)
+	s.mu.Unlock()
+	s.save()
+}
+
+// TemplateDropsToolCalls reports the persisted verdict for model, and whether
+// one exists at all. Both directions are meaningful here — see the Record
+// field — so a cached false is a hit, not a miss.
+func (s *Store) TemplateDropsToolCalls(model string) (drops, known bool) {
+	if s == nil {
+		return false, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.records[model]
+	if !ok || rec.TemplateDropsToolCalls == nil {
+		return false, false
+	}
+	return *rec.TemplateDropsToolCalls, true
+}
+
+// SetTemplateDropsToolCalls persists the verdict for model.
+func (s *Store) SetTemplateDropsToolCalls(model string, drops bool) {
+	if s == nil || model == "" {
+		return
+	}
+	s.mu.Lock()
+	rec := s.records[model]
+	v := drops
+	rec.TemplateDropsToolCalls = &v
 	s.stampLocked(model, rec)
 	s.mu.Unlock()
 	s.save()

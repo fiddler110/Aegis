@@ -82,6 +82,24 @@ type Adapter struct {
 	// consulted, so a model whose record says nothing doesn't re-read on every
 	// request.
 	capsLoaded sync.Map // model name -> bool
+
+	// dropsToolCalls caches, per model, whether the server's chat template
+	// discards an assistant turn's tool calls when that turn also carries prose
+	// (see ollamainfo.TemplateDropsToolCalls). Keyed by model for the same
+	// reason thinkRejected is: one daemon adapter serves a session's whole model
+	// mix, and Qwen3 and Qwen3.5 disagree about this. Values are meaningful in
+	// both directions, so unlike thinkRejected presence alone is not the signal.
+	dropsToolCalls sync.Map // model name -> bool
+	// detectTemplate is the template probe. Nil disables the whole mitigation:
+	// the adapter never reads a template and never withholds prose, which is
+	// what a bare New() does. The daemon wires ollamainfo.TemplateDropsToolCalls
+	// in via WithTemplateProbe — keeping the /api/show call an injected
+	// dependency rather than an implicit one means an adapter pointed at a
+	// non-Ollama endpoint (or a test stub) issues no surprise request.
+	detectTemplate func(ctx context.Context, base, model string) (bool, bool)
+	// warnedTemplate keeps the "template drops tool calls" warning to once per
+	// model rather than once per turn.
+	warnedTemplate sync.Map // model name -> bool
 }
 
 // CapabilityStore is the slice of internal/modelcaps this adapter needs.
@@ -95,6 +113,11 @@ type CapabilityStore interface {
 	ThinkRejected(model string) (rejected bool, known bool)
 	// SetThinkRejected persists a newly-discovered rejection.
 	SetThinkRejected(model string, rejected bool)
+	// TemplateDropsToolCalls reports the persisted template verdict for model,
+	// and whether one exists at all.
+	TemplateDropsToolCalls(model string) (drops bool, known bool)
+	// SetTemplateDropsToolCalls persists a freshly-read template verdict.
+	SetTemplateDropsToolCalls(model string, drops bool)
 }
 
 // Option configures the adapter.
@@ -133,6 +156,16 @@ func WithThink(v *bool) Option {
 // process-lifetime only, exactly as before.
 func WithCapabilityStore(s CapabilityStore) Option {
 	return func(a *Adapter) { a.caps = s }
+}
+
+// WithTemplateProbe enables the chat-template mitigation: fn is asked, once
+// per model, whether that model's template drops an assistant turn's tool
+// calls when the turn also carries prose, and a "yes" makes translate withhold
+// the prose so the call survives. Pass ollamainfo.TemplateDropsToolCalls.
+// Omitting it (the default) leaves the adapter's wire encoding exactly as it
+// was and issues no /api/show request.
+func WithTemplateProbe(fn func(ctx context.Context, base, model string) (bool, bool)) Option {
+	return func(a *Adapter) { a.detectTemplate = fn }
 }
 
 // WithNumCtx sets the adapter's default serving context window
@@ -421,7 +454,22 @@ type wireRequest struct {
 // *preceding* use instead, which is correct regardless of ID reuse and is
 // stable turn-over-turn — required for Ollama's prefix cache to survive
 // mixed-tool runs (P35.9).
-func translate(system string, msgs []provider.Message) []wireMessage {
+//
+// dropProse withholds an assistant turn's narration when that same turn also
+// carries tool calls, for the models whose chat template would otherwise drop
+// the *calls* instead — see ollamainfo.TemplateDropsToolCalls for the defect
+// and the measurement. Withholding is the lesser loss by a wide margin: the
+// narration is commentary, the call carries the arguments the rest of the
+// history refers back to. It is off by default and applies only to turns that
+// have both, so a model with a correct template pays nothing — no extra
+// tokens and no prefix-cache churn from a changed encoding.
+//
+// Splitting the turn in two (prose message, then call message) was measured as
+// an alternative and does not work: Ollama coalesces adjacent same-role
+// messages before templating, so the pair arrives at the template as the same
+// content-plus-calls message and is dropped exactly as before (0/3 on
+// qwen3:14b-32k, unchanged from the unsplit case).
+func translate(system string, msgs []provider.Message, dropProse bool) []wireMessage {
 	names := make(map[string]string)
 	args := make(map[string]json.RawMessage)
 	out := make([]wireMessage, 0, len(msgs)+1)
@@ -448,6 +496,9 @@ func translate(system string, msgs []provider.Message) []wireMessage {
 						Function: wireToolCallFunc{Name: v.Name, Arguments: callArgs},
 					})
 				}
+			}
+			if dropProse && len(wm.ToolCalls) > 0 {
+				text = ""
 			}
 			wm.Content = text
 			if wm.Content == "" && len(wm.ToolCalls) == 0 {
@@ -478,6 +529,64 @@ func translate(system string, msgs []provider.Message) []wireMessage {
 		}
 	}
 	return out
+}
+
+// templateDropsToolCalls reports whether model's chat template discards an
+// assistant turn's tool calls when that turn also carries prose, resolving in
+// the same order as thinkIsRejected: in-memory cache, then the persisted
+// record, then a live read of the template. A server that cannot answer is
+// cached as "fine" for the process lifetime but never persisted, so the
+// question is re-asked after a restart rather than being answered wrongly
+// forever from one unreachable moment.
+func (a *Adapter) templateDropsToolCalls(ctx context.Context, model string) bool {
+	if model == "" {
+		return false
+	}
+	if v, ok := a.dropsToolCalls.Load(model); ok {
+		return v.(bool)
+	}
+	if a.caps != nil {
+		if drops, known := a.caps.TemplateDropsToolCalls(model); known {
+			a.dropsToolCalls.Store(model, drops)
+			if drops {
+				a.warnTemplateDropsToolCalls(model)
+			}
+			return drops
+		}
+	}
+	if a.detectTemplate == nil {
+		return false
+	}
+	drops, ok := a.detectTemplate(ctx, a.baseURL, model)
+	if !ok {
+		a.dropsToolCalls.Store(model, false)
+		return false
+	}
+	a.dropsToolCalls.Store(model, drops)
+	if a.caps != nil {
+		a.caps.SetTemplateDropsToolCalls(model, drops)
+	}
+	if drops {
+		a.warnTemplateDropsToolCalls(model)
+	}
+	return drops
+}
+
+// warnTemplateDropsToolCalls logs the mitigation once per model. It is a
+// warning rather than a silent fix because the real repair is on the model
+// side — rebuilding it with a template whose assistant branch renders content
+// and tool calls in sequence rather than as `if`/`else if` — and that repair
+// keeps the narration this mitigation has to discard.
+func (a *Adapter) warnTemplateDropsToolCalls(model string) {
+	if _, already := a.warnedTemplate.LoadOrStore(model, true); already {
+		return
+	}
+	if a.logger == nil {
+		return
+	}
+	a.logger.Warn("ollama: model's chat template drops tool calls from an assistant turn that also has text; withholding that text so the call survives in history",
+		"model", model,
+		"fix", "rebuild the model with an assistant branch that renders .Content and .ToolCalls in sequence, not as if/else-if")
 }
 
 // ambiguousRound reports whether a tool-results message carries two or more
@@ -762,7 +871,7 @@ func (a *Adapter) clampNumPredict(maxTokens, numCtx int, system string, msgs []p
 func (a *Adapter) doChat(ctx context.Context, req provider.Request, think *bool) (*http.Response, error) {
 	wr := wireRequest{
 		Model:     req.Model,
-		Messages:  translate(req.System, req.Messages),
+		Messages:  translate(req.System, req.Messages, a.templateDropsToolCalls(ctx, req.Model)),
 		Tools:     translateTools(req.Tools),
 		Stream:    true,
 		Think:     think,

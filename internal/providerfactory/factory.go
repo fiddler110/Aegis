@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/ollamainfo"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/anthropic"
 	"github.com/fiddler110/aegis/internal/provider/ollama"
@@ -248,6 +249,12 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 			ollama.WithResponseHeaderTimeout(responseHeaderTimeout),
 			ollama.WithStreamIdleTimeout(streamIdleTimeout),
 			ollama.WithLogger(logger),
+			// Qwen3's stock Ollama chat template renders the assistant turn's
+			// content and tool calls as mutually exclusive branches, so a turn
+			// that narrates *and* calls loses the call from the rendered
+			// history. This is the only construction site that talks to a real
+			// Ollama, so it is the one that gets to ask.
+			ollama.WithTemplateProbe(ollamainfo.TemplateDropsToolCalls),
 		}
 		if contextWindow > 0 {
 			opts = append(opts, ollama.WithNumCtx(contextWindow))
