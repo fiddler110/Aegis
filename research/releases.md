@@ -8,7 +8,15 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-17 (second record the same day) — **the tier's own task was the bottleneck**.
+**Last updated:** 2026-08-17 (third record the same day) — **the top five of the "Up next" ten
+shipped**: **P67.3**, **P66.25**, **P67.4**, **P67.5** and **P67.2**, one commit each, no live-model
+work in any of them. Records below under [The top five, 2026-08-17](#the-top-five-2026-08-17).
+Three of the five correct the item they were built from, which is the part worth reading: P67.5's
+recall path turns out to have **no production callers at all**, P67.2's memoization is safe on only
+four of ten prompt sections, and P67.3's item lists cron among the callers when cron never makes a
+provider request.
+
+**Last updated (previous):** 2026-08-17 (second record the same day) — **the tier's own task was the bottleneck**.
 P68.2's re-run returned p ≈ 0.45, and the diagnosis was the instrument, not the sample size: the task
 was pass/fail. **P68.3** replaced it with a graded 12-point security-triage task that separates two
 models completely at n=3. Record: [The tier's task was a
@@ -50,6 +58,183 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### The top five, 2026-08-17
+
+Rows #1-#5 of the "Up next" ten, taken in one sitting and shipped as five commits. None of them
+needed a model server; the parked live-tier row (#10) stayed parked. Each record below says what
+shipped and, where the item was wrong about the tree, what corrected it.
+
+#### P67.3 — provider requests carry a call purpose, and retry keys on it
+
+`internal/provider/retry.go` applied one policy to everything crossing the adapter seam. The failure
+mode is symmetric and that is what makes it worth fixing: a session title nobody is waiting on backed
+off four times against a rate-limited backend — amplifying exactly the load that rate-limited it —
+while the user's own turn got no more patience than the title did.
+
+`provider.Purpose` (new `purpose.go`) tags a call by its **caller**, never by its content: two
+identical message lists sent by the engine and by the summarizer are different calls, and only the
+caller knows which. It travels two ways. `Request.Purpose` is the per-call tag, set by the component
+that knows what a particular call is (compaction, the guard, the probe, the title generator, MCP
+sampling). `provider.WithPurpose(ctx, …)` is a run-scoped default for a *launcher* — the code that
+starts a run knows what kind of run it is, and threading that through every intermediate signature
+would touch code with no business knowing about retry policy. **The per-call tag wins**
+(`EffectivePurpose`), which is the whole reason both exist: a launcher says "this run is a
+sub-agent", and the summarizer inside it still says "this call is a compaction". Reversing the
+precedence would erase the distinction **P67.6** is built on, so a test pins it, and a second test in
+`internal/compaction` pins that a summary stays a compaction inside a foreground run.
+
+Retry **derives** from the configured baseline rather than replacing it, so `provider.max_retries`
+stays the reference point in every direction: foreground adds two attempts, background (probe, title,
+MCP sampling) is capped at one retry and a 5s backoff, and everything else — including every untagged
+call — is the baseline unchanged. Two consequences are deliberate: nothing regresses by omission, and
+`max_retries: 0` still disables retries everywhere including the user's turn, because the foreground
+bonus is a delta on a baseline rather than a floor.
+
+**Compaction, the guard, sub-agents and debate roles are attended, not background.** The classifying
+question is not "is this the user's turn" but "who is blocked while this retries", and the turn those
+four serve fails with them — failing them fast spares nobody. `TestUrgencyOf_ClassifiesEveryPurpose`
+is that classification written down, and an unknown purpose resolves to the conservative baseline.
+
+The `Retry-After` clamp at `MaxDelay` is untouched in mechanism, as the item required — it is what
+keeps provider backoff inside the 900s `MaxTurnStall` bound without the retry path needing heartbeats
+— and now clamps to the *purpose's* `MaxDelay`, which only ever tightens it.
+
+**One correction.** The item lists cron jobs among the callers sharing the policy. Cron fires shell
+commands (`newCronRunFunc` → `runCronCmd`), never a provider request, so there is no cron purpose to
+tag today. The other eight callers it names are all real and all tagged.
+
+#### P66.25 — trust grants are bound to content, not just to a path (SEC-07)
+
+The last P66 item, and the last security item in the open set. A grant said "this path is trusted"
+and never "this content is trusted", so a `git pull` adding a `hooks:` block, flipping `security.*`
+or introducing a `commands:` override re-prompted nothing.
+
+The grant now carries a SHA-256 fingerprint over the security-relevant subset of that directory's
+*own* `.aegis/config.yaml` — exactly the keys P66.5's inverted freeze list does not mark
+`projectSettable`, which is why the item only became coherent after P66.5 shipped. `policyFor`
+defaults an unlisted key to frozen, so a dangerous key added in a later release is fingerprinted the
+day it exists rather than the day someone remembers it. Only the project file's keys are hashed,
+never the merged config: a digest that moved when the operator edited their own global config, or
+fired on an ordinary `log_level` edit, would train them to re-accept without reading, which is the
+failure mode a re-prompt has to avoid to be worth anything.
+
+**The `.env` question was settled the documented-partial way, and the reasoning is the item's real
+content.** Covering `.aegis/.env` would mean parsing project-controlled content ahead of the trust
+decision — the precise ordering P66.1/SEC-01 exists to prevent — so the two cannot both be had. It is
+also the smaller hole: `.env` is read only in an *already trusted* workspace, and may not set
+`AEGIS_*` at all, so an unfingerprinted `.env` edit cannot change an Aegis setting the way an
+unfingerprinted `hooks:` or `commands:` block can. What it can still do — set ordinary environment
+variables a child process reads (`PATH`, `GIT_SSH_COMMAND`, …) — is written down as a residual risk
+in `SecurityFingerprint`'s comment, in `docs/configuration.md` and in `docs/cli-reference.md`, with
+`--revoke` as the mitigation, and `TestDotEnvIsNotFingerprinted` makes silently *starting* to cover
+it a test failure too.
+
+**Migration: a pre-fingerprint grant is `Stale`, not `Trusted`.** Those grants were made against
+content nobody recorded, so "it still matches" is not a fact anything can check, and adopting the
+current content would bless a `hooks:` block that arrived between the grant and the upgrade — exactly
+the silent inheritance the item exists to end. One re-prompt per already-trusted directory, paid
+once. `Stale` gates identically to `Untrusted` (the freeze applies, nothing is unlocked) and exists
+as a separate value only so the operator is told "what you approved has changed" rather than "you
+never approved this"; it reaches `aegis trust`, `aegis doctor`, the stderr startup warning and the
+daemon's `stale_grant` log field.
+
+Two things the item did not anticipate. The `--dir` path (`workspace.additional_roots`) needed the
+same treatment rather than an exception, since a `--dir` grant and a cwd grant key the same store
+entry and would otherwise mean different things for one path. And the write paths that self-trust
+(`PatchProjectSandbox`, `PatchProjectSecurity`, `AppendProjectPermissionRule`) had to record the
+fingerprint strictly *after* their own write, or the operator's own edit would have gone stale the
+instant the call returned.
+
+#### P67.4 — a failed tool call cancels its siblings
+
+`Engine.runTools` ran every call in a round to completion regardless of what its siblings did. The
+round now runs under its own context derived from the turn's, cancelled on the first qualifying
+failure, so sibling subprocesses die promptly instead of finishing work the model is about to redirect
+past — which also shortens the aggregate wait `MaxTurnStall` backstops.
+
+**The parent/child split is the invariant, and it is tested.** Cancelling siblings must never cancel
+the turn: the checks after `wg.Wait()` still read `ctx`, not `roundCtx`, so only the turn's own
+cancellation ends the run, and a test asserts the model is called again and reaches its final answer
+after a round is cancelled.
+
+**Which failures qualify: write/execute only.** A read that fails is a normal negative result — a
+`read_file` on a path the model guessed wrong is how it learns the path is wrong — and cancelling for
+that would make speculative parallel reads, most of what the parallel round is for, unusable.
+`serialize[i]` is exactly that classification, already computed for scheduling via
+`tool.EffectiveCapability`, so the policy hangs off it rather than off a second copy that could
+drift, and it inherits the per-call refinement that keeps a shell call reclassified as read-only from
+cancelling anything.
+
+**What the cancelled siblings report follows P65.1 unchanged.** A call abandoned before `Execute`
+says plainly that nothing was executed — the one cancellation case where that is honestly assertable.
+A call already running keeps whatever the tool reported and gets the cancellation appended, never a
+claim that it did not run, because a model told that re-runs it. Every result slot is filled either
+way: a `tool_use` with no `tool_result` is a protocol error, so filling them is what makes cancelling
+safe at all, not bookkeeping. Cancellation is also honored at both *waits* — the same-path dependency
+graph and `execLock` — since otherwise it would shorten only a round's concurrent tail and not its
+serialized spine, which is usually the expensive part.
+
+**One interaction the item did not anticipate.** Marking cancelled siblings as errors puts them in
+front of the P52.3 tool-failure breaker, which keys its nudge and its abort on the *first* error in
+the round — and a round is a set of concurrent calls, so nothing says the failing one has the lowest
+index. A sibling cancelled at a lower index would have become the error the breaker reports, nudging
+the model about "tool call skipped" instead of about the build that failed. Cancellation artifacts
+carry two stable markers and are skipped in `toolFailureTracker.record`; removing that guard makes
+the test fail with the wrong tool named, which is how it was verified.
+
+#### P67.5 — recall dedupes across turns, renders age, and biases toward gotchas
+
+Three behaviors around `internal/memory`'s TF-IDF scoring, which is unchanged. A per-run
+`RecallState`, threaded through a new `RecallOptions` to `LoadRelevantFor`, drops entries the run has
+already been shown — **before** scoring, as the item required, so the entry budget goes to candidates
+the model can still use rather than being spent on repeats and then emptied. Marking happens on what
+is actually returned, so an entry cut by the entry/token budget stays eligible next turn instead of
+being burned unseen. The state is caller-owned and per-run by construction; a package-level set would
+starve the next run of what the previous one consumed.
+
+`Entry` now carries the `ModTime` from the stat pass that already keys the P8.5 relevance cache
+(`entriesSignature` became `statSources` — one walk, two consumers), so `FormatEntries` renders age
+in a coarse hour/day/month ladder at no extra I/O. Scoring gained a documented reference-vs-gotcha
+bias: an entry warning about a tool the run has recently called is multiplied by 1.5, a pure how-to
+entry for a tool being driven without failures by 0.5, and a single failed call withdraws the damp.
+The asymmetry is the point — a "successful" call is exactly when a silent gotcha bites. It is a
+multiplier around TF-IDF rather than an override, so it reorders near ties and can never manufacture
+relevance for an entry the query does not match. Both factors and all three age cutoffs are
+mutation-tested against literals.
+
+**The correction is larger than the item.** `LoadRelevant` and `FormatEntries` have **no production
+callers**. Memory reaches the prompt through `Sources.Load()`, which injects both memory files whole
+and unfiltered. The item's stated symptom — a top-scoring entry re-injected every turn it keeps
+winning — therefore could not have been observed: the scored-recall path is unwired, and these three
+behaviors take effect when a caller adopts it. A second, smaller correction: per-entry timestamps are
+not recoverable from an append-only, hand-editable `memory.md`, so freshness is file-mtime granular —
+an upper bound on staleness rather than the entry's own age.
+
+#### P67.2 — the prompt gets a stability invariant, not just a size ceiling
+
+`effectiveSystem` was an anonymous `[]string` of appends, so nothing stopped a volatile value from
+being assembled into the system prefix, where it breaks the prompt cache every turn and shows up only
+as unexplained prefill cost. The blocks are now named `promptSection` values built through one of two
+constructors: `stableSection`, memoized for the conversation under a `(sessionID, local-profile)` key
+cleared with the session's other in-memory state, and `volatileSection`, which recomputes per turn and
+**takes a written justification as a required argument**, panicking on an empty one — the list is
+rebuilt on every call and by the tests, so that fires at first construction rather than in production
+only. `TestPromptSections_StabilityInvariant` computes every section twice and fails any that differs
+without the declaration, mutation-verified against a deliberately unstable section. Same shape as the
+`localBasePromptCeilingTokens` ceiling, on the axis that costs per turn rather than per request.
+
+**The correction: the split came out asymmetric, and only four of ten sections are safe to memoize.**
+The three persona blocks and the debate block are config-derived prose; every other block reads state
+Aegis itself mutates mid-conversation — `activateSessionSkill` adds skills, the `memory` tool appends
+facts, `tool_search` and MCP's `tools/list_changed` move the deferred inventory, context files are
+re-read as the user and the agent edit them, and the repo map rebuilds as the agent edits the
+workspace. The item's framing (memoized by default, volatile as the exception) would have served
+stale prompts on five sections. Correctness took the cache's place and each carries its reason in the
+file. The prompt's content and order are byte-identical; the existing composition, ceiling, cap and
+P39.1 byte-stability tests pass untouched. The cheap win still lands: the volatile set is now the
+exhaustive, justified list of what breaks prefill reuse each turn, which is the input P67.6 and any
+later prefix-cache work needs.
 
 ### The temperature A/B that measured nothing, twice, 2026-08-17
 

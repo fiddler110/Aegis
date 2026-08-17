@@ -10,9 +10,11 @@ adding items.
 
 ## Status
 
-**37 open items: 32 build (Tier 1-4) + 5 verification-only. Tier 1 is empty.** The count is unchanged
-from 2026-08-16 morning by coincidence, not by inactivity: the live-tier sitting closed **P65.3** and
-filed **P68.1** the same day.
+**32 open items: 27 build (Tier 1-4) + 5 verification-only. Tier 1 is empty, and Tier 2 is down to
+one item.** Five shipped on 2026-08-17 — **P67.3**, **P66.25**, **P67.2**, **P67.4** and **P67.5**,
+the entire top five of the "Up next" ten, one commit each. Records in
+[releases.md](releases.md) (*The top five, 2026-08-17*). **P66.25 was the last P66 item and the last
+security item in the open set**; what remains in Tier 2 is **P68.1**, which is parked with row #7.
 
 **The P67 batch is a comparative reading of an external agent implementation**, not a review of this
 codebase. On 2026-08-16 the leaked Claude Code CLI source (`paperwave/claude-code-cli-leaked` @
@@ -60,11 +62,14 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 [Verification Work](#verification-work) below.
 
 - **Tier 1:** 0 — empty. **P66.5** shipped 2026-08-16, closing the last exploitable-today finding.
-- **Tier 2:** 6 — **P68.1** (the instrumentation gap the live tier found), **P66.25** (SEC-07,
-  refiled), plus four from P67: **P67.2**, **P67.3**, **P67.4**, **P67.5**. (**P66.11**, **P66.12**,
-  **P66.21** and **P67.1** shipped 2026-08-16.)
+- **Tier 2:** 1 — **P68.1** (the instrumentation gap the live tier found), and it is deliberately off
+  the ranked list because it travels with the parked row #10. (**P66.25**, **P67.2**, **P67.3**,
+  **P67.4** and **P67.5** shipped 2026-08-17; **P66.11**, **P66.12**, **P66.21** and **P67.1**
+  shipped 2026-08-16.)
 - **Tier 3:** 6 — **P66.13**, **P66.15**, plus four from P67: **P67.6**, **P67.7**, **P67.8**,
-  **P67.9**. (**P66.14** shipped 2026-08-16.)
+  **P67.9**. (**P66.14** shipped 2026-08-16.) **Two of them are now unblocked by their prerequisite
+  rather than waiting on it:** P67.3 built P67.6's purpose-tag seam, and P67.4 settled the
+  cancellation policy P67.7 would otherwise have had to settle mid-refactor.
 - **Tier 4:** 20 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, **P66.26** (PERF-02,
   refiled), the five from P67 (**P67.10**-**P67.14**), plus the nine pre-existing: **P65.4**,
   **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
@@ -72,11 +77,27 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
   **P62.9**, **P65.2** (prompt half, blocked on P68.1), **P62.8**. (**P65.3** closed 2026-08-16:
   both its questions are answered.)
 
-**What to do next.** **The live-tier sitting ran on 2026-08-16**, against `qwen3:14b-32k` and then
-`aegis-qwen35-9b:32k`, and row #1 is largely spent: LLM-01 and LLM-02 are measured, P65.3 is closed,
-P62.9's watch item came back positive, and P62.2's A/B produced its first non-empty result. Full
-record in [releases.md](releases.md) (*The live-tier sitting, 2026-08-16*). **Its remainder is parked
-at #10 by the user's decision**, so the next thing to take is **P67.3** at #1.
+**What to do next.** **The whole top five shipped on 2026-08-17**, so the ranked list below is now
+Tier 3 from top to bottom and the next thing to take is **P66.13** — `aegis chat`'s bare permission
+gate, the most serious defect left in the open set. Nothing above it remains: Tier 1 is empty and
+Tier 2 holds only the parked **P68.1**.
+
+**Three of the five corrected the item they were built from**, and the corrections outlive the items:
+
+- **P67.5's recall path has no production callers at all.** `LoadRelevant`/`FormatEntries` are
+  unwired — memory reaches the prompt through `Sources.Load()`, which injects both files whole and
+  unfiltered — so the symptom the item described (a top entry re-injected every turn) could not have
+  been observed. The dedupe, freshness and gotcha bias are built and tested; **wiring a caller is
+  separate work nobody has filed**, and should be, before the next item that assumes scored recall is
+  live.
+- **P67.2's memoization is safe on only four of ten prompt sections.** Five read state Aegis mutates
+  mid-conversation (skills, memory, context files, repo map, deferred tools), so the item's
+  memoize-by-default framing would have served stale prompts. The invariant and its test are the
+  deliverable; the cache is incidental. The volatile set is now the exhaustive, justified list of what
+  breaks prefill reuse each turn — which is an input **P67.6** can use.
+- **P67.3's item lists cron among the callers sharing one retry policy.** Cron fires shell commands,
+  never a provider request, so there is no cron purpose to tag. The other eight caller classes were
+  real and are tagged.
 
 **Everything that is left of the sitting is blocked on something other than a model server**, which
 is why parking it costs little. P38.1 needs permission to launch an unattended auto-approving agent;
@@ -95,17 +116,14 @@ still correct about what it tests; it just does not cover the low-yield regime. 
 minimum-yield rule suppressed none of the eleven**, which is the specific thing **P67.6** has to fix
 and the reason that item's value estimate should go up rather than down.
 
-**The rest of Tier 2 has no forced order** and is ranked by size-to-value alone. The one internal
-constraint is that **P67.3** builds the purpose-tag seam **P67.6** (Tier 3) needs, and **P67.4**
-settles a cancellation policy **P67.7** would otherwise have to settle mid-refactor — so both sit on
-the ten partly to make later Tier 3 work cheaper.
+**Tier 3 has no forced order left either.** Both of its sequencing constraints were discharged by the
+2026-08-17 sitting: **P67.3** shipped the purpose-tag seam **P67.6** needs, and **P67.4** settled the
+cancellation policy **P67.7** would otherwise have had to settle mid-refactor. What remains is ranked
+by size-to-value alone, so any of the six can be taken against whatever file is already open.
 
-**The two refiled sub-items are still not equivalent in urgency.** **P66.25** (SEC-07, content-bound
-trust grants) is real work with a real gap behind it — a `git pull` that adds a `hooks:` block still
-re-prompts nothing — and P66.5 built its prerequisite, the well-defined security-relevant subset. It
-is the only security item left in the open set and it holds its place on the ten. **P66.26** (PERF-02)
-is Tier 4 and should stay there: it is a Low-severity durability trade on the one database that holds
-checkpoints, the cost ledger and traces, and P66.9 already removed most of the pressure behind it.
+**P66.26** (PERF-02) is the one refiled sub-item still open, and it stays Tier 4: a Low-severity
+durability trade on the one database that holds checkpoints, the cost ledger and traces, with P66.9
+having already removed most of the pressure behind it. (Its sibling **P66.25** shipped 2026-08-17.)
 
 No Tier 4 build item currently has a fired trigger (re-verified 2026-08-15: `sandbox.backend` still
 defaults to `"local"`, `lsp.Manager` is still one shared daemon singleton, both TUI asymmetries in
@@ -137,61 +155,61 @@ instead, regardless of how large or urgent the underlying question is.
 
 ---
 
-## Up next — the ten items to take in order
+## Up next — the seven items to take in order
 
-**Rewritten 2026-08-16 (second time that day)**, after five of the previous ten shipped: P66.14,
-P66.11, P67.1, P66.21 and P66.12, one commit each. Build records in [releases.md](releases.md); the
-retired table is preserved there rather than carried here as strikethrough. This is a *reading* of the
-tiers, not a second ranking: every row's tier and size come from the item's own `Priority:` line, and
-the order is what those tiers say once the real sequencing constraints are honored.
+**Rewritten 2026-08-17, after the entire top five shipped**: P67.3, P66.25, P67.2, P67.4 and P67.5,
+one commit each. Build records in [releases.md](releases.md) (*The top five, 2026-08-17*); the
+retired table is preserved there rather than carried here as strikethrough. This is a *reading* of
+the tiers, not a second ranking: every row's tier and size come from the item's own `Priority:` line.
 
-**Reordered 2026-08-16 (third time that day), after the live-tier sitting ran.** The sitting held row
-#1; it produced LLM-01, LLM-02, P65.3's closure and P62.9's watch item, and **its remainder is now
-row #10 by the user's decision, not by rank** — the work left in it is real, and it is parked rather
-than demoted. Everything that was #2-#10 moves up one. The one-line summary of what the run found:
-the compaction A/B's fixture was being defeated by `read_file {"limit":1}` and had to be rebuilt
-before anything could be measured at all, and once it was, compaction turned out to fire on eleven of
-fifteen turns while freeing less than one turn adds — which is **#8**'s problem, and raises that
-item's value.
+**It is seven rows now, not ten, and that is a fact about the tiers rather than a shortened list.**
+Tier 1 is empty, Tier 2 holds only the parked-with-#7 **P68.1**, and Tier 3 has exactly six items.
+Everything below them is Tier 4 with no fired trigger, and this document's own rule is not to build
+Tier 4 speculatively — so padding this table back to ten would mean recommending work the tiering
+says to leave alone. The next batch of ranked items comes from a review pass or a fired trigger, not
+from promoting the least-cold Tier 4 entry.
 
-**One item was filed by the run and is not on this list: P68.1** (Tier 2, S). It is what the parked
-row needs before it is worth re-running — the eval tier deletes the database holding the trace its
-own closure conditions are written against. It travels with row #10, so it is off the ten while that
-row is parked.
+**Both sequencing constraints are now discharged**, which is why the six Tier 3 items are freely
+reorderable: **P67.3** shipped the purpose-tag seam **P67.6** needs, and **P67.4** settled the
+cancellation policy **P67.7** would otherwise have had to settle mid-refactor.
+
+**One item is deliberately off this list: P68.1** (Tier 2, S). It is what the parked row needs before
+it is worth re-running — the eval tier deletes the database holding the trace its own closure
+conditions are written against. It travels with row #7, so it is off the list while that row is
+parked.
 
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **P67.3** — call-purpose tag on provider requests | T2 · S-M | One retry policy currently serves the user's turn, compaction, the guard, debate roles, swarm sub-agents, the probe and cron alike — so background work amplifies load during exactly the window the backend is struggling. Small on its own, and the enabling seam **P67.6** cannot be gated correctly without it. Keep the `Retry-After` clamp at `MaxDelay` exactly as it is. |
-| 2 | **P66.25** — content-bound trust grants (SEC-07) | T2 · M | The only security item left in the open set. A grant says "this path is trusted", never "this content is trusted", so a `git pull` adding a `hooks:` block re-prompts nothing. P66.5 shipped its prerequisite. **Decide the `.env` question explicitly** — P66.1 resolves `.env` before any project-controlled file by design, so either invert that or document the partial fingerprint; an undocumented partial is worse than either. |
-| 3 | **P67.4** — cancel siblings when a parallel call fails | T2 · S | A round of four builds where the first fails still pays wall-clock for the other three and appends results to a conversation about to be redirected. Also shortens the aggregate wait `MaxTurnStall` backstops. On the list ahead of its size because it settles the cancellation policy **P67.7** would otherwise have to settle mid-refactor. |
-| 4 | **P67.5** — recall dedupe, freshness and gotcha bias | T2 · S | A top-scoring memory is re-injected every turn it keeps winning, spending the entry budget on context the model already has; `FormatEntries` renders no age though the mtime is already read to key the cache. Cheap, self-contained, and it improves the same local-model path #1 is measured on. |
-| 5 | **P67.2** — prompt stability invariant | T2 · S | Promoted from the nearest miss. It is the same shape as the existing prompt-size ceiling on the axis that costs more per turn, and it composes with the shipped P66.7. It rises because P66.11's `TurnTrace` now records enough per turn to *see* a cache break when one happens — the reason it dropped off last time was that nothing had been observed breaking the cache, and the observation is now cheaper than it was. |
-| 6 | **P66.13** — `aegis chat` bypasses the permission stack | T3 · M-L | Promoted from "deliberately below the cut", and still the most serious *defect* in the open set: `aegis chat` builds a bare permission gate. It needs `newChatCmd` — 683 lines wrapping a 615-line closure — split before either bug is testable. It rises because the small-fix batch that kept displacing it is now empty of Tier 2 items cheaper than it, and P66.21 has just corrected `buildChatSystem`'s doc comment to say what actually diverges, which is the map that refactor needs. |
-| 7 | **P66.15** — sweep `internal/tui` and `internal/security` | T3 · M | 26% of production Go that nobody read. The highest-expected-value item with no fired trigger; the one hour eventually spent in `approval.go` during arbitration produced a Medium security finding, which is the case for it. |
-| 8 | **P67.6** — gate compaction and background work on the purpose tag | T3 · M | Sequenced directly behind #2, which builds its seam. Read P66.14's record before starting: the compaction trigger is now one shared function with the caller's own number passed per call, so this item's gating decision has one place to live rather than two. |
-| 9 | **P67.7** — restructure the parallel tool round | T3 · L | The largest engine change in either batch, and it wants #4 landed first so the cancellation policy is settled before the refactor rather than during it. Also read P67.1's record: `runTools` now has a round-level result bound layered above the per-call caps, and that hook has to survive the restructure. |
-| 10 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | It ran that day and gave up most of what it had: LLM-01 and LLM-02 measured, P65.3 closed, P62.9's watch item positive, P62.2's A/B non-empty. **Deliberately last now, not blocked-last** — the user parked it. What is left is also no longer one sitting: **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show — a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
+| 1 | **P66.13** — `aegis chat` bypasses the permission stack | T3 · M-L | The most serious *defect* left in the open set, and now the top of the list on its own merits rather than by promotion: `aegis chat` builds a bare permission gate. It needs `newChatCmd` — 683 lines wrapping a 615-line closure — split before either bug is testable. P66.21 corrected `buildChatSystem`'s doc comment to say what actually diverges, which is the map that refactor needs. |
+| 2 | **P66.15** — sweep `internal/tui` and `internal/security` | T3 · M | 26% of production Go that nobody read. The highest-expected-value item with no fired trigger; the one hour eventually spent in `approval.go` during arbitration produced a Medium security finding, which is the case for it. |
+| 3 | **P67.6** — gate compaction and background work on the purpose tag | T3 · M | **Unblocked 2026-08-17**: P67.3 shipped `provider.Purpose`, so the discriminator this item needs exists — `EffectivePurpose(ctx, req)`, with the per-call tag beating the run-scoped one, which is exactly what keeps a compaction inside a foreground run distinguishable. Read P66.14's record too: the compaction trigger is one shared function with the caller's number passed per call, so the gating decision has one place to live. Its value went *up* when the live tier found compaction firing on eleven of fifteen turns while freeing less than one turn adds — P62.7's minimum-yield rule suppressed none of them, and that low-yield regime is this item's to fix. |
+| 4 | **P67.7** — restructure the parallel tool round | T3 · L | The largest engine change in either batch, and its prerequisite is now landed: P67.4 settled the cancellation policy, so the refactor inherits it rather than inventing it mid-flight. Two hooks must survive the restructure — P67.1's round-level result bound, and P67.4's round context with its "cancelling siblings never cancels the turn" split and its filled-every-slot rule. |
+| 5 | **P67.8** — read-only shell classification is per-binary | T3 · M | Useful commands stay execute-gated because the classification cannot see that `git log` and `git push` are different calls to one binary. Independent of everything above it. |
+| 6 | **P67.9** — terminal capability is inferred from `TERM`, not asked | T3 · S-M | The smallest of the six and the one most likely to be worth doing when the file is already open; it sits last only because the five above it are worth more per hour. |
+| 7 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | It ran on 2026-08-16 and gave up most of what it had: LLM-01 and LLM-02 measured, P65.3 closed, P62.9's watch item positive, P62.2's A/B non-empty. **Deliberately last, not blocked-last** — the user parked it. What is left is also no longer one sitting: **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show — a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
 
 **Notes on the ordering, and on what did not make it.**
 
-**#10 is a sitting, not a task, and it is no longer one sitting.** It stayed one row for as long as
-one setup answered all of it; the run split it into three unrelated blockers — a permission (P38.1),
-a task design (P62.9) and an instrumentation gap (P68.1, which the other three wait behind). Whoever
-picks it up should expect to take those separately rather than to book an afternoon.
+**#7 is a sitting, not a task, and it is no longer one sitting.** It stayed one row for as long as
+one setup answered all of it; the 2026-08-16 run split it into three unrelated blockers — a
+permission (P38.1), a task design (P62.9) and an instrumentation gap (P68.1, which the other three
+wait behind). Whoever picks it up should expect to take those separately rather than to book an
+afternoon.
 
-**What is fixed and what is free.** Only two orderings are real: **#1 before #8** (the purpose tag is
-that item's seam) and **#3 before #9**. Rows #2, #4, #5, #6 and #7 have no dependencies on each other
-or on anything above them and can be reordered freely to suit whatever file is already open. #10
-depends on nothing in the codebase except P68.1, and on a reachable model server.
+**Nothing on this list is now sequence-blocked.** Both real orderings were discharged on 2026-08-17
+(P67.3 → #3, P67.4 → #4), so rows #1-#6 can be taken in any order to suit whatever file is already
+open; the ranking is expected value per hour and nothing more. #7 depends on nothing in the codebase
+except P68.1, and on a reachable model server.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in *document*
-order, which is priority order only *within* a track — it cannot see a cross-tier ranking, so it will
-suggest the first unblocked Tier 2 entry rather than #1 — and it now also cannot see that #10 is
-parked by choice or that **P68.1** is deliberately off the list. Use it for repo state and for the
-parse; use this table for what to take.
+order, which is priority order only *within* a track — it cannot see a cross-tier ranking — and it
+also cannot see that #7 is parked by choice or that **P68.1** is deliberately off the list. Use it
+for repo state and for the parse; use this table for what to take.
 
-The remaining P67 Tier-3 items (**P67.8**, **P67.9**) sit just below the cut and belong to a later
-sitting.
+**What did not make it, and why the list is not padded.** Every remaining Tier 4 entry was
+re-verified as trigger-less on 2026-08-15 and nothing since has fired one. Promoting the least-cold
+of them to fill a ten-row table would contradict the tiering criteria this document is ranked by, so
+the table stops where the tiers do.
 
 ---
 
@@ -211,12 +229,14 @@ a fired trigger on a Tier 4 entry, not from re-reading the existing findings.
 
 ## Open Work — Tier 2
 
-**Status: 5 open** — one from the P66 review batch and four from the P67 external-source reading.
-**P66.11, P66.12, P66.21 and P67.1 shipped 2026-08-16** (after P66.7, P66.9, P66.10 and P66.16
-earlier the same day), leaving only the refiled **P66.25** from P66. Each remaining item is
-self-contained and independently shippable; the one ordering constraint inside the tier is that
-**P67.3** builds the seam **P67.6** (Tier 3) needs, so taking P67.3 early costs nothing and unblocks
-later work.
+**Status: 1 open** — **P68.1**, and it is deliberately off the ranked list because it travels with
+the parked live-tier row. **P66.25, P67.2, P67.3, P67.4 and P67.5 shipped 2026-08-17**, emptying the
+rest of the tier; P66.11, P66.12, P66.21 and P67.1 shipped 2026-08-16, and P66.7, P66.9, P66.10 and
+P66.16 earlier that day. Records for all of them are in [releases.md](releases.md).
+
+**P66.25 was the last P66 item and the last security item in the open set.** What that leaves in this
+tier is one instrumentation gap whose whole value is making the *next* live sitting readable — so a
+new Tier 2 entry now comes from a review pass or a fired trigger, not from what is already filed.
 
 ### P68.1 — The live tier can run a measurement it cannot read back
 
@@ -250,127 +270,10 @@ and `aegis sessions trace <id>` on it showing the compaction summary text, the c
 count and each turn's stop reason. That single change is what unblocks four verification items;
 until it exists, re-running the tier produces the same evidence it produced today.
 
-Priority: Tier 2 — S. No dependency. **Deliberately off the "Up next" ten**, because it travels with
+Priority: Tier 2 — S. No dependency. **Deliberately off the "Up next" list**, because it travels with
 row #10 and that row is parked: its whole value is making the next live sitting readable. If that
 sitting is ever scheduled, this comes first — a tier that cannot be read back costs the same and
 yields less.
-
-### P66.25 — Trust grants are permanent and content-blind (SEC-07, refiled from P66.5)
-
-**Filed 2026-08-16**, carved out of P66.5 rather than left as an unhonored "fold in if cheap" clause.
-P66.5 shipped the inverted freeze list and with it a **well-defined security-relevant subset** of the
-config — which was SEC-07's missing prerequisite, and is why this is now a coherent item instead of a
-vague one. What did not ship is the re-prompt.
-
-A trust grant (`aegis trust`, `internal/workspacetrust`) is recorded once per directory and never
-re-examined. It says "this path is trusted", not "this *content* is trusted". So a `git pull` that
-adds a `hooks:` block, flips `security.*`, or introduces a `commands:` override re-prompts nothing:
-the operator approved a directory weeks ago and silently inherits whatever the repository has become
-since. P66.5 closed the untrusted case completely; this is the trusted-then-changed case.
-
-The shape is a content fingerprint over the security-relevant subset, stored with the grant, checked
-on load, re-prompting when it moves. **What makes it Tier 2 rather than trivial** — and what stopped
-it shipping inside P66.5 — is that the fingerprint has to cover `.aegis/.env` to be honest, and
-P66.1 deliberately resolves `.env` *before* any project-controlled file is read. Honouring both means
-either inverting P66.1's ordering (reading and parsing project config ahead of the trust decision,
-which is the ordering P66.1 exists to prevent) or accepting a documented hole where the re-prompt
-covers `config.yaml` but not `.env`. **Pick one and write down why** — an undocumented partial
-fingerprint is worse than either. It also changes the `workspacetrust` store format and the
-`Trust`/`IsTrusted` signatures used from `internal/cli` and `internal/server`, so it is a migration,
-not an edit.
-
-Closes SEC-07. Priority: Tier 2 — M. Sequence after P66.5 (shipped); read P66.1's record in
-[releases.md](releases.md) first, because the `.env` ordering is the whole difficulty.
-
-### P67.2 — The prompt has a size invariant and no stability invariant
-
-`TestEffectiveSystem_localProfileBudget` fails the suite when the local base prompt crosses
-`localBasePromptCeilingTokens`, and CLAUDE.md states the rule it enforces: raising the ceiling is
-allowed, raising it silently is not. There is no equivalent guard on the axis that costs more per
-turn. Nothing stops a *volatile* value — a timestamp, a cost figure, a changing repo-map digest, a
-count that moves with session state — from being assembled into the system prefix, where it breaks
-the prompt cache on every single turn and shows up only as unexplained prefill cost.
-
-Build the prompt from **named sections** with two constructors: a default that is computed once and
-memoized for the life of the conversation, and an explicitly-named volatile one that recomputes per
-turn and **takes a written justification as a required argument**. Then a test computes every section
-twice and fails on any that differs without having been declared volatile. The naming does most of
-the enforcement; the test catches the rest.
-
-This is the same shape as the ceiling test on a different axis, and it composes with P66.7 — a
-context-file cap is easier to reason about when the rest of the prefix is known to be stable.
-
-Priority: Tier 2 — S-M. No dependency.
-
-### P67.3 — Provider requests carry no purpose, so one retry policy serves every caller
-
-`internal/provider/retry.go` applies a single policy to everything that passes through the adapter
-seam. Aegis makes far more kinds of call than that policy can be right for at once: the user's turn,
-compaction summaries, the guard's second pass, debate roles, swarm sub-agents, the tool-call probe,
-cron jobs. On a capacity or rate-limit error they all back off identically, including the ones no
-human is waiting on and whose failure is invisible.
-
-Thread a **call-purpose tag** through the adapter seam and key policy on it. The immediate payoff is
-retry: background work fails fast instead of amplifying load during exactly the window when the
-backend is already struggling, and the foreground turn is then free to retry harder than a
-one-size policy allows. Default new purposes to the conservative setting and make opting in explicit,
-so a call path added later does not silently acquire aggressive retry.
-
-The tag is worth more than the retry change alone. **P67.6 needs it** — a compaction trigger that
-fires on the main conversation must not fire for a sub-agent or an analysis-only caller, and the
-purpose tag is the correct discriminator for that. It would also give `internal/cost` a spend
-breakdown by call class, which today it cannot produce.
-
-Keep the existing `Retry-After` clamp at `MaxDelay` (`internal/provider/retry.go:86`) exactly as it
-is. It is what keeps provider backoff inside the 900s `MaxTurnStall` bound without the retry path
-needing heartbeats at all, and it should not be "fixed" into honoring the header unbounded.
-
-Priority: Tier 2 — S-M. No dependency. Enables P67.6.
-
-### P67.4 — A failed tool call leaves its siblings running to completion
-
-In a parallel round, `Engine.runTools` runs every call to completion regardless of what its siblings
-did. A round of four builds where the first fails still pays wall-clock for the other three, and
-their results are appended to a conversation the model is about to redirect anyway.
-
-Derive a per-round context from the turn context and cancel it on the first error, so sibling
-subprocesses die promptly while the turn itself continues normally. The parent/child split is the
-whole point: cancelling siblings must not cancel the turn.
-
-Two things to decide rather than assume. **Which failures qualify** — a `read_file` on a missing path
-is a normal negative result and must not kill the round, while a failing `shell` usually should; the
-capability classification the scheduler already computes (`Engine.serializeTool` →
-`tool.EffectiveCapability`) is the natural place to hang that policy. And **what the cancelled
-siblings report back** — the honest wording already exists in `interruptedMaybeRanText`, and the P65.1
-reasoning behind it applies unchanged here: a cancelled call that had already started may have landed
-its effects, and telling the model it did not run invites a destructive re-run.
-
-Shortening doomed rounds also shortens the aggregate wait that `MaxTurnStall` backstops, which is a
-second, smaller reason to want it.
-
-Priority: Tier 2 — S. No dependency.
-
-### P67.5 — Recall re-injects what it already injected, and says nothing about age
-
-`internal/memory/relevance.go` scores entries by TF-IDF over an mtime/size-cached corpus. The scoring
-is the right call for a local-first tool — no model round-trip, no cost — and this item does not
-change it. Three behaviors *around* it are missing:
-
-- **Already-surfaced dedupe.** Nothing filters entries injected on earlier turns of the same run, so a
-  top-scoring entry is re-injected every turn it keeps winning, spending the entry budget on context
-  the model already has.
-- **Freshness.** `FormatEntries` renders content with no indication of age. The mtime is already read
-  to key the cache (`cachedEntries`), so threading it through to the rendered entry costs one struct
-  field and no extra I/O — and a memory's age is often the thing that decides whether to trust it.
-- **Reference-vs-gotcha bias.** An entry that documents how to use a tool is near-useless when the
-  model is already using that tool successfully; an entry that records a *gotcha* about that same
-  tool is most valuable at exactly that moment. Bias scoring toward the latter when the tool in
-  question appears in the run's recent tool calls.
-
-The dedupe should filter before scoring, not after, so the entry budget is spent on candidates that
-can actually be used.
-
-Priority: Tier 2 — S. No dependency.
 
 ---
 
@@ -538,7 +441,9 @@ P62.7's minimum-yield rule suppressed none of them. Whatever this item gates com
 be able to say "not again this turn" in that state — the measurement is in
 [releases.md](releases.md) (*The live-tier sitting, 2026-08-16*).
 
-Priority: Tier 3 — M. Sequence after P67.3 (needs the purpose tag) and P66.14 (same machinery).
+Priority: Tier 3 — M. **Both prerequisites have shipped**: P67.3 (2026-08-17) built the purpose tag
+this item gates on, and P66.14 (2026-08-16) made the compaction trigger one shared function. No
+remaining dependency.
 
 ### P67.7 — Tool calls are dispatched only after the whole model turn has streamed
 
@@ -571,8 +476,10 @@ it, so the constraints are the substance of the item:
 Take **P67.4** first if both are wanted — sibling cancellation is much simpler to reason about on the
 current batch-dispatch model, and the policy it settles is one fewer thing to get right here.
 
-Priority: Tier 3 — L. Sequence after P67.4. The largest payoff of the batch on local models, where
-generation latency dominates.
+Priority: Tier 3 — L. **P67.4 shipped 2026-08-17**, so the cancellation policy this refactor would
+otherwise have settled mid-flight is already settled; inherit it (round context derived from the
+turn's, write/execute failures only, every result slot filled) rather than re-deciding it. The largest
+payoff of the batch on local models, where generation latency dominates.
 
 ### P67.8 — Read-only shell classification is per-binary, so useful commands stay execute-gated
 
