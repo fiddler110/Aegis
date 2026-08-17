@@ -6,8 +6,6 @@ import (
 	"runtime"
 	"testing"
 	"time"
-
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // clearEnv unsets the given env vars for the duration of the test.
@@ -156,7 +154,7 @@ mcp:
 	}
 	// mcp.* is a P27.1 trust-gated key; trust this directory so the project
 	// config's mcp: block actually applies for this test.
-	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+	if err := TrustWorkspace(dir); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
 

@@ -53,7 +53,6 @@ import (
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/fiddler110/aegis/internal/toolcallprobe"
 	"github.com/fiddler110/aegis/internal/toolpath"
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 const maxRequestBody = 10 << 20 // 10 MiB
@@ -707,7 +706,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// silently weaken isolation, so surface them loudly at startup.
 	if cfg.WorkspaceTrust.Frozen {
 		logger.Warn("workspace not trusted: project .aegis/config.yaml security-relevant settings are frozen to user/global values",
-			"dir", cfg.WorkspaceTrust.Dir, "changes", cfg.WorkspaceTrust.Changes, "fix", "run `aegis trust` to review and accept them")
+			"dir", cfg.WorkspaceTrust.Dir, "changes", cfg.WorkspaceTrust.Changes,
+			// P66.25/SEC-07: distinguishes "never trusted" from "trusted, then
+			// the repository's security config moved under you".
+			"stale_grant", cfg.WorkspaceTrust.Stale,
+			"fix", "run `aegis trust` to review and accept them")
 	}
 	if _, isLocal := sb.(*sandbox.LocalBackend); isLocal {
 		if cfg.Permission.Mode != string(permission.ModePlan) {
@@ -809,13 +812,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// the same workspace-trust decision applyWorkspaceTrust/`aegis trust`
 	// already governs for project config.yaml (P27.7/FIND-09), rather than
 	// applying an untrusted repo's persona frontmatter as real settings with
-	// no check. Queried directly against the trust store (not
-	// cfg.WorkspaceTrust.Trusted) because that field is forced true whenever
-	// no project config.yaml exists — a repo could ship only a persona file
-	// with no config.yaml and still need gating.
+	// no check. Queried through config.WorkspaceTrusted rather than the store
+	// directly, because since P66.25/SEC-07 the answer is "is there a grant
+	// *and* does it still cover what is on disk" — a caller that opened the
+	// store itself would answer the old, content-blind question.
 	s.personaDirs = persona.DiscoverDirs(cfg.DataDir, cwd)
 	s.personaProjectDir = persona.ProjectDir(cwd)
-	s.personaProjectTrusted = workspacetrust.Open(config.WorkspaceTrustStorePath()).IsTrusted(cwd)
+	s.personaProjectTrusted = config.WorkspaceTrusted(cwd)
 	if n, _ := persona.Refresh(s.personaProjectDir, s.personaProjectTrusted, s.personaDirs...); n > 0 {
 		logger.Info("loaded custom personas", "count", n)
 	}

@@ -95,8 +95,16 @@ type WorkspaceTrustStatus struct {
 	// where .aegis/config.yaml is resolved from).
 	Dir string
 	// Trusted is true once `aegis trust` (or equivalent) has recorded an
-	// explicit trust decision for Dir.
+	// explicit trust decision for Dir *and* that decision still covers the
+	// security-relevant config currently on disk (P66.25/SEC-07).
 	Trusted bool
+	// Stale is true when a trust decision exists for Dir but no longer
+	// matches: the project's security-relevant config changed since it was
+	// granted, or the grant predates P66.25 and recorded no content at all.
+	// A stale grant gates exactly like no grant — Trusted is false and the
+	// freeze applies — and this field exists only so the operator is told
+	// "what you approved has changed" instead of "you never approved this".
+	Stale bool
 	// Frozen is true when Trusted is false AND the project config would
 	// otherwise have changed a security-relevant setting — meaning Changes
 	// below were actually applied (reverted to the user/global baseline)
@@ -1830,7 +1838,15 @@ func Load() (*Config, error) {
 	if err != nil {
 		dir = "."
 	}
-	trusted := workspacetrust.Open(WorkspaceTrustStorePath()).IsTrusted(dir)
+	// P66.25/SEC-07: the grant is checked against a fingerprint of the
+	// security-relevant config, not just against the path, so a `git pull` that
+	// adds a `hooks:` block re-prompts instead of being silently inherited. The
+	// fingerprint reads .aegis/config.yaml — project-controlled content — but
+	// only to *hash* it: nothing parsed here is applied, the layer loaders below
+	// still run after the decision, and .aegis/.env is deliberately outside the
+	// covered set precisely so this ordering survives. See SecurityFingerprint.
+	trustStatus := workspacetrust.Open(WorkspaceTrustStorePath()).Check(dir, SecurityFingerprint(dir))
+	trusted := trustStatus == workspacetrust.Trusted
 
 	// Snapshot the environment before .aegis/.env can add to it; the baseline
 	// layer is built over this rather than over the live environment.
@@ -1877,7 +1893,7 @@ func Load() (*Config, error) {
 	// (project-inclusive) config's Normalize error is fatal.
 	_ = baseCfg.Sandbox.Normalize()
 
-	applyWorkspaceTrust(&cfg, &baseCfg, dir, trusted)
+	applyWorkspaceTrust(&cfg, &baseCfg, dir, trustStatus)
 
 	// P66.5/SEC-06, generalizing P27.9/FIND-11: the baselineOnly keys
 	// (data_dir, security.dast.allowed_targets) take their value from the
@@ -1938,10 +1954,15 @@ func WorkspaceTrustStorePath() string {
 // excluded) for those keys. Which keys those are is P66.5's subject: the
 // classification is exhaustive over Config and defaults to frozen, so this
 // function no longer carries a list of its own to fall out of date.
-// dir and trusted are resolved by Load before any project-controlled file is
-// read (P66.1), and passed in rather than recomputed here so that one trust
+// dir and status are resolved by Load before any project-controlled file is
+// applied (P66.1), and passed in rather than recomputed here so that one trust
 // decision governs both the .env load and this freeze.
-func applyWorkspaceTrust(cfg, baseline *Config, dir string, trusted bool) {
+//
+// P66.25/SEC-07: status carries three answers, not two. Stale — a grant whose
+// fingerprint no longer matches, or a pre-fingerprint grant — freezes exactly
+// like Untrusted; the distinction only reaches the operator-facing message.
+func applyWorkspaceTrust(cfg, baseline *Config, dir string, status workspacetrust.Status) {
+	trusted := status == workspacetrust.Trusted
 	// P66.1/SEC-01: Trusted reports what the trust store says, and nothing
 	// else. It used to be forced true whenever .aegis/config.yaml was absent —
 	// "no project config, nothing to gate" — but absence of a file is not a
@@ -1950,7 +1971,7 @@ func applyWorkspaceTrust(cfg, baseline *Config, dir string, trusted bool) {
 	// already worked around it by querying the store directly
 	// (server.go:787); this makes the field itself honest so the next such
 	// caller does not need the same workaround.
-	cfg.WorkspaceTrust = WorkspaceTrustStatus{Dir: dir, Trusted: trusted}
+	cfg.WorkspaceTrust = WorkspaceTrustStatus{Dir: dir, Trusted: trusted, Stale: status == workspacetrust.Stale}
 
 	// Nothing to freeze if there's no project config file — the diff would be
 	// empty anyway, so skip building it.

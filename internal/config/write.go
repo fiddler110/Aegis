@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // ProviderPatch holds the provider fields to write into the global config file.
@@ -111,7 +109,9 @@ func PatchProjectSandbox(p SandboxPatch) error {
 	if err != nil {
 		return nil
 	}
-	return workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir)
+	// P66.25/SEC-07: after the write, so the grant's fingerprint covers the
+	// block this call just wrote rather than the content it replaced.
+	return TrustWorkspace(dir)
 }
 
 func patchSandbox(path string, p SandboxPatch) error {
@@ -275,7 +275,10 @@ func PatchProjectSecurity(p SecurityPatch) error {
 	if err != nil {
 		return nil
 	}
-	return workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir)
+	// P66.25/SEC-07: after the write, for the same reason as
+	// PatchProjectSandbox — the operator's own edit is what the renewed
+	// fingerprint has to describe.
+	return TrustWorkspace(dir)
 }
 
 // PatchGlobalSecurity replaces the security: block in the global config file.

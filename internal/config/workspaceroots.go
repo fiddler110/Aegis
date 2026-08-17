@@ -28,10 +28,14 @@ import (
 //   - it is the primary root, or nested inside it — already reachable, and
 //     admitting it a second time would let a read-only entry contradict the
 //     primary root's writability;
-//   - it has no `aegis trust` decision of its own. An additional root does
-//     not inherit the primary workspace's trust: trusting the repo you are
+//   - it has no *current* `aegis trust` decision of its own. An additional root
+//     does not inherit the primary workspace's trust: trusting the repo you are
 //     working in is not the same decision as granting it a window into
-//     another directory on the host.
+//     another directory on the host. Since P66.25/SEC-07 "current" also means
+//     the root's own security-relevant config has not moved since the grant —
+//     a stale grant is rejected like a missing one, on the same reasoning that
+//     a directory which has acquired a `hooks:` block since you approved it is
+//     a directory you have not approved.
 func ResolveAdditionalRoots(primary string, cfg WorkspaceConfig) (roots []sandbox.Root, rejected []string) {
 	primaryAbs, err := filepath.Abs(primary)
 	if err != nil {
@@ -74,7 +78,7 @@ func ResolveAdditionalRoots(primary string, cfg WorkspaceConfig) (roots []sandbo
 			rejected = append(rejected, fmt.Sprintf("%s: inside the workspace root %s (already reachable)", ar.Path, primaryAbs))
 			continue
 		}
-		if !store.IsTrusted(abs) {
+		if !store.IsTrusted(abs, SecurityFingerprint(abs)) {
 			rejected = append(rejected, fmt.Sprintf("%s: not trusted (run `aegis trust` in that directory)", ar.Path))
 			continue
 		}

@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // writeProjectConfig writes raw YAML to .aegis/config.yaml under the current
@@ -111,7 +109,7 @@ git:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+	if err := TrustWorkspace(dir); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
 	cfg, err = Load()
@@ -142,7 +140,7 @@ plugins:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+	if err := TrustWorkspace(dir); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
 
@@ -211,8 +209,7 @@ func TestWorkspaceTrustNoProjectConfigFreezesNothing(t *testing.T) {
 		t.Error("nothing should be frozen with no project config")
 	}
 
-	store := workspacetrust.Open(WorkspaceTrustStorePath())
-	if err := store.Trust(dir); err != nil {
+	if err := TrustWorkspace(dir); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
 	cfg, err = Load()
@@ -257,7 +254,7 @@ security:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+	if err := TrustWorkspace(dir); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
 	cfg, err = Load()
@@ -328,7 +325,7 @@ func TestAppendProjectPermissionRuleAutoTrusts(t *testing.T) {
 		t.Fatalf("AppendProjectPermissionRule: %v", err)
 	}
 
-	if !workspacetrust.Open(WorkspaceTrustStorePath()).IsTrusted(root) {
+	if !WorkspaceTrusted(root) {
 		t.Error("AppendProjectPermissionRule should trust root")
 	}
 }
@@ -380,7 +377,7 @@ workspace:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+	if err := TrustWorkspace(dir); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
 	cfg, err = Load()

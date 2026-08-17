@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // trustDir records a trust decision for dir in the store ResolveAdditionalRoots
@@ -17,7 +15,7 @@ func trustDir(t *testing.T, dir string) {
 	if err != nil {
 		real = dir
 	}
-	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(real); err != nil {
+	if err := TrustWorkspace(real); err != nil {
 		t.Fatal(err)
 	}
 }

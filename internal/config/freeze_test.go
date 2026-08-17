@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // TestEveryConfigFieldDeclaresATrustPolicy is P66.5's structural guard, the
@@ -357,7 +355,7 @@ func trustCWD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir); err != nil {
+	if err := TrustWorkspace(dir); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
 }

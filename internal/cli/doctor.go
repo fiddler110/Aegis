@@ -351,11 +351,25 @@ func doctorCommandChecks(cfg *config.Config) []doctorCheck {
 func doctorWorkspaceTrustCheck(cfg *config.Config) doctorCheck {
 	const name = "workspace trust"
 	if !cfg.WorkspaceTrust.Frozen {
+		// P66.25/SEC-07: a stale grant with nothing left to freeze (the project
+		// config was deleted or reduced to project-settable keys) is still worth
+		// reporting — the recorded grant no longer describes what is on disk.
+		if cfg.WorkspaceTrust.Stale {
+			return doctorCheck{
+				Name: name, Severity: doctorWarn,
+				Detail: "trust grant is stale: this directory's security-relevant config changed since it was trusted",
+				Fix:    "run `aegis trust` to review the current config and re-grant",
+			}
+		}
 		return doctorCheck{Name: name, Severity: doctorPass, Detail: "no untrusted project security overrides"}
+	}
+	detail := fmt.Sprintf("%d project config change(s) frozen: %s", len(cfg.WorkspaceTrust.Changes), strings.Join(cfg.WorkspaceTrust.Changes, "; "))
+	if cfg.WorkspaceTrust.Stale {
+		detail = "trust grant is stale (security config changed since it was granted); " + detail
 	}
 	return doctorCheck{
 		Name: name, Severity: doctorWarn,
-		Detail: fmt.Sprintf("%d project config change(s) frozen: %s", len(cfg.WorkspaceTrust.Changes), strings.Join(cfg.WorkspaceTrust.Changes, "; ")),
+		Detail: detail,
 		Fix:    "run `aegis trust` to review and accept them",
 	}
 }

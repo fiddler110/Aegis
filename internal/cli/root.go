@@ -362,7 +362,16 @@ func warnWorkspaceTrust(cfg *config.Config) {
 	if !cfg.WorkspaceTrust.Frozen {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "\n⚠ workspace not trusted: %s's project config would change:\n", cfg.WorkspaceTrust.Dir)
+	// P66.25/SEC-07: a stale grant reads as "not trusted" everywhere it gates,
+	// but the operator's situation is the opposite of a first visit — they
+	// approved this directory, and its security-relevant config has moved since
+	// (a `git pull`, typically). Saying "not trusted" there would send them
+	// looking for a decision they already made.
+	lead := "workspace not trusted"
+	if cfg.WorkspaceTrust.Stale {
+		lead = "workspace trust is stale (security config changed since you trusted it)"
+	}
+	fmt.Fprintf(os.Stderr, "\n⚠ %s: %s's project config would change:\n", lead, cfg.WorkspaceTrust.Dir)
 	for _, c := range cfg.WorkspaceTrust.Changes {
 		fmt.Fprintf(os.Stderr, "    %s\n", c)
 	}

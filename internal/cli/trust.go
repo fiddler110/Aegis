@@ -34,6 +34,11 @@ func newTrustCmd() *cobra.Command {
 			"lifecycle hooks just by being checked out.\n\n" +
 			"Run this in a project you've reviewed and want to trust; it shows exactly\n" +
 			"which settings the project config would change before asking for confirmation.\n\n" +
+			"A grant covers the security-relevant config as it stands when you accept it, not\n" +
+			"the directory forever: if those settings change later (a `git pull` that adds a\n" +
+			"hooks: block, say) the grant goes stale and you are asked again. Edits to\n" +
+			"settings a project may set without trust do not go stale. .aegis/.env is\n" +
+			"deliberately not covered — see docs/configuration.md.\n\n" +
 			"Use --dir to record a trust decision for another directory without cd-ing into\n" +
 			"it. That is how a workspace.additional_roots entry (P52.13) is authorized: an\n" +
 			"additional root does not inherit the primary workspace's trust, and — unlike\n" +
@@ -63,6 +68,15 @@ func newTrustCmd() *cobra.Command {
 				fmt.Fprintf(out, "%s is already trusted.\n", dir)
 				return nil
 			}
+			// P66.25/SEC-07: a stale grant is not trust, but it is a different
+			// situation from never having granted one, and saying so is the
+			// whole point of the re-prompt — the operator needs to know that
+			// something they already approved has been changed under them
+			// (typically by a `git pull`), not merely that approval is missing.
+			if cfg.WorkspaceTrust.Stale {
+				fmt.Fprintf(out, "%s was trusted, but its security-relevant project config has changed since\n"+
+					"(or the grant predates content fingerprinting). The old grant no longer applies.\n\n", dir)
+			}
 			if len(cfg.WorkspaceTrust.Changes) == 0 {
 				fmt.Fprintf(out, "%s has no security-relevant project config to trust (nothing frozen). Trusting it anyway so future edits apply immediately.\n", dir)
 				if status {
@@ -89,7 +103,7 @@ func newTrustCmd() *cobra.Command {
 					return nil
 				}
 			}
-			if err := store.Trust(dir); err != nil {
+			if err := config.TrustWorkspace(dir); err != nil {
 				return fmt.Errorf("trust: %w", err)
 			}
 			fmt.Fprintf(out, "%s is now trusted. Restart the daemon to apply.\n", dir)
@@ -132,17 +146,33 @@ func trustNamedDir(cmd *cobra.Command, store *workspacetrust.Store, dir string, 
 		fmt.Fprintf(out, "%s is no longer trusted; it will be dropped from workspace.additional_roots on next load.\n", abs)
 		return nil
 	}
-	if status {
-		if store.IsTrusted(abs) {
+	// P66.25/SEC-07: the same content check applies to a --dir grant. An
+	// additional root usually has no .aegis/config.yaml at all, which
+	// fingerprints as the empty key set — so the common case is unaffected —
+	// but a root that has since *acquired* a security-relevant config block is
+	// a directory whose content nobody reviewed, and the uniform rule (one
+	// fingerprint definition, no per-call-site exceptions) is what keeps a
+	// --dir grant and a cwd grant for the same path meaning the same thing.
+	switch config.WorkspaceTrustFor(abs) {
+	case workspacetrust.Trusted:
+		if status {
 			fmt.Fprintf(out, "%s is trusted.\n", abs)
 		} else {
-			fmt.Fprintf(out, "%s is not trusted. Run `aegis trust --dir %s` to grant it.\n", abs, dir)
+			fmt.Fprintf(out, "%s is already trusted.\n", abs)
 		}
 		return nil
-	}
-	if store.IsTrusted(abs) {
-		fmt.Fprintf(out, "%s is already trusted.\n", abs)
-		return nil
+	case workspacetrust.Stale:
+		fmt.Fprintf(out, "%s was trusted, but its security-relevant config has changed since\n"+
+			"(or the grant predates content fingerprinting). The old grant no longer applies.\n", abs)
+		if status {
+			fmt.Fprintf(out, "Run `aegis trust --dir %s` to review and re-grant it.\n", dir)
+			return nil
+		}
+	default:
+		if status {
+			fmt.Fprintf(out, "%s is not trusted. Run `aegis trust --dir %s` to grant it.\n", abs, dir)
+			return nil
+		}
 	}
 
 	if !yes {
@@ -154,7 +184,7 @@ func trustNamedDir(cmd *cobra.Command, store *workspacetrust.Store, dir string, 
 			return nil
 		}
 	}
-	if err := store.Trust(abs); err != nil {
+	if err := config.TrustWorkspace(abs); err != nil {
 		return fmt.Errorf("trust: %w", err)
 	}
 	fmt.Fprintf(out, "%s is now trusted. Restart the daemon to apply.\n", abs)

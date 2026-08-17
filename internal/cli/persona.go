@@ -8,7 +8,6 @@ import (
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/persona"
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +41,7 @@ func loadPersonaFiles() (*config.Config, error) {
 	// Gate project-sourced persona control fields on the same workspace-trust
 	// decision `aegis trust` governs for project config.yaml (P27.7/FIND-09).
 	projectDir := persona.ProjectDir(cwd)
-	trusted := workspacetrust.Open(config.WorkspaceTrustStorePath()).IsTrusted(cwd)
+	trusted := config.WorkspaceTrusted(cwd)
 	persona.Refresh(projectDir, trusted, dirs...)
 	return cfg, nil
 }

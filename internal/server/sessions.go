@@ -24,7 +24,6 @@ import (
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 func permModeRank(mode string) int {
@@ -110,7 +109,7 @@ func (s *Server) personaFor(root, name string) (persona.Persona, bool) {
 	if root == "" || root == s.workspace {
 		return persona.Get(name)
 	}
-	trusted := workspacetrust.Open(config.WorkspaceTrustStorePath()).IsTrusted(root)
+	trusted := config.WorkspaceTrusted(root)
 	return persona.GetForRoot(root, trusted, name)
 }
 

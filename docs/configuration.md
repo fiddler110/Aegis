@@ -1407,6 +1407,48 @@ their effect reaches past the workspace you are trusting:
 
 An attempt at either is reverted and logged.
 
+### A grant covers content, not just a path
+
+A trust decision is recorded against a **fingerprint of the security-relevant
+settings in that directory's `.aegis/config.yaml`** — exactly the keys listed
+under "everything else needs `aegis trust`" above, plus any key a future release
+adds without classifying it. If those settings change afterwards, the grant no
+longer applies: the workspace goes back to frozen, `aegis trust`, `aegis doctor`
+and the startup warning report it as *stale* rather than untrusted, and re-running
+`aegis trust` shows you the current diff and re-grants. A `git pull` that adds a
+`hooks:` block, flips `security.*` or introduces a `commands:` override therefore
+prompts you again instead of being silently inherited (P66.25/SEC-07).
+
+What does **not** move a fingerprint:
+
+- edits to keys a project may set without trust (`log_level`, `provider.model`,
+  `cost`, …) — a digest that fired on every config edit would train you to
+  re-accept without reading;
+- changes to your *own* `~/.config/aegis/config.yaml` or `AEGIS_*` environment
+  variables — only project-controlled content is fingerprinted;
+- reordering a YAML block without changing any value.
+
+**Grants recorded before this release carry no fingerprint and are treated as
+stale**, so each already-trusted directory prompts once. That is deliberate:
+those grants were made against content nobody recorded, so "it still matches"
+is not something Aegis can check, and adopting whatever is on disk today would
+bless anything that arrived in the meantime.
+
+**Known gap: `.aegis/.env` is not fingerprinted.** Trust is resolved *before*
+any project-controlled file is read (P66.1/SEC-01) precisely so that `.env` is
+never parsed on the strength of a decision that has not been made yet; covering
+it in the fingerprint would mean parsing project content ahead of that decision
+and reintroducing the ordering that gate exists to prevent. The two cannot both
+be had, and this is the smaller hole: `.env` is read **only in an already
+trusted workspace**, and it may not set `AEGIS_*` at all (those keys are dropped
+and logged, trusted or not), so it is a secrets file rather than a config layer
+and cannot move an Aegis setting the way an unfingerprinted `hooks:` or
+`commands:` block can. What it *can* still do in a workspace you previously
+trusted is set ordinary environment variables that child processes read
+(`GIT_SSH_COMMAND`, `NODE_OPTIONS`, `PATH`, …), and no re-prompt will fire for
+that. Treat `.aegis/.env` as content you re-review yourself, and use
+`aegis trust --revoke` on a repository you no longer want reading it.
+
 ---
 
 ## The `.aegis/.env` File
@@ -1428,6 +1470,11 @@ SOME_INTERNAL_API_KEY=another-secret
   `.aegis/config.yaml`. In an untrusted directory it is not read at all, and
   nothing warns about it beyond the usual untrusted-workspace notice. Run
   `aegis trust` in your own projects. (P66.1/SEC-01)
+- **A later edit to this file does not re-prompt.** Workspace trust is pinned to
+  a fingerprint of `.aegis/config.yaml`'s security-relevant keys, and `.env` is
+  deliberately outside that fingerprint — see "A grant covers content, not just
+  a path" above for why that ordering is the smaller of the two available holes,
+  and what the residual risk is. (P66.25/SEC-07)
 - **`AEGIS_*` keys are ignored here, trusted or not**, and logged when dropped.
   This file is for *secrets*; settings belong in `.aegis/config.yaml`, where
   they are reviewable and diffable and the trust gate can show you what

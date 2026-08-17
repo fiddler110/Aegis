@@ -464,7 +464,11 @@ aegis trust --dir ../research-repo   # authorize an additional workspace root
 
 `--dir` exists because an additional root is usually a plain directory with no `.aegis/config.yaml` of its own to review, and the no-flag path short-circuits when there is nothing to freeze. What it grants is different too: not "apply this project's config" but "let a session that lists this directory under `workspace.additional_roots` reach into it at all". An additional root never inherits the primary workspace's trust.
 
-`aegis doctor`'s "workspace trust" check surfaces the same frozen-settings state. Restart the daemon after trusting a directory to apply the newly-unfrozen settings.
+A grant is recorded against a fingerprint of that directory's security-relevant config, not just against its path (P66.25/SEC-07). If those settings change later — a `git pull` that adds a `hooks:` block, flips `security.*`, or introduces a `commands:` override — the grant goes **stale**: the workspace is frozen again and `aegis trust` says so, showing the current diff so you can re-accept. Editing keys a project may set without trust (`log_level`, `provider.model`, `cost`, …), or editing your own user-global config, does not go stale. Grants recorded before this behavior existed carry no fingerprint and go stale once, on purpose.
+
+`.aegis/.env` is **not** covered by that fingerprint: trust is resolved before any project-controlled file is read, so a later `.env` edit in an already-trusted workspace never re-prompts. See [Project Config and Workspace Trust](configuration.md#project-config-and-workspace-trust) for why that is the smaller hole and what the residual risk is; `aegis trust --revoke` is the mitigation.
+
+`aegis doctor`'s "workspace trust" check surfaces the same frozen-settings (and stale-grant) state. Restart the daemon after trusting a directory to apply the newly-unfrozen settings.
 
 ---
 

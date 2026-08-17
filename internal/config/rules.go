@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 
 	yamlv3 "go.yaml.in/yaml/v3"
-
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // AppendProjectPermissionRule appends a text permission rule (e.g.
@@ -67,7 +65,11 @@ func AppendProjectPermissionRule(root, rule string) error {
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		return err
 	}
-	if err := workspacetrust.Open(WorkspaceTrustStorePath()).Trust(root); err != nil {
+	// P66.25/SEC-07: recorded *after* the write, so the grant's fingerprint
+	// covers the file as it now stands — including the rule just appended.
+	// Re-trusting before the write would record the pre-write content and go
+	// stale the instant this function returns.
+	if err := TrustWorkspace(root); err != nil {
 		return fmt.Errorf("trust %s: %w", root, err)
 	}
 	return nil

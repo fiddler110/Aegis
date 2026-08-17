@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
 // writeDotEnv writes .aegis/.env under the current directory.
@@ -108,8 +106,7 @@ func TestDotEnvAegisKeysDroppedEvenWhenTrusted(t *testing.T) {
 	clearPayloadEnv(t)
 	clearEnv(t, "MY_MCP_TOKEN")
 
-	store := workspacetrust.Open(WorkspaceTrustStorePath())
-	if err := store.Trust(dir); err != nil {
+	if err := TrustWorkspace(dir); err != nil {
 		t.Fatalf("Trust: %v", err)
 	}
 	writeDotEnv(t, dotEnvPayload+"MY_MCP_TOKEN=secret-bearer-token\n")
