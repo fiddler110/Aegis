@@ -51,6 +51,37 @@ reading:
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
 
+### The temperature A/B that measured nothing, twice, 2026-08-17
+
+Recorded because a void experiment that goes unrecorded gets re-run, and because the shape of this
+one is the shape of every false null. With P68.3's graded task in hand, the obvious next question was
+whether the sampling parameters `docs/local-model-tuning.md` recommends on judgement actually help.
+Temperature 0.2 against 0.6, single-variable Modelfiles:
+
+| substrate | 0.2 | 0.6 |
+|---|---|---|
+| `aegis-qwen35-9b:32k` | 12, 12, 12 | 12, 12, 12 |
+| `qwen3:14b-32k-fix` | 3, 3, 3, 3, 3 | 3, 3, 3 |
+
+Flat in all four arms — and **none of it is evidence that temperature does not matter**. The 9b has
+exhausted the rubric and the 14b is pinned at one repeated minimal strategy; a saturated instrument
+returns exactly this pattern regardless. The substrate call was mine and it was wrong twice: the 9b
+was chosen on a 10.7/12 mean that included one run scored under the *old* grader, before the
+collapsed-criteria fix, so its true level was already at the ceiling and there was never room for
+degradation to show.
+
+**Two instrument checks ran before concluding**, which is the only reason "no headroom" survives as
+the reading rather than being a guess: `ollama show` confirmed the derived models differ solely in
+`temperature`, and the P68.2 detector confirmed all four still carry the **corrected** chat template —
+`FROM <derived model>` silently losing it was the obvious way for this to be a P68.2 regression
+wearing a null's clothes.
+
+Filed as **P68.4**: the rubric ranks models well and configurations not at all, because its useful
+measuring band sits below the strongest local model available. The tuning page's sampling section
+stays labelled reasoned-not-measured, and now says explicitly that two experiments were void.
+
+---
+
 ### The tier's task was a boolean, 2026-08-17 (P68.3)
 
 **P68.2's re-run came back at p ≈ 0.45, and the honest diagnosis was not "six runs is too few".**

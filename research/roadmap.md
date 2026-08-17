@@ -1090,7 +1090,7 @@ Priority: Tier 4 — no concrete trigger, XS. A comment, not a feature.
 
 ## Verification Work
 
-**Status: 5 open** (**P68.2** filed *and closed* 2026-08-17 — it ran the same day and its record is
+**Status: 8 open** (**P68.4**, **P68.5** and **P68.6** filed 2026-08-17; **P68.2** filed *and closed* 2026-08-17 — it ran the same day and its record is
 below; **P65.3** closed 2026-08-16, its record is in [releases.md](releases.md)). Every
 item here has its code already written and merged — nothing below is a design or implementation task.
 Each is closed by running a live-model harness and recording the result the item's closure condition
@@ -1377,6 +1377,87 @@ build cannot erase a correct audit. Pinned by
 comparisons P68.2 could not make (mitigation on/off, template corrected/stock, and the sampling
 parameters `docs/local-model-tuning.md` currently recommends on judgement alone) are now runnable at
 an n a sitting can afford.
+
+### P68.4 — The triage rubric's measuring band sits below the strongest local model
+
+**Filed 2026-08-17, from a temperature A/B that measured nothing — twice.** P68.3 shipped a task that
+ranks *models* well (9b 10.7 vs 14b 2.7, complete separation at n=3). The attempt to use it for the
+next question — do the sampling parameters `docs/local-model-tuning.md` recommends actually help? —
+found it cannot rank *configurations*, because both available substrates sit against a rail:
+
+| substrate | temp 0.2 | temp 0.6 | reading |
+|---|---|---|---|
+| `aegis-qwen35-9b:32k` | 12, 12, 12 | 12, 12, 12 | **ceiling** — rubric exhausted |
+| `qwen3:14b-32k-fix` | 3, 3, 3, 3, 3 | 3, 3, 3 | **pinned low** — one repeated minimal strategy |
+
+Both arms of both A/Bs are flat, and **neither is evidence that temperature does not matter** — a
+saturated instrument returns exactly this pattern whether the variable matters or not. Reading these
+as a null would be the same error as reading P68.2's 0/6-against-2/6 as a win, in the other direction.
+
+Two instrument checks were run before concluding, and both came back clean, which is what makes the
+"no headroom" reading the surviving one rather than a guess: the derived Modelfiles differ **only** in
+`temperature` (`ollama show` confirms `num_ctx` and everything else carried), and all four derived
+models still carry the **corrected** chat template (the `FROM <derived model>` inheritance was the
+obvious way for this to be a silent P68.2 regression rather than a real result).
+
+**What it needs:** a harder tier of criteria so a strong model has somewhere left to go, and a floor
+that a weak model clears by more than one repeated strategy. Candidates, none costed:
+
+- a sixth planted issue that only a cross-module data-flow trace finds (the current hardest, the
+  `wire.py` → `jobs.py` pickle, is the one criterion the 9b sometimes misses — so the difficulty
+  gradient is right, there is just not enough of it above);
+- severity grading, currently parsed and discarded — a finding reported at the wrong severity is
+  presently worth the same as one reported correctly;
+- points for *not* touching the three files the task never mentions, which the 14b family edits.
+
+**Until this lands, `docs/local-model-tuning.md`'s sampling section stays labelled reasoned-not-
+measured**, and it says so in the document. That is the honest state: two experiments were run and
+both were void, which is different from "tested and found not to matter", and the page must not drift
+into implying the latter.
+
+### P68.5 — P52.16's `toolResultEcho` measurement was taken through a defective template
+
+**Filed 2026-08-17.** P52.16's echo experiment — 32/40 bare → 38/40 echoed, the measurement the whole
+`toolResultEcho` mechanism rests on — was run on **`qwen2.5-coder:1.5b`**, which P68.2's detector
+flags as shipping the `else if … .ToolCalls` template. That experiment measured tool-result
+*correlation* through a renderer that was deleting the calls being correlated, which is close to the
+worst possible confound for it: the echo's stated purpose is carrying an association "in content
+where the protocol cannot carry it in metadata", and the protocol was losing even more than assumed.
+
+Nothing is retracted here. The +15pp may well survive — the echo could be *more* valuable when the
+call is missing entirely, not less — but the number as recorded describes a setup nobody would choose
+today.
+
+**What would close it:** re-run the 3-parallel-`read_file` attribution task, 40 trials per arm, on
+`qwen2.5-coder:1.5b` with the P68.2 mitigation active, and again on a template-corrected build. This
+is a probe rather than a workflow tier — cheap, and it does not need the live-tier sitting's setup.
+
+Priority: Verification. It is the one re-run the 2026-08-17 sitting identified and did not do.
+
+### P68.6 — The 14b family never produces the report, and nothing in the run says why
+
+**Filed 2026-08-17, from P68.3's first live sittings.** Across six graded runs on `qwen3:14b-32k` and
+its template-corrected build, the dominant failure is not finding and not fixing — it is that
+`findings.json` **is never written, or is written naming 2 of 5 issues**, after the model has greped
+the codebase extensively. One run made sixteen tool calls of which ten were consecutive `grep`s and
+produced no artifact at all.
+
+This is a model-behaviour observation, but it is not obviously *only* that, which is why it is filed
+rather than noted in a doc:
+
+- the task names the output file explicitly and gives its schema in the prompt, so this is not an
+  ambiguous instruction;
+- the local prompt profile defers `edit_file` and exposes the handle-based editors, and the runs that
+  do write use `write_file`/`multi_edit` — so it is worth checking whether a model that has decided
+  to "write a JSON report" finds a tool that obviously does that, or bounces off the deferred surface
+  and falls back to searching;
+- P62.9 has an unresolved watch item about exactly this class of detour, and its `tool_search` signal
+  has now been unobserved at n=5 across two sittings.
+
+**What would close it:** read one such run's trace (which needs **P68.1** — the tier deletes its data
+dir) and establish whether the model ever attempted a write tool and failed, or never selected one.
+Those are an Aegis problem and a model problem respectively, and the run as recorded cannot tell them
+apart.
 
 ### P62.9 — The exposed-schema half of the base prompt: five editing tools and three prose blocks
 

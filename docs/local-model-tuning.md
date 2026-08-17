@@ -347,6 +347,14 @@ traffic wants fidelity over variety. No A/B has been run isolating `temperature`
 `repeat_penalty` on this workload, and the seeded-bug task above is demonstrably too weak to run one.
 They are a sensible starting point; they are not a finding.
 
+**Two A/Bs were attempted on 2026-08-17 and both were void**, which is worth stating so this section
+is not later read as "tested and found not to matter". Temperature 0.2 against 0.6, n=3–5 per arm,
+single-variable Modelfiles verified to differ only in that parameter: the 9b scored 12/12 on every
+run of both arms (rubric exhausted) and the corrected 14b scored 3/12 on every run of both arms
+(pinned low). A saturated instrument returns a flat result whether or not the variable matters, so
+neither outcome is evidence either way. Widening the rubric's measuring band is
+[P68.4](../research/roadmap.md).
+
 ---
 
 ## What to check when adopting a new model
