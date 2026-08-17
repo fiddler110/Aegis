@@ -23,8 +23,12 @@ func TestEffectivePurpose_RequestBeatsContext(t *testing.T) {
 	if got := EffectivePurpose(context.Background(), Request{}); got != PurposeUnspecified {
 		t.Errorf("neither declared: got %q want %q", got, PurposeUnspecified)
 	}
-	//nolint:staticcheck // a nil context is what a zero-value struct field hands us
-	if got := EffectivePurpose(nil, Request{}); got != PurposeUnspecified {
+	// A nil context is not hypothetical here: EffectivePurpose is reached from
+	// decorators, and a caller holding a zero-value struct field hands one over
+	// without meaning to. Guarded rather than assumed, since the alternative is
+	// a panic inside the retry path.
+	var nilCtx context.Context
+	if got := EffectivePurpose(nilCtx, Request{}); got != PurposeUnspecified {
 		t.Errorf("nil context: got %q want %q", got, PurposeUnspecified)
 	}
 	// WithPurpose(Unspecified) must not install a value that shadows an outer
