@@ -46,6 +46,11 @@ ollama pull deepseek-r1:14b    # reasoning model
 
 ### Tool-calling reliability for local models
 
+> **Before adopting a local model for agent work, see [Tuning a Local Model](local-model-tuning.md).**
+> Ollama's stock model definitions are tuned for chat, and several stock chat templates — Qwen3's
+> among them — silently delete a tool call from history whenever the assistant turn also carries
+> prose. The probes described on this page will not catch it: it only appears in multi-turn history.
+
 Not every locally-runnable model reliably drives Aegis's agent loop. The engine's tool-dispatch loop
 depends on the model actually emitting a structured `tool_call` in its response — a model that instead
 *describes* the action it would take, in prose, never triggers `edit_file`/`write_file`/etc., and the

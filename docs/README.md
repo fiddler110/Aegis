@@ -17,6 +17,7 @@ Welcome to the Aegis documentation. These guides cover every aspect of using, co
 | [Permission System](permissions.md) | Plan/Build/Auto modes, text-based rules, contextual security policies |
 | [Session Management](sessions.md) | Durable sessions, checkpoints, rewind, export, archiving |
 | [Providers & Models](providers.md) | Local LLMs, cloud providers, model selection, extended thinking |
+| [Tuning a Local Model](local-model-tuning.md) | Modelfile recipe for agent use: chat templates that drop tool calls, context pinning, sampling for tool fidelity |
 | [Memory & Knowledge](memory-and-knowledge.md) | Project/user memory, skills, project knowledge base, long-term entity store |
 | [Skills](skills.md) | Authoring guide: minimal/bundled skills, companion scripts, frontmatter, precedence, built-ins |
 | [Extensibility](extensibility.md) | Lifecycle hooks, MCP servers, custom commands, custom agents, process plugins, bundles |
@@ -30,6 +31,8 @@ Welcome to the Aegis documentation. These guides cover every aspect of using, co
 **New to Aegis?** Start with [Installation & First Run](installation.md), then [TUI Guide](tui-guide.md).
 
 **Configuring providers?** See [Providers & Models](providers.md) and [Configuration Reference](configuration.md).
+
+**Running a local model?** See [Tuning a Local Model](local-model-tuning.md) — Ollama's stock model definitions are tuned for chat, and one common template defect silently deletes tool calls from an agent's history.
 
 **Writing automation?** See [CLI Reference](cli-reference.md) and [Tools Reference](tools-reference.md).
 

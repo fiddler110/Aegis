@@ -1090,8 +1090,8 @@ Priority: Tier 4 — no concrete trigger, XS. A comment, not a feature.
 
 ## Verification Work
 
-**Status: 6 open** (**P68.2** filed 2026-08-17; **P65.3** closed 2026-08-16, its record is in
-[releases.md](releases.md)). Every
+**Status: 5 open** (**P68.2** filed *and closed* 2026-08-17 — it ran the same day and its record is
+below; **P65.3** closed 2026-08-16, its record is in [releases.md](releases.md)). Every
 item here has its code already written and merged — nothing below is a design or implementation task.
 Each is closed by running a live-model harness and recording the result the item's closure condition
 names, not by writing more code. They are **not tiered**: tiering answers "how urgent is this build,"
@@ -1146,17 +1146,44 @@ detects the `else if … .ToolCalls` shape; the adapter asks once per model, per
 adjacent same-role messages before templating, so the pair arrives as the same message and is
 dropped identically (0/3, unchanged).
 
-**Closure conditions:**
+**Both closure conditions ran the same day, n=6 per arm, and the answer is "the task still cannot
+resolve this".** `TestLiveWorkflow/FixSeededBug`, same fixture, three arms:
 
-- `TestLiveWorkflow` re-run on **stock** `qwen3:14b-32k` with the mitigation active, against the
-  2026-08-16 baseline where it failed the seeded-bug task twice. If it now passes, P62.9's "the task
-  is measuring model competence" reading is wrong and the task is worth keeping.
-- The same run against a **template-corrected** build of the same model, which keeps the narration
-  the mitigation has to discard. If the corrected build beats the mitigated one, the right fix is a
-  documented Modelfile rather than a provider workaround, and this becomes a docs item.
+| arm | passed | tool calls per run (median) |
+|---|---|---|
+| unmitigated (pre-fix `317c388`, stock template) | **0/6** | 1, 1, 4, 1, 1, 1 (**1**) |
+| mitigation active (prose withheld) | **1/6** | 2, 1, 3, 1, 2, 2 (**2**) |
+| template-corrected model (`qwen3:14b-32k-fix`) | **2/6** | 9, 3, 39, 1, 1, 4 (**3.5**) |
 
-Priority: Verification — it shares the live tier with row #10's bundle and should be run in the same
-sitting, before any further n≥10 work on P62.9.
+**0/6 against 2/6 is not a significant difference** (Fisher's exact, p ≈ 0.45), and no claim of one is
+made. Three things are nonetheless worth carrying:
+
+- The control arm is now **properly characterised** rather than anecdotal: **0/6 today, 0/8 including
+  2026-08-16**, and in five of six runs it ran the script, read the traceback, and **stopped after a
+  single `shell` call**. That is a much stronger version of P62.9's own finding.
+- The **failure shape moves** with the fix even where the pass rate does not: median tool calls per
+  run 1 → 2 → 3.5 across the three arms. The corrected arms engage; the unmitigated one gives up.
+- Both corrected arms produced passes; the unmitigated arm produced none in 8 runs. Directionally
+  consistent with the probe, **not independent confirmation of it**.
+
+**The template defect itself does not depend on any of this.** It is settled by the history-fidelity
+probe (0/3 → 3/3 → 3/3, deterministic, one variable flipped), which is a mechanism-level measurement
+and the evidence the shipped fix rests on. This item's end-to-end half is the weaker instrument, and
+it behaved like one.
+
+**What this leaves open** is no longer P68.2's original question but P62.9's: the task needs
+replacing before any arm-versus-arm comparison on it means anything. **P68.2 is closed as a
+measurement** — recorded here and in [releases.md](releases.md), with the tuning procedure written up
+in [docs/local-model-tuning.md](../docs/local-model-tuning.md). **What it hands to P62.9** is a
+6-run control arm and a concrete reason the 2026-08-16 failures were not purely competence.
+
+**Still unretracted, and now the more interesting thread:** P52.16's `toolResultEcho` measurement was
+taken on `qwen2.5-coder:1.5b`, which the detector flags as affected. That experiment measured
+tool-result correlation through a template that was deleting the calls being correlated. Re-running
+it is cheap (it is a 40-trial probe, not a workflow tier) and is the one re-run this sitting did not
+do.
+
+Priority: Verification — the remaining work is P62.9's task replacement, not another run of this.
 
 ### P66.22 — The LLM-tier findings are all estimates; one live run converts them to measurements
 

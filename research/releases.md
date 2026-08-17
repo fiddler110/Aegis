@@ -11,7 +11,7 @@ or next, see [roadmap.md](roadmap.md).
 **Last updated:** 2026-08-17 — **a chat template was deleting tool calls from history**, found while
 asking why `aegis-qwen35-9b:32k` outperforms `qwen3:14b-32k` on the workflow tier. Most of the answer
 turned out not to be the models. Record: [The template that ate the tool
-calls](#the-template-that-ate-the-tool-calls-2026-08-17) below; the open half is **P68.2**.
+calls](#the-template-that-ate-the-tool-calls-2026-08-17) below. **P68.2 was filed and closed the same day**: the end-to-end re-run (n=6 per arm) came back underpowered and is reported as such, and the reusable procedure is now [docs/local-model-tuning.md](../docs/local-model-tuning.md).
 
 **Last updated (previous):** 2026-08-16 (fourth sitting the same day) — **the live-tier sitting ran**, against a
 reachable `qwen3:14b-32k` on `:11434`. It is row #1 of the "Up next" ten and the first measurement
@@ -95,6 +95,38 @@ keeps both (verified: 3/3) — and the warning says so.
 
 **Detector verified live** against five local models: `qwen3:14b-32k` and `qwen2.5-coder:1.5b`
 flagged; `aegis-qwen35-9b:32k`, `gemma4:12b` and a template-corrected 14b clear.
+
+**The end-to-end re-run, same day, n=6 per arm — and it does not confirm anything.**
+`TestLiveWorkflow/FixSeededBug`, three arms, same fixture:
+
+| arm | passed | tool calls per run (median) |
+|---|---|---|
+| unmitigated (pre-fix `317c388`) | **0/6** | 1, 1, 4, 1, 1, 1 (**1**) |
+| mitigation active | **1/6** | 2, 1, 3, 1, 2, 2 (**2**) |
+| template-corrected model | **2/6** | 9, 3, 39, 1, 1, 4 (**3.5**) |
+
+0/6 against 2/6 is **not significant** (Fisher's exact, p ≈ 0.45). Recorded because the temptation
+was to report "the fix took the tier from 0 to 2 passes" and that would have been the same mistake
+this document has twice caught elsewhere: an instrument reporting a number it cannot support. The
+seeded-bug task is already known to be too weak to settle differences this size — that is **P62.9**'s
+standing conclusion, and this run reinforces it.
+
+What the run *is* good for: the control arm went from anecdotal (0/2 on 2026-08-16) to
+**characterised** — 0/6 today, 0/8 in total, and in five of six runs it ran the script, read the
+traceback, and stopped after a **single** `shell` call. And the **failure shape moves with the fix
+even though the pass rate does not**: median tool calls per run 1 → 2 → 3.5 across the arms. The
+corrected arms keep working the problem; the unmitigated one quits.
+
+**The template finding never depended on the tier.** It is settled by the history probe above — 0/3 →
+3/3, deterministic, one variable flipped — which is why that probe, not this table, is what the fix
+rests on. Worth stating plainly because the tier is the more impressive-looking instrument and the
+weaker one.
+
+**Written up for reuse:** [docs/local-model-tuning.md](../docs/local-model-tuning.md) is the
+procedure — extract the template, detect the `else if .ToolCalls` defect, patch it, pin `num_ctx`,
+set sampling for tool fidelity, and verify with the three checks (doctor → history probe → live
+tier). It is explicit about which of its recommendations are measured (the template) and which are
+reasoned defaults (the sampling parameters).
 
 **Two existing records are now suspect**, which is the part worth carrying forward. `qwen2.5-coder:1.5b`
 is affected, and it is the model behind **P52.16**'s `toolResultEcho` measurement (32/40 → 38/40) —
