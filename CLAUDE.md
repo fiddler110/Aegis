@@ -98,7 +98,7 @@ none is reachable.
 | `internal/mcp`, `internal/mcpserver` | MCP client (out) and server (`aegis mcp-serve`, in) |
 | `internal/acp` | ACP JSON-RPC for Zed/Neovim |
 | `internal/sandbox` | Local/Docker/Podman/WSL/Apple execution sandboxes; persistent per-workspace container |
-| `internal/workspacetrust` | Per-directory trust grants (`aegis trust --dir`) |
+| `internal/workspacetrust` | Per-directory trust grants (`aegis trust --dir`), pinned to a content fingerprint |
 | `internal/cron` | Background job scheduler |
 | `internal/guard` | Second-pass output validation against a rubric/schema |
 | `internal/toolcallprobe`, `internal/modelcaps` | Tool-calling smoke probe + persisted per-model capability cache |
@@ -111,7 +111,11 @@ Secrets come only from the environment (or `.aegis/.env`, which is read only in
 a **trusted** workspace and may not set `AEGIS_*` — it is a secrets file, not a
 config layer).
 `workspace.additional_roots` is frozen from project config and still needs a
-trust grant per root. See [docs/configuration.md](docs/configuration.md).
+trust grant per root. A grant is pinned to `config.SecurityFingerprint` — the
+security-relevant subset of that directory's `.aegis/config.yaml` — so ask the
+question through `config.WorkspaceTrusted`/`TrustWorkspace`, never by opening
+the store yourself; a pre-fingerprint grant re-prompts once, and `.aegis/.env`
+is a deliberate, documented hole. See [docs/configuration.md](docs/configuration.md).
 
 ## Invariants worth knowing before you edit
 
@@ -133,7 +137,14 @@ trust grant per root. See [docs/configuration.md](docs/configuration.md).
   each other. Reads/network calls take no lock — they are *not* held off by a
   concurrent write (P8.6). The only read-vs-write ordering is the same-`path`
   dependency graph, keyed on the literal `"path"` input field, so a `shell` call
-  and a `read_file` are never ordered.
+  and a `read_file` are never ordered. A round runs under its own context derived
+  from the turn's (P67.4): a failing **write/execute** call cancels its siblings,
+  a failing read never does, and cancelling the round must never cancel the turn.
+  Every result slot is still filled — an unanswered `tool_use` is a protocol
+  error — and a cancelled call that had started is never told it did not run
+  (P65.1). Those results carry `siblingCancelledPrefix`/`roundCancelledMarker` so
+  the P52.3 failure breaker skips them: they are the consequence of one failure,
+  not evidence of four.
 - **Tool result size.** Caps live in `internal/tool/builtin/truncate.go`, which
   carries the posture table (which end survives, what happens to the remainder).
   Notice bytes are reserved *out of* the cap; remainders spill to

@@ -1941,6 +1941,65 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 		emitMu.Unlock()
 	}
 
+	// P67.4: a round-scoped context derived from the turn's. When one call
+	// fails, the round is cancelled — sibling subprocesses die promptly instead
+	// of running a build to completion whose output the model is about to
+	// redirect past anyway, and the aggregate wait MaxTurnStall backstops gets
+	// shorter with them.
+	//
+	// The parent/child split is the whole point and the thing to preserve
+	// through any later change here: cancelling siblings must never cancel the
+	// turn. ctx is still the only source of "the run is over" — the checks
+	// after wg.Wait() below read ctx, not roundCtx, for exactly that reason.
+	roundCtx, cancelRound := context.WithCancel(ctx)
+	defer cancelRound()
+	var (
+		failMu     sync.Mutex
+		failedTool string // the call that cancelled the round, "" if none did
+	)
+	// failRound cancels the round on behalf of the first qualifying failure.
+	// Later failures are recorded by nobody: the first one is the one the
+	// siblings' results should name, and re-cancelling an already-cancelled
+	// context would only race over the reason.
+	failRound := func(name string) {
+		failMu.Lock()
+		defer failMu.Unlock()
+		if failedTool != "" {
+			return
+		}
+		failedTool = name
+		e.logger.Debug("cancelling parallel tool round after a failure", "tool", name, "round_size", len(toolUses))
+		cancelRound()
+	}
+	roundFailure := func() string {
+		failMu.Lock()
+		defer failMu.Unlock()
+		return failedTool
+	}
+	// abandon fills the result slot for a call the round cancelled. Every slot
+	// must be filled or the conversation goes back to the provider with a
+	// tool_use that has no tool_result — so this is not optional bookkeeping,
+	// it is what makes cancelling safe at all.
+	//
+	// abandon is only ever reached *before* a call has entered Execute — every
+	// path that has already executed reports the tool's own result instead,
+	// with siblingCancelledSuffix appended. That is what makes the plain
+	// "nothing was executed" wording honest here, and it is the P65.1 rule
+	// applied rather than relaxed: a call that may have landed effects is never
+	// told it did not run, because a model told that re-runs it.
+	abandon := func(i int, tu provider.ToolUseBlock) {
+		if ctx.Err() != nil {
+			// The turn itself is over: results are discarded wholesale below
+			// and repairOrphanedToolUses writes the synthetic ones instead.
+			return
+		}
+		content := siblingCancelledText(tu.Name, roundFailure())
+		traces[i] = trace.ToolCall{Name: tu.Name, IsError: true}
+		safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
+		safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: true})
+		results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: true}
+	}
+
 	for i, tu := range toolUses {
 		if ctx.Err() != nil {
 			break
@@ -1972,21 +2031,33 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 			// touching the path. Deadlock-free: writes never wait on reads, and
 			// every awaited call has a lower index — so it was already spawned
 			// (holding its own semaphore slot) and runs to completion, closing
-			// done[j]. Give up if the run is interrupted.
+			// done[j]. Give up if the run is interrupted or the round was
+			// cancelled by a sibling's failure (P67.4).
 			for _, j := range waitFor[i] {
 				select {
 				case <-done[j]:
-				case <-ctx.Done():
+				case <-roundCtx.Done():
+					abandon(i, tu)
 					return
 				}
 			}
-			if ctx.Err() != nil {
+			if roundCtx.Err() != nil {
+				abandon(i, tu)
 				return
 			}
 
 			if serialize[i] {
 				execLock.Lock()
 				defer execLock.Unlock()
+				// The wait for execLock is unbounded — it can sit behind a
+				// long-running write or shell — so a round cancelled while this
+				// call queued must not start it now (P67.4). This is the check
+				// that makes cancellation actually shorten a doomed round of
+				// serialized calls rather than only its concurrent tail.
+				if roundCtx.Err() != nil {
+					abandon(i, tu)
+					return
+				}
 			}
 
 			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
@@ -1995,11 +2066,39 @@ func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock,
 			// from these goroutines.
 			beat(ctx)
 			start := time.Now()
-			content, isErr := e.executeTool(ctx, tu)
+			// P67.4: roundCtx, so a sibling's failure reaches this call's
+			// subprocess. Everything that ends the *turn* still reaches it too,
+			// since roundCtx is derived from ctx.
+			content, isErr := e.executeTool(roundCtx, tu)
+			// Read the round's state before failRound below, so a call cannot
+			// annotate its own result with a cancellation it is about to cause.
+			// A call that was genuinely running while a *sibling* failed does
+			// get the annotation, which is the honest reading: its error may be
+			// the cancellation rather than the tool's own verdict.
+			cutShort := roundCtx.Err() != nil && ctx.Err() == nil
 			beat(ctx)
+			if isErr && cutShort {
+				content = content + "\n\n" + siblingCancelledSuffix(roundFailure())
+			}
 			traces[i] = trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr}
 			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
 			results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: isErr}
+			// Which failures qualify (P67.4). A read that fails is a normal
+			// negative result — `read_file` on a path the model guessed wrong
+			// is how it learns the path is wrong, and killing its siblings for
+			// that would make speculative parallel reads useless. A failing
+			// write or execute is different: the round was a plan, a step of it
+			// did not happen, and the steps after it are being carried out
+			// against a state that no longer matches.
+			//
+			// serialize[i] is exactly that classification, already computed for
+			// scheduling (serializeTool → tool.EffectiveCapability), so the
+			// policy hangs off it rather than off a second, drifting copy —
+			// including its per-call refinement, which is what keeps a shell
+			// call the tool reclassified as read-only from cancelling a round.
+			if isErr && serialize[i] && !cutShort {
+				failRound(tu.Name)
+			}
 		}(i, tu)
 	}
 	wg.Wait()
@@ -2139,6 +2238,45 @@ func (e *Engine) serializeTool(name string, input json.RawMessage) bool {
 // verbatim because for this half it was always true.
 func interruptedNotStartedText(name string) string {
 	return fmt.Sprintf("tool call interrupted; %s did not run", name)
+}
+
+// siblingCancelledText is the result reported for a call that never started
+// because an earlier write/execute call in the same parallel round failed
+// (P67.4). This is the one cancellation case where "nothing happened" is
+// honestly assertable — the call had not reached Execute — so unlike
+// interruptedMaybeRanText it says so plainly, and the model is free to re-issue
+// it once it has dealt with the failure.
+func siblingCancelledText(name, failed string) string {
+	if failed == "" {
+		return fmt.Sprintf("%s%s did not run because another call in the same round failed. Nothing was executed.", siblingCancelledPrefix, name)
+	}
+	return fmt.Sprintf("%s%s did not run because %s failed earlier in the same round. Nothing was executed.", siblingCancelledPrefix, name, failed)
+}
+
+// siblingCancelledPrefix and roundCancelledMarker are the two stable markers
+// that identify a result as an artifact of a P67.4 round cancellation rather
+// than as something a tool actually reported. isRoundCancelledResult is the
+// only reader; the tool-failure breaker uses it (see toolfailure.go).
+const (
+	siblingCancelledPrefix = "tool call skipped; "
+	roundCancelledMarker   = "The round was cancelled because "
+)
+
+// isRoundCancelledResult reports whether a tool result was produced by
+// cancelling the round rather than by running the tool (P67.4).
+func isRoundCancelledResult(content string) bool {
+	return strings.HasPrefix(content, siblingCancelledPrefix) || strings.Contains(content, roundCancelledMarker)
+}
+
+// siblingCancelledSuffix explains a cancellation to a call that was already
+// running when it happened. Appended to (never substituted for) whatever the
+// tool itself reported, because that text may describe real work the call had
+// already done before the cancellation reached it.
+func siblingCancelledSuffix(failed string) string {
+	if failed == "" {
+		return roundCancelledMarker + "another call in it failed."
+	}
+	return fmt.Sprintf("%s%s failed.", roundCancelledMarker, failed)
 }
 
 // interruptedMaybeRanText is the synthetic result for an orphaned call that had

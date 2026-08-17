@@ -96,6 +96,16 @@ func (t *toolFailureTracker) record(toolUses []provider.ToolUseBlock, results []
 		if !ok {
 			continue
 		}
+		// A call the round cancelled (P67.4) is not an outcome — it is the
+		// consequence of the one failure that is already counted below. Counting
+		// it would make a single failing write in a round of four read as a
+		// whole-round failure, tripping this breaker up to four times faster
+		// than the same failure did before rounds were cancellable, on evidence
+		// that is really one data point repeated. Excluded from total as well as
+		// from errs, because "did not run" is not a success either.
+		if isRoundCancelledResult(res.Content) {
+			continue
+		}
 		total++
 		if res.IsError {
 			errs++
