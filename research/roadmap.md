@@ -1400,6 +1400,16 @@ Two instrument checks were run before concluding, and both came back clean, whic
 models still carry the **corrected** chat template (the `FROM <derived model>` inheritance was the
 obvious way for this to be a silent P68.2 regression rather than a real result).
 
+**The substrate was removed from the machine on 2026-08-17, after this was filed**, which makes the
+item harder rather than staler: `qwen3:14b-32k` and its corrected build are both gone, so the only
+mid-range scorer either A/B had is no longer available. What remains locally is
+`aegis-qwen35-9b:32k` (saturates at 12/12), `qwen2.5-coder:1.5b` (historically zero tool calls on the
+older tier — see [providers.md](../docs/providers.md)) and **`gemma4:12b`, which is untested here and
+is the obvious first thing to score**: its manifest advertises tools and its template is clean by the
+P68.2 detector, so it is a candidate mid-range substrate rather than a known one. Re-pulling
+`qwen3:14b` and rebuilding the corrected variant per
+[docs/local-model-tuning.md](../docs/local-model-tuning.md) is the fallback, and is cheap.
+
 **What it needs:** a harder tier of criteria so a strong model has somewhere left to go, and a floor
 that a weak model clears by more than one repeated strategy. Candidates, none costed:
 
@@ -1453,6 +1463,11 @@ rather than noted in a doc:
   and falls back to searching;
 - P62.9 has an unresolved watch item about exactly this class of detour, and its `tool_search` signal
   has now been unobserved at n=5 across two sittings.
+
+**Both models were removed from the machine on 2026-08-17**, so this is not reproducible locally
+without re-pulling `qwen3:14b` — worth knowing before someone plans a sitting around it. The
+behaviour is recorded in enough detail above to be recognised if it recurs on another model, and
+whether it is Qwen3-specific or general is itself now an open question.
 
 **What would close it:** read one such run's trace (which needs **P68.1** — the tier deletes its data
 dir) and establish whether the model ever attempted a write tool and failed, or never selected one.
