@@ -8,6 +8,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/trust"
 )
 
 // TeamTools returns the agent-team coordination tools (P5.1): a shared task list
@@ -241,14 +242,87 @@ func (t *teamInboxTool) Execute(_ context.Context, input json.RawMessage) (tool.
 	if len(msgs) == 0 {
 		return tool.Result{Content: "inbox empty"}, nil
 	}
+	return tool.Result{Content: formatInbox(mb, id.AgentID, msgs, unreadOnly)}, nil
+}
+
+// maxInboxResult bounds one team_inbox result's message body in bytes, before
+// the provenance envelope is added (P70.2).
+//
+// The value and the end are web_fetch's, and for the same reasons (see the
+// posture table in truncate.go): this is untrusted prose whose point is at the
+// top, and 20000 bytes is ~5.0k estimated tokens, small enough to bind before
+// a local context window does. Two properties of this site differ from a page
+// fetch and are handled below rather than by the shared helper:
+//
+//   - The remainder is deliberately NOT spilled, the same exclusion web_fetch
+//     takes. Spilling would write the *unwrapped* overflow to a workspace file
+//     that read_file returns with no marker at all, turning a context-budget
+//     feature into exactly the laundering path this item closes.
+//   - A message that does not fit is left unread rather than dropped, so the
+//     budget costs a second call rather than the message. Only a single
+//     over-cap message loses bytes, and its notice says so.
+const maxInboxResult = 20000
+
+// formatInbox renders messages into one model-facing result: each message is
+// individually capped, the batch is bounded by maxInboxResult, and the whole
+// body is wrapped as untrusted content. Messages actually included are marked
+// read; ones deferred by the budget are not, so the next call returns them.
+func formatInbox(mb *swarm.Mailbox, agent string, msgs []swarm.Message, unreadOnly bool) string {
 	var sb strings.Builder
-	for _, m := range msgs {
+	deferred := 0
+	for i, m := range msgs {
 		sender := m.Sender
 		if sender == "" {
 			sender = "unknown"
 		}
-		fmt.Fprintf(&sb, "[%s from %s] %s\n", m.Type, sender, m.Text)
+		header := fmt.Sprintf("[%s from %s] ", m.Type, sender)
+		// The header and the separating newline come out of the same budget,
+		// so one over-cap message can never push the body past the cap.
+		text, _ := TruncateHead(m.Text, maxInboxResult-len(header)-1, "ask the sender to resend the remainder as further messages")
+		entry := header + text + "\n"
+		if sb.Len() > 0 && sb.Len()+len(entry) > maxInboxResult {
+			deferred = len(msgs) - i
+			break
+		}
+		sb.WriteString(entry)
 		_ = mb.MarkRead(m.ID)
 	}
-	return tool.Result{Content: strings.TrimRight(sb.String(), "\n")}, nil
+	body := strings.TrimRight(sb.String(), "\n")
+	if deferred > 0 {
+		recovery := "read the inbox again to receive them"
+		if !unreadOnly {
+			recovery = "read the inbox again with unread_only:true to receive them"
+		}
+		body += fmt.Sprintf("\n[%d further message(s) withheld: one team_inbox result is capped at %d bytes. They are left unread — %s.]",
+			deferred, maxInboxResult, recovery)
+	}
+	return wrapInboxMessages(agent, body)
+}
+
+// wrapInboxMessages marks a mailbox batch as untrusted content before it
+// re-enters the model's context (P70.2).
+//
+// The mailbox is a file-backed queue under the shared data dir, writable by
+// any peer agent and by any local process with file access. A teammate that
+// read a poisoned web page, an MCP result or a workspace file can relay those
+// bytes to a peer through team_send, where they previously arrived as plain,
+// trusted-looking text — laundering the provenance marking web_fetch and MCP
+// results carry at ingestion. Aegis takes the zero-trust reading: content in
+// the mailbox did not originate with the agent that sent it, so the mailbox
+// wraps too.
+//
+// The heuristic injection scan is off, matching the persona/skill and network
+// scan-report sites: it is a config-gated opt-in everywhere it is on, there is
+// no per-mailbox knob to gate it, and peer coordination prose ("ignore the
+// earlier instructions in task #3") is exactly the text its keyword patterns
+// over-fire on. The envelope — this is data, not instructions — is what the
+// provenance gap asked for; the ingestion points remain where scanning happens.
+func wrapInboxMessages(agent, body string) string {
+	return trust.Wrap(
+		"team_untrusted_output",
+		[][2]string{{"inbox", agent}},
+		"another agent's mailbox (a teammate can relay text it read from the web, an MCP server or a file, so these bytes did not necessarily originate with the sender)",
+		body,
+		false,
+	)
 }

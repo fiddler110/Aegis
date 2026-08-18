@@ -377,6 +377,12 @@ The shared task list is SQLite-backed. `team_task_claim` is atomic — if two ag
 
 The file mailbox persists messages across agent restarts. Team agents don't need a shared parent — they coordinate through the task list and mailbox directly.
 
+`team_inbox` returns messages wrapped in a `<team_untrusted_output>` provenance
+marker and capped at 20,000 bytes per call — the mailbox is writable by any
+peer, so a teammate can relay content it read from the web or an MCP server,
+and the receiving model is told to read it as data rather than instructions.
+See [MCP Trust Boundary](mcp-trust-boundary.md).
+
 ### When to use teams vs. sub-agents
 
 | Pattern | Use when |

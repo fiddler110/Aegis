@@ -43,6 +43,9 @@ import (
 //	git pre-commit test      0–4 KiB      24 KiB (~6.1k tok)   tail  spilled; notice
 //	web_fetch                2–20 KiB     20000 B (~5.0k tok)  head  spilled; notice
 //	                                      (max_chars overrides)
+//	team_inbox               0–4 KiB      20000 B (~5.0k tok)  head  NOT spilled — see
+//	                                      (maxInboxResult)           maxInboxResult; over-budget
+//	                                                                 messages stay unread
 //	read_file (default)      0.5–32 KiB   1500 lines OR 32 KiB head  NOT spilled — the remainder
 //	                                      whichever bites first       is the file, already
 //	                                                                  addressable via offset/limit

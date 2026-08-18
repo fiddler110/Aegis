@@ -1149,12 +1149,27 @@ Send a message to a peer agent via the file mailbox.
 
 **Capability:** read  *(deferred)*
 
-Read messages sent to this agent by peers.
+Read messages sent to this agent by peers. Returned messages are marked read.
 
 ```json
 {
-  "since": "2026-07-02T10:00:00Z"   // optional: only messages after this timestamp
+  "agent": "worker-1",       // whose inbox to read (your own agent name)
+  "team": "default",         // optional, defaults to "default"
+  "unread_only": true        // optional, defaults to true
 }
 ```
 
-Returns a list of messages with sender, subject, body, and timestamp.
+Returns the messages in chronological order, each rendered as
+`[<type> from <sender>] <text>`.
+
+The whole batch comes back inside a `<team_untrusted_output inbox="...">`
+provenance marker, the same envelope `web_fetch` and MCP results carry: the
+mailbox is a file-backed queue any peer agent can write to, so a teammate can
+relay web, MCP or workspace bytes through it, and the content did not
+necessarily originate with the sender. See
+[MCP Trust Boundary](mcp-trust-boundary.md).
+
+One result's message body is capped at 20,000 bytes (head end). A single
+over-cap message is truncated with a notice; further messages that do not fit
+are **left unread** and named in a withholding notice, so reading again
+returns them.

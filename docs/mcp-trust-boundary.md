@@ -36,6 +36,21 @@ routinely discusses its own role and instructions, which the scan's
 `\bsystem prompt\b`-style patterns are prone to flag as false positives on
 entirely benign text.
 
+It also wraps a **swarm mailbox batch** (P70.2). `team_inbox` returns peer
+messages inside a `<team_untrusted_output inbox="...">` marker, because the
+mailbox is a file-backed queue under the shared data dir that any peer agent —
+and any local process with file access — can write to. A teammate that fetched
+a poisoned page or called a malicious MCP server can relay those bytes to a
+peer with `team_send`, where they would otherwise arrive as plain,
+trusted-looking text, laundering the provenance marking applied at ingestion.
+Aegis takes the zero-trust reading here: content in the mailbox did not
+necessarily originate with the agent that sent it. As with personas and
+skills, the marker is always on and the heuristic scan is left off — there is
+no per-mailbox knob to gate it, and peer coordination prose is prone to the
+same false positives. A `team_inbox` result's message body is also capped at
+20,000 bytes; the overflow is never spilled to a workspace file, since
+`read_file` would then hand it back with no marker at all.
+
 ## The threat
 
 Every tool result — including an MCP tool's — becomes part of the

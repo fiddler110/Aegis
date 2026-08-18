@@ -137,6 +137,7 @@ func TestResultCapsCanBindBeforeTheContextWindow(t *testing.T) {
 		"skill script":                    maxSkillScriptOutput,
 		"read_file default window":        maxDefaultReadBytes,
 		"web_fetch default max_chars":     20000,
+		"team_inbox (maxInboxResult)":     maxInboxResult,
 	}
 	for name, n := range caps {
 		tokens := tokenest.Estimate(strings.Repeat("a", n))
