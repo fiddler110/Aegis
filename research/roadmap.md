@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-16. This document tracks only **open** work and what's next. For
+**Last updated:** 2026-08-18. This document tracks only **open** work and what's next. For
 shipped-feature history, batch origins, pass-by-pass narrative, refutation records and full design
 rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading with a
 `Priority:` line in its body — `scripts/roadmap-status.sh` parses exactly that shape, so keep it when
@@ -10,10 +10,20 @@ adding items.
 
 ## Status
 
-**29 open items: 24 build (Tier 1-4) + 5 verification-only. Tier 1 is empty, Tier 2 holds one
-item, and Tier 3 holds two — both filed today.** Five shipped on 2026-08-18 — **P66.15**, **P67.6**,
-**P67.7**, **P67.8** and **P67.9** — which is the whole of the previous "Up next" table except its
-parked last row. Record in [releases.md](releases.md) (*Five rows of Up next, 2026-08-18*).
+**27 open items: 22 build (Tier 1-4) + 5 verification-only. Tier 1 is empty, Tier 2 holds one
+item, and Tier 3 holds one — filed today, out of a build that shipped today.** Eight shipped on
+2026-08-18, in two sittings: **P66.15**, **P67.6**, **P67.7**, **P67.8** and **P67.9** (the whole of
+the previous "Up next" table except its parked last row — record in [releases.md](releases.md),
+*Five rows of Up next, 2026-08-18*), then **P70.1**, **P70.2** and **P70.3**, which were the three
+build rows P66.15's sweep had filed that same morning (record: [Three rows and a
+posture](releases.md#three-rows-and-a-posture-2026-08-18-p701-p702-p703)).
+
+**Two trust-posture questions were answered on 2026-08-18 and they point opposite ways, which is the
+point.** The swarm mailbox **is** wrapped as untrusted (P70.2) because content in it crossed a
+boundary before the sending agent relayed it; `security_scan`'s workspace-derived output is
+**deliberately not** wrapped (P70.3) because a file the model can already read directly is not a
+boundary crossing. Zero trust is the stated posture for *ingestion*, not a rule that every byte gets
+a marker. Settle the next such question against those two, not afresh.
 
 **Read the P67.7 record before touching `internal/engine`.** That item asked for tool calls to be
 dispatched as their blocks complete in the stream, and named four constraints. Building it found two
@@ -186,50 +196,49 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next — what is left, and it is short
 
-**Rewritten 2026-08-18, after five of the previous table's six rows shipped in one sitting** —
-**P66.15**, **P67.6**, **P67.7**, **P67.8** and **P67.9**, in that table's own order. Build records
-in [releases.md](releases.md) (*Five rows of Up next, 2026-08-18*); the retired table is preserved
-there rather than carried here as strikethrough.
+**Rewritten 2026-08-18 (second time that day), after all three build rows of the morning's table
+shipped in one sitting** — **P70.1**, **P70.2** and **P70.3**, filed out of P66.15's sweep that
+morning and closed that afternoon. Build record in
+[releases.md](releases.md#three-rows-and-a-posture-2026-08-18-p701-p702-p703).
 
-**What is left is the row that was already parked plus what the sweep found.** Row #6 of the old
-table — the live-tier remainder — was parked by the user's choice and still is; it is unchanged and
-carried below. The three rows above it are new items filed *out of* the work that just shipped:
-P66.15 was an audit, and an audit's output is items.
+**Two of the three closed on a decision rather than on code**, which is what the retired table
+predicted: P70.2's posture question was answered *zero trust* (the mailbox is wrapped), and P70.3's
+wrap half was answered the other way (workspace-derived scanner output is **not** wrapped, because a
+workspace file is not a boundary crossing). Those two answers together are now the tree's stated
+reading, and the next item that raises the question should be settled against them rather than afresh.
 
-**Tier 1 and Tier 2 are unchanged**: Tier 1 empty, Tier 2 holding only the parked-with-#4 **P68.1**.
+**Tier 1 and Tier 2 are unchanged**: Tier 1 empty, Tier 2 holding only the parked-with-#2 **P68.1**.
+Tier 3 holds exactly one item, and it is row #1 below.
 
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **P70.1** — `checkpoint.RestoreFiles` writes anywhere the database says to | T3 · M | The highest-value thing the sweep produced. `/rewind` replays BLOB rows to absolute paths with no validation, because the store has no notion of a workspace root. It is defence-in-depth *today* only because every capture site happens to resolve in-workspace — and the same sweep found the one that did not (`captureShellWrites`, fixed). The invariant is currently held by the honesty of every present and future caller, which is the arrangement this is worth spending a signature change to end. |
-| 2 | **P70.2** — the swarm mailbox is an unwrapped cross-agent injection channel | T3 · S-M | `trust.Wrap` covers MCP and web; nobody had checked the mailbox, and it is bare. **The decision is the work** — whether a sub-agent Aegis itself spawned is a hostile source has never been written down, and answering it settles [P70.3](#p703--scanner-output-reaches-the-model-unbounded-and-half-wrapped)'s wrap half too. Take it when there is appetite for a posture question, not when there is an afternoon. |
-| 3 | **P70.3**'s bound half — no per-call cap on scanner output | T4 · S | Split out of a Tier 4 item deliberately: the *wrap* half waits on row #2's posture decision, but `cmd.Output()` with no bound and no `truncate.go` posture entry is a plain fix with no question attached. It is here rather than left in Tier 4 because it is the only thing on this list anyone can finish in an hour. |
-| 4 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Unchanged from the previous table, and still last for the same reason: **the user parked it**, not a dependency. It is also no longer one sitting — **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show: a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
+| 1 | **P70.4** — a sub-agent's result reaches its parent bare and uncapped | T3 · S-M | The only Tier 3 item, and it is the direct output of the work that just shipped: wrapping the mailbox surfaced the channel beside it (`internal/swarm/subprocess.go:223`), where a sub-agent's result reaches the parent model with no wrap and no cap, on *both* backends. **It splits like P70.3 did** — the cap is unblocked and small, the wrap needs a deliberate answer, and P70.2's zero-trust reading points at it without settling it, because a parent designed to consume its child's work is not plainly in the same position as one reading a teammate's relayed prose. Take the cap whenever; take the wrap when there is appetite for the second posture question in a week. |
+| 2 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Unchanged, and still last for the same reason: **the user parked it**, not a dependency. It is also no longer one sitting — **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show: a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
 
 **Notes on the ordering, and on what did not make it.**
 
-**This table is four rows because the tiers are nearly empty, not because it was trimmed.** Tier 1 is
-empty, Tier 2 holds one parked item, and Tier 3 now holds exactly the two items rows #1 and #2 name —
-both filed hours ago out of P66.15. Everything else is Tier 4 with no fired trigger, and this
-document's own rule is not to build Tier 4 speculatively. Row #3 is the one Tier 4 entry promoted,
-and it is promoted on a stated reason (its blocking question was answered by splitting it) rather
-than for being the least cold.
+**This table is two rows because the backlog is genuinely nearly empty, not because it was trimmed.**
+Tier 1 is empty, Tier 2 holds one parked item, Tier 3 holds one item filed hours ago, and everything
+else is Tier 4 with no fired trigger — which this document's own rule says not to build
+speculatively. The previous table promoted one Tier 4 entry (P70.3's bound half) on a stated reason;
+nothing in Tier 4 currently has one.
 
-**Two of the four rows are decisions rather than code.** Row #2's posture question and row #4's
-parked-by-choice status both need a person, not a session. That is the actual state of the backlog
-after a review batch and an audit have both been worked through: what is left is disproportionately
-things that need someone to decide something.
+**The pattern from the last two tables held and then broke.** Both of them observed that what was
+left was disproportionately decisions rather than code. Three decisions were put to the user on
+2026-08-18 and all three came back the same day, which is why the table emptied — the constraint was
+never effort. Row #1's wrap half is the next one queued.
 
-**Nothing here is sequence-blocked.** Rows #1-#3 are independent of each other and of everything
-shipped. Row #4 depends on nothing in the codebase except P68.1, and on a reachable model server.
+**Nothing here is sequence-blocked.** Row #1 depends on nothing. Row #2 depends on nothing in the
+codebase except P68.1, and on a reachable model server.
 
 **One item is deliberately off this list: P68.1** (Tier 2, S). It is what the parked row needs before
 it is worth re-running — the eval tier deletes the database holding the trace its own closure
-conditions are written against. It travels with row #4, so it is off the list while that row is
+conditions are written against. It travels with row #2, so it is off the list while that row is
 parked.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in *document*
 order, which is priority order only *within* a track — it cannot see a cross-tier ranking — and it
-also cannot see that row #4 is parked by choice or that **P68.1** is deliberately off the list. Use
+also cannot see that row #2 is parked by choice or that **P68.1** is deliberately off the list. Use
 it for repo state and for the parse; use this table for what to take.
 
 ---
@@ -401,8 +410,10 @@ yields less.
 
 ## Open Work — Tier 3
 
-**Status: 2 filed items**, both new — **P70.1** and **P70.2**, filed 2026-08-18 out of P66.15's
-sweep. The tier held five until that day, when **P66.15**, **P67.6**, **P67.7**, **P67.8** and
+**Status: 1 filed item** — **P70.4**, filed 2026-08-18 out of building P70.2. The tier held two for
+a few hours the same day: **P70.1** and **P70.2** were filed out of P66.15's sweep in the morning and
+both shipped the same afternoon, so what is left is the item their build produced. The tier held five
+until 2026-08-18, when **P66.15**, **P67.6**, **P67.7**, **P67.8** and
 **P67.9** all shipped: the entire "Up next" table below row #5, in one sitting. Their build records —
 including the three places the items were wrong about their own preconditions — are in
 [releases.md](releases.md) (*Five rows of Up next, 2026-08-18*). Read the P67.7 record before
@@ -416,7 +427,43 @@ introduced changed which numbers two already-shipped heuristics see. P62.9 and P
 both moved to [Verification Work](#verification-work) — in each case the code is already shipped and
 what remains is a live-run result, not a design or implementation task.
 
-### P70.1 — `checkpoint.RestoreFiles` writes anywhere the database says to
+### P70.4 — A sub-agent's result reaches its parent bare and uncapped
+
+**Filed 2026-08-18 from building [P70.2](#p702--the-swarm-mailbox-is-an-unwrapped-cross-agent-injection-channel)**,
+which wrapped the mailbox and, in sweeping for other model-facing reads of it, found the channel next
+to it. Verified at `internal/swarm/subprocess.go:223-229`.
+
+`SubprocessBackend.runWorker` scans the worker's mailbox back for the last `MsgResult` and assigns
+`msgs[i].Text` into `Result.Output`. That value reaches the parent model bare — through `agent.go`
+(`res.Output`) and through `task_output`. The in-process backend arrives at the same place *without*
+the mailbox at all (`inprocess.go:82`, `Result{Output: output}` straight from `runGuarded`), which is
+the point: **this is the sub-agent result path, not the mailbox channel.** The mailbox is only its
+durability substrate under one of the two backends, so P70.2's wrap does not and should not cover it.
+
+It is the same laundering shape P70.2 closed — a sub-agent that read poisoned web or MCP content
+relays it upward as trusted-looking text — and it is *also* uncapped, with no `truncate.go` posture
+entry.
+
+**The reason it is a separate item is scope, not doubt about the finding.** P70.2's zero-trust answer
+points at wrapping this too, but the blast radius is different in kind: it changes the shape of every
+`agent` and `task_output` result and every workflow mode's joined output, and a parent that is
+*designed* to consume its child's work is not obviously in the same position as one reading a
+teammate's relayed prose. The size cap carries no such question and can be taken alone, exactly as
+P70.3's bound half was.
+
+Priority: Tier 3 — S-M. No dependency. The cap is small and unblocked; the wrap needs the same kind
+of deliberate answer P70.2 got.
+
+<details>
+<summary>P70.1 — the restore boundary (shipped 2026-08-18)</summary>
+
+### P70.1 — `checkpoint.RestoreFiles` writes anywhere the database says to — SHIPPED 2026-08-18
+
+**Shipped 2026-08-18**, the day it was filed. Both decisions the item left open were answered by the
+user: the workspace root is **recorded per checkpoint** (`checkpoints.workspace_root`, an idempotent
+`ALTER` following the `git_sha` precedent) rather than threaded into the server-wide `Store`, and a
+path that fails validation **refuses the whole restore** before anything is written. Legacy rows with
+no recorded root fail closed. Record: [releases.md](releases.md#three-rows-and-a-posture-2026-08-18-p701-p702-p703).
 
 **Filed 2026-08-18 from P66.15's sweep**, which verified it at
 `internal/checkpoint/checkpoint.go:201` and deliberately left it unfixed because the fix is a
@@ -449,7 +496,21 @@ it, and is recreated by restore comes back at `0o644` — its original mode is n
 Priority: Tier 3 — M. No dependency. Security-adjacent: the fix is a boundary, so the test pass is
 the deliverable as much as the code.
 
-### P70.2 — The swarm mailbox is an unwrapped cross-agent injection channel
+</details>
+
+<details>
+<summary>P70.2 — the mailbox trust posture (shipped 2026-08-18)</summary>
+
+### P70.2 — The swarm mailbox is an unwrapped cross-agent injection channel — SHIPPED 2026-08-18
+
+**Shipped 2026-08-18**, the day it was filed. The posture question *was* the item, and the user
+answered it: **Aegis is built on zero-trust principles**, so the mailbox is a laundering channel and
+its content is wrapped. That answer is now the tree's stated reading — see
+[docs/mcp-trust-boundary.md](../docs/mcp-trust-boundary.md) — and it is what closes the wrap question
+for [P70.3](#p703--scanner-output-reaches-the-model-unbounded-and-half-wrapped) too. Building it
+found the *other* half of the same channel, filed as
+[P70.4](#p704--a-sub-agents-result-reaches-its-parent-bare-and-uncapped). Record:
+[releases.md](releases.md#three-rows-and-a-posture-2026-08-18-p701-p702-p703).
 
 **Filed 2026-08-18 from P66.15's sweep**, verified at `internal/tool/builtin/team.go:250`
 (`team_inbox`) against the file-backed queue in `internal/swarm/mailbox.go`.
@@ -475,6 +536,8 @@ The size cap is not a posture question and can be taken either way: `truncate.go
 not applied here.
 
 Priority: Tier 3 — S-M once the posture is decided; the decision is the work.
+
+</details>
 
 <details>
 <summary>P66.15 — the unread-package sweep (shipped 2026-08-18)</summary>
@@ -739,7 +802,24 @@ Take one only when already working in that file. The P67 entries are a different
 is a capability Aegis does not have and nobody has asked for, filed with the specific trigger that
 would make it worth building.
 
-### P70.3 — Scanner output reaches the model unbounded and half-wrapped
+<details>
+<summary>P70.3 — the scanner-output bound, and the wrap declined (shipped 2026-08-18)</summary>
+
+### P70.3 — Scanner output reaches the model unbounded and half-wrapped — SHIPPED 2026-08-18
+
+**Shipped 2026-08-18**, the day it was filed, and it closes on *both* halves rather than one:
+
+- **The bound half was built.** `runJSON` and `runContainerCLI` no longer use `cmd.Output()`; both
+  read through a bounded writer capped at 64 MiB, and an overflow **refuses to parse** rather than
+  handing a parser a truncated SARIF/JSON document.
+- **The wrap half was declined, deliberately, by the user.** `security_scan`'s content is
+  workspace-derived — files the model can already read directly — so wrapping it would mark as
+  untrusted the one class of input the agent is reading on purpose. This is the answer the item asked
+  for "once for the whole tree rather than tool by tool", and it is *not* in tension with
+  [P70.2](#p702--the-swarm-mailbox-is-an-unwrapped-cross-agent-injection-channel)'s zero-trust
+  answer: the mailbox launders content that crossed a boundary, a workspace file did not.
+
+Record: [releases.md](releases.md#three-rows-and-a-posture-2026-08-18-p701-p702-p703).
 
 **Filed 2026-08-18 from P66.15's sweep.** The sweep fixed the two clear cases —
 `recon_scan` and `dast_scan` now wrap their reports, because nmap's `product`/`version` fields are a
@@ -762,6 +842,8 @@ either, or when a scanner is observed producing an output large enough to matter
 
 Priority: Tier 4 — S. Low severity, and the wrap half is a posture decision shared with
 [P70.2](#p702--the-swarm-mailbox-is-an-unwrapped-cross-agent-injection-channel).
+
+</details>
 
 ### P66.26 — `synchronous=NORMAL` on the three SQLite databases (PERF-02, refiled from P66.9)
 

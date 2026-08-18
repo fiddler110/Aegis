@@ -8,7 +8,17 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-18 — **five items shipped in one sitting**: **P66.15**, **P67.6**,
+**Last updated:** 2026-08-18 (second sitting the same day) — **the three items the morning's audit
+filed all shipped that afternoon**: **P70.1**, **P70.2** and **P70.3**. Record: [Three rows and a
+posture](#three-rows-and-a-posture-2026-08-18-p701-p702-p703). Two of the three closed on a **user
+decision rather than on code**, and the two decisions point opposite ways: the swarm mailbox is now
+wrapped as untrusted (zero trust — content in it crossed a boundary before it was relayed), while
+`security_scan`'s workspace-derived output is deliberately **not** wrapped (a file the model can
+already read is not a boundary crossing). P70.2's build also found the channel beside the one it
+fixed — the sub-agent *result* path, bare on both backends — filed as **P70.4**, now the only open
+Tier 3 item.
+
+**Last updated (previous):** 2026-08-18 — **five items shipped in one sitting**: **P66.15**, **P67.6**,
 **P67.7**, **P67.8** and **P67.9**, which is the whole of the "Up next" table except its
 parked-by-choice last row. Record: [Five rows of Up next](#five-rows-of-up-next-2026-08-18-p6615-p676-p677-p678-p679).
 Two of the five **contradicted their own item text while being built** — P67.7 named four constraints
@@ -88,6 +98,143 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### Three rows and a posture, 2026-08-18 (P70.1, P70.2, P70.3)
+
+P66.15's sweep shipped that morning and, being an audit, ended by filing three items it had verified
+but deliberately not fixed. All three shipped the same afternoon. Each had been filed *because* it
+carried a question rather than a line of work, so the shape of this sitting is three answers and the
+code that follows from them.
+
+---
+
+#### P70.1 — the restore boundary
+
+`checkpoint.Store.RestoreFiles` replayed BLOB rows to absolute paths with **no validation of any
+kind**, because the store had no notion of a workspace root. The item named two decisions; the user
+answered both.
+
+**Where the root comes from: recorded per checkpoint.** `checkpoints.workspace_root`, added by the
+same idempotent-`ALTER` convention already used for `git_sha`, with `Store.Create` taking it and
+`internal/server/messages.go` passing the session's workdir. The alternative the item floated —
+threading a root into the `Store` — is wrong here for a reason worth writing down: the `Store` is
+constructed **once per server** (`server.go:611`) and shared across sessions with different
+workspaces, so a store-wide root could only ever be right by coincidence.
+
+**What a rejected path does: refuse the whole restore.** Every path is validated *before* anything is
+written; one bad path means nothing is written at all, reported through a new `ErrRestoreRefused`
+sentinel that callers can tell apart from the pre-existing best-effort per-file write errors. A
+half-rewound tree is the exact failure `/rewind` exists to prevent.
+
+**Legacy rows fail closed.** A checkpoint with captured files but no recorded root is refused rather
+than exempted — trusting recorded paths is precisely the behavior this item removes, and the user's
+fallback (`/rollback`, a git reset) is offered by the same rewind request. One carve-out keeps it
+quiet: a checkpoint that captured *no* files needs no root, which is the common "turn wrote nothing"
+case.
+
+**The containment check is not a prefix check.** `withinRoot` rejects non-absolute paths, then runs
+both sides through `EvalSymlinks` — walking up to the deepest existing ancestor and re-appending the
+remaining components when the leaf does not exist yet, so a symlinked directory pointing out of the
+workspace is caught while a legitimate created-then-deleted or deleted-then-recreated path still
+validates. Containment is `filepath.Rel` plus a `..` test (so `/work-other` does not pass as inside
+`/work`), the root itself is rejected, and on Windows both sides are lowercased because
+`EvalSymlinks` there can return different casing or the long form of an 8.3 name.
+
+**Two call-site consequences, decided rather than inherited.** The rewind handler returns **409** and
+`return`s *before* truncating the conversation, so a refused `both` rewind never leaves the transcript
+describing a state the disk is not in. `guardretry`'s rollback treats a refusal as **non-fatal** —
+warned, and appended to the guard reason — because that path exists only to tidy a response already
+being surfaced as failed; making it fatal would turn a guard FAIL into a run error.
+
+**Secondary, as the item asked:** file mode is now captured and restored, with an explicit
+`os.Chmod` alongside the write, since `WriteFile`'s mode argument only applies on create and a mode
+changed during the turn would otherwise survive the rewind.
+
+**One nuance left alone.** For the git `/rollback` variant, `git reset --hard` still runs before the
+file restore, so a refusal 409s *after* the reset has happened. The reset is a superset of the
+checkpoint restore for tracked files and the 409 body says nothing was restored from the checkpoint,
+so the ordering stands.
+
+Tests pin the boundary as the deliverable: an out-of-root path aborts the restore with the good
+in-root file also left unrestored, a table over `withinRoot` (sibling prefix, `..`, the root itself,
+relative paths, plus the legitimate shapes), symlink escape, recreate-after-delete and
+delete-of-created, mode preservation, the legacy row, and a server-level test that poisons a real
+checkpoint and asserts 409 + nothing touched + conversation not truncated. The symlink and
+mode-preservation tests skip on Windows, where they cannot mean anything.
+
+---
+
+#### P70.2 — the mailbox, and the posture question that was the item
+
+`team_inbox` formatted a teammate's `m.Text` into the tool result bare: no `trust.Wrap`, no size cap.
+The item refused to guess, because wrapping intra-harness traffic asserts something about the trust
+model that had never been written down.
+
+**The user's answer: zero trust.** The mailbox is a laundering channel — a teammate that ingested
+poisoned web or MCP content can relay it to a peer as plain, trusted-looking text, and the wrap at
+the original ingestion point does not survive the relay. So mailbox content is wrapped, in the same
+shape `internal/mcp/trust.go`, `web.go` and `scanreport.go` use, with a `team_untrusted_output` tag
+and framing that says why the bytes may not have originated with the sender. Aegis's own "inbox
+empty" sentence stays unwrapped, and a test pins that it does.
+
+**The cap posture deviates from the usual one, deliberately.** 20,000 bytes, head end — `web_fetch`'s
+value, for `web_fetch`'s reasons — but the remainder is **not spilled**, which every other capped
+tool does. Spilling would write the *unwrapped* overflow to a workspace file that `read_file` returns
+with no marker, reopening the exact laundering path the item closes. Two further details: the
+per-message header is reserved out of the cap so a single over-cap body still cannot exceed it, and a
+message that does not fit the batch budget is **left unread** rather than consumed and dropped, with
+a notice naming the count. The budget costs a second `team_inbox` call, never a message.
+
+**The sweep for other laundering paths found one, and it is a different item.** `subprocess.go:223`
+lifts the worker's last `MsgResult` text into `Result.Output`, which reaches the parent model bare
+through `agent.go` and `task_output` — but the in-process backend reaches the same place *without the
+mailbox at all*, so this is the sub-agent **result** path and the mailbox is merely its durability
+substrate under one backend. Wrapping it changes the shape of every `agent`/`task_output` result and
+every workflow mode's joined output, which is not something to do as a side effect of a mailbox fix.
+Filed as **P70.4**, uncapped as well as unwrapped.
+
+Docs carry the decision so the next question can be settled against it rather than afresh:
+[docs/mcp-trust-boundary.md](../docs/mcp-trust-boundary.md) states the zero-trust reading,
+`docs/multi-agent.md` and `docs/tools-reference.md` note the new shape — and the latter's `team_inbox`
+argument block, which documented a `since` parameter that has never existed, was corrected in passing.
+
+---
+
+#### P70.3 — the bound built, the wrap declined
+
+**The bound half.** `security.runJSON` and `runContainerCLI` both used `cmd.Output()`, so a rogue or
+compromised scanner's stdout was read entirely into memory before parsing, with no per-call cap at
+all — they leaned on `CapRound`, which is the *aggregate* bound and was never meant to be the only
+one. Both now read through a bounded writer capped at **64 MiB**, matching `spillMaxBytes` and near
+`maxReadBytes`; the cap is deliberately generous against `truncate.go`'s 20-32 KiB model-facing caps
+because it is a memory-safety ceiling on a raw SARIF report (a large monorepo scan legitimately runs
+to megabytes), not a token budget.
+
+**Two implementation points that are not stylistic.** The bound is a *writer* rather than an
+`io.LimitReader` over `StdoutPipe`, because `os/exec` pipes a non-`*os.File` `Stdout` through an
+internal `io.Copy` goroutine that `cmd.Wait()` waits on — stopping the read at the cap risks the
+child blocking forever on a full, undrained pipe and `Wait()` hanging against it. The writer instead
+drains to completion, discarding past the cap. And overflow **refuses to parse**: it returns an error
+naming the cap, never a prefix, checked *before* the existing "non-zero exit tolerated if output was
+produced" branch so a rogue scanner cannot dodge the bound by also exiting non-zero. That follows the
+gosec two-phase precedent — fail honestly rather than hand a parser a truncated JSON document that
+parses cleanly into a confidently under-reported finding count. Since `cmd.Output()` is gone, so is
+its automatic population of `ExitError.Stderr`, which `interpretOSVError` depends on for P34.12's
+"no dependencies" vs "extraction failure" distinction; stderr is now captured and attached by hand,
+with a test pinning it.
+
+**The wrap half was declined by the user, and that is the durable output.** `security_scan`'s content
+is workspace-derived — files the model can already read directly — so wrapping it would mark as
+untrusted the one class of input the agent is reading on purpose. The item asked for this to be
+answered "once for the whole tree rather than tool by tool", and it now is. It does **not** contradict
+P70.2: the mailbox launders content that crossed a boundary, and a workspace file did not. Zero trust
+is the posture for *ingestion*, not a rule that every byte acquires a marker.
+
+---
+
+**Verification.** `go build ./...`, `go vet ./...` and `go test ./...` all clean with the three
+changes in the tree together — checked on the combined tree, not only per item, since P70.1's schema
+migration and P70.2's `truncate.go` row touch packages the other two also compile against.
 
 ### Five rows of Up next, 2026-08-18 (P66.15, P67.6, P67.7, P67.8, P67.9)
 

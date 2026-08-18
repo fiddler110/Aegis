@@ -53,11 +53,7 @@ var lookPath = func(bin string) bool {
 func runJSON(ctx context.Context, dir, bin string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = dir
-	out, err := cmd.Output()
-	if len(out) == 0 && err != nil {
-		return nil, err
-	}
-	return out, nil
+	return runBoundedOutput(cmd)
 }
 
 func firstLine(s string) string {

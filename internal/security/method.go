@@ -1088,7 +1088,7 @@ func runContainerImage(ctx context.Context, rt sandbox.ContainerRuntime, image, 
 // doesn't have to duplicate the exit-code handling.
 func runContainerCLI(ctx context.Context, rt sandbox.ContainerRuntime, image string, cliArgs []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, string(rt), cliArgs...)
-	out, err := cmd.Output()
+	out, err := runBoundedOutput(cmd)
 	// Scanners commonly exit non-zero when they find issues; tolerate that as
 	// long as some output was produced, matching runJSON's host-exec behavior.
 	if len(out) == 0 && err != nil {
