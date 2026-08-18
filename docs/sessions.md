@@ -100,6 +100,16 @@ Shows all checkpoints for the current session, newest first, with:
 
 After a `code` or `both` restore, file-staleness tracking is cleared so the agent re-reads any reverted file before touching it again.
 
+**The workspace boundary.** Each checkpoint records the session's workspace root
+when it is created, and a restore validates every captured path against that
+root — symlinks and `..` resolved — *before* writing anything. If any path
+resolves outside the root, the restore is refused wholesale: nothing is written
+and the transcript is not truncated. A half-rewound tree is the exact failure
+mode `/rewind` exists to prevent, so a stale or malformed checkpoint fails
+loudly instead of partially. Checkpoints created before this root was recorded
+(pre-upgrade rows) cannot be validated and are refused for the same reason; use
+`/rollback` (git) to undo those turns.
+
 ### `git reset` variant
 
 ```

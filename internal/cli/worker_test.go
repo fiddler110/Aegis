@@ -42,7 +42,10 @@ func TestOpenCheckpointSnapshotterCapturesAcrossConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	cp, err := store.Create(ctx, "sess-1", 0, "test turn")
+	// The workspace the checkpoint is bound to (P70.1): restore validates every
+	// captured path against the root recorded on this row.
+	workspace := t.TempDir()
+	cp, err := store.Create(ctx, "sess-1", 0, "test turn", workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +62,7 @@ func TestOpenCheckpointSnapshotterCapturesAcrossConnections(t *testing.T) {
 	}
 	defer closeDB()
 
-	target := filepath.Join(t.TempDir(), "out.txt")
+	target := filepath.Join(workspace, "out.txt")
 	if err := os.WriteFile(target, []byte("original"), 0o644); err != nil {
 		t.Fatal(err)
 	}

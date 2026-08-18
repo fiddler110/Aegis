@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -77,6 +79,10 @@ func newCheckpointTestServer(t *testing.T, root string, adapter provider.Adapter
 
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, adapter, reg)
 	srv.checkpoints = cpStore
+	// The daemon's real constructor sets this to the process cwd; newWithDeps
+	// leaves it empty. It is the workspace root checkpoints are bound to
+	// (P70.1), so a rewind can only validate its captured paths with it set.
+	srv.workspace = root
 	srv.fileTracker = ft
 	srv.authToken = "test-token"
 
@@ -555,5 +561,82 @@ func TestSessionForkValidation(t *testing.T) {
 	}
 	if _, err := cl.Fork(ctx, meta.ID, otherCps[0].ID); err == nil {
 		t.Error("expected error forking with another session's checkpoint")
+	}
+}
+
+// TestRewindRefusesCheckpointWithOutOfWorkspacePath is P70.1 at the handler:
+// a checkpoint holding a path outside the workspace root recorded on its row
+// must not be replayed at all. The handler surfaces that as a 409 rather than
+// reporting a successful rewind of zero files — and it must stop before the
+// conversation is truncated, so the session never ends up describing a state
+// the disk is not in.
+func TestRewindRefusesCheckpointWithOutOfWorkspacePath(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(outside, []byte("untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "out.txt")
+	if err := os.WriteFile(target, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cl, cleanup := newCheckpointTestServer(t, root, &scriptedAdapter{path: "out.txt", content: "v2"})
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := cl.PostMessage(ctx, meta.ID, "overwrite the file")
+	if err != nil {
+		t.Fatalf("PostMessage: %v", err)
+	}
+	for range ch {
+	}
+
+	cps, err := cl.ListCheckpoints(ctx, meta.ID)
+	if err != nil || len(cps) != 1 {
+		t.Fatalf("ListCheckpoints = %v, %v", cps, err)
+	}
+
+	// Poison the checkpoint the way a capture site that resolved outside the
+	// workspace would have (the P66.15 bug class), by writing the row directly.
+	db, err := sql.Open("sqlite", filepath.Join(root, "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO checkpoint_files (checkpoint_id, path, existed, content, mode) VALUES (?, ?, 1, ?, 0)`,
+		cps[0].ID, outside, []byte("clobbered")); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	before, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "both"); err == nil {
+		t.Fatal("Rewind succeeded, want a refusal")
+	} else if !strings.Contains(err.Error(), "refused") {
+		t.Errorf("Rewind err = %v, want it to report the refusal", err)
+	}
+
+	if got, _ := os.ReadFile(outside); string(got) != "untouched" {
+		t.Errorf("out-of-workspace file = %q, want it never written", got)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "v2" {
+		t.Errorf("in-workspace file = %q, want v2 (a refused rewind writes nothing)", got)
+	}
+	after, err := cl.GetSession(ctx, meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Messages) != len(before.Messages) {
+		t.Errorf("messages = %d, want %d (a refused code rewind must not truncate the conversation)",
+			len(after.Messages), len(before.Messages))
 	}
 }

@@ -270,7 +270,12 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 	// file changes the turn makes. seq is the pre-turn message count.
 	var snap *checkpoint.Snapshotter
 	if s.checkpoints != nil {
-		if cp, err := s.checkpoints.Create(context.Background(), id, len(sess.Messages), req.Text); err != nil {
+		// workdir is recorded on the checkpoint row: it is the root every
+		// captured path must resolve inside for a rewind to replay it (P70.1).
+		// It belongs on the row rather than on the shared Store because one
+		// Store serves every session on this daemon, and two sessions can have
+		// different workspaces.
+		if cp, err := s.checkpoints.Create(context.Background(), id, len(sess.Messages), req.Text, workdir); err != nil {
 			s.logger.Warn("create checkpoint", "session", id, "err", err)
 		} else {
 			snap = s.checkpoints.NewSnapshotter(cp.ID)

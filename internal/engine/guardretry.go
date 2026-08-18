@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -194,9 +195,21 @@ func (g *guardGate) review(ctx context.Context, conv *Conversation, emit EmitFun
 func (g *guardGate) surfaceFailure(ctx context.Context, emit EmitFunc, reason string, status guard.Status) {
 	finalReason := "surfacing the response after " + itoa(g.maxRetries) + " failed validation attempt(s): " + reason
 	restored, rerr := checkpoint.SnapshotterFrom(ctx).RestoreFiles(ctx)
-	if rerr != nil {
+	switch {
+	case errors.Is(rerr, checkpoint.ErrRestoreRefused):
+		// P70.1: the checkpoint refused to replay itself (a captured path
+		// outside the recorded workspace root, or a row with no root). Nothing
+		// was written back. That is deliberately not fatal here: this path
+		// already exists only to tidy up a response that is about to be
+		// surfaced as failed, so a skipped rollback degrades to the
+		// pre-P27.16 behavior rather than turning a guard FAIL into a run
+		// error. The reason is surfaced so the user knows the bad write is
+		// still on disk.
+		g.logger.Warn("guard fail: rollback refused by the checkpoint boundary; files written this turn were left on disk", "err", rerr)
+		finalReason += " — rollback of files written this turn was refused (" + rerr.Error() + "), so they remain on disk"
+	case rerr != nil:
 		g.logger.Warn("guard fail: rollback of files written this turn failed", "err", rerr)
-	} else if restored > 0 {
+	case restored > 0:
 		g.logger.Warn("guard fail: rolled back files written this turn", "files_restored", restored)
 		finalReason += fmt.Sprintf(" — rolled back %d file(s) written this turn", restored)
 	}

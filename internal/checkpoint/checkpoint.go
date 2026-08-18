@@ -16,7 +16,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +35,18 @@ const maxSnapshotBytes = 16 << 20 // 16 MiB
 // ErrNotFound is returned when a checkpoint does not exist.
 var ErrNotFound = errors.New("checkpoint not found")
 
+// ErrRestoreRefused wraps every reason RestoreFiles declines to replay a
+// checkpoint at all (P70.1). A refusal is *all or nothing*: when it is
+// returned, nothing on disk has been touched. Callers can distinguish it from
+// the best-effort per-file write errors RestoreFiles still returns after
+// having restored what it could.
+var ErrRestoreRefused = errors.New("checkpoint restore refused")
+
+// defaultRestoreMode is the permission a restored file gets when the
+// checkpoint predates mode capture (mode column 0). It matches the literal
+// os.WriteFile mode this package used before P70.1.
+const defaultRestoreMode fs.FileMode = 0o644
+
 // Checkpoint is a restore point captured at the start of a user turn.
 type Checkpoint struct {
 	ID        string    `json:"id"`
@@ -40,13 +56,22 @@ type Checkpoint struct {
 	GitSHA    string    `json:"git_sha,omitempty"` // HEAD commit at checkpoint time (P3.4)
 	FileCount int       `json:"file_count"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// WorkspaceRoot is the session's workspace directory at the moment the
+	// checkpoint was created. Restore refuses any captured path that does not
+	// resolve inside it (P70.1). Recorded per checkpoint rather than per Store
+	// because one Store is shared by every session on the daemon, and two
+	// sessions can have different workspaces. Empty only for rows written
+	// before P70.1, which restore refuses outright.
+	WorkspaceRoot string `json:"workspace_root,omitempty"`
 }
 
 // FileSnapshot is one captured file within a checkpoint.
 type FileSnapshot struct {
-	Path    string // absolute path
-	Existed bool   // true if the file existed before the turn; false if newly created
-	Content []byte // pre-turn content (nil if Existed is false)
+	Path    string      // absolute path
+	Existed bool        // true if the file existed before the turn; false if newly created
+	Content []byte      // pre-turn content (nil if Existed is false)
+	Mode    fs.FileMode // pre-turn permission bits; 0 when unknown (pre-P70.1 rows, or a path that did not exist)
 }
 
 // Store persists checkpoints in SQLite. It shares the daemon's single session
@@ -86,23 +111,38 @@ CREATE TABLE IF NOT EXISTS checkpoint_files (
 	}
 	// Idempotent additions for existing databases (P3.4: git SHA column).
 	_, _ = s.db.Exec(`ALTER TABLE checkpoints ADD COLUMN git_sha TEXT NOT NULL DEFAULT ''`)
+	// P70.1: the workspace root every captured path must resolve inside, and
+	// the pre-turn permission bits of a captured file. Both default to the
+	// "unknown" value on rows written by an older binary — an empty root makes
+	// restore refuse the checkpoint, a zero mode makes it fall back to 0o644.
+	_, _ = s.db.Exec(`ALTER TABLE checkpoints ADD COLUMN workspace_root TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE checkpoint_files ADD COLUMN mode INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
 
 // Create records a new checkpoint for sessionID. seq is the conversation
 // message count at the moment of capture (rewinding truncates to it). label is
-// a short human description, typically the user's prompt.
-func (s *Store) Create(ctx context.Context, sessionID string, seq int, label string) (*Checkpoint, error) {
+// a short human description, typically the user's prompt. workspaceRoot is the
+// session's workspace directory: restore refuses to write any captured path
+// that does not resolve inside it (P70.1), so passing "" produces a checkpoint
+// whose files can never be restored.
+func (s *Store) Create(ctx context.Context, sessionID string, seq int, label, workspaceRoot string) (*Checkpoint, error) {
+	if workspaceRoot != "" {
+		if abs, err := filepath.Abs(workspaceRoot); err == nil {
+			workspaceRoot = abs
+		}
+	}
 	cp := &Checkpoint{
-		ID:        uuid.NewString(),
-		SessionID: sessionID,
-		Seq:       seq,
-		Label:     truncateLabel(label, 120),
-		CreatedAt: time.Now(),
+		ID:            uuid.NewString(),
+		SessionID:     sessionID,
+		Seq:           seq,
+		Label:         truncateLabel(label, 120),
+		CreatedAt:     time.Now(),
+		WorkspaceRoot: workspaceRoot,
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO checkpoints (id, session_id, seq, label, created_at) VALUES (?, ?, ?, ?, ?)`,
-		cp.ID, cp.SessionID, cp.Seq, cp.Label, cp.CreatedAt.UnixMilli())
+		`INSERT INTO checkpoints (id, session_id, seq, label, created_at, workspace_root) VALUES (?, ?, ?, ?, ?, ?)`,
+		cp.ID, cp.SessionID, cp.Seq, cp.Label, cp.CreatedAt.UnixMilli(), cp.WorkspaceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("insert checkpoint: %w", err)
 	}
@@ -112,21 +152,21 @@ func (s *Store) Create(ctx context.Context, sessionID string, seq int, label str
 // recordFile stores a single captured file. It is best-effort and used by the
 // Snapshotter; a primary-key conflict (the file was already captured this turn)
 // is ignored.
-func (s *Store) recordFile(checkpointID, path string, existed bool, content []byte) error {
+func (s *Store) recordFile(checkpointID, path string, existed bool, content []byte, mode fs.FileMode) error {
 	existedInt := 0
 	if existed {
 		existedInt = 1
 	}
 	_, err := s.db.Exec(
-		`INSERT OR IGNORE INTO checkpoint_files (checkpoint_id, path, existed, content) VALUES (?, ?, ?, ?)`,
-		checkpointID, path, existedInt, content)
+		`INSERT OR IGNORE INTO checkpoint_files (checkpoint_id, path, existed, content, mode) VALUES (?, ?, ?, ?, ?)`,
+		checkpointID, path, existedInt, content, int64(mode.Perm()))
 	return err
 }
 
 // List returns checkpoints for a session, most recent first, with file counts.
 func (s *Store) List(ctx context.Context, sessionID string) ([]Checkpoint, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT c.id, c.session_id, c.seq, c.label, c.git_sha, c.created_at,
+SELECT c.id, c.session_id, c.seq, c.label, c.git_sha, c.workspace_root, c.created_at,
        (SELECT COUNT(*) FROM checkpoint_files f WHERE f.checkpoint_id = c.id)
 FROM checkpoints c
 WHERE c.session_id = ?
@@ -139,7 +179,7 @@ ORDER BY c.created_at DESC, c.id DESC`, sessionID)
 	for rows.Next() {
 		var cp Checkpoint
 		var created int64
-		if err := rows.Scan(&cp.ID, &cp.SessionID, &cp.Seq, &cp.Label, &cp.GitSHA, &created, &cp.FileCount); err != nil {
+		if err := rows.Scan(&cp.ID, &cp.SessionID, &cp.Seq, &cp.Label, &cp.GitSHA, &cp.WorkspaceRoot, &created, &cp.FileCount); err != nil {
 			return nil, err
 		}
 		cp.CreatedAt = time.UnixMilli(created)
@@ -151,12 +191,12 @@ ORDER BY c.created_at DESC, c.id DESC`, sessionID)
 // Get loads a single checkpoint's metadata.
 func (s *Store) Get(ctx context.Context, id string) (*Checkpoint, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT c.id, c.session_id, c.seq, c.label, c.git_sha, c.created_at,
+SELECT c.id, c.session_id, c.seq, c.label, c.git_sha, c.workspace_root, c.created_at,
        (SELECT COUNT(*) FROM checkpoint_files f WHERE f.checkpoint_id = c.id)
 FROM checkpoints c WHERE c.id = ?`, id)
 	var cp Checkpoint
 	var created int64
-	if err := row.Scan(&cp.ID, &cp.SessionID, &cp.Seq, &cp.Label, &cp.GitSHA, &created, &cp.FileCount); err != nil {
+	if err := row.Scan(&cp.ID, &cp.SessionID, &cp.Seq, &cp.Label, &cp.GitSHA, &cp.WorkspaceRoot, &created, &cp.FileCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -176,42 +216,163 @@ func (s *Store) SetGitSHA(ctx context.Context, id, sha string) error {
 // files returns the captured file snapshots for a checkpoint.
 func (s *Store) files(ctx context.Context, checkpointID string) ([]FileSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT path, existed, content FROM checkpoint_files WHERE checkpoint_id = ?`, checkpointID)
+		`SELECT path, existed, content, mode FROM checkpoint_files WHERE checkpoint_id = ?`, checkpointID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []FileSnapshot
 	for rows.Next() {
-		var fs FileSnapshot
+		var snap FileSnapshot
 		var existedInt int
-		if err := rows.Scan(&fs.Path, &existedInt, &fs.Content); err != nil {
+		var mode int64
+		if err := rows.Scan(&snap.Path, &existedInt, &snap.Content, &mode); err != nil {
 			return nil, err
 		}
-		fs.Existed = existedInt == 1
-		out = append(out, fs)
+		snap.Existed = existedInt == 1
+		snap.Mode = fs.FileMode(mode).Perm()
+		out = append(out, snap)
 	}
 	return out, rows.Err()
 }
 
+// workspaceRoot returns the root recorded on a checkpoint row, or ErrNotFound
+// if the checkpoint does not exist. An empty string means the row predates
+// P70.1.
+func (s *Store) workspaceRoot(ctx context.Context, checkpointID string) (string, error) {
+	var root string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT workspace_root FROM checkpoints WHERE id = ?`, checkpointID).Scan(&root)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return root, err
+}
+
+// resolveForCompare turns p into the path that containment should be judged on:
+// symlinks resolved as far as the filesystem can, the rest cleaned lexically.
+//
+// A captured path legitimately may not exist at restore time — a file created
+// during the turn is about to be deleted, or a file deleted during the turn is
+// about to be recreated — so EvalSymlinks on the full path is not enough. Walk
+// up to the deepest ancestor that *does* exist, resolve that, and re-append the
+// components below it. That still catches a symlinked directory in the middle
+// of the path (the classic escape), while letting a not-yet-existing leaf
+// inside the root validate.
+func resolveForCompare(p string) string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(r)
+	}
+	rest := ""
+	cur := p
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur { // reached the volume/filesystem root
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Clean(filepath.Join(r, rest))
+		}
+	}
+}
+
+// foldPath normalizes case where the platform's filesystem does. Windows paths
+// compare case-insensitively, and EvalSymlinks there can hand back a different
+// casing (or the long form of an 8.3 name) than the one recorded at capture
+// time, so a case-sensitive comparison would reject legitimate paths.
+func foldPath(p string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(p)
+	}
+	return p
+}
+
+// withinRoot reports whether path resolves to a location strictly inside root.
+// Both sides go through resolveForCompare, so this is a real filesystem
+// containment check — `..` segments and symlinked ancestors are resolved — not
+// a string-prefix test (which would accept /work-other for a root of /work).
+func withinRoot(root, path string) bool {
+	if root == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	rr := foldPath(resolveForCompare(root))
+	rp := foldPath(resolveForCompare(path))
+	rel, err := filepath.Rel(rr, rp)
+	if err != nil {
+		return false
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
 // RestoreFiles writes each captured file in the checkpoint back to its
-// pre-turn content. Files that did not exist before the turn are deleted. It
-// returns the number of files restored. Best-effort per file: an error on one
-// file is recorded but does not stop the others.
+// pre-turn content and permission bits. Files that did not exist before the
+// turn are deleted. It returns the number of files restored.
+//
+// P70.1: every captured path is validated against the workspace root recorded
+// on the checkpoint row *before* anything is written, and a single path that
+// resolves outside that root refuses the whole restore — nothing is written,
+// and the returned error (wrapping ErrRestoreRefused) names the offending
+// path. A half-rewound tree is precisely the failure mode /rewind exists to
+// prevent, so a stale or malformed row must not produce one. This is the layer
+// that stops depending on every present and future capture site resolving
+// in-workspace.
+//
+// A checkpoint whose row records no root (written before P70.1, or by a caller
+// that passed "") is refused for the same reason: its paths cannot be checked
+// against anything, and silently trusting them is the behavior being removed.
+// A checkpoint that captured no files is a no-op and needs no root.
+//
+// Past validation it stays best-effort per file: an error writing one file is
+// recorded but does not stop the others.
 func (s *Store) RestoreFiles(ctx context.Context, checkpointID string) (int, error) {
 	snaps, err := s.files(ctx, checkpointID)
 	if err != nil {
 		return 0, err
 	}
+	if len(snaps) == 0 {
+		return 0, nil
+	}
+	root, err := s.workspaceRoot(ctx, checkpointID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return 0, fmt.Errorf("%w: checkpoint %s has captured files but no checkpoint row", ErrRestoreRefused, checkpointID)
+		}
+		return 0, err
+	}
+	if root == "" {
+		return 0, fmt.Errorf("%w: checkpoint %s records no workspace root, so its captured paths cannot be validated (checkpoint created before P70.1)", ErrRestoreRefused, checkpointID)
+	}
+	for _, snap := range snaps {
+		if !withinRoot(root, snap.Path) {
+			return 0, fmt.Errorf("%w: captured path %q resolves outside the checkpoint's workspace root %q; nothing was restored", ErrRestoreRefused, snap.Path, root)
+		}
+	}
+
 	var restored int
 	var firstErr error
 	for _, fs := range snaps {
 		if fs.Existed {
-			if err := os.WriteFile(fs.Path, fs.Content, 0o644); err != nil {
+			mode := fs.Mode.Perm()
+			if mode == 0 {
+				mode = defaultRestoreMode
+			}
+			if err := os.WriteFile(fs.Path, fs.Content, mode); err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
 				continue
+			}
+			// WriteFile's mode applies only when it creates the file, so an
+			// existing file whose mode the turn changed needs an explicit
+			// chmod to come back as it was.
+			if err := os.Chmod(fs.Path, mode); err != nil && firstErr == nil {
+				firstErr = err
 			}
 		} else {
 			// File was created during the turn: remove it. A missing file is
@@ -268,7 +429,10 @@ func (s *Snapshotter) CheckpointID() string { return s.checkpointID }
 // the turn), delegating to Store.RestoreFiles. It returns the number of
 // files restored. Used to quarantine a bad write on an exhausted
 // output-guard FAIL (P27.16) — the same primitive the user-facing rewind
-// feature already uses. Safe to call on a nil receiver (returns 0, nil),
+// feature already uses — including its P70.1 boundary check, so a rollback
+// whose checkpoint records a path outside the workspace root (or records no
+// root at all) writes nothing and returns an ErrRestoreRefused error rather
+// than partially rolling back. Safe to call on a nil receiver (returns 0, nil),
 // matching Capture's nil-safety so callers don't need a separate nil check.
 func (s *Snapshotter) RestoreFiles(ctx context.Context) (int, error) {
 	if s == nil {
@@ -300,7 +464,7 @@ func (s *Snapshotter) Capture(absPath string) {
 	if err != nil {
 		// File does not exist yet: record it as newly created so a rewind
 		// deletes it.
-		_ = s.store.recordFile(s.checkpointID, absPath, false, nil)
+		_ = s.store.recordFile(s.checkpointID, absPath, false, nil, 0)
 		return
 	}
 	if info.Size() > maxSnapshotBytes {
@@ -311,7 +475,10 @@ func (s *Snapshotter) Capture(absPath string) {
 	if err != nil {
 		return
 	}
-	_ = s.store.recordFile(s.checkpointID, absPath, true, data)
+	// P70.1: the pre-turn permission bits travel with the content, so a file
+	// that was deleted during the turn and is recreated by restore comes back
+	// with the mode it had rather than a flat 0o644.
+	_ = s.store.recordFile(s.checkpointID, absPath, true, data, info.Mode())
 }
 
 // CaptureBytes records explicit pre-turn content for absPath, the first time
@@ -332,7 +499,15 @@ func (s *Snapshotter) CaptureBytes(absPath string, existed bool, data []byte) {
 	if len(data) > maxSnapshotBytes {
 		return
 	}
-	_ = s.store.recordFile(s.checkpointID, absPath, existed, data)
+	// The pre-mutation mode is no longer observable (the mutation already
+	// happened), so the file's current mode is the best available proxy —
+	// better than recording 0 and restoring a flat 0o644. A path that no
+	// longer exists records 0, and restore falls back to the default.
+	var mode fs.FileMode
+	if info, err := os.Stat(absPath); err == nil {
+		mode = info.Mode()
+	}
+	_ = s.store.recordFile(s.checkpointID, absPath, existed, data, mode)
 }
 
 // claim reports whether this call is the first for absPath within the turn,

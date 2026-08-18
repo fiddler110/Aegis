@@ -138,8 +138,10 @@ func gitRepoRoot(ctx context.Context, root string) string {
 // workspaceAbs resolves one repo-root-relative git-status path to an absolute
 // path, reporting false when it lands outside the workspace root. A sibling
 // package's file in the same monorepo is git's business, not this workspace's
-// — and checkpoint.Store.RestoreFiles writes back every captured path with no
-// root of its own to check against, so the boundary has to hold here.
+// — and capturing it would only produce a checkpoint that restore refuses
+// (P70.1 gave checkpoint.Store.RestoreFiles a recorded root of its own and
+// made a single out-of-root path abort the whole rewind), so the boundary has
+// to hold here too rather than being left to that backstop.
 func workspaceAbs(top, root, rel string) (string, bool) {
 	abs := filepath.Join(top, filepath.FromSlash(rel))
 	r, err := filepath.Rel(root, abs)

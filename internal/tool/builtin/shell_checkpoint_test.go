@@ -27,7 +27,10 @@ func echoToFile(name, content string) string {
 // newTestSnapshotter builds a checkpoint store backed by a temp SQLite file
 // and returns a Snapshotter plus a ctx carrying it, mirroring the setup in
 // agent_test.go's TestAgentToolPropagatesCheckpointIDToSpawn.
-func newTestSnapshotter(t *testing.T) (*checkpoint.Snapshotter, *checkpoint.Store, context.Context) {
+// root is the workspace the checkpoint is bound to: since P70.1 restore
+// validates every captured path against the root recorded on the checkpoint
+// row, so these tests need a real checkpoint row rather than a bare id.
+func newTestSnapshotter(t *testing.T, root string) (*checkpoint.Snapshotter, *checkpoint.Store, context.Context) {
 	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "cp.db"))
 	if err != nil {
@@ -38,7 +41,11 @@ func newTestSnapshotter(t *testing.T) (*checkpoint.Snapshotter, *checkpoint.Stor
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap := store.NewSnapshotter("cp-shell-test")
+	cp, err := store.Create(context.Background(), "sess-shell-test", 0, "shell turn", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := store.NewSnapshotter(cp.ID)
 	ctx := checkpoint.WithSnapshotter(context.Background(), snap)
 	return snap, store, ctx
 }
@@ -55,7 +62,7 @@ func TestShellCheckpointCapturesNewFile(t *testing.T) {
 	// diff against (mirrors any real workspace this fix targets).
 	mustGit(t, root, "commit", "--allow-empty", "-m", "init")
 
-	snap, store, ctx := newTestSnapshotter(t)
+	snap, store, ctx := newTestSnapshotter(t, root)
 
 	sh := newShellTool(root, 30, nil, nil)
 	res, err := sh.Execute(ctx, mustJSON(t, map[string]any{
@@ -92,7 +99,7 @@ func TestShellCheckpointCapturesModifiedTrackedFile(t *testing.T) {
 	mustGit(t, root, "add", "tracked.txt")
 	mustGit(t, root, "commit", "-m", "add tracked.txt")
 
-	snap, store, ctx := newTestSnapshotter(t)
+	snap, store, ctx := newTestSnapshotter(t, root)
 
 	sh := newShellTool(root, 30, nil, nil)
 	res, err := sh.Execute(ctx, mustJSON(t, map[string]any{
@@ -126,7 +133,7 @@ func TestShellCheckpointCapturesModifiedTrackedFile(t *testing.T) {
 func TestShellCheckpointNoopOutsideGitRepo(t *testing.T) {
 	root := t.TempDir() // not a git repo
 
-	_, store, ctx := newTestSnapshotter(t)
+	_, store, ctx := newTestSnapshotter(t, root)
 	snap := checkpoint.SnapshotterFrom(ctx)
 
 	sh := newShellTool(root, 30, nil, nil)
@@ -190,7 +197,7 @@ func TestShellCheckpointWorkspaceInsideLargerRepo(t *testing.T) {
 	mustGit(t, repo, "add", "-A")
 	mustGit(t, repo, "commit", "-m", "init")
 
-	snap, store, ctx := newTestSnapshotter(t)
+	snap, store, ctx := newTestSnapshotter(t, root)
 
 	sh := newShellTool(root, 30, nil, nil)
 	res, err := sh.Execute(ctx, mustJSON(t, map[string]any{
@@ -215,7 +222,10 @@ func TestShellCheckpointWorkspaceInsideLargerRepo(t *testing.T) {
 		t.Errorf("rewind created app/app/... from a repo-root-relative path (err=%v)", err)
 	}
 	// A sibling directory in the same repo is outside the workspace and must
-	// be left alone entirely — RestoreFiles has no root of its own to check.
+	// be left alone entirely. Capturing it would now also poison the whole
+	// checkpoint: since P70.1 a single out-of-root path makes RestoreFiles
+	// refuse the rewind wholesale, so the restore above would have written
+	// nothing at all.
 	if data, err := os.ReadFile(filepath.Join(sibling, "keep.txt")); err != nil || string(data) != siblingBefore {
 		t.Errorf("sibling file changed by a workspace rewind: %q, err=%v", data, err)
 	}

@@ -619,7 +619,7 @@ func TestGuardExhaustedRollsBackWrittenFile(t *testing.T) {
 	}
 
 	st := newTestCheckpointStore(t)
-	cp, err := st.Create(context.Background(), "s1", 0, "write the report")
+	cp, err := st.Create(context.Background(), "s1", 0, "write the report", dir)
 	if err != nil {
 		t.Fatalf("checkpoint Create: %v", err)
 	}
@@ -709,5 +709,70 @@ func TestGuardExhaustedNoCheckpointStoreSkipsRollback(t *testing.T) {
 	}
 	if strings.Contains(final.GuardReason, "rolled back") {
 		t.Errorf("GuardReason = %q, should not mention a rollback that didn't happen", final.GuardReason)
+	}
+}
+
+// TestGuardExhaustedRollbackRefusalIsNotFatal is P70.1's half of the same
+// path: when the checkpoint refuses to replay itself (here because the row's
+// recorded workspace root is a different directory than the one the turn
+// wrote in, the shape a stale or mis-captured row takes), the guard's
+// quarantine must degrade to "no rollback" — not to a run error. The run
+// still completes, the terminal guard event still fires, and the reason says
+// the bad write is still on disk.
+func TestGuardExhaustedRollbackRefusalIsNotFatal(t *testing.T) {
+	dir := t.TempDir()
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(dir, "report.md")
+	if err := os.WriteFile(target, []byte("original state"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := New(Options{
+		Adapter: alwaysFailGuardTurns(), Tools: reg, Model: "test",
+		OutputGuardMaxRetries: 1,
+		OutputGuard: func(context.Context, guard.Input) (bool, string, guard.Status) {
+			return false, "always bad", guard.StatusFailed
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st := newTestCheckpointStore(t)
+	// A checkpoint bound to a workspace the turn's write does not live in.
+	cp, err := st.Create(context.Background(), "s1", 0, "write the report", t.TempDir())
+	if err != nil {
+		t.Fatalf("checkpoint Create: %v", err)
+	}
+	ctx := checkpoint.WithSnapshotter(context.Background(), st.NewSnapshotter(cp.ID))
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "write the report"}}})
+
+	var evs []Event
+	if err := eng.Run(ctx, conv, func(ev Event) { evs = append(evs, ev) }); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "bad write" {
+		t.Errorf("file content = %q, want the bad write left in place when rollback is refused", got)
+	}
+	final := terminalGuardFailEvent(evs)
+	if final == nil {
+		t.Fatal("expected a terminal (non-retrying) failed KindGuard event")
+	}
+	if final.GuardFilesRestored != 0 {
+		t.Errorf("GuardFilesRestored = %d, want 0", final.GuardFilesRestored)
+	}
+	if !strings.Contains(final.GuardReason, "refused") {
+		t.Errorf("GuardReason = %q, want it to say the rollback was refused", final.GuardReason)
 	}
 }

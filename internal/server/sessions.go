@@ -602,6 +602,17 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		n, err := s.checkpoints.RestoreFiles(r.Context(), cp.ID)
+		if errors.Is(err, checkpoint.ErrRestoreRefused) {
+			// P70.1: the restore was refused wholesale — a captured path did
+			// not resolve inside the workspace root recorded on the
+			// checkpoint, or the row records no root at all. Nothing was
+			// written, so say so and stop: truncating the conversation for a
+			// code rewind that did not happen would leave the session
+			// describing a state the disk is not in.
+			s.logger.Warn("rewind: refused", "checkpoint", cp.ID, "err", err)
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if err != nil {
 			s.logger.Warn("rewind: restore files", "checkpoint", cp.ID, "err", err)
 		}
