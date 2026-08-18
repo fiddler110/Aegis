@@ -675,6 +675,43 @@ type ProviderConfig struct {
 	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
 	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
 	ContextWindow   int               `koanf:"context_window"`   // model context window in tokens; 0 = auto (skips compaction for local models)
+	// VRAMBudgetGB is how much memory, in GiB, the operator is willing to let
+	// the model server hold across *every* concurrently resident model (P69.6).
+	// It is what makes a co-resident plan possible: since P69.1 each debate seat
+	// resolves its own model, so a debate holds two or three models in VRAM at
+	// once, and context_window alone can only size one of them at a time — each
+	// as if it were alone.
+	//
+	// It is a figure the operator states, never one Aegis detects. No GPU/VRAM
+	// introspection is attempted on any platform (P17.5, and P20.3 rejected it
+	// again), and the number wanted here is not the card's capacity anyway: it is
+	// capacity minus whatever the driver reserve and the desktop compositor
+	// already hold, which only the operator can see. ~14.5 of a 16 GB card is the
+	// measured figure on the machine P69.5/P69.6 were calibrated against.
+	//
+	//   0 (unset) — no resident-set planning at all. Every path keeps the
+	//               behavior it had before P69.6; the feature exists only for an
+	//               operator who opted in.
+	//   n > 0     — plan every co-resident set against n GiB.
+	//
+	// Only meaningful for a local Ollama backend; a cloud provider has nothing
+	// resident to budget. Read via VRAMBudgetBytes(), never this field directly.
+	VRAMBudgetGB float64 `koanf:"vram_budget_gb"`
+	// KVCacheType declares the element type Ollama stores K and V in — its
+	// OLLAMA_KV_CACHE_TYPE, llama.cpp's --cache-type-k/v. "" (unset) means f16,
+	// Ollama's default; "q8_0" roughly halves the cache and "q4_0" roughly
+	// quarters it.
+	//
+	// This is a declaration, not a discovery: Ollama does not report the setting
+	// over its API, so an operator running a quantized cache must say so, or every
+	// window is planned against roughly twice the bytes it actually costs —
+	// erring safe, but wasting most of the headroom the quantization bought. A
+	// declaration in the wrong direction is caught empirically by Ollama's own
+	// size/size_vram split (ollamainfo.Footprint.FullyOnGPU) rather than silently
+	// believed. An unrecognized value is treated as f16; KVCacheTypeValid reports
+	// whether it was recognized, so a typo can be named rather than left looking
+	// like a working setting.
+	KVCacheType string `koanf:"kv_cache_type"`
 	// KeepAlive controls how long Ollama keeps the model resident after a
 	// request, via the native adapter's keep_alive field (P33.10). Only the
 	// native "ollama" adapter honors it; the OpenAI-compat path cannot send it.
@@ -808,6 +845,31 @@ type ProviderConfig struct {
 	PromptProfile string `koanf:"prompt_profile"`
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
+}
+
+// VRAMBudgetBytes returns provider.vram_budget_gb in bytes, or 0 when no budget
+// is stated (P69.6). Zero is the "plan nothing" value every caller checks, and a
+// negative figure reads as zero rather than as an error: a budget is an opt-in
+// hint about hardware, and refusing to start the daemon over a mistyped one
+// would be a worse trade than ignoring it. The daemon warns instead.
+func (p ProviderConfig) VRAMBudgetBytes() int64 {
+	if p.VRAMBudgetGB <= 0 {
+		return 0
+	}
+	return int64(p.VRAMBudgetGB * float64(int64(1)<<30))
+}
+
+// KVCacheTypeValid reports whether provider.kv_cache_type names a KV cache
+// element type Aegis knows how to size. The names mirror
+// ollamainfo.KVCacheType and are spelled as literals here for the same reason
+// provider.tool_call_probe_trials' default is — the config package stays free of
+// a dependency on the package that consumes the value.
+func (p ProviderConfig) KVCacheTypeValid() bool {
+	switch p.KVCacheType {
+	case "", "f16", "q8_0", "q4_0":
+		return true
+	}
+	return false
 }
 
 // ResponseHeaderTimeout returns the configured
@@ -1514,7 +1576,15 @@ func defaults() map[string]any {
 		// and a cloud one stays unbounded. Spelled here so the key is visible
 		// in `aegis config` alongside its auto value.
 		"provider.max_concurrent_requests": 0,
-		"server.addr":                      "127.0.0.1:4127",
+		// Resident-set planning (P69.6). 0 is "no budget stated", which means no
+		// planning at all rather than an unbounded one — spelled here so the key
+		// is visible in `aegis config` with its inert value, since the whole
+		// feature is invisible until an operator fills it in. f16 matches Ollama's
+		// own default KV cache type; it is a declaration Aegis cannot verify from
+		// the API, only falsify from a spilled placement.
+		"provider.vram_budget_gb": 0.0,
+		"provider.kv_cache_type":  "f16",
+		"server.addr":             "127.0.0.1:4127",
 		// Conservative non-zero caps by default (P27.12/FIND-14) — see
 		// ServerConfig's doc comments for why these values are safe for a
 		// normal single-user session while still bounding a runaway/DoS case.

@@ -770,18 +770,110 @@ Show the curated model catalog and optionally probe for running local servers or
 
 ```bash
 aegis models [--local] [--recommend]
+aegis models --fit [--fit-model M] [--budget-gb N] [--kv-type f16|q8_0|q4_0] [--write]
+aegis models --fit-set a,b,c [--budget-gb N]
+aegis models --fit-debate [--budget-gb N]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--local` | Probe localhost for Ollama, LM Studio, LiteLLM |
 | `--recommend` | Detect CPU/RAM and narrow local-model recommendations to what this machine can run |
+| `--fit` | Size `provider.context_window` from the model's measured KV-cache cost instead of its training maximum |
+| `--fit-model` | Model to fit (default: `provider.model`) |
+| `--budget-gb` | Memory budget in GiB (default: `provider.vram_budget_gb`); omit both to print the window/footprint curve instead |
+| `--kv-type` | KV cache element type: `f16`, `q8_0`, `q4_0` (default: `provider.kv_cache_type`) |
+| `--write` | Patch the fitted `context_window` into the global config |
+| `--fit-set` | Plan a whole **resident set**: comma-separated models that must fit the budget simultaneously |
+| `--fit-debate` | Plan the configured debate's three seat models as one resident set |
 
 Without flags: prints a curated list of recommended models by tier (frontier / balanced / local) with context windows and notes.
 
 With `--local`: additionally probes `localhost:11434`, `localhost:1234`, `localhost:4000` and lists every available model found.
 
 With `--recommend` (P20.3): detects CPU core count and total system RAM (best-effort, platform-specific — no GPU/VRAM introspection, by design; see [providers.md](providers.md#aegis-models)), prints the detected hardware, and narrows the `local` tier to the entries a rule of thumb says will run without heavy swapping. RAM detection fails soft to "unknown" (falls back to the full unnarrowed local list) on unsupported platforms or sandboxed environments. For any recommended model not already pulled, prints the exact `ollama pull <model>` command as a suggestion — never runs it.
+
+### `--fit`: sizing a window to the hardware (P69.5)
+
+The default sizing path takes the model's *training* maximum and halves it. On a VRAM-constrained
+local GPU that is the wrong question: what binds is how much KV cache fits next to the weights. A
+model with a 262144 training context gets recommended 131072 tokens, which is 16.5 GiB of KV cache
+on its own — more than a 16 GB card holds before any weights are loaded.
+
+`--fit` computes the cache exactly, from the geometry in Ollama's `/api/show`
+(`blocks × kv_heads × (key_length + value_length) × bytes_per_element`), measures the resident
+weights from `/api/ps`, and solves for the largest window that fits a budget you state:
+
+```console
+$ aegis models --fit --budget-gb 10.5
+Model:        aegis-qwen35-9b:16k
+Architecture: qwen35 (33 blocks, 4 KV heads, key 256 + value 256)
+KV cache:     132 KiB per token at f16
+Training max: 262144 tokens
+
+Loaded now:   6.01 GiB resident, 6.01 GiB in VRAM, window 16000
+              Ollama placed it entirely on the GPU at that window.
+Weights:      4.00 GiB (measured: resident size minus the loaded window's KV cache)
+
+Budget:       10.50 GiB
+Fitted window: 51200 tokens (6.45 GiB of KV, 10.44 GiB total, 0.06 GiB spare)
+```
+
+Notes on how to read it:
+
+- **The budget is yours to state, not something Aegis detects.** No GPU/VRAM introspection happens
+  here either (same P17.5 rule as `--recommend`). What the command *does* report is Ollama's own
+  placement verdict — the `size` vs `size_vram` split — which says whether the window currently in
+  use actually fit, without guessing at how much memory exists.
+- **The model must be loaded** for the weights figure. `/api/tags` reports on-disk size, which for a
+  multimodal model includes a vision projector that is never resident unless an image is sent
+  (2.57 GiB of phantom weights on qwen35-9b), so an unloaded model gets no estimate rather than a
+  wrong one.
+- **Omit `--budget-gb`** to print the window→footprint curve instead and pick a row yourself. This
+  is the mode to use when planning several co-resident models.
+- **Assumptions are printed, never hidden.** A model whose `head_count_kv` is absent or null gets the
+  multi-head fallback *with a `NOTE:` line saying so*; sliding-window models are reported but not
+  discounted, so their figures are a deliberate upper bound.
+- **`--write` patches only the `context_window:` line**, leaving surrounding comments intact — but it
+  does not update a comment that names the old number, so re-read the block after writing.
+
+### `--fit-set` / `--fit-debate`: planning a resident set (P69.6)
+
+`--fit` sizes **one** model as if it owned the card. A debate does not work that way: each seat
+resolves its own model, so two or three models are resident at once and each of them needs to be
+sized knowing the others exist.
+
+Shape of the output (figures depend on your models and budget):
+
+```console
+$ aegis models --fit-debate --budget-gb 14.5
+Resident set: configured debate seats — proposer=aegis-qwen35-9b, critic=aegis-qwen35-9b, arbiter=aegis-phi4-reasoning
+Budget:       14.50 GiB (f16 KV cache)
+
+MODEL                  WINDOW  KV CACHE  WEIGHTS
+aegis-qwen35-9b        25600   3.30 GiB  4.00 GiB
+aegis-phi4-reasoning   25600   1.68 GiB  2.89 GiB
+...
+1 seat(s) share a model with another and were planned once: Ollama holds one
+runner per model name, so they share its weights and its KV cache.
+```
+
+- **Windows are split by equal *token* count**, not by equal bytes, clamped at each model's training
+  maximum. Two seats reading the same transcript need comparable room to hold it; an equal-byte split
+  gives the model with the cheap cache a window it can never fill.
+- **Seats sharing a model are planned once.** Ollama holds one runner per model *name*, so a shared
+  model means one copy of the weights and one KV cache. Counting it twice would refuse sets that fit.
+- **Every model in the set must currently be loaded**, for the same reason `--fit` needs one: the
+  on-disk size is not the resident size.
+- **`--budget-gb` defaults to `provider.vram_budget_gb`**, so once that key is set this command and
+  the daemon are answering from the same number. Without either, it refuses rather than inventing one.
+- **When nothing fits, it says which wall was hit** — weights alone over budget, or windows squeezed
+  below the viable floor. The fixes differ.
+
+`--fit-debate` resolves the *actual* configured seat models through the same resolver the daemon and
+`aegis debate` use, so it answers "will my debate fit" without spending a debate to find out. See
+[research/debate-topology-plan.md](../research/debate-topology-plan.md) for the measured worked
+example.
 
 ---
 

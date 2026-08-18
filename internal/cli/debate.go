@@ -113,9 +113,42 @@ func newDebateCmd() *cobra.Command {
 				Registry: reg,
 				Rules:    enginecfg.ConfigRules(cfg, nil),
 			})
-			runRole := func(roleCtx context.Context, systemPrompt, prompt string) (string, error) {
+			debateCfg := debate.WithDefaults(debate.Config{
+				Domain:          domain,
+				ProposerPersona: proposerPersona,
+				CriticPersona:   criticPersona,
+				ArbiterPersona:  arbiterPersona,
+				MaxRounds:       maxRounds,
+				Tracker:         tracker,
+				BudgetUSD:       cfg.Cost.BudgetUSD,
+				MaxTokens:       cfg.Cost.MaxTokensPerRun,
+			})
+			// P69.6: plan all three seats against one memory budget before the
+			// first of them runs, and refuse here rather than let Ollama discover
+			// the overcommit by spilling to system RAM. nil when
+			// provider.vram_budget_gb is unset, which is every install that has
+			// not opted in.
+			seatWindows, err := debateResidentPlan(ctx, cmd.ErrOrStderr(), cfg, debateCfg)
+			if err != nil {
+				return err
+			}
+
+			runRole := func(roleCtx context.Context, seat debate.Seat, systemPrompt, prompt string) (string, error) {
+				// Per-seat model (P69.1), resolved through the same precedence
+				// the daemon uses. Headless, so there is no context-window cache
+				// to read a detected window out of the way the daemon's runner
+				// has — but a planned window is knowable without one, and it
+				// rides the adapter as a num_ctx stamp through exactly the
+				// decorator modelAdapter uses. With no plan the window is
+				// whatever the seat's own Modelfile pins, which is the reason
+				// docs/local-model-tuning.md insists on pinning it per variant.
+				model := enginecfg.DebateSeatModel(cfg, seat.Persona)
+				seatAdapter := adapter
+				if win := seatWindows[model]; win > 0 {
+					seatAdapter = provider.WithNumCtx(adapter, win)
+				}
 				eng, err := engine.New(engine.Options{
-					Adapter:         adapter,
+					Adapter:         seatAdapter,
 					Tools:           reg,
 					Gate:            gate,
 					Hooks:           engineHooks,
@@ -124,7 +157,7 @@ func newDebateCmd() *cobra.Command {
 					RoundResultCap:  roundCapFor(cwd),       // P67.1
 					BudgetUSD:       cfg.Cost.BudgetUSD,
 					MaxTokensPerRun: cfg.Cost.MaxTokensPerRun,
-					Model:           cfg.Provider.Model,
+					Model:           model,
 					MaxTokens:       cfg.Provider.MaxTokens,
 				})
 				if err != nil {
@@ -142,16 +175,7 @@ func newDebateCmd() *cobra.Command {
 			}
 
 			claim = debate.WithFiles(claim, files)
-			transcript, runErr := debate.Run(ctx, claim, debate.Config{
-				Domain:          domain,
-				ProposerPersona: proposerPersona,
-				CriticPersona:   criticPersona,
-				ArbiterPersona:  arbiterPersona,
-				MaxRounds:       maxRounds,
-				Tracker:         tracker,
-				BudgetUSD:       cfg.Cost.BudgetUSD,
-				MaxTokens:       cfg.Cost.MaxTokensPerRun,
-			}, runRole)
+			transcript, runErr := debate.Run(ctx, claim, debateCfg, runRole)
 
 			snap := tracker.Snapshot()
 			out := cmd.OutOrStdout()

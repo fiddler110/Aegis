@@ -8,7 +8,22 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-17 (fourth record the same day) — **P66.13 shipped**, the top of the
+**Last updated:** 2026-08-17 (sixth record the same day) — **P69.6 shipped**, the last open Tier 1
+item and the multi-model half P69.5 deliberately left open. A debate now plans its seats as one
+resident set against a stated memory budget, installs the resulting windows for its duration, and
+restores them afterwards — or refuses before spending a turn. Record: [Nothing planned a resident
+set](#nothing-planned-a-resident-set-2026-08-17-p696). Building it **corrected two figures in its own
+source documents**, one of which was about to be pinned into a regression test.
+
+**Last updated (previous):** 2026-08-17 (fifth record the same day) — **P69.1 and P69.5 shipped**: a debate
+seat now resolves its own model, and `aegis models --fit` sizes a context window from measured
+KV-cache cost instead of the model's training maximum. Record: [A context window sized to the
+machine, not to the model](#a-context-window-sized-to-the-machine-not-to-the-model-2026-08-17-p691-p695).
+Testing P69.1 found a **verdict-inversion bug** in `parseVerdict` that fires on any arbiter whose
+reasoning trace lands in content — confirmed present in 5/5 live debates. The multi-model half is
+filed as **P69.6**, now the only open Tier 1 item.
+
+**Last updated (previous):** 2026-08-17 (fourth record the same day) — **P66.13 shipped**, the top of the
 rewritten "Up next" list and the most serious defect left in the open set. `aegis chat` built a bare
 one-layer permission gate where the daemon stacks five. Record: [The gate stack finally has one
 home](#the-gate-stack-finally-has-one-home-2026-08-17-p6613). The extraction found a **fourth** bare
@@ -65,6 +80,186 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### Nothing planned a resident set, 2026-08-17 (P69.6)
+
+**The signature was the bug.** `ollamainfo.RecommendContextWindow(modelMax int) int` is one model in,
+one number out, and it cannot express "these three models must be resident at once" because it never
+learns a second model exists. Since P69.1 each debate seat resolves its own model, so a debate holds
+two or three models in VRAM simultaneously — every one of them sized as though it owned the card.
+P69.5 fixed the arithmetic for one model in isolation; this is the half it left open, and the half
+the debate feature actually needs.
+
+**The two open design questions, settled.** The budget is an explicit `provider.vram_budget_gb` key —
+no detection, because `internal/hwinfo` rules out GPU/VRAM introspection "on any platform, ever"
+(P17.5), and the number wanted is not the card's capacity anyway but capacity minus the driver
+reserve and the desktop compositor, which only the operator can see. And the plan is owned by the
+*debate*, installed as a scoped override on the daemon's per-model context-window cache for its
+duration, rather than by a new "workload" abstraction that nothing else would have used.
+
+**`ollamainfo.PlanResidentSet` — the set planner.** Binary-searches the largest **equal token window**
+`T` such that `sum(min(T, ContextMax_i) x BytesPerToken_i) <= budget - sum(weights)`. Equal *tokens*
+rather than equal *bytes* because the window is the number the engine budgets a conversation against,
+and two seats reading the same transcript need comparable room to hold it; an equal-byte split hands
+the cheap-KV model a window it can never fill and starves the expensive one on the identical prompt.
+The `min()` clamp gives redistribution for free — a member that reaches its training maximum stops
+consuming budget as `T` climbs, and the search keeps going for the rest.
+
+**The planner's unit is a distinct model, not a seat**, and that is a correctness property rather than
+a tidiness one. Ollama holds one runner per model *name*, so the proposer and critic sharing a 9B
+share one copy of the weights and one KV cache. A planner that budgets three seats when two share
+weights refuses configurations that fit — pinned by `TestPlanResidentSetCollapsesSeatsSharingAModel`,
+whose second half proves the un-collapsed arithmetic really does overflow the budget the collapsed
+one has room to spare in.
+
+**`BaselineContextWindow = 32768` was not lowered — it is not on the path.** The roadmap forbade
+fixing this by lowering the floor, which does real work for the single-model case it was written for
+(P35.3). The n=1 path still calls `RecommendContextWindow` and still gets 32768; the multi-member path
+calls the planner, which floors at `MinFittedContextWindow` (2048) like every other fitted answer. A
+co-resident set is a different question from the one the baseline answers.
+
+**Installed by writing real cache entries, not by adding a lookup layer.** The obvious implementation
+— a `ctxWinPlanned` map consulted ahead of the cache in `effectiveContextWindowFor` — is wrong, and
+the reason is a P66.14 repeat one layer down: `setWindowLocked` retunes the daemon-wide summarizer
+when the model being written is `compModel`, so a parallel layer would leave the compactor budgeting
+against the solo window while the runner serves the planned one. So `claimResidentSet` saves the
+affected entries, writes the planned ones *through* `setWindowLocked`, and restores on release. One
+source of truth, the retune correct in both directions for free, and `effectiveContextWindowFor`,
+`newEngine` and `modelAdapter` need no changes at all — they pick the plan up because it is simply
+what the cache now says.
+
+**Three things that came out of building it, none of them in the plan:**
+
+- **A claim never *raises* a window.** On the common case — every seat on the same model — the planned
+  window is *larger* than the detected one, so honoring it would make every debate pay a cold
+  unload/reload to gain context nobody asked for. Shrinking is the only direction a claim buys
+  anything in.
+- **`internal/config` has no `config.Validate`** to put the planned validation in. It went where it
+  could live instead: a negative budget reads as zero, `KVCacheTypeValid()` names a typo, and a
+  daemon-start check warns — staying silent when the model simply is not loaded yet, because warning
+  there would train the operator to ignore the warning that matters.
+- **Both new keys are frozen against untrusted project config.** Every other project-settable
+  `provider.*` key describes the *work*; these describe the operator's *machine*. A cloned repo
+  declaring how much VRAM the model server may hold oversizes every window on hardware it has never
+  seen.
+
+**Two corrections to the source documents, both found by doing the arithmetic:**
+
+- **[roadmap.md](roadmap.md) P69.6** claimed 32768 tokens "alone is 8.12 GiB, leaving no room for the
+  5.08 GiB arbiter", and that the floor "cannot express a co-resident configuration on 16 GB at all".
+  At the geometry both documents record (135,168 bytes/token at f16), 32768 tokens is **4.13 GiB of
+  KV**; 8.12 GiB is weights *plus* KV. Read correctly the pair sums to 13.21 GiB against a 14.5 GiB
+  budget — **it fits**, with ~1.3 GiB spare. The floor is *marginal* for exactly two seats, not
+  impossible; it binds for three seats, a larger arbiter, or a cache filled to the window rather than
+  measured at low occupancy. This does not weaken the item, but it changes what the regression test
+  should assert, which is why it had to be settled first.
+- **[debate-topology-plan.md](debate-topology-plan.md) §1.2** labels its Topology 1 KV column `q8_0`
+  while the measured figures match **f16** (4.00 GiB resident weights + 2.06 GiB f16 KV = 6.06 against
+  6.02 measured; q8_0 would predict 5.10) — which would mean q8_0 is *unspent* headroom rather than
+  headroom already counted. But that reading contradicts §1.1's own note that `/api/ps` grows the
+  cache as tokens arrive, and §1.1's 32k reading is consistent with growth and inconsistent with a
+  full f16 cache. The two readings cannot both mean what their labels say, so the discrepancy is
+  recorded rather than resolved by relabelling, and the regression test asserts against the
+  hand-fitted 16000 and the stated 14.5 GiB — both stated, not inferred — so it does not inherit the
+  problem. Re-run `research/scripts/vram_topology_probe.py` recording the server's actual
+  `OLLAMA_KV_CACHE_TYPE`, at a filled window, before anything else is pinned to that table.
+
+**Wired at all four entry points**, so the CLI and the daemon cannot disagree about the machine they
+are both running on: `POST /debate` and the TUI's `/debate` claim through the daemon's cache; the
+`agent` tool's debate mode claims through a new `WithResidentSetClaim`, alongside the
+`WithDebateSeatModel` P69.1 added for the same reason; and headless `aegis debate`, which has no cache
+to install into, stamps each seat's adapter with `provider.WithNumCtx` from the same planner and the
+same config key.
+
+**Observable before it is enforced:** `aegis models --fit-set a,b,c` plans an explicit set, and
+`--fit-debate` plans the *actual* configured seat trio, resolved through `enginecfg.DebateSeatModel`
+so the diagnostic cannot pass while the debate it diagnoses runs on different models. `--budget-gb`
+defaults to the config key.
+
+**`--first-init` closes the loop.** The wizard asks for a VRAM budget on a local Ollama backend and
+sizes `context_window` from `Fit` rather than `RecommendContextWindow`. Blank is a first-class answer
+and produces a byte-identical config to before. When the model has never been loaded its resident
+weights cannot be measured — and the tempting substitute, `/api/tags`' on-disk size, overstates
+qwen35-9b by 2.57 GiB of never-resident vision projector — so the budget is written, the old
+recommendation stands as the window, and the user is told to run `aegis models --fit --write` after
+the first turn.
+
+**Inert until opted in.** With `provider.vram_budget_gb` unset, every path keeps the behavior it had
+before P69.6: no planning, no claim, no entry touched. That is what made steps 1–4 landable
+independently of the wiring, and it is why this ships on by default.
+
+### A context window sized to the machine, not to the model, 2026-08-17 (P69.1, P69.5)
+
+**Two shipped items and one filed.** P69.1 gave each debate role its own model; P69.5 made a model's
+serving context window computable from what the hardware actually holds. The half deliberately left
+open — planning several models that must be resident *at once* — is filed as **P69.6**, the only open
+Tier 1 item.
+
+**P69.1 — a debate seat resolves its own model.** `debate.RunFunc` took `(ctx, systemPrompt,
+userPrompt)`, so the three runners (daemon, headless CLI, and the `agent` tool's debate mode) each
+hardcoded one `Model:`. A persona's `model:` frontmatter and a `personas.<name>.model` config
+override were honored everywhere in the tree *except* the one feature whose entire premise is that
+different models disagree. `RunFunc` now carries a `Seat{Role, Persona, Last}`, and
+`enginecfg.PersonaModel`/`DebateSeatModel` is the single resolver all three paths share so they
+cannot drift. Each seat is served with its **own** detected context window, not the primary model's —
+a 3.8B arbiter handed a 9B's `num_ctx` allocates a KV cache it never fills, out of the same VRAM the
+debater is holding. `buildGate` still receives `persona.Persona{}` on purpose: the seat's persona
+supplies the system prompt and the model, never the tool gate.
+
+**A verdict-inversion bug found while testing it.** `parseVerdict` used `FindStringSubmatch`, which
+takes the *leftmost* match. A reasoning model that drafts `VERDICT: UPHOLD` at line start inside its
+`<think>` trace and then rules `VERDICT: REJECT` was parsed as `UPHOLD`. This is not hypothetical for
+the topology P69.5 measures: `phi4-mini-reasoning` reports `capabilities: [tools, completion]` with
+**no `thinking`**, so Ollama cannot separate the trace and the whole deliberation arrives as content.
+Confirmed in 5/5 live debates — every one contained a raw `<think>` block, and one of them emitted
+its verdict from inside an *unterminated* one. Now takes the last match; single-verdict output is
+unaffected.
+
+**P69.5 — `aegis models --fit`.** `ollamainfo.RecommendContextWindow(modelMax)` sizes a window from
+the model's training maximum, halved, floored at 32768. For `aegis-qwen35-9b` (training context
+262144) that is 131072 tokens = **16.50 GiB of KV cache**, on a card that holds 16. New in
+`internal/ollamainfo/kvfit.go`: `KVGeometry`, `BytesPerToken`, `Fit`, `WeightsBytes`, `Loaded`.
+
+Four things that had to be right, each of which was wrong in an earlier Python prototype:
+
+- **Weights come from `/api/ps` minus the loaded window's KV, not from `/api/tags`.** The on-disk
+  size includes a vision projector that is not resident unless an image is sent — qwen35-9b reports
+  6.57 GiB on disk against **4.00 GiB** actually loaded. A 2.57 GiB overstatement would eat a fitted
+  window's entire margin.
+- **A null `head_count_kv` is absent, not zero, and the fallback is announced.** gemma4 reports it as
+  JSON null; silently substituting `head_count` overstates that model's cache **eightfold**. The
+  substitution is still made — it is correct for multi-head attention — but `KVGeometry.Inferred`
+  records it and the CLI prints it as a `NOTE:`.
+- **Block-quantized KV is not a power of two per element.** A q8_0 block is a 2-byte scale plus 32
+  int8 values: 8.5 bits each, not 8. Truncating would understate the cache, the one direction this
+  code must never err in.
+- **Sliding-window attention is reported but not discounted.** GGUF does not reliably say which
+  layers use the window, so the estimate stays a deliberate upper bound rather than guessing the
+  interleave.
+
+**Validated against measurement, not derived.** The formula predicts 6.00 GiB for the 9B at 16000
+tokens where Ollama reports 6.01 — 0.2% error — and that anchor is pinned by
+`TestBytesPerTokenMatchesTheMeasuredQwen35`.
+
+**What it deliberately does not do is detect VRAM.** `internal/hwinfo` forbids it outright ("on any
+platform, ever", P17.5) because it would mean reimplementing Ollama's offload heuristic from a
+fragile proxy. So the budget is an operator input, and the *verification* is empirical instead:
+`Footprint.FullyOnGPU` reads Ollama's own `size`/`size_vram` split, which is its accounting of its
+own placement decision rather than a guess about it.
+
+**`config.PatchGlobalContextWindow` patches one line.** `PatchGlobalProvider` rebuilds the whole
+provider block, which deletes any comment explaining why a window was chosen — exactly the thing a
+calibrated number needs to keep. It refuses rather than creating a provider block that would silently
+drop the adapter and base URL.
+
+**Measured topology, on a 16 GB card:** debater `aegis-qwen35-9b:16k` at 6.01 GiB and arbiter
+`aegis-phi4-reasoning:16k` at 5.08 GiB, both 100% on GPU, 11.06 GiB total. Before pinning the
+arbiter's window it consumed **7.02 GiB — more than the 9B** — because it shipped with no parameters
+at all and inherited a 32k window. Worked through in
+[debate-topology-plan.md](debate-topology-plan.md), with the measurement harness at
+`research/scripts/vram_topology_probe.py`.
+
+---
 
 ### The gate stack finally has one home, 2026-08-17 (P66.13)
 

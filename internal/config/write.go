@@ -21,6 +21,13 @@ type ProviderPatch struct {
 	// skill-driven run's ~35k-token prompt is not truncated at Ollama's small
 	// default (P35.3). 0 = omit the line (auto-detect at daemon start).
 	ContextWindow int
+	// VRAMBudgetGB is how much memory the operator says the model server may
+	// hold across every concurrently resident model (P69.6). 0 = omit the line,
+	// which is "no resident-set planning" and leaves every path exactly as it
+	// was before the key existed. Written next to ContextWindow because the two
+	// answer halves of one question: how big one model's window is, and how many
+	// models have to fit beside it.
+	VRAMBudgetGB float64
 }
 
 // PatchGlobalProvider replaces the provider: block in the global config file
@@ -63,6 +70,13 @@ func buildProviderBlock(p ProviderPatch) string {
 		b.WriteString("  # overriding the model's Modelfile pin). Sized from the model's\n")
 		b.WriteString("  # detected max; raise for more headroom, lower to reclaim VRAM.\n")
 		fmt.Fprintf(&b, "  context_window: %d\n", p.ContextWindow)
+	}
+	if p.VRAMBudgetGB > 0 {
+		b.WriteString("  # Memory Aegis may assume the model server can hold across EVERY\n")
+		b.WriteString("  # concurrently resident model, in GiB. Stated, never detected — and\n")
+		b.WriteString("  # not the card's capacity: subtract the driver reserve and whatever\n")
+		b.WriteString("  # your desktop already holds. Debates plan their seats against this.\n")
+		fmt.Fprintf(&b, "  vram_budget_gb: %g\n", p.VRAMBudgetGB)
 	}
 	fmt.Fprintf(&b, "  max_tokens: %d\n", p.MaxTokens)
 	fmt.Fprintf(&b, "  max_retries: %d\n", p.MaxRetries)
@@ -550,4 +564,80 @@ func spliceSection(data []byte, key, newBlock string) []byte {
 		result = append(result, "")
 	}
 	return []byte(strings.Join(result, "\n"))
+}
+
+// PatchGlobalContextWindow rewrites just the `context_window:` line inside the
+// global config's provider block, leaving every other line — including
+// hand-written comments — byte-identical.
+//
+// PatchGlobalProvider would be the obvious tool and is the wrong one here: it
+// rebuilds the whole provider block from a ProviderPatch, so a comment
+// explaining *why* a window was chosen is deleted by the next write that
+// changes an unrelated field. A calibrated window is exactly the kind of value
+// that needs its rationale to survive (`aegis models --fit` writes a number
+// that looks arbitrary without one), so this patch is surgical by design.
+//
+// The line is inserted after `model:` when the block has no context_window yet.
+// Returns an error when there is no provider block to patch, rather than
+// creating one — a config with no provider block has bigger problems than an
+// unset window, and inventing a block here would silently drop the adapter and
+// base URL that block is supposed to carry.
+func PatchGlobalContextWindow(tokens int) error {
+	path := GlobalConfigPath()
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	out, err := patchContextWindowLine(existing, tokens)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+// patchContextWindowLine is the pure half of PatchGlobalContextWindow.
+func patchContextWindowLine(data []byte, tokens int) ([]byte, error) {
+	lines := strings.Split(string(data), "\n")
+
+	start, end := -1, len(lines)
+	for i, line := range lines {
+		if start < 0 {
+			if len(line) > 0 && line[0] != '#' && line[0] != ' ' && line[0] != '\t' &&
+				(line == "provider:" || strings.HasPrefix(line, "provider: ") || strings.HasPrefix(line, "provider:\t")) {
+				start = i
+			}
+			continue
+		}
+		if len(line) > 0 {
+			if ch := line[0]; (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
+				end = i
+				break
+			}
+		}
+	}
+	if start < 0 {
+		return nil, fmt.Errorf("no provider: block in %s", GlobalConfigPath())
+	}
+
+	newLine := fmt.Sprintf("  context_window: %d", tokens)
+	modelAt := -1
+	for i := start + 1; i < end; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "context_window:") {
+			lines[i] = newLine
+			return []byte(strings.Join(lines, "\n")), nil
+		}
+		if strings.HasPrefix(trimmed, "model:") {
+			modelAt = i
+		}
+	}
+
+	at := modelAt + 1
+	if modelAt < 0 {
+		at = start + 1
+	}
+	out := append([]string{}, lines[:at]...)
+	out = append(out, newLine)
+	out = append(out, lines[at:]...)
+	return []byte(strings.Join(out, "\n")), nil
 }

@@ -10,10 +10,10 @@ adding items.
 
 ## Status
 
-**31 open items: 26 build (Tier 1-4) + 5 verification-only. Tier 1 is empty, and Tier 2 is down to
-one item.** Six shipped on 2026-08-17 — **P67.3**, **P66.25**, **P67.2**, **P67.4**, **P67.5** and
-then **P66.13**, the entire top five of the retired "Up next" ten plus the top row of the list that
-replaced it. Records in [releases.md](releases.md) (*The top five, 2026-08-17*; *The gate stack
+**31 open items: 26 build (Tier 1-4) + 5 verification-only. Tier 1 is empty again and Tier 2 is
+down to one.** Seven shipped on 2026-08-17 — **P67.3**, **P66.25**, **P67.2**, **P67.4**, **P67.5**,
+then **P66.13**, then **P69.6** (filed and shipped the same day) — the entire top five of the retired
+"Up next" ten plus the top two rows of the list that replaced it. Records in [releases.md](releases.md) (*The top five, 2026-08-17*; *The gate stack
 finally has one home*). **P66.25 was the last security item filed in the open set**, though P66.13
 turned out to be one as well — it closed three bare-or-partial permission gates and a hook-chain
 bug in the daemon. What remains in Tier 2 is **P68.1**, which is parked with row #6.
@@ -63,7 +63,9 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 "go run a test" and "go design and build a feature" as the same kind of next action. See
 [Verification Work](#verification-work) below.
 
-- **Tier 1:** 0 — empty. **P66.5** shipped 2026-08-16, closing the last exploitable-today finding.
+- **Tier 1:** 0 — **P69.6** (nothing plans a resident set, so every model is sized as if it were
+  alone) was filed and shipped on 2026-08-17. Before it the tier had been empty since **P66.5**
+  shipped 2026-08-16, closing the last exploitable-today finding.
 - **Tier 2:** 1 — **P68.1** (the instrumentation gap the live tier found), and it is deliberately off
   the ranked list because it travels with the parked row #6. (**P66.25**, **P67.2**, **P67.3**,
   **P67.4** and **P67.5** shipped 2026-08-17; **P66.11**, **P66.12**, **P66.21** and **P67.1**
@@ -79,10 +81,9 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
   **P62.9**, **P65.2** (prompt half, blocked on P68.1), **P62.8**. (**P65.3** closed 2026-08-16:
   both its questions are answered.)
 
-**What to do next.** **P66.13 shipped 2026-08-17**, closing the last defect-shaped item in the open
-set, so the next thing to take is **P66.15** — the sweep of `internal/tui` and `internal/security`,
-26% of production Go that nobody has read. Nothing above it remains: Tier 1 is empty and Tier 2 holds
-only the parked **P68.1**.
+**What to do next.** **P66.15** — the sweep of `internal/tui` and `internal/security`, 26% of
+production Go that nobody has read. It was displaced from the top by P69.6, which is now shipped, so
+it returns to row #1. Tier 1 is empty and Tier 2 still holds only the parked **P68.1**.
 
 **P66.13's own correction, which outlives it:** the item named four instances of one root cause and
 there were six. `aegis debate` was a fourth bare gate nobody had looked at, `cli/worker.go` was a
@@ -175,8 +176,12 @@ instead, regardless of how large or urgent the underlying question is.
 retired tables are preserved there rather than carried here as strikethrough. This is a *reading* of
 the tiers, not a second ranking: every row's tier and size come from the item's own `Priority:` line.
 
+**Re-cut again 2026-08-17 when P69.6 was filed and then shipped the same day.** It went straight to
+the top as the only Tier 1 item and left again once built, which is why the table is six rows.
+
 **It is six rows now, not ten, and that is a fact about the tiers rather than a shortened list.**
-Tier 1 is empty, Tier 2 holds only the parked-with-#6 **P68.1**, and Tier 3 has exactly five items.
+Tier 1 is empty again (**P69.6** was filed and shipped on 2026-08-17), Tier 2 holds only the
+parked-with-#6 **P68.1**, and Tier 3 has exactly five items.
 Everything below them is Tier 4 with no fired trigger, and this document's own rule is not to build
 Tier 4 speculatively — so padding this table back to ten would mean recommending work the tiering
 says to leave alone. The next batch of ranked items comes from a review pass or a fired trigger, not
@@ -209,7 +214,7 @@ wait behind). Whoever picks it up should expect to take those separately rather 
 afternoon.
 
 **Nothing on this list is now sequence-blocked.** Both real orderings were discharged on 2026-08-17
-(P67.3 → #2, P67.4 → #3), so rows #1-#5 can be taken in any order to suit whatever file is already
+(P67.3 → #3, P67.4 → #4), so rows #2-#6 can be taken in any order to suit whatever file is already
 open; the ranking is expected value per hour and nothing more. #6 depends on nothing in the codebase
 except P68.1, and on a reachable model server.
 
@@ -227,15 +232,116 @@ the table stops where the tiers do.
 
 ## Open Work — Tier 1
 
-**Status: 0 open — Tier 1 is empty.** Every finding the review classified as exploitable on the day
-it landed has now shipped: P66.2 (2026-08-15), then P66.1, P66.4, P66.3, P66.6 and finally **P66.5**
-(2026-08-16). See [releases.md](releases.md) for what each landed and what was found while landing
-it — several of those records correct the item they were built from, which is the part worth reading
+**Status: empty. P69.6 shipped 2026-08-17**, the same day it was filed — see [Nothing planned a
+resident set](releases.md#nothing-planned-a-resident-set-2026-08-17-p696). Before it the tier had
+been empty since **P66.5** shipped (2026-08-16), closing the last of the findings the review
+classified as exploitable on the day it landed: P66.2 (2026-08-15), then P66.1, P66.4, P66.3, P66.6
+and P66.5. See [releases.md](releases.md) for what each landed and what was found while landing it —
+several of those records correct the item they were built from, which is the part worth reading
 before trusting [CodeReview.md](CodeReview.md) directly.
 
 An item enters this tier when it is a real, currently-exploitable security or robustness gap that is
-small and has no dependency. Nothing currently qualifies; a new one would come from a review pass or
-a fired trigger on a Tier 4 entry, not from re-reading the existing findings.
+small and has no dependency.
+
+<details>
+<summary>P69.6 — Nothing plans a resident set, so every seat is sized as if it were alone (shipped 2026-08-17)</summary>
+
+### P69.6 — Nothing plans a resident set, so every seat is sized as if it were alone
+
+**Filed 2026-08-17, from building P69.5** (`aegis models --fit`, see [releases.md](releases.md)) and
+from measuring the debate topology in
+[debate-topology-plan.md](debate-topology-plan.md). P69.5 fixed the arithmetic for **one model in
+isolation**; this is the half it deliberately left open, and the half the debate feature actually
+needs.
+
+**The gap.** `ollamainfo.RecommendContextWindow(modelMax int) int` is the only sizing decision in the
+tree, and its signature is the bug: one model in, one number out. It cannot express "these three
+models must be resident at once", because it never learns that a second model exists. Since **P69.1**
+each debate seat resolves its own model, so a single debate can hold two or three models in VRAM
+simultaneously — and every one of them was sized as though it owned the whole card.
+
+**It is currently wrong, not theoretically wrong.** Measured on a 16 GB card with
+`aegis-qwen35-9b` (training context 262144):
+
+| Path | Window | KV cache | Total with weights |
+|------|--------|----------|--------------------|
+| `RecommendContextWindow` (what `--first-init` writes) | 131072 | 16.50 GiB | 20.50 GiB |
+| `aegis models --fit --budget-gb 10.5` (P69.5) | 51200 | 6.45 GiB | 10.44 GiB |
+| Hand-fitted for two resident seats | 16000 | 2.01 GiB | 6.01 GiB |
+
+The top row does not fit the card at all. **`BaselineContextWindow = 32768` is the sharper problem**:
+it is a *floor*, so the function cannot return a window *below* it no matter what model it is asked
+about, or how many others must sit beside it. At the geometry measured above (135,168 bytes/token at
+f16) 32768 tokens is 4.13 GiB of KV, so the floored model's whole footprint is 8.13 GiB — which does
+leave room for the 5.08 GiB arbiter on a 14.5 GiB usable budget, with ~1.3 GiB spare. So the floor is
+*marginal* for exactly two seats rather than impossible, and it binds outright for three seats, for a
+larger arbiter, or once the KV cache is filled to the window rather than measured at low occupancy.
+Either way the mechanism is the same and the user-visible result is the same: `--first-init` writes a
+number chosen without knowing a second model exists.
+
+<sub>Corrected 2026-08-17 while implementing. The original text read the 8.12 GiB as KV alone and
+concluded the floor "cannot express a co-resident configuration on 16 GB at all", which was too
+strong — 8.12 GiB is weights plus KV. The correction narrows the claim; it does not weaken the item,
+since a 1.3 GiB margin is not something to arrive at by accident, and it changes what the regression
+test should assert.</sub>
+
+**What the design has to settle**, none of which P69.5 answers:
+
+- **Where the budget comes from.** P69.5 makes it an operator-supplied `--budget-gb` precisely to
+  avoid this question. `internal/hwinfo` forbids VRAM detection outright ("on any platform, ever",
+  P17.5) and that reasoning still holds for driver queries — but `/api/ps`'s `size`/`size_vram`
+  split is Ollama's own accounting of its own placement, which is the signal P17.5 said did not
+  exist. Whether that is enough to derive a budget, or whether a `provider.vram_budget_gb` config
+  key is the honest answer, is the first decision.
+- **Who owns the split.** A resident set is a property of a *workload* (a debate's three seats, a
+  swarm's fan-out), not of a model or of the daemon. Nothing in the tree currently represents one.
+- **Whether seats are co-resident or swapped.** Topology 2 in the plan trades residency for
+  sequential loading via `keep_alive: 0`, which needs `provider.Request.KeepAlive` — it does not
+  exist (`WithNumCtx` is the pattern to mirror). That is the alternative to shrinking every window,
+  and the choice between them is a design decision, not a tuning one.
+- **What happens on a machine that cannot fit the set at any window.** Refusing is right; refusing
+  *at daemon start* rather than mid-debate is the part that needs designing.
+
+**Do not fix this by lowering `BaselineContextWindow`.** The floor is doing real work for the
+single-model case it was written for (P35.3: a skill-driven run builds a >40k-token prompt before
+writing output, and a smaller floor makes the first real task fail with no compaction attempted).
+The fix is a sizing path that knows how many models must coexist, with the existing per-model
+recommendation kept for the case where the answer is one.
+
+**Reuse, do not rebuild:** `ollamainfo.KVGeometry`/`BytesPerToken`/`Fit`/`WeightsBytes` (P69.5)
+already give exact per-model KV arithmetic, validated against measurement to 0.2%, plus the
+`Footprint.FullyOnGPU` empirical check. The measurement harness is
+`research/scripts/vram_topology_probe.py`. What is missing is only the set-level planner on top.
+
+**Closure condition:** `aegis --first-init` on a 16 GB card, followed by a debate with a distinct
+arbiter model, produces a config where every seat is 100% on GPU per `/api/ps` — with no hand
+editing, and with a stated refusal when no such assignment exists.
+
+**Status 2026-08-17: SHIPPED.** All seven steps applied; the closure condition is met. The record,
+including two corrections this made to its own source documents, is in
+[releases.md](releases.md#nothing-planned-a-resident-set-2026-08-17-p696). The two open design
+questions were decided —
+the budget is an explicit `provider.vram_budget_gb` key (no detection, per P17.5), and the debate
+builds a plan and installs it as a scoped override on the daemon's per-model context-window cache for
+its duration, rather than introducing a "workload" abstraction. All of
+[p69.6-resident-set-plan.md](p69.6-resident-set-plan.md) is applied, and everything before step 5 is
+behavior-neutral without a configured budget:
+
+- `ollamainfo.PlanResidentSet`/`PlanFor` — the set planner, equal-token split with a training-maximum
+  clamp, deduplicating by model name because Ollama holds one runner per name.
+- `provider.vram_budget_gb` and `provider.kv_cache_type`, both inert at their defaults.
+- `aegis models --fit-set a,b,c` and `--fit-debate`, so the plan is observable before it is enforced.
+- `Server.claimResidentSet` — the scoped override, plus a daemon-start warning.
+- Step 5: all four debate entry points wired — `POST /debate`, the TUI, the `agent` tool
+  (`builtin.WithResidentSetClaim`), and headless `aegis debate` via `provider.WithNumCtx`.
+- Step 6: `--first-init` asks for the budget and sizes `context_window` from `Fit`; blank is a
+  first-class answer that writes a byte-identical config to before.
+- Step 7: docs in [configuration.md](../docs/configuration.md), [cli-reference.md](../docs/cli-reference.md),
+  [debate.md](../docs/debate.md) and [installation.md](../docs/installation.md).
+
+Priority: Tier 1 — M. No dependency; P69.5 shipped the arithmetic it builds on.
+
+</details>
 
 ---
 

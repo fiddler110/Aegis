@@ -214,6 +214,13 @@ type Server struct {
 	// window, not the global one — see setWindowLocked (P52.1).
 	compModel string
 
+	// residentSetSem serializes resident-set claims (P69.6, residentset.go).
+	// Cap 1: two debates planning windows at once on one GPU would each install
+	// the other's models out from under it. Lazily created via residentSetGate
+	// so a Server built field-by-field in a test is not a nil-channel deadlock.
+	residentSetMu  sync.Mutex
+	residentSetSem chan struct{}
+
 	// agentLimiter throttles how many sub-agents a 'parallel' workflow batch
 	// runs simultaneously (P17), adapting from observed batch behavior. One
 	// instance per daemon process, shared by every session's agent tool calls;
@@ -952,6 +959,14 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		builtin.WithCostCaps(cfg.Cost.BudgetUSD, cfg.Cost.MaxTokensPerRun),
 		builtin.WithConcurrencyLimiter(s.agentLimiter),
 		builtin.WithDataDir(cfg.DataDir),
+		builtin.WithDebateSeatModel(func(p string) string {
+			return enginecfg.DebateSeatModel(cfg, p)
+		}),
+		// P69.6: the seat models above decide *which* models a debate makes
+		// resident; this decides what each of them can afford to be served at
+		// while the others are loaded. Inert unless provider.vram_budget_gb is
+		// set, so wiring it changes nothing for an install that has not opted in.
+		builtin.WithResidentSetClaim(s.claimResidentSet),
 	)); err != nil {
 		store.Close()
 		return nil, err

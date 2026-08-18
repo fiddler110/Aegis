@@ -170,6 +170,85 @@ aegis debate "This design doc's threat model covers the new webhook endpoint" \
 
 ---
 
+## Running each role on a different model
+
+Each role runs on whatever model its persona resolves to — a `personas.<name>.model` config
+override first, then the persona file's own `model:` frontmatter, then `provider.model`. This is the
+same precedence the session path has always used for a persona; before P69.1 a debate ignored it and
+ran all three roles on `provider.model`.
+
+```yaml
+provider:
+  model: aegis-qwen35-9b:16k     # debaters, and the daemon default
+
+personas:
+  security-arbiter: {model: aegis-phi4-mini:8k}
+  arbiter:          {model: aegis-phi4-mini:8k}
+```
+
+Each role is served with **its own** context window (detected per model), not the primary model's —
+a small arbiter handed a 9B's 32k `num_ctx` would allocate a KV cache it never fills out of the same
+VRAM the debater is holding.
+
+**Which seat to vary.** The arbiter is the seat worth changing, and the critic is the seat to leave
+alone:
+
+- The **critic** must ground each challenge in evidence it retrieves itself (`grep`/`read_file`), and
+  `hasEvidence` tags an uncited challenge `[unsubstantiated]` for the arbiter to discard. A model
+  that can't reliably drive tool calls fills every round with challenges that are then correctly
+  ignored — the debate returns `UPHOLD` for a reason that has nothing to do with the claim. Give
+  this seat the strongest tool-capable model you have.
+- The **arbiter** calls no tools at all: it reads a transcript already in its prompt and emits
+  `VERDICT:`/`CONFIDENCE:`/`REASON:`. That makes it the one seat a smaller or differently-trained
+  model can take, and the seat where a different model actually decorrelates error rather than just
+  costing VRAM — an arbiter from the debaters' own family shares their blind spots.
+
+If you swap in a smaller arbiter, check that verdicts still parse: `parseVerdict` anchors
+`VERDICT:`/`CONFIDENCE:` to line-start, so a model that wraps them in prose yields an empty
+`verdict` field. Run a few claims with `--output-format json` and confirm the field is non-empty.
+
+### Fitting the seats in one GPU
+
+Per-seat models mean two or three models are resident **at the same time**, and until you state a
+memory budget each of them is sized as if it owned the card. Set one:
+
+```yaml
+provider:
+  vram_budget_gb: 14.5     # what Ollama may hold, across every model at once
+```
+
+That figure is stated, never detected — Aegis performs no GPU/VRAM introspection on any platform —
+and it is not the card's capacity: subtract the driver reserve and whatever your desktop already
+holds. ~14.5 of a 16 GB card is the measured figure on the machine this was calibrated against.
+
+With it set, every debate — CLI, TUI, HTTP, and the `agent` tool — plans its seats as one resident
+set before the first role runs:
+
+- Windows are split by equal **token count**, clamped at each model's training maximum. Two seats
+  reading the same transcript need comparable room to hold it.
+- Seats sharing a model are planned **once**. Ollama holds one runner per model *name*, so a shared
+  model means one copy of the weights and one KV cache; counting it twice would refuse sets that fit.
+- The plan is installed for the debate's duration and the solo windows are restored afterwards. A
+  session turn that lands mid-debate is served the planned (smaller) window rather than flipping the
+  runner back — that thrash is the thing being avoided, and the only visible effect is that the turn
+  compacts a little earlier.
+- A window is never *raised* by a plan. Shrinking is the only direction that buys anything.
+- If no assignment fits, the debate is **refused with a reason** before a single model turn is spent.
+
+Preview any of this without spending a debate:
+
+```console
+$ aegis models --fit-debate
+```
+
+Every path reads the same key and runs the same planner, so `aegis debate` (headless, no daemon) and
+the daemon cannot disagree about the machine they are both running on. See
+[cli-reference.md](cli-reference.md#--fit-set----fit-debate-planning-a-resident-set-p696) for the
+output, and [research/debate-topology-plan.md](../research/debate-topology-plan.md) for the measured
+worked example, with a harness at `research/scripts/vram_topology_probe.py`.
+
+---
+
 ## Cost and rounds
 
 Each round is at least 2 model calls (critique + rebuttal, or just the critique if the critic

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/api"
@@ -339,7 +340,8 @@ func TestDebateRoleRunnerUsesRequestWorkdir(t *testing.T) {
 	srv.workspace = daemonRoot
 
 	tracker := cost.NewTracker()
-	out, err := srv.debateRoleRunner(tracker, otherDir)(context.Background(), "system prompt", "read target.txt")
+	seat := debate.Seat{Role: debate.RoleCritic, Persona: debate.DefaultCriticPersona}
+	out, err := srv.debateRoleRunner(tracker, otherDir)(context.Background(), seat, "system prompt", "read target.txt")
 	if err != nil {
 		t.Fatalf("debateRoleRunner: %v", err)
 	}
@@ -362,5 +364,85 @@ func TestHandleDebateRejectsBadWorkdir(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected an error for a nonexistent debate workdir")
+	}
+}
+
+// modelRecordingAdapter records the model each role's request was sent with,
+// keyed by the request's System prompt.
+type modelRecordingAdapter struct {
+	mu     sync.Mutex
+	byRole map[string]string
+}
+
+func (*modelRecordingAdapter) Name() string { return "model-recording" }
+
+func (a *modelRecordingAdapter) Stream(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
+	a.mu.Lock()
+	if a.byRole == nil {
+		a.byRole = map[string]string{}
+	}
+	a.byRole[req.System] = req.Model
+	a.mu.Unlock()
+
+	ch := make(chan provider.Event, 3)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: "VERDICT: UPHOLD\nCONFIDENCE: high\nREASON: ok."}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 2}}
+	close(ch)
+	return ch, nil
+}
+
+func (a *modelRecordingAdapter) modelFor(system string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.byRole[system]
+}
+
+// TestDebateRolesRunOnTheirOwnModel is the P69.1 regression: each debate role
+// runs on the model its persona resolves to, not on provider.model for all
+// three.
+//
+// This is the whole point of the seat plumbing. Before it, every role ran on
+// the daemon's global model, so a `personas.security-arbiter.model` override —
+// which the *session* path has honored since P14.7 — was silently inert inside
+// a debate. On a single-GPU local backend that is not a preference: the arbiter
+// is the one seat needing no tools, so it is the one seat a smaller or
+// differently-trained model can take, and putting it there is how a debate
+// stops being three passes of one model agreeing with itself.
+func TestDebateRolesRunOnTheirOwnModel(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	adapter := &modelRecordingAdapter{}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "debater-9b", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "build"},
+		Personas: map[string]config.PersonaOverride{
+			debate.DefaultArbiterPersona: {Model: "arbiter-3b"},
+		},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, adapter, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	cl := client.New(ts.URL).WithToken("test-token")
+
+	if _, err := cl.Debate(context.Background(), api.DebateRequest{Claim: "Some finding.", MaxRounds: 1}); err != nil {
+		t.Fatalf("Debate: %v", err)
+	}
+
+	for _, tc := range []struct {
+		role, persona, want string
+	}{
+		{"critic", debate.DefaultCriticPersona, "debater-9b"},
+		{"proposer", debate.DefaultProposerPersona, "debater-9b"},
+		{"arbiter", debate.DefaultArbiterPersona, "arbiter-3b"},
+	} {
+		got := adapter.modelFor(debate.PersonaSystem(tc.persona))
+		if got != tc.want {
+			t.Errorf("%s ran on model %q, want %q", tc.role, got, tc.want)
+		}
 	}
 }

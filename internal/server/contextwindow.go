@@ -153,6 +153,11 @@ func (s *Server) configEntry(final bool) ctxWinEntry {
 // maybeRefreshContextWindowFor. Only the global model is resolved here; any other
 // model a turn routes to is resolved on first use (effectiveContextWindowFor).
 func (s *Server) initContextWindow(ctx context.Context) {
+	// The budget check runs whatever path the resolution below takes, including
+	// the early returns, so a budget set against a cloud provider is still named
+	// (P69.6, residentset.go). It only warns.
+	defer s.warnResidentBudget(ctx)
+
 	model := s.cfg.Provider.Model
 	s.setWindowLocked(model, s.configEntry(false))
 

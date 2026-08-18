@@ -43,6 +43,12 @@ func (m model) updateWizard(msg tea.Msg) (model, tea.Cmd) {
 			m.transcript.Append(
 				m.th.statusText.Render("✓ Configuration saved — restart Aegis to apply changes.") + "\n\n",
 			)
+			// P69.6: a stated VRAM budget that could not size the window leaves
+			// one thing for the user to finish, and the wizard closes too fast to
+			// say so in its own view. The transcript is where it survives.
+			if note := m.wizard.fitNote; note != "" {
+				m.transcript.Append(m.th.statusDim.Render(note) + "\n\n")
+			}
 		}
 		m.wizard = nil
 		m.refresh()

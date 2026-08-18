@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/discover"
 	"github.com/fiddler110/aegis/internal/hwinfo"
 	"github.com/fiddler110/aegis/internal/modelcatalog"
@@ -17,6 +18,7 @@ import (
 func newModelsCmd() *cobra.Command {
 	var local bool
 	var recommend bool
+	var fit fitOptions
 
 	cmd := &cobra.Command{
 		Use:   "models",
@@ -29,6 +31,16 @@ func newModelsCmd() *cobra.Command {
 			"for anything recommended but not already pulled.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
+			// --fit is a calibration run, not a catalog listing: printing the
+			// curated table above a VRAM report would bury the number the
+			// operator asked for.
+			if fit.enabled || fit.debate || len(fit.set) > 0 {
+				cfg, err := config.Load()
+				if err != nil {
+					return err
+				}
+				return runFit(cmd.Context(), out, cfg, fit)
+			}
 			tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
 			fmt.Fprintln(tw, "PROVIDER\tMODEL\tTIER\tCONTEXT\tNOTES")
 			for _, m := range modelcatalog.Curated() {
@@ -61,6 +73,13 @@ func newModelsCmd() *cobra.Command {
 
 	cmd.Flags().BoolVar(&local, "local", false, "also discover locally running model servers")
 	cmd.Flags().BoolVar(&recommend, "recommend", false, "detect CPU/RAM and narrow local-model recommendations to what this machine can run")
+	cmd.Flags().BoolVar(&fit.enabled, "fit", false, "size provider.context_window from measured KV-cache cost instead of the model's training maximum")
+	cmd.Flags().StringVar(&fit.model, "fit-model", "", "model to fit (default: provider.model)")
+	cmd.Flags().Float64Var(&fit.budgetGB, "budget-gb", 0, "memory budget in GiB for --fit (default: provider.vram_budget_gb); omit both to print the window/footprint curve instead")
+	cmd.Flags().StringVar(&fit.kvType, "kv-type", "", "KV cache element type for --fit: f16, q8_0 or q4_0 (default: provider.kv_cache_type)")
+	cmd.Flags().StringSliceVar(&fit.set, "fit-set", nil, "plan a whole resident set: comma-separated models that must fit in --budget-gb simultaneously")
+	cmd.Flags().BoolVar(&fit.debate, "fit-debate", false, "plan the configured debate's seat models as one resident set — answers \"will my debate fit\" without spending one")
+	cmd.Flags().BoolVar(&fit.write, "write", false, "with --fit and --budget-gb, patch context_window into the global config")
 	return cmd
 }
 

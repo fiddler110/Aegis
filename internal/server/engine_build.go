@@ -48,16 +48,12 @@ func (s *Server) providerUnconfiguredErr() error {
 	}
 }
 
-// personaModel resolves the effective model for a persona: a config override
-// wins, then the persona's own Model, then the global provider model.
+// personaModel binds the daemon's config to the shared persona-model resolver,
+// where the precedence (config override -> persona file -> global) is
+// documented. It stays a method because the call sites below read better for
+// it, not because the daemon resolves it differently from `aegis debate`.
 func (s *Server) personaModel(p persona.Persona) string {
-	if ov, ok := s.cfg.Personas[p.Name]; ok && ov.Model != "" {
-		return ov.Model
-	}
-	if p.Model != "" {
-		return p.Model
-	}
-	return s.cfg.Provider.Model
+	return enginecfg.PersonaModel(s.cfg, p)
 }
 
 // resolveModel is personaModel with the P14.7 per-session /model override

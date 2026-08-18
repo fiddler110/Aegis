@@ -76,6 +76,38 @@ type agentTool struct {
 	// (P25.9) — see resolveDef. Empty disables the rescan (agentdef.Resolve
 	// still serves whatever New()'s startup load registered).
 	dataDir string
+
+	// debateModel resolves a debate seat's persona name to the model that seat
+	// should run on (P69.1). Nil — the case for every caller that does not wire
+	// it, including tests — means every seat keeps running on the daemon
+	// default, which is the pre-P69.1 behavior.
+	debateModel func(persona string) string
+
+	// residentClaim reserves VRAM for the set of models a debate will hold
+	// resident at once, returning a release for the end of the debate (P69.6).
+	// Nil — every caller that does not wire it, including tests and non-daemon
+	// embedders — means no planning, which is also what a daemon with no
+	// provider.vram_budget_gb does.
+	residentClaim func(ctx context.Context, models []string) (func(), error)
+}
+
+// debateSeatModel resolves one debate seat's model, or "" (the daemon default)
+// when no resolver was wired.
+func (a *agentTool) debateSeatModel(persona string) string {
+	if a.debateModel == nil {
+		return ""
+	}
+	return a.debateModel(persona)
+}
+
+// claimResidentSet reserves the debate's resident set, or does nothing when no
+// claim function was wired. The error is the caller's to surface: a set that
+// cannot fit is a reason not to start, not a reason to start and hope.
+func (a *agentTool) claimResidentSet(ctx context.Context, models []string) (func(), error) {
+	if a.residentClaim == nil {
+		return func() {}, nil
+	}
+	return a.residentClaim(ctx, models)
 }
 
 // AgentToolOption configures optional behavior on the `agent` tool.
@@ -108,6 +140,33 @@ func WithConcurrencyLimiter(l *swarm.AdaptiveLimiter) AgentToolOption {
 func WithDataDir(dataDir string) AgentToolOption {
 	return func(a *agentTool) {
 		a.dataDir = dataDir
+	}
+}
+
+// WithDebateSeatModel wires the resolver debate mode uses to pick a model per
+// role (P69.1) — pass enginecfg.DebateSeatModel bound to the daemon's config.
+// The tool package cannot resolve this itself: the precedence spans the persona
+// registry and the config's `personas:` override map, neither of which a
+// builtin tool has (or should have) a handle on. Unset means every seat runs on
+// the daemon default, exactly as before.
+func WithDebateSeatModel(resolve func(persona string) string) AgentToolOption {
+	return func(a *agentTool) {
+		a.debateModel = resolve
+	}
+}
+
+// WithResidentSetClaim wires the resident-set planner debate mode uses to size
+// its seats against one memory budget (P69.6) — pass Server.claimResidentSet.
+//
+// It sits alongside WithDebateSeatModel for the same reason: once each seat can
+// pick its own model, a debate holds two or three models in VRAM at once, and
+// nothing below this package knows how many or how big. The tool decides *when*
+// a set exists; the daemon decides what fits. Unset means no planning, which is
+// also what a daemon with no provider.vram_budget_gb does — so this is inert
+// rather than absent for every embedder that does not wire it.
+func WithResidentSetClaim(claim func(ctx context.Context, models []string) (func(), error)) AgentToolOption {
+	return func(a *agentTool) {
+		a.residentClaim = claim
 	}
 }
 
@@ -486,7 +545,7 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 	// — 80 minutes at the default clamp — and debate.Run spends it one role at a
 	// time, so without a per-role bound a single wedged proposer is 80 minutes of
 	// silence to the parent run and dies at 900s as a fatal ErrTurnStalled.
-	runRole := func(roleCtx context.Context, systemPrompt, prompt string) (string, error) {
+	runRole := func(roleCtx context.Context, seat debate.Seat, systemPrompt, prompt string) (string, error) {
 		roleCtx, roleCancel := context.WithTimeout(roleCtx, maxAgentDuration)
 		defer roleCancel()
 		defer heartbeat.Beat(ctx)
@@ -496,6 +555,7 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 			Team:         "debate",
 			Prompt:       prompt,
 			SystemPrompt: systemPrompt,
+			Model:        a.debateSeatModel(seat.Persona), // P69.1; "" keeps the daemon default
 			Mode:         childMode,
 			Depth:        swarm.DepthFromContext(ctx) + 1,
 			CheckpointID: checkpointIDFrom(ctx),
@@ -516,7 +576,11 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 	}
 
 	tracker, _ := swarm.CostTrackerFromContext(ctx).(*cost.Tracker)
-	debateCfg := debate.Config{
+	// Resolved before Run (P69.6) so the seat trio — and with it the set of
+	// models that will be resident together — is known while there is still
+	// time to refuse. withDefaults is idempotent, so Run applying it again
+	// changes nothing.
+	debateCfg := debate.WithDefaults(debate.Config{
 		Domain:          domain,
 		ProposerPersona: proposerPersona,
 		CriticPersona:   criticPersona,
@@ -525,7 +589,21 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 		Tracker:         tracker,
 		BudgetUSD:       a.budgetUSD,
 		MaxTokens:       a.maxTokensPerRun,
+	})
+
+	// Each role spawns through swarm and lands back on the daemon's engine
+	// path, so it picks up whatever windows the cache holds — but only if
+	// something installs them. This is the something.
+	seats := debate.Seats(debateCfg)
+	residentModels := make([]string, 0, len(seats))
+	for _, seat := range seats {
+		residentModels = append(residentModels, a.debateSeatModel(seat.Persona))
 	}
+	releaseSet, claimErr := a.claimResidentSet(ctx, residentModels)
+	if claimErr != nil {
+		return tool.Result{Content: "agent: debate not started: " + claimErr.Error(), IsError: true}, nil
+	}
+	defer releaseSet()
 
 	// Mirrors the clamp debate.Run's withDefaults applies to Config.MaxRounds
 	// (P32.4) so this timeout can't be inflated by the same unclamped value —

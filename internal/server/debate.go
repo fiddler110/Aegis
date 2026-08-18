@@ -58,7 +58,12 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tracker := cost.NewTracker()
-	cfg := debate.Config{
+	// Resolved up front (P69.6) so the seats — and therefore the models that
+	// will be resident together — are known before any of them runs. withDefaults
+	// is idempotent, so handing Run an already-resolved config changes nothing
+	// about the debate; what it buys is that the set planned for is exactly the
+	// set that executes.
+	cfg := debate.WithDefaults(debate.Config{
 		Domain:          req.Domain,
 		ProposerPersona: req.ProposerPersona,
 		CriticPersona:   req.CriticPersona,
@@ -67,7 +72,23 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 		Tracker:         tracker,
 		BudgetUSD:       s.cfg.Cost.BudgetUSD,
 		MaxTokens:       s.cfg.Cost.MaxTokensPerRun,
+	})
+
+	// Plan the seats as one resident set and hold the plan for the debate's
+	// duration. A no-op unless provider.vram_budget_gb is configured; when it is
+	// and the set cannot fit, this refuses here — before the first model turn —
+	// rather than letting Ollama discover it by spilling half the arbiter to
+	// system RAM. debateRoleRunner needs no change: it resolves each seat's
+	// window through effectiveContextWindowFor, which is now answering from the
+	// installed plan.
+	release, claimErr := s.claimResidentSet(r.Context(), s.debateSeatModels(cfg))
+	if claimErr != nil {
+		spend.Finish(0, 0)
+		writeError(w, http.StatusServiceUnavailable, claimErr.Error())
+		return
 	}
+	defer release()
+
 	claim := debate.WithFiles(req.Claim, req.Files)
 	transcript, err := debate.Run(r.Context(), claim, cfg, s.debateRoleRunner(tracker, workdir))
 	// Record spend regardless of outcome: debate.Run returns the partial
@@ -101,10 +122,35 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.
 	// tool_search no longer permanently widens every other session's surface.
 	// Same defect as ARCH-02 in subAgentRunner, same shape (P66.4).
 	tools := s.tools.Clone()
-	return func(ctx context.Context, systemPrompt, prompt string) (string, error) {
+	return func(ctx context.Context, seat debate.Seat, systemPrompt, prompt string) (string, error) {
+		// Resolve this seat's model the same way a session resolves a
+		// persona's (personaModel: config override -> persona file -> global),
+		// and serve it with *its own* detected window rather than the primary
+		// model's (P69.1, same reasoning as modelAdapter's P52.4). Before this,
+		// every role ran on s.cfg.Provider.Model, so a debate could not put a
+		// different model in the arbiter's seat even though the persona layer
+		// already carried a Model override and the session path already honored
+		// it. On a single-GPU local backend that is the whole feature: the
+		// arbiter needs no tools and is the one seat a smaller, differently-
+		// trained model can take, which is also where a different model
+		// decorrelates error instead of merely costing VRAM.
+		//
+		// The window matters as much as the model. A 3.8B arbiter handed the
+		// 9B's 32k num_ctx allocates a KV cache it will never fill out of the
+		// same budget the debater is holding, which is the cold-reload churn
+		// modelAdapter exists to avoid.
+		p, _ := persona.Get(seat.Persona)
+		model := s.personaModel(p)
+		ctxWin, _ := s.effectiveContextWindowFor(ctx, model)
+
+		// buildGate still gets an empty Persona deliberately: the seat's
+		// persona supplies the system prompt and the model, not the tool gate.
+		// Letting a persona file widen a debate role's permissions is a
+		// separate decision with a security review attached, and folding it in
+		// here would make it by accident.
 		gate, engineHooks := s.buildGate("build", s.approver(), persona.Persona{})
 		eng, err := engine.New(engine.Options{
-			Adapter:         s.adapter,
+			Adapter:         s.modelAdapter(ctxWin),
 			Tools:           tools,
 			Gate:            gate,
 			Compactor:       s.compactor,
@@ -113,7 +159,7 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.
 			Purpose:         provider.PurposeDebate, // P67.3
 			BudgetUSD:       s.cfg.Cost.BudgetUSD,
 			MaxTokensPerRun: s.cfg.Cost.MaxTokensPerRun,
-			Model:           s.cfg.Provider.Model,
+			Model:           model,
 			MaxTokens:       s.cfg.Provider.MaxTokens,
 			Logger:          s.logger,
 			Workdir:         workdir,

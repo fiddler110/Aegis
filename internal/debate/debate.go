@@ -72,13 +72,51 @@ const (
 	GenericArbiterPersona  = "arbiter"
 )
 
+// Role names which seat a call is being made for (P69.1).
+type Role string
+
+const (
+	RoleProposer Role = "proposer"
+	RoleCritic   Role = "critic"
+	RoleArbiter  Role = "arbiter"
+)
+
+// Seat is everything a caller needs to know about the call it is being asked
+// to execute, beyond the two prompts.
+//
+// It exists because this package decides *what* a seat is and the caller
+// decides what a seat costs. Which model serves a role, and which serving
+// context window that model gets, is a deployment question — on a single-GPU
+// local backend the arbiter can and should be a different (smaller, or just
+// differently-trained) model from the debaters, and until this type existed the
+// caller could not tell one role's call from another's. Every runner therefore
+// resolved the one global model for all three, and a per-role model was
+// unreachable even though the persona layer already carried one.
+//
+// Persona is the *resolved* persona name — after Domain defaults and any
+// per-role override — which is the key both persona.Get and a caller's
+// config-level persona overrides are indexed by.
+type Seat struct {
+	Role    Role
+	Persona string
+
+	// Last marks the final non-arbiter call of the debate, so a caller running
+	// one model at a time can evict before the arbiter loads. It is
+	// best-effort: it is set on the last round's rebuttal, which is where the
+	// loop normally exits, but a conceded round or a budget stop leaves the
+	// debate early and no call carries it. A caller must therefore treat Last
+	// as an optimization and stay correct without it — the arbiter simply
+	// loads alongside a still-resident debater that round.
+	Last bool
+}
+
 // RunFunc executes one role turn (a system prompt + a user prompt) and returns
 // the role's text output. The caller supplies an implementation — typically
 // spawning a sub-agent via swarm.Backend so the role gets real tool access
 // (P12.3's evidence-grounding requirement depends on the critic actually being
 // able to call grep/read_file/security_scan), but any model-calling function
-// works for testing.
-type RunFunc func(ctx context.Context, systemPrompt, userPrompt string) (string, error)
+// works for testing. seat says which role the call is for; see Seat.
+type RunFunc func(ctx context.Context, seat Seat, systemPrompt, userPrompt string) (string, error)
 
 // Config configures a debate run. Zero-valued fields fall back to their
 // documented defaults via withDefaults.
@@ -129,6 +167,35 @@ func withDefaults(cfg Config) Config {
 		cfg.MaxRounds = MaxRoundsCeiling
 	}
 	return cfg
+}
+
+// WithDefaults resolves a Config's zero-valued fields to their documented
+// defaults, exported so a caller can see the *resolved* persona trio before Run
+// spends anything.
+//
+// A caller that has to plan resources — which models will be resident at once,
+// and what window each can afford (P69.6) — needs the answer before the first
+// role turn, not per call as the seats arrive. Run applies the same function
+// internally, so a caller that pre-resolves and passes the result back gets
+// exactly the debate it planned for; withDefaults is idempotent, so passing an
+// already-resolved Config through Run changes nothing.
+func WithDefaults(cfg Config) Config { return withDefaults(cfg) }
+
+// Seats returns the debate's seats in the order they first run, with personas
+// resolved. It is the input to any per-seat planning a caller does up front —
+// model resolution, resident-set fitting — and it is deliberately derived from
+// the same withDefaults the run itself uses, so a plan cannot be built for a
+// different trio than the one that executes.
+//
+// Rounds do not multiply the seats: the proposer and critic run once per round
+// on the same personas, so the distinct set is always these three.
+func Seats(cfg Config) []Seat {
+	cfg = withDefaults(cfg)
+	return []Seat{
+		{Role: RoleProposer, Persona: cfg.ProposerPersona},
+		{Role: RoleCritic, Persona: cfg.CriticPersona},
+		{Role: RoleArbiter, Persona: cfg.ArbiterPersona},
+	}
 }
 
 // Round is one critique/rebuttal exchange.
@@ -199,13 +266,38 @@ var (
 	verdictConfidenceRe = regexp.MustCompile(`(?im)^\s*CONFIDENCE\s*:\s*(HIGH|MEDIUM|LOW)\b`)
 )
 
+// lastSubmatch returns the capture group of the *last* match in text, or "".
+//
+// Last rather than first (P69.1): a reasoning model drafts the answer format
+// mid-deliberation and then revises it, so the leftmost "VERDICT:" line is a
+// discarded hypothesis and the final one is the ruling. Ollama only separates
+// a reasoning trace into its own field when the model declares the `thinking`
+// capability — phi4-mini-reasoning does not — so on those models the trace
+// arrives inside the content the arbiter's own prompt asked for a verdict in.
+//
+// The failure this prevents is silent and inverts the result: an arbiter that
+// reasons its way from a draft UPHOLD to a final REJECT was parsed as UPHOLD,
+// with the correct verdict sitting in Verdict.Text where nothing reads it. The
+// line-start anchors are not sufficient on their own, because a drafted verdict
+// is typically written at line start too.
+//
+// For a non-reasoning model that emits exactly one verdict line this is
+// identical to taking the first.
+func lastSubmatch(re *regexp.Regexp, text string) string {
+	m := re.FindAllStringSubmatch(text, -1)
+	if len(m) == 0 {
+		return ""
+	}
+	return m[len(m)-1][1]
+}
+
 func parseVerdict(text string) Verdict {
 	v := Verdict{Text: text}
-	if m := verdictOutcomeRe.FindStringSubmatch(text); m != nil {
-		v.Outcome = strings.ToUpper(m[1])
+	if s := lastSubmatch(verdictOutcomeRe, text); s != "" {
+		v.Outcome = strings.ToUpper(s)
 	}
-	if m := verdictConfidenceRe.FindStringSubmatch(text); m != nil {
-		v.Confidence = strings.ToLower(m[1])
+	if s := lastSubmatch(verdictConfidenceRe, text); s != "" {
+		v.Confidence = strings.ToLower(s)
 	}
 	return v
 }
@@ -279,7 +371,7 @@ func Run(ctx context.Context, claim string, cfg Config, run RunFunc) (Transcript
 			"Claim under review:\n%s\n\n%s\nCritique this claim: attack its weakest part, grounded in cited evidence, or reply CONCEDE.",
 			claim, renderRoundsSoFar(t.Rounds),
 		)
-		critique, err := run(ctx, criticSys, critiquePrompt)
+		critique, err := run(ctx, Seat{Role: RoleCritic, Persona: cfg.CriticPersona}, criticSys, critiquePrompt)
 		if err != nil {
 			return t, fmt.Errorf("debate round %d critique: %w", i, err)
 		}
@@ -294,7 +386,11 @@ func Run(ctx context.Context, claim string, cfg Config, run RunFunc) (Transcript
 			"Your claim:\n%s\n\n%s\nCritic's challenge (round %d):\n%s\n\nRespond to the critique.",
 			claim, renderRoundsSoFar(t.Rounds), i, critique,
 		)
-		rebuttal, err := run(ctx, proposerSys, rebuttalPrompt)
+		rebuttal, err := run(ctx, Seat{
+			Role:    RoleProposer,
+			Persona: cfg.ProposerPersona,
+			Last:    i == cfg.MaxRounds,
+		}, proposerSys, rebuttalPrompt)
 		if err != nil {
 			round.Rebuttal = "(rebuttal failed: " + err.Error() + ")"
 			t.Rounds = append(t.Rounds, round)
@@ -308,7 +404,7 @@ func Run(ctx context.Context, claim string, cfg Config, run RunFunc) (Transcript
 		"Full debate transcript:\n\n%s\nIssue your verdict on the original claim.",
 		Transcript{Claim: claim, Rounds: t.Rounds}.Format(),
 	)
-	verdictText, err := run(ctx, arbiterSys, verdictPrompt)
+	verdictText, err := run(ctx, Seat{Role: RoleArbiter, Persona: cfg.ArbiterPersona}, arbiterSys, verdictPrompt)
 	if err != nil {
 		return t, fmt.Errorf("debate arbitration: %w", err)
 	}

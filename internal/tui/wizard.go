@@ -49,7 +49,15 @@ var wCurated = map[string][]string{
 // ─── Internal messages ────────────────────────────────────────────────────────
 
 type modelsDiscoveredMsg struct{ models []discover.Model }
-type wizardSavedMsg struct{ err error }
+
+// wizardSavedMsg carries the save outcome back onto the update loop. fitNote
+// travels in the message rather than being written straight to the model:
+// saveCmd runs in a tea.Cmd goroutine, and assigning to the model from there is
+// a data race with the renderer, however harmless the value looks.
+type wizardSavedMsg struct {
+	err     error
+	fitNote string
+}
 type ripgrepInstalledMsg struct{ err error }
 
 // ─── Phases ───────────────────────────────────────────────────────────────────
@@ -82,7 +90,17 @@ type wizardModel struct {
 	modelName    string
 	maxTokensStr string
 	thinkStr     string
-	confirmSave  bool
+	// vramBudgetStr is the P69.6 memory budget, in GiB, and only ever asked for
+	// on a local Ollama backend. Blank is a first-class answer: it means "do not
+	// plan resident sets", and the config written is byte-identical to the one
+	// this wizard produced before the question existed.
+	vramBudgetStr string
+	confirmSave   bool
+	// fitNote explains, after saving, why a stated budget did not size the
+	// window — normally because the model has never been loaded, so its resident
+	// weights cannot be measured and the honest answer is to say so rather than
+	// size against /api/tags' on-disk figure.
+	fitNote string
 
 	// Discovered / curated model options
 	modelOpts []huh.Option[string]
@@ -162,6 +180,57 @@ func (w *wizardModel) buildConfigForm() *huh.Form {
 			Value(&w.modelName)
 	}
 
+	// The VRAM budget is an Ollama-only question. Every other backend either
+	// runs somewhere Aegis does not manage residency for, or has nothing
+	// co-resident to plan against.
+	var extra []huh.Field
+	if w.adapterName() == "ollama" {
+		extra = append(extra, huh.NewInput().
+			Title("VRAM budget (GiB)").
+			Description("Memory Ollama may use, across all models at once. Blank to skip.").
+			Placeholder("e.g. 14.5 on a 16 GB card").
+			Validate(func(s string) error {
+				s = strings.TrimSpace(s)
+				if s == "" {
+					return nil
+				}
+				v, err := strconv.ParseFloat(s, 64)
+				if err != nil || v <= 0 {
+					return fmt.Errorf("enter a positive number of GiB, or leave blank")
+				}
+				return nil
+			}).
+			Value(&w.vramBudgetStr))
+	}
+
+	settings := []huh.Field{
+		huh.NewInput().
+			Title("Max tokens per response").
+			Placeholder("e.g. 8192").
+			Validate(func(s string) error {
+				n, err := strconv.Atoi(strings.TrimSpace(s))
+				if err != nil || n <= 0 {
+					return fmt.Errorf("enter a positive integer")
+				}
+				return nil
+			}).
+			Value(&w.maxTokensStr),
+	}
+	settings = append(settings, extra...)
+	settings = append(settings,
+		huh.NewSelect[string]().
+			Title("Extended thinking").
+			Description("For reasoning models (Claude 3.7+, o1, etc.).").
+			Options(thinkOpts...).
+			Value(&w.thinkStr).
+			Height(5),
+		huh.NewConfirm().
+			Title("Save to config.yaml?").
+			Affirmative("Save").
+			Negative("Cancel").
+			Value(&w.confirmSave),
+	)
+
 	return huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().
@@ -171,31 +240,19 @@ func (w *wizardModel) buildConfigForm() *huh.Form {
 				Value(&w.baseURL),
 			modelField,
 		),
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Max tokens per response").
-				Placeholder("e.g. 8192").
-				Validate(func(s string) error {
-					n, err := strconv.Atoi(strings.TrimSpace(s))
-					if err != nil || n <= 0 {
-						return fmt.Errorf("enter a positive integer")
-					}
-					return nil
-				}).
-				Value(&w.maxTokensStr),
-			huh.NewSelect[string]().
-				Title("Extended thinking").
-				Description("For reasoning models (Claude 3.7+, o1, etc.).").
-				Options(thinkOpts...).
-				Value(&w.thinkStr).
-				Height(5),
-			huh.NewConfirm().
-				Title("Save to config.yaml?").
-				Affirmative("Save").
-				Negative("Cancel").
-				Value(&w.confirmSave),
-		),
+		huh.NewGroup(settings...),
 	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+}
+
+// adapterName resolves the adapter behind the selected provider preset, for the
+// handful of questions that only make sense for one backend.
+func (w *wizardModel) adapterName() string {
+	for i := range wPresets {
+		if wPresets[i].label == w.presetLabel {
+			return wPresets[i].adapter
+		}
+	}
+	return "openai"
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────────
@@ -353,6 +410,7 @@ func (w *wizardModel) updateSaving(msg tea.Msg) tea.Cmd {
 		w.sp, cmd = w.sp.Update(msg)
 		return cmd
 	case wizardSavedMsg:
+		w.fitNote = msg.fitNote
 		if msg.err != nil {
 			w.saveErr = msg.err.Error()
 			w.done = true
@@ -482,15 +540,22 @@ func (w *wizardModel) saveCmd() tea.Cmd {
 		think = &b
 	}
 
+	budgetGB, _ := strconv.ParseFloat(strings.TrimSpace(w.vramBudgetStr), 64)
+	if budgetGB < 0 {
+		budgetGB = 0
+	}
+
 	p := config.ProviderPatch{
-		Adapter:    adapter,
-		BaseURL:    w.baseURL,
-		Model:      w.modelName,
-		MaxTokens:  mt,
-		MaxRetries: 4,
-		Think:      think,
+		Adapter:      adapter,
+		BaseURL:      w.baseURL,
+		Model:        w.modelName,
+		MaxTokens:    mt,
+		MaxRetries:   4,
+		Think:        think,
+		VRAMBudgetGB: budgetGB,
 	}
 	return func() tea.Msg {
+		var fitNote string
 		// For Ollama, emit an explicit context_window sized from the model's
 		// training-context max so a skill-driven run's large prompt isn't
 		// truncated at Ollama's small Modelfile default (P35.3). Detection is a
@@ -498,15 +563,62 @@ func (w *wizardModel) saveCmd() tea.Cmd {
 		// to the baseline recommendation (RecommendContextWindow(0)).
 		if adapter == "ollama" {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			base := ollamainfo.NativeBase(p.BaseURL)
 			modelMax := 0
-			if res, ok := ollamainfo.Detect(ctx, ollamainfo.NativeBase(p.BaseURL), p.Model); ok {
+			if res, ok := ollamainfo.Detect(ctx, base, p.Model); ok {
 				modelMax = res.ModelMax
 			}
-			cancel()
 			p.ContextWindow = ollamainfo.RecommendContextWindow(modelMax)
+			// With a budget stated, the training max stops being the question
+			// (P69.6/P69.5). RecommendContextWindow on a 262144-context model
+			// writes 131072, which is 16.5 GiB of KV cache before any weights —
+			// a number no 16 GB card can serve, written by the very command
+			// meant to set the machine up. Fit answers what the hardware holds.
+			if budgetGB > 0 {
+				if win, note := fitWindowForBudget(ctx, base, p.Model, budgetGB); win > 0 {
+					p.ContextWindow = win
+				} else {
+					fitNote = note
+				}
+			}
+			cancel()
 		}
-		return wizardSavedMsg{err: config.PatchGlobalProvider(p)}
+		return wizardSavedMsg{err: config.PatchGlobalProvider(p), fitNote: fitNote}
 	}
+}
+
+// fitWindowForBudget solves for the context window that fits budgetGB alongside
+// the model's measured resident weights, or returns 0 and a line explaining why
+// it could not.
+//
+// The refusal case is the common one at first-init: a freshly pulled model has
+// never been loaded, so /api/ps reports nothing and its resident weights cannot
+// be measured. The tempting substitute — /api/tags' on-disk size — overstates a
+// multimodal model by the size of a vision projector that is never resident
+// (2.57 GiB on qwen35-9b), which is more than a fitted window's whole margin. So
+// the budget is still written, the pre-P69.6 recommendation still stands as the
+// window, and the user is told the one command that finishes the job.
+func fitWindowForBudget(ctx context.Context, base, model string, budgetGB float64) (int, string) {
+	g, ok := ollamainfo.Geometry(ctx, base, model)
+	if !ok || !g.Complete() {
+		return 0, "Budget saved, but " + model + " did not report the KV geometry needed to size a window."
+	}
+	f, loaded := ollamainfo.Loaded(ctx, base, model)
+	if !loaded {
+		return 0, "Budget saved. " + model + " is not loaded yet, so its window could not be fitted —\n" +
+			"run a turn, then `aegis models --fit --write`."
+	}
+	weights, ok := ollamainfo.WeightsBytes(f, g, ollamainfo.KVTypeF16)
+	if !ok {
+		return 0, "Budget saved, but " + model + "'s resident weights could not be measured;\n" +
+			"run `aegis models --fit --write` once it has served a turn."
+	}
+	win, ok := ollamainfo.Fit(g, ollamainfo.BudgetBytes(budgetGB), weights, ollamainfo.KVTypeF16)
+	if !ok {
+		return 0, "Budget saved, but no viable window fits " + model + " in it. Try a larger budget\n" +
+			"or a smaller model; `aegis models --fit` shows the curve."
+	}
+	return win, ""
 }
 
 // ─── View ─────────────────────────────────────────────────────────────────────

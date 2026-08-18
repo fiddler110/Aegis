@@ -142,6 +142,27 @@ This writes a full configuration template to your OS config directory:
 
 The template has **Ollama active by default** and all other providers (Anthropic, OpenAI, Azure, Groq, OpenRouter, LM Studio, Vertex AI) in commented-out blocks ready to activate.
 
+**On a local GPU, the wizard asks for a VRAM budget.** It is optional — leave it blank and the config
+written is exactly what earlier versions produced. Answering it does two things:
+
+- sizes `context_window` from what your card can actually hold, instead of from the model's training
+  maximum. A model with a 262144-token training context otherwise gets 131072, which is 16.5 GiB of
+  KV cache before any weights are loaded — more than a 16 GB card holds;
+- lets a debate plan its two or three seats against one budget, instead of sizing each as if it were
+  alone. See [debate.md](debate.md#fitting-the-seats-in-one-gpu).
+
+State what the model server may use, not what the card reports: subtract the driver reserve and
+whatever your desktop already holds (~14.5 of a 16 GB card is the measured figure on the machine this
+was calibrated against). Aegis never detects this — no GPU/VRAM introspection is attempted on any
+platform.
+
+If the model has not been loaded yet, its resident weights cannot be measured, so the budget is saved
+but the window is not fitted. Run one turn, then:
+
+```bash
+aegis models --fit --write
+```
+
 ### Step 2: Set your API key environment variable
 
 Local LLM servers don't validate API keys, but Aegis requires a non-empty value:

@@ -195,6 +195,32 @@ provider:
   # configured value breaks long runs). /status shows the value in use.
   context_window: 0
 
+  # How much memory, in GiB, Aegis may assume the model server can hold across
+  # EVERY concurrently resident model (P69.6). 0 = unset, which means no
+  # resident-set planning at all: without it, each model is sized as if it owned
+  # the card, which is wrong the moment a debate puts a second model beside it.
+  #
+  # This is a figure you state, never one Aegis detects — no GPU/VRAM
+  # introspection is attempted on any platform (P17.5). It is also not the card's
+  # capacity: subtract the driver reserve and whatever your desktop compositor
+  # and browser hold. ~14.5 of a 16 GB card is the measured figure on the machine
+  # this was calibrated against.
+  #
+  # With it set, a debate plans its seats as one resident set, installs the
+  # resulting windows for the debate's duration, and restores them afterwards —
+  # or refuses before spending a turn when no assignment fits. Preview any plan
+  # with `aegis models --fit-debate`. Only meaningful for a local Ollama backend.
+  vram_budget_gb: 0
+
+  # The element type Ollama stores K and V in — its OLLAMA_KV_CACHE_TYPE.
+  # "f16" (default), "q8_0" (roughly half the cache) or "q4_0" (roughly a
+  # quarter). Ollama does not report this over its API, so it is a declaration
+  # you keep in sync with the server: get it wrong and every fitted window is
+  # planned against the wrong number of bytes. A wrong declaration is caught
+  # empirically — Ollama's own size/size_vram split shows the model spilled to
+  # system RAM — rather than silently believed.
+  kv_cache_type: f16
+
   # How long a streamed request waits for the response headers (not the
   # streamed body that follows), in seconds. 0 = default (5 minutes) — the
   # previously-hardcoded value, unchanged unless you opt in. Ollama withholds
@@ -1392,7 +1418,11 @@ and, under `provider:`, the model and tuning knobs — `model`, `small_model`,
 `mcp`, `mcp_server`, `hooks`, `plugins`, `lsp`, `commands`, `server`,
 `security`, `git`, `workspace`, `notify`, `search`, `embeddings`, `diagram`,
 `cleanup`, and the rest of `provider:` (`default`, `base_url`, `headers`,
-`fallback`). The list is deliberately the complement of the one above rather
+`fallback`, `vram_budget_gb`, `kv_cache_type`). The last two are frozen on a
+different ground from the rest: they describe the *operator's machine*, not the
+work, and a cloned repo declaring how much VRAM the model server may hold
+oversizes every window on hardware it has never seen. The list is deliberately
+the complement of the one above rather
 than an enumeration of its own: a config key added to Aegis in a later release
 is frozen until somebody classifies it, so the boundary cannot quietly develop
 a hole (P66.5/SEC-02).
