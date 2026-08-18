@@ -8,15 +8,24 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-18 (second sitting the same day) — **the three items the morning's audit
+**Last updated:** 2026-08-18 (third sitting the same day) — **P70.4 shipped**, the last open build
+item in the tree, and **both of its halves rather than the cap alone**. A sub-agent's result now
+reaches its parent capped and wrapped as untrusted on all four paths it can travel and on both swarm
+backends. The item predicted a split — take the cap, defer the wrap until there was appetite for the
+posture question — and the user answered the question immediately: **zero trust, wrap it**.
+Commissioning a sub-agent's work does not vouch for what that work read. Record: [Both halves of the
+sub-agent boundary](#both-halves-of-the-sub-agent-boundary-2026-08-18-p704). With it, **Tier 1,
+Tier 2 and Tier 3 are all empty** and the "Up next" table is down to its one parked verification row.
+
+**Last updated (previous):** 2026-08-18 (second sitting the same day) — **the three items the morning's audit
 filed all shipped that afternoon**: **P70.1**, **P70.2** and **P70.3**. Record: [Three rows and a
 posture](#three-rows-and-a-posture-2026-08-18-p701-p702-p703). Two of the three closed on a **user
 decision rather than on code**, and the two decisions point opposite ways: the swarm mailbox is now
 wrapped as untrusted (zero trust — content in it crossed a boundary before it was relayed), while
 `security_scan`'s workspace-derived output is deliberately **not** wrapped (a file the model can
 already read is not a boundary crossing). P70.2's build also found the channel beside the one it
-fixed — the sub-agent *result* path, bare on both backends — filed as **P70.4**, now the only open
-Tier 3 item.
+fixed — the sub-agent *result* path, bare on both backends — filed as **P70.4**, which shipped that
+evening.
 
 **Last updated (previous):** 2026-08-18 — **five items shipped in one sitting**: **P66.15**, **P67.6**,
 **P67.7**, **P67.8** and **P67.9**, which is the whole of the "Up next" table except its
@@ -98,6 +107,111 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### Both halves of the sub-agent boundary, 2026-08-18 (P70.4)
+
+P70.2's build, that same morning, wrapped the swarm mailbox and — sweeping for other model-facing
+reads of it — found the channel next to it. That became **P70.4**, and it shipped the same evening.
+The item explicitly planned to be taken in two pieces: a size cap that "carries no such question and
+can be taken alone", and a wrap that "needs the same kind of deliberate answer P70.2 got". Both were
+taken, because the answer arrived immediately.
+
+**The posture question, and the answer.** The item's own counter-argument was that a parent which
+*commissioned* a sub-agent's work is not obviously in the same position as one reading a teammate's
+relayed prose — the parent asked for this text, so treating it as hostile input reads as paranoia
+about your own tooling. The user's answer: **wrap it, zero trust.** Commissioning the work does not
+vouch for what the work *read*. A sub-agent that fetched a poisoned page or called a malicious MCP
+server writes what it read into its own report, and the ingestion-time marking `web_fetch` and MCP
+results carry is lost the moment the child summarizes them in its own words. That is the laundering
+shape P70.2 closed one channel of; this is the other.
+
+It is now the third answer in a set of three that deliberately do not all point the same way. The
+mailbox (P70.2) and a sub-agent's result (P70.4) are wrapped because their content crossed a boundary
+before being relayed onward; `security_scan`'s workspace-derived output (P70.3) is not, because a file
+the model can already read directly is not a crossing. All three are recorded in
+[docs/mcp-trust-boundary.md](../docs/mcp-trust-boundary.md), including the argument rejected here.
+
+**The finding was wider than one line number.** The item verified it at
+`internal/swarm/subprocess.go:223`, where `runWorker` scans the mailbox back for the last `MsgResult`
+and assigns its text into `Result.Output`. But that is the durability substrate of *one* backend: the
+in-process backend reaches the same place without the mailbox at all (`inprocess.go:82`). What the
+build had to enumerate was every path `Result.Output` takes to the parent model, and there are four,
+all in `internal/tool/builtin/agent.go`:
+
+| Path | Site | Note |
+|------|------|------|
+| Foreground `agent` call | `execute` | The plain case. |
+| Workflow modes | `executeWorkflow` (sequential / parallel / loop) | Three returns, each joining teammate output. |
+| Debate | `executeDebate` | Wrapped at the transcript, **not** at the role — see below. |
+| Background spawn | `spawnBackground` → `task_output` | Capped and wrapped *before* the task store, not at the reader. |
+
+`TestSubAgentResultIsCappedAndWrappedOnEveryPath` is a table over those four rather than one
+representative case, because the failure this item was filed for is a path that forgot, not a helper
+that is wrong.
+
+**Two places the obvious implementation would have broken something.**
+
+- **A head cap inside the debate's `runRole` would have corrupted the protocol, not just shortened
+  it.** `parseVerdict` reads the *last* `VERDICT:` line in the arbiter's text — that is P69.1's fix
+  for reasoning models that draft a verdict mid-thought and revise it at the end. Cutting a role's
+  tail is therefore exactly how a REJECT gets read as the UPHOLD it was drafted from: silent, and it
+  inverts the result. Bounding role text is the debate's own concern and it has its own bounds for it
+  (the round ceiling, the budget-headroom check). The cap and wrap go at `transcript.Format()`, the
+  boundary where the debate becomes a result for the parent model, and that is the only boundary this
+  item is about.
+
+- **Capping at `task_output` would have broken the shell tool's stated recovery path.** `task_output`
+  is generic — it also serves shell's background jobs, and the shell cap's truncation notice *names*
+  it as where the dropped bytes can be recovered. Capping there would break that promise and would
+  wrap output that never came from a sub-agent. The background path therefore caps and wraps before
+  the text enters the task store. `TestTaskOutputStaysGenericForNonAgentJobs` pins the negative.
+
+**The cap divides rather than clips.** 24,000 bytes (~6.0k estimated tokens, the value shell and the
+skill-script runner already chose for a subprocess writing a report; deliberately above `team_inbox`'s
+20,000, since a sub-agent's report is the *point* of the call the parent made). Head end — a
+sub-agent's report is a digest written top-down. A workflow divides that budget into per-teammate
+shares (`agentShare`, floored at 2,000) rather than applying one cap over the joined text, because a
+single cap over the join does not truncate a batch evenly — it deletes the last teammates outright,
+and a parallel batch's last two agents vanishing without a trace is worse than four visibly shortened
+reports. The join is still bounded on the way out, which is what catches a batch too wide for the
+shares to divide.
+
+**The remainder is not spilled**, the same exclusion `team_inbox` and `web_fetch` take, and here it is
+load-bearing rather than inherited: spilling writes the overflow to a workspace file that `read_file`
+returns with **no envelope at all**, so a context-budget feature would hand back unmarked exactly the
+bytes the wrap just marked. `TestSubAgentCapKeepsTheHeadAndSpillsNothing` asserts the notice names no
+spill locator.
+
+**Aegis's own text stays outside the envelope.** The "unknown subagent_type" note and the loop's
+"(loop completed in N iterations)" status line are the harness speaking, not the sub-agent; rendering
+them inside the marker would tell the model to distrust the harness. Pinned by
+`TestUnknownSubagentTypeNoticeStaysOutsideTheEnvelope`.
+
+**Found while building: a data race in the test suite, not in the product.** `fakeBackend.Spawn`
+recorded its `SpawnConfig` into shared struct fields with no lock. A `parallel` workflow calls `Spawn`
+once per goroutine, so that is a race under `-race` — and nothing had ever exercised it, because the
+one existing concurrency test drives a different double (`gatingBackend`). P70.4's per-path table was
+the first test to run `fakeBackend` concurrently, and it failed immediately. Fixed with a mutex. Worth
+recording because it is the second time in this batch that adding coverage for one thing surfaced a
+defect in the scaffolding for another.
+
+**Tests.** `internal/tool/builtin/agentresult_test.go` is the new pass: the four-path table, the
+background-before-the-store assertion, the head-and-no-spill posture, the share arithmetic plus a
+four-agent batch where every teammate must survive, the harness-text-outside-the-envelope ordering,
+and the `task_output`-stays-generic negative. `maxAgentResult` joins the enumeration in
+`TestResultCapsCanBindBeforeTheContextWindow` — a cap no test can name is a cap that drifts. Three
+existing assertions compared a whole result string to the sub-agent's exact text and now go through an
+`agentBody` helper that fails if the envelope is missing, so a test asserting on *content* cannot be
+the thing that quietly deletes the wrap. `go test ./...` and `go test -race ./internal/tool/builtin/`
+are green.
+
+**What this leaves.** Nothing. P70.4 was the last open build item in the tree: Tier 1, Tier 2 and
+Tier 3 are all empty, and the "Up next" table is down to its one parked-by-choice verification row.
+Every remaining item is Tier 4 with no fired trigger. The next build item does not exist yet and has
+to be found — by unparking the live tier, or by an audit that files new work the way P66.15's sweep
+filed this one.
+
+---
 
 ### Three rows and a posture, 2026-08-18 (P70.1, P70.2, P70.3)
 

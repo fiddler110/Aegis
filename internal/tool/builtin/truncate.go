@@ -46,6 +46,10 @@ import (
 //	team_inbox               0–4 KiB      20000 B (~5.0k tok)  head  NOT spilled — see
 //	                                      (maxInboxResult)           maxInboxResult; over-budget
 //	                                                                 messages stay unread
+//	agent / workflow /       0.5–20 KiB   24000 B (~6.0k tok)  head  NOT spilled — see
+//	debate / background                   (maxAgentResult)           maxAgentResult; a workflow
+//	sub-agent result                                                 divides it into per-teammate
+//	                                                                 shares (agentShare)
 //	read_file (default)      0.5–32 KiB   1500 lines OR 32 KiB head  NOT spilled — the remainder
 //	                                      whichever bites first       is the file, already
 //	                                                                  addressable via offset/limit

@@ -10,20 +10,24 @@ adding items.
 
 ## Status
 
-**27 open items: 22 build (Tier 1-4) + 5 verification-only. Tier 1 is empty, Tier 2 holds one
-item, and Tier 3 holds one — filed today, out of a build that shipped today.** Eight shipped on
-2026-08-18, in two sittings: **P66.15**, **P67.6**, **P67.7**, **P67.8** and **P67.9** (the whole of
-the previous "Up next" table except its parked last row — record in [releases.md](releases.md),
-*Five rows of Up next, 2026-08-18*), then **P70.1**, **P70.2** and **P70.3**, which were the three
-build rows P66.15's sweep had filed that same morning (record: [Three rows and a
-posture](releases.md#three-rows-and-a-posture-2026-08-18-p701-p702-p703)).
+**26 open items: 21 build (Tier 4 only) + 5 verification-only. Tier 1, Tier 2 and Tier 3 are all
+empty** — every remaining build item is Tier 4 with no fired trigger, which this document's own rule
+says not to build speculatively. Nine shipped on 2026-08-18, in three sittings: **P66.15**,
+**P67.6**, **P67.7**, **P67.8** and **P67.9** (the whole of the then-current "Up next" table except
+its parked last row — record in [releases.md](releases.md), *Five rows of Up next, 2026-08-18*), then
+**P70.1**, **P70.2** and **P70.3**, the three build rows P66.15's sweep had filed that same morning
+(record: [Three rows and a
+posture](releases.md#three-rows-and-a-posture-2026-08-18-p701-p702-p703)), then **P70.4**, which
+P70.2's build had filed hours earlier (record: [Both halves of the sub-agent
+boundary](releases.md#both-halves-of-the-sub-agent-boundary-2026-08-18-p704)).
 
-**Two trust-posture questions were answered on 2026-08-18 and they point opposite ways, which is the
-point.** The swarm mailbox **is** wrapped as untrusted (P70.2) because content in it crossed a
-boundary before the sending agent relayed it; `security_scan`'s workspace-derived output is
-**deliberately not** wrapped (P70.3) because a file the model can already read directly is not a
-boundary crossing. Zero trust is the stated posture for *ingestion*, not a rule that every byte gets
-a marker. Settle the next such question against those two, not afresh.
+**Three trust-posture questions were answered on 2026-08-18 and they do not all point the same way,
+which is the point.** The swarm mailbox **is** wrapped as untrusted (P70.2) and so is a sub-agent's
+result (P70.4), because in both cases content crossed a boundary before being relayed onward;
+`security_scan`'s workspace-derived output is **deliberately not** wrapped (P70.3) because a file the
+model can already read directly is not a boundary crossing. Zero trust is the stated posture for
+*ingestion* and for *relayed* content, not a rule that every byte gets a marker. Settle the next such
+question against those three, not afresh.
 
 **Read the P67.7 record before touching `internal/engine`.** That item asked for tool calls to be
 dispatched as their blocks complete in the stream, and named four constraints. Building it found two
@@ -196,45 +200,47 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next — what is left, and it is short
 
-**Rewritten 2026-08-18 (second time that day), after all three build rows of the morning's table
-shipped in one sitting** — **P70.1**, **P70.2** and **P70.3**, filed out of P66.15's sweep that
-morning and closed that afternoon. Build record in
-[releases.md](releases.md#three-rows-and-a-posture-2026-08-18-p701-p702-p703).
+**Rewritten 2026-08-18 (third time that day), after its only build row shipped** — **P70.4**, the
+last item standing, filed that morning out of building P70.2 and closed that evening with *both*
+halves rather than the cap alone. Build record in
+[releases.md](releases.md#both-halves-of-the-sub-agent-boundary-2026-08-18-p704).
 
-**Two of the three closed on a decision rather than on code**, which is what the retired table
-predicted: P70.2's posture question was answered *zero trust* (the mailbox is wrapped), and P70.3's
-wrap half was answered the other way (workspace-derived scanner output is **not** wrapped, because a
-workspace file is not a boundary crossing). Those two answers together are now the tree's stated
-reading, and the next item that raises the question should be settled against them rather than afresh.
+**All three build tiers are now empty.** Tier 1, Tier 2's only entry (**P68.1**, parked with row #1
+below) and Tier 3 hold nothing that is both open and unparked. Four items shipped on 2026-08-18 —
+P70.1, P70.2, P70.3, P70.4 — and every one of them was filed the same day it closed.
 
-**Tier 1 and Tier 2 are unchanged**: Tier 1 empty, Tier 2 holding only the parked-with-#2 **P68.1**.
-Tier 3 holds exactly one item, and it is row #1 below.
+**The pattern the last three tables observed is now the whole story: the constraint was never
+effort, it was decisions.** Four posture questions were put to the user on 2026-08-18 and all four
+came back the same day. Three of the answers are the tree's stated reading and point in two
+directions on purpose — the mailbox (P70.2) and a sub-agent's result (P70.4) **are** wrapped because
+their content crossed a boundary before being relayed; `security_scan`'s workspace-derived output
+(P70.3) is **not**, because a file the model can already read is not a crossing. Settle the next such
+question against those three, not afresh.
 
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **P70.4** — a sub-agent's result reaches its parent bare and uncapped | T3 · S-M | The only Tier 3 item, and it is the direct output of the work that just shipped: wrapping the mailbox surfaced the channel beside it (`internal/swarm/subprocess.go:223`), where a sub-agent's result reaches the parent model with no wrap and no cap, on *both* backends. **It splits like P70.3 did** — the cap is unblocked and small, the wrap needs a deliberate answer, and P70.2's zero-trust reading points at it without settling it, because a parent designed to consume its child's work is not plainly in the same position as one reading a teammate's relayed prose. Take the cap whenever; take the wrap when there is appetite for the second posture question in a week. |
-| 2 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Unchanged, and still last for the same reason: **the user parked it**, not a dependency. It is also no longer one sitting — **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show: a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
+| 1 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Unchanged, and still last for the same reason: **the user parked it**, not a dependency. It is also no longer one sitting — **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show: a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
 
 **Notes on the ordering, and on what did not make it.**
 
-**This table is two rows because the backlog is genuinely nearly empty, not because it was trimmed.**
-Tier 1 is empty, Tier 2 holds one parked item, Tier 3 holds one item filed hours ago, and everything
-else is Tier 4 with no fired trigger — which this document's own rule says not to build
-speculatively. The previous table promoted one Tier 4 entry (P70.3's bound half) on a stated reason;
-nothing in Tier 4 currently has one.
+**This table is one row because the build backlog is empty, not because it was trimmed.** Tier 1,
+Tier 2 and Tier 3 hold nothing open and unparked, and everything else is Tier 4 with no fired
+trigger — which this document's own rule says not to build speculatively. The previous two tables
+each promoted one Tier 4 entry on a stated reason (P70.3's bound half, then nothing); nothing in
+Tier 4 currently has one.
 
-**The pattern from the last two tables held and then broke.** Both of them observed that what was
-left was disproportionately decisions rather than code. Three decisions were put to the user on
-2026-08-18 and all three came back the same day, which is why the table emptied — the constraint was
-never effort. Row #1's wrap half is the next one queued.
-
-**Nothing here is sequence-blocked.** Row #1 depends on nothing. Row #2 depends on nothing in the
-codebase except P68.1, and on a reachable model server.
+**There is no sequenced work left to rank.** The one row depends on nothing in the codebase except
+P68.1, and on a reachable model server.
 
 **One item is deliberately off this list: P68.1** (Tier 2, S). It is what the parked row needs before
 it is worth re-running — the eval tier deletes the database holding the trace its own closure
-conditions are written against. It travels with row #2, so it is off the list while that row is
+conditions are written against. It travels with row #1, so it is off the list while that row is
 parked.
+
+**What to do when this table is picked up next.** The honest reading is that the next build item does
+not exist yet and has to be *found* rather than selected: either the user unparks the live tier
+(taking P68.1 first), or a fresh audit files new work the way P66.15's sweep filed P70.1–P70.3.
+Promoting a Tier 4 entry without a fired trigger is the thing this document tells you not to do.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in *document*
 order, which is priority order only *within* a track — it cannot see a cross-tier ranking — and it
@@ -410,9 +416,10 @@ yields less.
 
 ## Open Work — Tier 3
 
-**Status: 1 filed item** — **P70.4**, filed 2026-08-18 out of building P70.2. The tier held two for
-a few hours the same day: **P70.1** and **P70.2** were filed out of P66.15's sweep in the morning and
-both shipped the same afternoon, so what is left is the item their build produced. The tier held five
+**Status: empty. P70.4 shipped 2026-08-18**, the day it was filed — see [Both halves of the
+sub-agent boundary](releases.md#both-halves-of-the-sub-agent-boundary-2026-08-18-p704). The tier held
+two for a few hours that morning: **P70.1** and **P70.2** were filed out of P66.15's sweep and both
+shipped the same afternoon; P70.4 was the item their build produced, and it closed the same day. The tier held five
 until 2026-08-18, when **P66.15**, **P67.6**, **P67.7**, **P67.8** and
 **P67.9** all shipped: the entire "Up next" table below row #5, in one sitting. Their build records —
 including the three places the items were wrong about their own preconditions — are in
@@ -427,7 +434,19 @@ introduced changed which numbers two already-shipped heuristics see. P62.9 and P
 both moved to [Verification Work](#verification-work) — in each case the code is already shipped and
 what remains is a live-run result, not a design or implementation task.
 
-### P70.4 — A sub-agent's result reaches its parent bare and uncapped
+<details>
+<summary>P70.4 — the sub-agent result boundary (shipped 2026-08-18)</summary>
+
+### P70.4 — A sub-agent's result reaches its parent bare and uncapped — SHIPPED 2026-08-18
+
+**Shipped 2026-08-18**, the day it was filed, and **both halves were taken together**. The item
+predicted a split — cap now, wrap when there was appetite for the posture question — and the user
+answered the posture question immediately: **wrap it, zero trust**. Commissioning a sub-agent's work
+does not vouch for what that work read, so a parent consuming its child's report is in the same
+position as one reading a teammate's relayed prose after all. The counter-argument the item was filed
+with is recorded as considered and rejected in
+[docs/mcp-trust-boundary.md](../docs/mcp-trust-boundary.md). Record:
+[releases.md](releases.md#both-halves-of-the-sub-agent-boundary-2026-08-18-p704).
 
 **Filed 2026-08-18 from building [P70.2](#p702--the-swarm-mailbox-is-an-unwrapped-cross-agent-injection-channel)**,
 which wrapped the mailbox and, in sweeping for other model-facing reads of it, found the channel next
@@ -453,6 +472,8 @@ P70.3's bound half was.
 
 Priority: Tier 3 — S-M. No dependency. The cap is small and unblocked; the wrap needs the same kind
 of deliberate answer P70.2 got.
+
+</details>
 
 <details>
 <summary>P70.1 — the restore boundary (shipped 2026-08-18)</summary>

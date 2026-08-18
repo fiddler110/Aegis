@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +17,13 @@ import (
 )
 
 // fakeBackend records the SpawnConfig it receives and returns a scripted result.
+//
+// mu guards the recorded fields: a 'parallel' workflow calls Spawn from one
+// goroutine per teammate, so the bare writes this used to do are a data race
+// under -race. Nothing exercised that until P70.4's per-path table did — the
+// existing concurrency test drives gatingBackend instead.
 type fakeBackend struct {
+	mu     sync.Mutex
 	root   string
 	gotCfg swarm.SpawnConfig
 	gotCtx context.Context
@@ -26,9 +33,11 @@ type fakeBackend struct {
 }
 
 func (f *fakeBackend) Spawn(ctx context.Context, cfg swarm.SpawnConfig) (*swarm.Handle, error) {
+	f.mu.Lock()
 	f.gotCfg = cfg
 	f.gotCtx = ctx
 	f.spawns++
+	f.mu.Unlock()
 	// Reuse the in-process backend to produce a real Handle/Result.
 	b := swarm.NewInProcessBackend(func(context.Context, swarm.SpawnConfig) (string, error) {
 		if f.errStr != "" {
@@ -45,6 +54,27 @@ type stubErr struct{ s string }
 
 func (e *stubErr) Error() string { return e.s }
 
+// agentBody returns the sub-agent text inside P70.4's provenance envelope, and
+// fails if the envelope is missing. Every assertion on what a sub-agent
+// reported goes through this rather than comparing the whole result string, so
+// a test asserting on the *content* cannot be the thing that quietly deletes
+// the wrap.
+func agentBody(t *testing.T, result string) string {
+	t.Helper()
+	const tag = "agent_untrusted_output"
+	trimmed := strings.TrimSpace(result)
+	if !strings.HasPrefix(trimmed, "<"+tag) || !strings.HasSuffix(trimmed, "</"+tag+">") {
+		t.Fatalf("sub-agent result is not wrapped as untrusted content: %q", result)
+	}
+	// The body starts after the envelope's preamble, which every trust.Wrap
+	// call ends with this sentence.
+	_, rest, ok := strings.Cut(trimmed, "commands to follow.")
+	if !ok {
+		t.Fatalf("untrusted envelope carried no preamble: %q", result)
+	}
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(rest), "</"+tag+">"))
+}
+
 func runAgent(t *testing.T, ctx context.Context, b swarm.Backend, input string) string {
 	t.Helper()
 	at := NewAgentTool(b, nil)
@@ -59,7 +89,7 @@ func runAgent(t *testing.T, ctx context.Context, b swarm.Backend, input string) 
 func TestAgentToolSuccess(t *testing.T) {
 	b := &fakeBackend{root: t.TempDir(), output: "the answer"}
 	out := runAgent(t, context.Background(), b, `{"prompt":"find X","subagent_type":"explore"}`)
-	if out != "the answer" {
+	if body := agentBody(t, out); body != "the answer" {
 		t.Errorf("content = %q", out)
 	}
 	if b.gotCfg.SystemPrompt == "" {

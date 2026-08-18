@@ -158,8 +158,8 @@ func TestBackgroundAgentTool(t *testing.T) {
 	if !ok || done.State != task.StateDone {
 		t.Fatalf("task = %+v", done)
 	}
-	if done.Output != "sub-agent answer" {
-		t.Errorf("output = %q, want %q", done.Output, "sub-agent answer")
+	if body := agentBody(t, done.Output); body != "sub-agent answer" {
+		t.Errorf("output = %q, want %q", body, "sub-agent answer")
 	}
 }
 

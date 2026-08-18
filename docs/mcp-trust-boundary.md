@@ -51,6 +51,36 @@ same false positives. A `team_inbox` result's message body is also capped at
 20,000 bytes; the overflow is never spilled to a workspace file, since
 `read_file` would then hand it back with no marker at all.
 
+It also wraps a **sub-agent's result** (P70.4), which is the same laundering
+shape on a different channel. A sub-agent's report reaches its parent inside an
+`<agent_untrusted_output>` marker on all four paths it can travel — a
+foreground `agent` call, each workflow mode's joined output, a debate
+transcript, and a background spawn read back with `task_output` — and on both
+swarm backends, since the in-process one returns the result without touching
+the mailbox at all. The counter-argument considered and rejected is that a
+parent which *commissioned* the work is not in the same position as one reading
+a teammate's relayed prose; commissioning the work does not vouch for what the
+work read, and a sub-agent that fetched a poisoned page writes what it read
+into its own report. As with the mailbox, the marker is always on and the
+heuristic scan is off — a sub-agent reporting on this very subject is exactly
+the text those patterns over-fire on.
+
+That result is also capped at 24,000 bytes, head end, and the remainder is
+**not** spilled for the same reason the mailbox's is not. A workflow divides
+the cap into per-teammate shares so an over-budget batch loses bytes evenly
+instead of losing its last teammates entirely. `task_output` itself is left
+generic — it also serves the shell tool's background jobs, and the shell cap's
+notice names it as the recovery path for the bytes shell dropped — so the
+background path caps and wraps before the text enters the task store.
+
+**The boundary is not "every byte gets a marker."** Two questions settled on
+2026-08-18 point opposite ways and are the reference for the next one:
+`security_scan`'s workspace-derived output is deliberately **not** wrapped
+(P70.3), because a file the model can already read directly is not a boundary
+crossing, while the mailbox and the sub-agent result are, because their content
+crossed one before being relayed onward. Zero trust is the posture for
+*ingestion* and for *relayed* content, not a rule applied to everything.
+
 ## The threat
 
 Every tool result — including an MCP tool's — becomes part of the

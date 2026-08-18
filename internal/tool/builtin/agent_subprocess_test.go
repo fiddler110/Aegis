@@ -135,7 +135,7 @@ func TestAgentToolBackgroundSpawnRespectsSharedBudgetCeiling(t *testing.T) {
 		RemainingBudgetUSD float64 `json:"remaining_budget_usd"`
 		RemainingTokens    int     `json:"remaining_tokens"`
 	}
-	if err := json.Unmarshal([]byte(tk.Output), &got); err != nil {
+	if err := json.Unmarshal([]byte(agentBody(t, tk.Output)), &got); err != nil {
 		t.Fatalf("unmarshal worker report from task output %q: %v", tk.Output, err)
 	}
 

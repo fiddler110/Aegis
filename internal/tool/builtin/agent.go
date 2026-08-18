@@ -356,6 +356,10 @@ func (a *agentTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if out == "" {
 		out = "(sub-agent produced no output)"
 	}
+	// P70.4: cap, then wrap. The harness's own note about an unrecognized
+	// subagent_type is added *outside* the envelope — it is Aegis speaking, and
+	// putting it inside would present it as part of the untrusted body.
+	out = wrapAgentOutput("agent", def.Name, capAgentOutput(out, maxAgentResult))
 	if !known && args.SubagentType != "" {
 		out = fmt.Sprintf("(unknown subagent_type %q; used %q)\n\n%s", args.SubagentType, def.Name, out)
 	}
@@ -390,6 +394,15 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 	//     (tool.WithHeartbeat), but the subprocess backend runs in another
 	//     process and cannot, so a teammate finishing is the observable activity
 	//     this path has to volunteer.
+	// P70.4: each teammate's share of maxAgentResult. Capping per teammate
+	// rather than only over the joined text makes an over-budget batch lose
+	// bytes evenly instead of losing its last teammates outright, and it bounds
+	// the *prompt* growth in the chaining modes below, where one teammate's
+	// output becomes the next one's extraContext. The join is bounded again on
+	// the way out, which is what catches a batch too wide for the shares to
+	// divide (see agentShare's floor).
+	share := agentShare(len(agents))
+
 	spawn := func(batchCtx context.Context, wa workflowAgent, extraContext string) (string, error) {
 		agentCtx, agentCancel := context.WithTimeout(batchCtx, maxAgentDuration)
 		defer agentCancel()
@@ -425,7 +438,7 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 		if res.Output == "" {
 			return "(no output)", nil
 		}
-		return res.Output, nil
+		return capAgentOutput(res.Output, share), nil
 	}
 
 	// The batch bound. It is deliberately wider than DefaultMaxTurnStallSec and
@@ -448,7 +461,7 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 			outputs = append(outputs, fmt.Sprintf("=== Agent %d ===\n%s", i+1, out))
 			context = out
 		}
-		return tool.Result{Content: strings.Join(outputs, "\n\n")}, nil
+		return tool.Result{Content: wrapWorkflowOutput(mode, strings.Join(outputs, "\n\n"))}, nil
 
 	case "parallel":
 		type result struct {
@@ -498,7 +511,7 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 		if len(errs) > 0 {
 			return tool.Result{Content: "parallel: " + strings.Join(errs, "; "), IsError: true}, nil
 		}
-		return tool.Result{Content: strings.Join(outputs, "\n\n")}, nil
+		return tool.Result{Content: wrapWorkflowOutput(mode, strings.Join(outputs, "\n\n"))}, nil
 
 	case "loop":
 		if maxIter <= 0 {
@@ -516,10 +529,12 @@ func (a *agentTool) executeWorkflow(ctx context.Context, mode string, agents []w
 			}
 			lastOut = out
 			if strings.Contains(out, "DONE") {
-				return tool.Result{Content: fmt.Sprintf("(loop completed in %d iteration(s))\n\n%s", i+1, out)}, nil
+				// The loop's own status line stays outside the envelope: it is
+				// Aegis reporting on the run, not the sub-agent's text (P70.4).
+				return tool.Result{Content: fmt.Sprintf("(loop completed in %d iteration(s))\n\n%s", i+1, wrapWorkflowOutput(mode, out))}, nil
 			}
 		}
-		return tool.Result{Content: fmt.Sprintf("(loop reached max iterations %d)\n\n%s", maxIter, lastOut)}, nil
+		return tool.Result{Content: fmt.Sprintf("(loop reached max iterations %d)\n\n%s", maxIter, wrapWorkflowOutput(mode, lastOut))}, nil
 
 	default:
 		return tool.Result{Content: fmt.Sprintf("agent: unknown mode %q", mode), IsError: true}, nil
@@ -626,7 +641,19 @@ func (a *agentTool) executeDebate(ctx context.Context, claim, domain, proposerPe
 	if err != nil {
 		return tool.Result{Content: "agent: debate failed: " + err.Error(), IsError: true}, nil
 	}
-	return tool.Result{Content: transcript.Format()}, nil
+	// P70.4: the debate is capped and wrapped *here*, at the transcript, and
+	// deliberately not inside runRole above.
+	//
+	// A head cap on an individual role would corrupt the protocol rather than
+	// just shorten it: parseVerdict reads the *last* "VERDICT:" line in the
+	// arbiter's text (P69.1 — a reasoning model drafts a verdict mid-thought and
+	// revises it at the end), so cutting a role's tail is exactly how a REJECT
+	// gets read as the UPHOLD it was drafted from. Bounding role text is the
+	// debate's own concern, and it has its own bounds for it — the round ceiling
+	// and the budget-headroom check. This is the boundary where the transcript
+	// becomes a result for the parent model, and it is the only one this item
+	// is about.
+	return tool.Result{Content: wrapAgentOutput("debate", debateCfg.Domain, capAgentOutput(transcript.Format(), maxAgentResult))}, nil
 }
 
 // spawnBackground launches the teammate as a detached background task. The
@@ -661,8 +688,15 @@ func (a *agentTool) spawnBackground(ctx context.Context, cfg swarm.SpawnConfig, 
 		if res.Failed() {
 			return "", errors.New(res.Err)
 		}
-		emit(res.Output)
-		return res.Output, nil
+		// P70.4: cap and wrap *before* the text enters the task manager, not
+		// where task_output reads it back out. task_output is generic — it also
+		// serves the shell tool's background jobs, and the shell cap's notice
+		// promises it as the recovery path for the bytes shell dropped. Capping
+		// it there would break that promise and wrap output that never came
+		// from a sub-agent; doing it here bounds the only path that did.
+		out := wrapAgentOutput("agent", agentName, capAgentOutput(res.Output, maxAgentResult))
+		emit(out)
+		return out, nil
 	})
 	if err != nil {
 		return tool.Result{Content: "agent: " + err.Error(), IsError: true}, nil
