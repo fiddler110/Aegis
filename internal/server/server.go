@@ -550,6 +550,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	} else if cfg.Provider.ToolCallShimEnabled() {
 		logger.Info("tool-call shim enabled: tool schemas are served in the system prompt and calls are parsed from the model's reply (provider.tool_call_shim)")
 	}
+	// P67.6: same reasoning as the shim warning above — an unparseable duration
+	// falls back to the default, which is indistinguishable from not setting it.
+	if _, ok := cfg.Compaction.ColdCacheAfterOr(); !ok {
+		logger.Warn("compaction.cold_cache_after is not a duration; using the default",
+			"value", cfg.Compaction.ColdCacheAfter, "default", config.ColdCacheAfterDefault,
+			"expected", `a Go duration such as "20m", or "off"`)
+	}
 	// Screen untrusted bundled skill directories through the same filesystem
 	// scan `aegis security scan` drives, so a compromised .aegis/skills/ bundle's
 	// scripts surface a HIGH/CRITICAL warning rather than reaching the model
@@ -913,6 +920,9 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			// detection, so the gate stays A/B-able without a rebuild.
 			PreservePrefixCache: cfg.Compaction.PreservePrefixCacheOr(
 				config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL)),
+			// P67.6: how many clearable tool results the cold-cache pass leaves
+			// verbatim. 0 takes the package default; the pass floors it at 1.
+			ColdCacheKeep: cfg.Compaction.ColdCacheKeep,
 		}
 		// A local provider whose window is still unknown (Ollama unreachable at
 		// startup): skip auto-compaction rather than falling back to the 120k

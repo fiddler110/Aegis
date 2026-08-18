@@ -280,6 +280,7 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 		doctorScannerCheck(ctx, cfg),
 		doctorGuardCheck(cfg),
 		doctorWorkdirCheck(cfg),
+		doctorTerminalCapsCheck(cfg),
 	}
 	checks = append(checks, doctorCommandChecks(cfg)...)
 	return append(checks, doctorDaemonChecks(ctx, cfg)...)

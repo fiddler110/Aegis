@@ -1,98 +1,947 @@
 package builtin
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/permission"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
-// readOnlyShellArgv0 is the allowlist of binaries whose invocation classifies
-// as read-only (P25.4c) regardless of arguments, as long as the command
-// contains no shell chaining/redirection/substitution metacharacter. Keys
-// are lowercase; matching lowercases the observed binary name so a Windows
-// "Cat.exe" or a differently-cased alias still matches.
-var readOnlyShellArgv0 = map[string]bool{
-	"ls": true, "cat": true, "head": true, "tail": true, "wc": true,
-	"pwd": true, "stat": true, "file": true,
-	"grep": true, "which": true, "whoami": true,
-	"date": true, "uname": true, "hostname": true, "id": true,
-	"du": true, "df": true,
-	"cut": true, "tr": true, "nl": true,
-	"type": true,
-	// Deliberately NOT here (P66.3/SEC-04): ps, less, more. `ps auxwwe` prints
-	// the daemon's own process environment — the provider API keys — which is
-	// the exact leak env/printenv are excluded for below, reached by a
-	// different binary. `less` and `more` are pagers that shell out (!command,
-	// v to open an editor), so they are program launchers wearing a reader's
-	// name.
-	//
-	// Deliberately NOT here (P66.3/VULN-02): sort, tree, uniq. Each has a
-	// documented file-*writing* form — `sort -o FILE`, `tree -o FILE`,
-	// `uniq INPUT OUTPUT` — so no argument parsing makes them read-only. The
-	// attached-value confinement in argv_confine.go stops those forms from
-	// escaping the workspace, but a write inside the workspace is still a
-	// write, and plan mode allows CapRead silently.
-	//
-	// Deliberately NOT here (P40.1): env/printenv. They are read-only in the
-	// filesystem sense but dump the daemon's process environment, which holds
-	// the provider API keys (config.loadDotEnv os.Setenv's .aegis/.env into the
-	// process, ProviderAPIKey reads os.Getenv). Downgrading them to CapRead
-	// auto-approves them under plan mode, leaking the keys into the transcript
-	// and SQLite session store before the CapNetwork egress gate ever fires.
-	// Falling back to the normal CapExecute approval is the safe posture, and
-	// they are low value as read-only anyway.
-	// PowerShell read-only equivalents (the shell tool runs via PowerShell
-	// on Windows; see shell.go's Description).
-	"get-childitem": true, "get-content": true, "get-item": true, "test-path": true,
-	"get-location": true, "get-process": true, "get-date": true, "select-string": true,
-	"where.exe": true,
+// P67.8 — per-command flag configuration replaces the per-binary allowlist.
+//
+// The old table allowlisted whole *binaries*: if the argv0 was on the list,
+// every flag it could carry came with it. That was safe only for binaries with
+// no file-writing form at all, so `sort`, `tree` and `uniq` were excluded
+// outright ("no argument parsing makes them read-only") — and `rg`, `fd` and
+// flag-carrying `gh` never got in. Argument parsing is what was missing, and
+// this file now does it: each command carries a table of the flags it may
+// use, each flag declares whether it takes no value / a string / a number
+// (optionally constrained by a regex), each command says whether it honors
+// POSIX `--`, how many positionals it may have, and may carry a predicate for
+// the things flags cannot express. **An unlisted flag fails closed**: the
+// command simply does not get the CapRead downgrade and runs under the normal
+// CapExecute approval, exactly as before.
+//
+// Two rules govern every entry below, and neither is optional:
+//
+//  1. Flag parsing decides whether a command *can* be read-only. Path
+//     confinement (argvStaysInRoot, argv_confine.go) decides whether *this
+//     invocation* is. Both run, never either — and argvStaysInRoot confines
+//     attached flag values too ("--file=/etc/passwd", "-o/etc/passwd"), which
+//     is what VULN-02 rode in on.
+//  2. "Does this flag write a file?" is not the whole question. A flag can be
+//     unsafe for a reason its name does not suggest: fd's `--list-details`
+//     internally execs `ls` (a PATH-hijack surface), sort's
+//     `--compress-program` execs an arbitrary program on its temp files, rg's
+//     `--pre` runs a preprocessor command, gh's `--web` launches a browser.
+//     Every flag admitted below was asked that question; the ones that failed
+//     it are named in the per-command comments so the reasoning is not lost.
+//
+// Widening this classification widens two things at once: what the engine will
+// run in parallel without the exec lock, and what plan mode approves *without
+// asking*. A false negative here costs a call its downgrade; a false positive
+// auto-approves a mutation. When in doubt, leave the flag out.
+
+// flagArg is the argument type a flag takes.
+type flagArg int
+
+const (
+	noArg  flagArg = iota // "--long", "-l": the flag stands alone
+	strArg                // "--glob=x", "--glob x", "-gx", "-g x"
+	numArg                // same spellings, value must parse as a number
+)
+
+// flagSpec describes one permitted flag.
+type flagSpec struct {
+	arg flagArg
+	// optional marks a flag whose value may be omitted ("--color" and
+	// "--color=auto" are both valid). An optional value is only ever read
+	// from the attached form; a bare "--color" never swallows the next token,
+	// which would otherwise eat a path operand.
+	optional bool
+	// pattern, when non-nil, must match the flag's value. It is the escape
+	// hatch for values that are neither a free string nor a plain number —
+	// head/tail's "-c 10K" size syntax, for instance.
+	pattern *regexp.Regexp
+}
+
+// anyPositionals is the maxPositionals value for a command whose positional
+// arguments are all inputs. Commands whose *last* positional is an output
+// (uniq) or an operand with side effects (hostname) set a finite number
+// instead. maxPositionals is always written out explicitly: the zero value
+// means "no positionals", which is the fail-closed direction.
+const anyPositionals = -1
+
+// commandSpec is the read-only configuration for one command.
+type commandSpec struct {
+	// capability is what a matching invocation is downgraded to. The zero
+	// value means tool.CapRead. `gh` sets tool.CapNetwork instead — see the
+	// gh entry.
+	capability tool.Capability
+	// flags is the complete set of permitted flags, keyed by their exact
+	// spelling including dashes. Anything not in here fails closed.
+	flags map[string]flagSpec
+	// doubleDash: the command honors POSIX "--" as end-of-flags. A command
+	// that does not (PowerShell cmdlets, `pwd`) rejects a "--" token as an
+	// unlisted flag.
+	doubleDash bool
+	// singleDashLong: flags are whole words behind a single dash and are
+	// matched case-insensitively, with an optional ":value" attachment. This
+	// is PowerShell's parameter style; it also disables short-flag clustering,
+	// so "-Recurse" is one flag and not eight.
+	singleDashLong bool
+	// numericShorthand: a bare "-20" is a count, not a flag cluster (head,
+	// tail, uniq's obsolete forms).
+	numericShorthand bool
+	// maxPositionals bounds the non-flag arguments; anyPositionals for no
+	// bound. This is the whole defense for `uniq`, whose second positional is
+	// an OUTPUT file.
+	maxPositionals int
+	// subcommands, when non-nil, requires the first argument to name one of
+	// them and hands the rest to it. Nested arbitrarily (gh pr view).
+	subcommands map[string]*commandSpec
+	// predicate is the last resort for a rule flags cannot express — see
+	// `date`, whose *positional* is a set-the-system-clock operand on BSD.
+	// It sees the positionals in order.
+	predicate func(positionals []string) bool
+}
+
+// ---------------------------------------------------------------------------
+// Table-construction helpers. flagsOf merges groups into one map; noneOf/
+// strOf/numOf/optOf/patOf name the groups so the tables below read as
+// "these flags take nothing, these take a string, ...".
+// ---------------------------------------------------------------------------
+
+type flagGroup struct {
+	spec  flagSpec
+	names []string
+}
+
+func noneOf(names ...string) flagGroup { return flagGroup{flagSpec{arg: noArg}, names} }
+func strOf(names ...string) flagGroup  { return flagGroup{flagSpec{arg: strArg}, names} }
+func numOf(names ...string) flagGroup  { return flagGroup{flagSpec{arg: numArg}, names} }
+func optOf(names ...string) flagGroup {
+	return flagGroup{flagSpec{arg: strArg, optional: true}, names}
+}
+func patOf(re *regexp.Regexp, names ...string) flagGroup {
+	return flagGroup{flagSpec{arg: strArg, pattern: re}, names}
+}
+
+func flagsOf(groups ...flagGroup) map[string]flagSpec {
+	m := make(map[string]flagSpec)
+	for _, g := range groups {
+		for _, n := range g.names {
+			m[n] = g.spec
+		}
+	}
+	return m
+}
+
+// sizePattern is head/tail/du's size argument: a count with an optional
+// SI/binary suffix ("512", "10K", "1MB", "+5"). Constraining it is not a
+// safety property on its own — argvStaysInRoot would confine a path-shaped
+// value anyway — it is what keeps a size flag from being a general string
+// slot that a future reader mistakes for one.
+var sizePattern = regexp.MustCompile(`^[+-]?[0-9]+(\.[0-9]+)?[bcwkKMGTPEZY]{0,2}B?$`)
+
+// ---------------------------------------------------------------------------
+// The command table.
+// ---------------------------------------------------------------------------
+
+// readOnlyShellCommands maps a lowercased binary name to its configuration.
+// The binary name is matched after stripping a directory prefix and a Windows
+// .exe/.cmd/.bat suffix, so "/bin/cat" and "Cat.exe" both land on "cat".
+//
+// ===========================================================================
+// DELIBERATELY ABSENT, and why — these are NOT oversights and do not become
+// admissible under flag parsing. The reasoning is the expensive part; keep it
+// with the table.
+//
+//   - env, printenv (P40.1). Read-only in the filesystem sense, but they dump
+//     the daemon's *process environment*, which holds the provider API keys
+//     (config.loadDotEnv os.Setenv's .aegis/.env into the process,
+//     ProviderAPIKey reads os.Getenv). A CapRead downgrade auto-approves them
+//     under plan mode, leaking the keys into the transcript and the SQLite
+//     session store before the CapNetwork egress gate ever fires. No flag
+//     table changes this: the *default* output is the leak. Falling back to
+//     the normal CapExecute approval is the safe posture, and they are low
+//     value as read-only anyway.
+//   - ps (P66.3/SEC-04). `ps auxwwe` prints the daemon's own process
+//     environment — the same provider-key leak as env/printenv, reached by a
+//     different binary. Excluding `e` from a flag table would not help: `ps`
+//     accepts BSD-style flag clusters without dashes at all ("auxwwe"), so
+//     the leak has no reliable flag spelling to deny.
+//   - less, more (P66.3/SEC-04). Pagers that shell out: `!command` runs a
+//     shell, `v` opens an editor. They are program launchers wearing a
+//     reader's name, and no flag table can take that away.
+//   - find. `-exec`/`-execdir` run arbitrary commands, `-delete` removes
+//     files, `-fprintf`/`-fls` write files. The safe subset is real but the
+//     unsafe primaries are *operands*, not flags, and find's operand grammar
+//     is a whole expression language. `fd` covers the same ground with a flag
+//     grammar this parser can actually check — use it instead.
+//   - xargs, sh, bash, powershell, sudo, ssh, curl, wget, nc. Program
+//     launchers or network clients; nothing to parse.
+//
+// ===========================================================================
+var readOnlyShellCommands = map[string]*commandSpec{
+	// --- Listing and reading -------------------------------------------------
+	"ls": {
+		// Nothing ls does writes. Its long-listing flags (-l, -o, -g) are
+		// pure formatting — note that -o here means "long format, no group",
+		// unrelated to sort's output-file -o. Per-command tables are exactly
+		// what lets the same spelling be safe in one command and refused in
+		// another.
+		flags: flagsOf(
+			noneOf("-a", "-A", "-b", "-c", "-C", "-d", "-f", "-F", "-g", "-G", "-h", "-H",
+				"-i", "-k", "-l", "-L", "-m", "-n", "-N", "-o", "-p", "-q", "-Q", "-r", "-R",
+				"-s", "-S", "-t", "-u", "-U", "-v", "-x", "-X", "-1",
+				"--all", "--almost-all", "--escape", "--directory", "--classify",
+				"--no-group", "--human-readable", "--si", "--dereference",
+				"--inode", "--numeric-uid-gid", "--literal", "--quote-name",
+				"--reverse", "--recursive", "--size", "--group-directories-first",
+				"--author", "--full-time", "--dereference-command-line"),
+			numOf("-w", "--width", "-T", "--tabsize"),
+			optOf("--color", "--indicator-style", "--quoting-style", "--hyperlink"),
+			strOf("--sort", "--time", "--time-style", "--format", "--block-size",
+				"-I", "--ignore", "--hide"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"cat": {
+		flags: flagsOf(
+			noneOf("-A", "-b", "-e", "-E", "-n", "-s", "-t", "-T", "-u", "-v",
+				"--show-all", "--number-nonblank", "--show-ends", "--number",
+				"--squeeze-blank", "--show-tabs", "--show-nonprinting"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"head": {
+		flags: flagsOf(
+			noneOf("-q", "-v", "-z", "--quiet", "--silent", "--verbose", "--zero-terminated"),
+			patOf(sizePattern, "-c", "--bytes", "-n", "--lines"),
+		),
+		doubleDash: true, numericShorthand: true, maxPositionals: anyPositionals,
+	},
+	"tail": {
+		flags: flagsOf(
+			noneOf("-f", "-F", "-q", "-v", "-z", "-r",
+				"--quiet", "--silent", "--verbose", "--zero-terminated", "--retry"),
+			patOf(sizePattern, "-c", "--bytes", "-n", "--lines"),
+			numOf("-s", "--sleep-interval", "--pid", "--max-unchanged-stats"),
+			optOf("--follow"),
+		),
+		doubleDash: true, numericShorthand: true, maxPositionals: anyPositionals,
+	},
+	"wc": {
+		flags: flagsOf(
+			noneOf("-c", "-l", "-L", "-m", "-w",
+				"--bytes", "--chars", "--lines", "--max-line-length", "--words"),
+			strOf("--files0-from"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"nl": {
+		flags: flagsOf(
+			noneOf("-p", "--no-renumber"),
+			strOf("-b", "--body-numbering", "-d", "--section-delimiter",
+				"-f", "--footer-numbering", "-h", "--header-numbering",
+				"-n", "--number-format", "-s", "--number-separator"),
+			numOf("-i", "--line-increment", "-l", "--join-blank-lines",
+				"-v", "--starting-line-number", "-w", "--number-width"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"cut": {
+		flags: flagsOf(
+			noneOf("-n", "-s", "-z", "--complement", "--only-delimited", "--zero-terminated"),
+			strOf("-b", "--bytes", "-c", "--characters", "-d", "--delimiter",
+				"-f", "--fields", "--output-delimiter"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"tr": {
+		// tr never opens a file: it filters stdin to stdout, so its
+		// positionals are character SETs rather than paths. They are still fed
+		// to argvStaysInRoot, which resolves a set like "a-z" as a relative
+		// name inside the root and passes — the conservative direction.
+		flags:      flagsOf(noneOf("-c", "-C", "-d", "-s", "-t", "-u", "--complement", "--delete", "--squeeze-repeats", "--truncate-set1")),
+		doubleDash: true, maxPositionals: 2,
+	},
+	"sort": {
+		// P67.8 admits sort, which the binary allowlist had to refuse whole.
+		//
+		// DENIED, and why:
+		//   -o/--output writes the sorted output to a file — VULN-02's escape,
+		//     in both its separated ("-o out") and attached ("-oout") forms.
+		//   --compress-program=PROG execs an arbitrary program over sort's
+		//     temporary files. Nothing in the name says "runs a binary"; this
+		//     is the class of flag rule 2 above exists for.
+		//   --random-source=FILE reads an arbitrary file as entropy. Path
+		//     confinement would contain it, but a read-only classifier has no
+		//     reason to want it.
+		//   --debug is harmless but prints to stderr only; omitted to keep the
+		//     surface minimal.
+		flags: flagsOf(
+			noneOf("-b", "-c", "-C", "-d", "-f", "-g", "-h", "-i", "-M", "-m", "-n",
+				"-R", "-r", "-s", "-u", "-V", "-z",
+				"--ignore-leading-blanks", "--dictionary-order", "--ignore-case",
+				"--general-numeric-sort", "--human-numeric-sort", "--ignore-nonprinting",
+				"--month-sort", "--numeric-sort", "--random-sort", "--reverse",
+				"--sort", "--stable", "--merge", "--unique", "--version-sort",
+				"--zero-terminated"),
+			optOf("--check"),
+			strOf("-k", "--key", "-t", "--field-separator", "-T", "--temporary-directory",
+				"-S", "--buffer-size", "--files0-from"),
+			numOf("--parallel"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"uniq": {
+		// P67.8 admits uniq. Its file-writing form is not a flag at all:
+		// `uniq INPUT OUTPUT` writes the second positional. maxPositionals: 1
+		// is the entire defense, and it is why maxPositionals exists.
+		flags: flagsOf(
+			noneOf("-c", "-d", "-D", "-i", "-u", "-z",
+				"--count", "--repeated", "--all-repeated", "--ignore-case",
+				"--unique", "--zero-terminated"),
+			numOf("-f", "--skip-fields", "-s", "--skip-chars", "-w", "--check-chars"),
+			optOf("--group"),
+		),
+		doubleDash: true, numericShorthand: true, maxPositionals: 1,
+	},
+	"tree": {
+		// P67.8 admits tree.
+		//
+		// DENIED: -o/--output writes the listing to a file (the VULN-02 shape
+		// again), and --fromfile makes tree read a file listing instead of the
+		// filesystem — harmless but a different program, so it fails closed.
+		// tree's -X/-J/-H emit XML/JSON/HTML to *stdout*, not to a file, and
+		// are admitted.
+		flags: flagsOf(
+			noneOf("-a", "-A", "-c", "-C", "-d", "-D", "-f", "-F", "-g", "-i", "-J",
+				"-l", "-n", "-N", "-p", "-q", "-Q", "-r", "-R", "-s", "-S", "-t", "-u",
+				"-U", "-v", "-x", "-X",
+				"--noreport", "--dirsfirst", "--filesfirst", "--si", "--du", "--inodes",
+				"--device", "--prune", "--matchdirs", "--nolinks", "--version",
+				"--ignore-case"),
+			numOf("-L", "--level", "--filelimit"),
+			strOf("-P", "-I", "-H", "-T", "--charset", "--timefmt", "--sort"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+
+	// --- Metadata ------------------------------------------------------------
+	"stat": {
+		flags: flagsOf(
+			noneOf("-f", "-L", "-t", "-Z", "--dereference", "--file-system",
+				"--terse", "--context"),
+			strOf("-c", "--format", "--printf", "--cached"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"file": {
+		// DENIED: -C/--compile. `file -C -m magicfile` *writes* a compiled
+		// .mgc file next to the magic file — a writing form in a binary whose
+		// entire purpose reads as read-only. Exactly rule 2.
+		flags: flagsOf(
+			noneOf("-b", "-h", "-i", "-k", "-L", "-n", "-N", "-p", "-r", "-s", "-v",
+				"-z", "-0", "--brief", "--no-dereference", "--mime", "--mime-type",
+				"--mime-encoding", "--keep-going", "--dereference", "--no-pad",
+				"--raw", "--uncompress", "--print0", "--separator"),
+			strOf("-e", "--exclude", "-F", "-f", "--files-from", "-m", "--magic-file"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"du": {
+		flags: flagsOf(
+			noneOf("-a", "-b", "-c", "-h", "-H", "-k", "-l", "-L", "-m", "-P", "-s",
+				"-S", "-x", "-0", "--all", "--apparent-size", "--bytes", "--total",
+				"--dereference", "--dereference-args", "--human-readable", "--si",
+				"--one-file-system", "--separate-dirs", "--summarize", "--null",
+				"--count-links", "--inodes"),
+			numOf("-d", "--max-depth"),
+			strOf("--exclude", "--exclude-from", "--files0-from", "--threshold"),
+			patOf(sizePattern, "-B", "--block-size"),
+			optOf("--time"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"df": {
+		// df's --output=FIELD_LIST selects *columns*; it writes nothing. It is
+		// admitted here while sort's --output is denied, which is the point of
+		// per-command tables: a global flag denylist cannot tell them apart.
+		flags: flagsOf(
+			noneOf("-a", "-h", "-H", "-i", "-k", "-l", "-P", "-T", "-v",
+				"--all", "--human-readable", "--si", "--inodes", "--local",
+				"--portability", "--print-type", "--no-sync", "--sync", "--total"),
+			strOf("-t", "--type", "-x", "--exclude-type"),
+			patOf(sizePattern, "-B", "--block-size"),
+			optOf("--output"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+
+	// --- Host and identity ---------------------------------------------------
+	"pwd":    {flags: flagsOf(noneOf("-L", "-P", "--logical", "--physical")), maxPositionals: 0},
+	"whoami": {flags: flagsOf(), maxPositionals: 0},
+	"id": {
+		flags: flagsOf(noneOf("-a", "-g", "-G", "-n", "-r", "-u", "-z", "-Z",
+			"--group", "--groups", "--name", "--real", "--user", "--zero", "--context")),
+		maxPositionals: 1,
+	},
+	"uname": {
+		flags: flagsOf(noneOf("-a", "-s", "-n", "-r", "-v", "-m", "-p", "-i", "-o",
+			"--all", "--kernel-name", "--nodename", "--kernel-release", "--kernel-version",
+			"--machine", "--processor", "--hardware-platform", "--operating-system")),
+		maxPositionals: 0,
+	},
+	"hostname": {
+		// maxPositionals: 0 is load-bearing. `hostname foo` SETS the system
+		// hostname; the read-only form is the bare invocation. -F/--file has
+		// the same effect from a file and is denied.
+		flags: flagsOf(noneOf("-s", "-f", "-d", "-i", "-I", "-A", "-a", "-y",
+			"--short", "--fqdn", "--long", "--domain", "--ip-address", "--all-ip-addresses",
+			"--all-fqdns", "--alias", "--yp", "--nis")),
+		maxPositionals: 0,
+	},
+	"date": {
+		// DENIED: -s/--set writes the system clock. And on BSD/macOS `date`
+		// the clock-setting form is a *positional* ("date 202601011200"),
+		// which no flag table can express — hence the predicate: a positional
+		// is only admissible as a "+FORMAT" output template.
+		flags: flagsOf(
+			noneOf("-u", "-R", "-L", "--utc", "--universal", "--rfc-email", "--debug"),
+			strOf("-d", "--date", "-f", "--file", "-r", "--reference", "--rfc-3339"),
+			optOf("-I", "--iso-8601"),
+		),
+		doubleDash: false, maxPositionals: 1,
+		predicate: func(pos []string) bool {
+			for _, p := range pos {
+				if !strings.HasPrefix(p, "+") {
+					return false
+				}
+			}
+			return true
+		},
+	},
+	"which": {
+		flags:          flagsOf(noneOf("-a", "-s", "-v", "--all", "--skip-alias", "--skip-functions")),
+		maxPositionals: anyPositionals,
+	},
+	"type": {
+		flags:          flagsOf(noneOf("-a", "-f", "-p", "-P", "-t")),
+		maxPositionals: anyPositionals,
+	},
+
+	// --- Search --------------------------------------------------------------
+	"grep": {
+		// grep's -o is --only-matching, not an output file. Same spelling,
+		// opposite meaning from sort's; the per-command table is what lets
+		// both be right.
+		flags: flagsOf(
+			noneOf("-a", "-b", "-c", "-E", "-F", "-G", "-H", "-h", "-i", "-I", "-l",
+				"-L", "-n", "-o", "-P", "-q", "-r", "-R", "-s", "-U", "-v", "-w", "-x",
+				"-y", "-z", "-Z",
+				"--text", "--byte-offset", "--count", "--extended-regexp",
+				"--fixed-strings", "--basic-regexp", "--perl-regexp", "--with-filename",
+				"--no-filename", "--ignore-case", "--no-ignore-case", "--files-with-matches",
+				"--files-without-match", "--line-number", "--only-matching", "--quiet",
+				"--silent", "--recursive", "--dereference-recursive", "--no-messages",
+				"--invert-match", "--word-regexp", "--line-regexp", "--null",
+				"--null-data", "--line-buffered", "--initial-tab", "-T"),
+			numOf("-A", "--after-context", "-B", "--before-context", "-C", "--context",
+				"-m", "--max-count"),
+			strOf("-e", "--regexp", "-f", "--file", "-d", "--directories",
+				"-D", "--devices", "--include", "--exclude", "--exclude-dir",
+				"--exclude-from", "--binary-files", "--label", "--group-separator"),
+			optOf("--color", "--colour"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"rg": {
+		// P67.8 opens up ripgrep with its flags rather than not at all.
+		//
+		// DENIED, and why:
+		//   --pre=CMD runs an arbitrary preprocessor command over every file
+		//     rg opens, and --pre-glob only scopes it. This is a program
+		//     launcher spelled as a search flag.
+		//   --hostname-bin=CMD names a binary rg execs to resolve the hostname
+		//     for hyperlinks — arbitrary execution from a flag whose name
+		//     suggests a lookup.
+		//   -z/--search-zip decompresses via external decompressor binaries,
+		//     a PATH-hijack surface of the same shape.
+		//   --generate emits shell completions / man pages; harmless but it is
+		//     not a search, so it fails closed.
+		// rg's -r/--replace only rewrites the *printed* output; it never
+		// touches the file, so it is admitted.
+		flags: flagsOf(
+			noneOf("-i", "-s", "-S", "-v", "-w", "-x", "-n", "-N", "-c", "-l", "-L",
+				"-F", "-H", "-I", "-o", "-p", "-q", "-u", "-a", "-U", "-b", "-P", "-V", "-0",
+				"--ignore-case", "--case-sensitive", "--smart-case", "--invert-match",
+				"--word-regexp", "--line-regexp", "--line-number", "--no-line-number",
+				"--count", "--count-matches", "--files-with-matches", "--files-without-match",
+				"--fixed-strings", "--with-filename", "--no-filename", "--only-matching",
+				"--pretty", "--quiet", "--text", "--multiline", "--multiline-dotall",
+				"--hidden", "--no-hidden", "--no-ignore", "--no-ignore-vcs",
+				"--no-ignore-parent", "--no-ignore-global", "--no-ignore-dot",
+				"--no-ignore-files", "--no-messages", "--no-heading", "--heading",
+				"--json", "--stats", "--files", "--null", "--vimgrep", "--column",
+				"--no-config", "--one-file-system", "--crlf", "--binary", "--trim",
+				"--block-buffered", "--line-buffered", "--byte-offset", "--follow",
+				"--unrestricted", "--pcre2", "--no-unicode", "--include-zero",
+				"--no-require-git", "--version", "--debug"),
+			numOf("-m", "--max-count", "-A", "--after-context", "-B", "--before-context",
+				"-C", "--context", "--max-depth", "-M", "--max-columns", "-j", "--threads"),
+			strOf("-e", "--regexp", "-f", "--file", "-g", "--glob", "--iglob",
+				"-t", "--type", "-T", "--type-not", "--type-add", "-r", "--replace",
+				"--sort", "--sortr", "--color", "--colors", "--engine",
+				"--context-separator", "--field-context-separator",
+				"--field-match-separator", "--path-separator", "--ignore-file",
+				"--max-filesize", "--encoding", "-E"),
+			optOf("--max-columns-preview"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"fd": {
+		// P67.8 opens up fd.
+		//
+		// DENIED, and why:
+		//   -x/--exec and -X/--exec-batch run a command per result. Obvious.
+		//   -l/--list-details is the instructive one: it does not merely print
+		//     more columns, it internally execs `ls` to render them. A flag
+		//     whose name says "details" is a PATH-hijack surface. This is the
+		//     example rule 2 was written from — never assume a flag's blast
+		//     radius from its name.
+		//   --gen-completions writes/emits shell completions; not a search.
+		// fd's -o/--owner filters by owner and writes nothing — the third
+		// distinct meaning of "-o" in this table.
+		flags: flagsOf(
+			noneOf("-H", "-I", "-s", "-i", "-g", "-F", "-a", "-L", "-p", "-0", "-u",
+				"-q", "-h", "-V",
+				"--hidden", "--no-hidden", "--no-ignore", "--no-ignore-vcs",
+				"--no-ignore-parent", "--unrestricted", "--case-sensitive",
+				"--ignore-case", "--glob", "--regex", "--fixed-strings",
+				"--absolute-path", "--relative-path", "--follow", "--no-follow",
+				"--full-path", "--print0", "--show-errors", "--one-file-system",
+				"--prune", "--quiet", "--version", "--strip-cwd-prefix"),
+			numOf("-d", "--max-depth", "--min-depth", "--exact-depth", "--max-results",
+				"-j", "--threads"),
+			strOf("-t", "--type", "-e", "--extension", "-E", "--exclude", "-S", "--size",
+				"--changed-within", "--changed-before", "--older", "--newer",
+				"-o", "--owner", "--base-directory", "--path-separator", "--format",
+				"--color", "--ignore-file", "--and", "--search-path"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+
+	// --- Network-facing ------------------------------------------------------
+	"gh": {
+		// P67.8 opens up read-only gh subcommands — but as tool.CapNetwork,
+		// not tool.CapRead. Every gh call talks to GitHub, and plan mode Asks
+		// for CapNetwork while it Allows CapRead silently (permission.Policy.
+		// Decide). Classifying gh as CapRead would make it *more* permissive
+		// than the network gate it must sit behind. The downgrade is still
+		// worth having: build mode Allows CapNetwork where it Asks for
+		// CapExecute, and plan mode Asks instead of Denying outright.
+		//
+		// DENIED, and why:
+		//   `gh api` is a general-purpose HTTP client — `-X POST`, `-f k=v`
+		//     mutate anything the token can reach. No read-only subset of it
+		//     is expressible in a flag table.
+		//   `gh auth` (status included) is one --show-token away from printing
+		//     the credential, the same class of leak as env/printenv.
+		//   -w/--web launches a browser: a program launcher, like less/more.
+		//   --hostname points gh at an arbitrary host, i.e. sends the GitHub
+		//     token somewhere else. Nothing in the name says "credential
+		//     exfiltration".
+		//   Any `create`/`edit`/`close`/`merge`/`delete`/`comment` subcommand
+		//     mutates; only the view/list/status/diff family is listed.
+		capability: tool.CapNetwork,
+		subcommands: map[string]*commandSpec{
+			"pr":       ghSubcommands("view", "list", "diff", "status", "checks"),
+			"issue":    ghSubcommands("view", "list", "status"),
+			"repo":     ghSubcommands("view", "list"),
+			"run":      ghSubcommands("view", "list"),
+			"release":  ghSubcommands("view", "list"),
+			"workflow": ghSubcommands("view", "list"),
+			"search":   ghSubcommands("repos", "issues", "prs", "code", "commits"),
+			"label":    ghSubcommands("list"),
+			"gist":     ghSubcommands("view", "list"),
+		},
+		maxPositionals: 0,
+	},
+
+	// --- PowerShell ----------------------------------------------------------
+	// The shell tool runs commands through PowerShell on Windows (see
+	// shell.go's Description), so the read-only tier needs cmdlet entries too.
+	// All of them set singleDashLong: PowerShell parameters are whole words
+	// behind one dash, matched case-insensitively, with no short-flag
+	// clustering and no POSIX "--". PowerShell also accepts unambiguous
+	// parameter *abbreviations* ("-Rec" for "-Recurse"), which this table does
+	// not enumerate — an abbreviation simply fails closed and costs the call
+	// its downgrade, which is the safe direction.
+	"get-childitem": psSpec(
+		noneOf("-recurse", "-force", "-name", "-file", "-directory", "-hidden",
+			"-readonly", "-system", "-followsymlink", "-usetransaction"),
+		strOf("-path", "-literalpath", "-filter", "-include", "-exclude",
+			"-attributes", "-erroraction", "-errorvariable"),
+		numOf("-depth"),
+	),
+	"get-content": psSpec(
+		noneOf("-raw", "-force", "-wait", "-asbytestream", "-usetransaction"),
+		strOf("-path", "-literalpath", "-filter", "-include", "-exclude",
+			"-encoding", "-delimiter", "-stream", "-erroraction"),
+		numOf("-tail", "-totalcount", "-head", "-first", "-last", "-readcount"),
+	),
+	"get-item": psSpec(
+		noneOf("-force", "-usetransaction"),
+		strOf("-path", "-literalpath", "-filter", "-include", "-exclude", "-stream",
+			"-erroraction"),
+	),
+	"test-path": psSpec(
+		noneOf("-isvalid", "-newerthan", "-olderthan", "-usetransaction"),
+		strOf("-path", "-literalpath", "-filter", "-include", "-exclude",
+			"-pathtype", "-erroraction"),
+	),
+	"get-location": psSpec(
+		noneOf("-stack"),
+		strOf("-psprovider", "-psdrive", "-stackname"),
+	),
+	// Get-Process survives while `ps` does not: its default output is a
+	// process table with no environment block, and PowerShell exposes a
+	// process's environment only through .StartInfo.Environment, which needs a
+	// property access this classifier's metacharacter rejection already
+	// forbids. -ComputerName is denied because it reaches a *remote* machine.
+	"get-process": psSpec(
+		noneOf("-module", "-fileversioninfo", "-includeusername"),
+		strOf("-name", "-inputobject", "-erroraction"),
+		numOf("-id"),
+	),
+	// Unlike POSIX `date`, Get-Date has no clock-setting form at all — that is
+	// Set-Date, a different cmdlet — so no predicate is needed here.
+	"get-date": psSpec(
+		noneOf("-asutc"),
+		strOf("-format", "-uformat", "-date", "-displayhint"),
+		numOf("-year", "-month", "-day", "-hour", "-minute", "-second", "-millisecond"),
+	),
+	"select-string": psSpec(
+		noneOf("-simplematch", "-casesensitive", "-notmatch", "-list", "-quiet",
+			"-allmatches", "-raw", "-noemphasis"),
+		strOf("-path", "-literalpath", "-pattern", "-include", "-exclude",
+			"-encoding", "-inputobject", "-erroraction"),
+		numOf("-context"),
+	),
+	// where.exe (the Windows binary, not PowerShell's Where-Object) takes
+	// slash-style switches this parser treats as positionals; a "/R dir"
+	// invocation therefore fails path confinement and simply loses the
+	// downgrade.
+	"where": {flags: flagsOf(), maxPositionals: anyPositionals},
+}
+
+// ghSubcommands builds the leaf spec for a gh noun's read-only verbs. Every
+// verb shares one flag table: gh's output-shaping flags (--json/--jq/
+// --template), its filters, and nothing that mutates, opens a browser, or
+// retargets the host. See the gh entry for what is denied and why.
+func ghSubcommands(verbs ...string) *commandSpec {
+	leaf := &commandSpec{
+		capability: tool.CapNetwork,
+		flags: flagsOf(
+			noneOf("-c", "--comments", "--patch", "--name-only", "--merged", "--closed",
+				"--json-fields", "--no-color"),
+			numOf("-L", "--limit"),
+			strOf("--json", "-q", "--jq", "-t", "--template", "-R", "--repo",
+				"-s", "--state", "-A", "--author", "-a", "--assignee", "-l", "--label",
+				"-S", "--search", "-B", "--branch", "--head", "--base", "--owner",
+				"--sort", "--order", "--visibility", "--language", "--topic",
+				"--workflow", "--user", "--filename"),
+		),
+		doubleDash: true, maxPositionals: 2,
+	}
+	m := make(map[string]*commandSpec, len(verbs))
+	for _, v := range verbs {
+		m[v] = leaf
+	}
+	return &commandSpec{capability: tool.CapNetwork, subcommands: m, maxPositionals: 0}
+}
+
+// psSpec builds a PowerShell cmdlet spec: single-dash long parameters, no
+// POSIX "--", unlimited positionals.
+func psSpec(groups ...flagGroup) *commandSpec {
+	return &commandSpec{
+		flags:          flagsOf(groups...),
+		singleDashLong: true,
+		maxPositionals: anyPositionals,
+	}
 }
 
 // readOnlyGitSubcommands is the allowlist of git subcommands treated as
 // read-only. Only subcommands that are read-only for every possible
 // argument combination belong here — e.g. "branch"/"tag"/"remote" are
 // excluded because a positional argument turns them into a mutation
-// ("git branch foo" creates a branch), unlike "status"/"log"/"diff"/"show"
-// which stay read-only regardless of extra flags or pathspecs.
+// ("git branch foo" creates a branch), and "reflog"/"symbolic-ref" because
+// their extra forms ("reflog expire", "symbolic-ref NAME REF") mutate too.
+// The listed ones stay read-only regardless of extra flags or pathspecs.
+//
+// git keeps its own path (rather than a commandSpec) on purpose: the flag
+// rules for a git invocation must stay *identical* to the dedicated git tool's,
+// and validateReadOnlyGitArgv in argv_confine.go is the one place that decides
+// them for both. Duplicating them into a flag table here would recreate
+// exactly the divergence P66.3 closed.
 var readOnlyGitSubcommands = map[string]bool{
 	"status": true, "log": true, "diff": true, "show": true, "blame": true,
-	"rev-parse": true, "describe": true, "ls-files": true, "cat-file": true,
-	"shortlog": true,
+	"annotate": true, "rev-parse": true, "describe": true, "ls-files": true,
+	"ls-tree": true, "cat-file": true, "shortlog": true, "grep": true,
+	"rev-list": true, "diff-tree": true, "diff-index": true, "merge-base": true,
+	"name-rev": true, "show-branch": true, "count-objects": true,
+	"whatchanged": true, "for-each-ref": true, "check-ignore": true,
 }
 
-// readOnlyShellCommand reports whether command is safe to gate as
-// tool.CapRead instead of tool.CapExecute (P25.4c): a narrow allowlist of
-// inspection commands, rejected outright if any shell chaining/redirection/
-// substitution metacharacter is present anywhere in the string — including
-// one nested inside quotes, which this scan does not parse — or if any
-// argument resolves (via sandbox.ValidatePath, the same root-confinement
-// check read_file/grep/glob already use) outside root (P32.1). Being
-// conservative here is deliberate: a false negative just means the call
+// classifyShellCommand reports the capability a shell command may be gated as
+// instead of tool.CapExecute (P25.4c, P67.8), and whether it is classified at
+// all. The command is rejected outright if any shell chaining/redirection/
+// substitution metacharacter is present anywhere in the string — including one
+// nested inside quotes, which this scan does not parse — if its binary has no
+// entry in readOnlyShellCommands, if it carries a flag that entry does not
+// list, or if any argument resolves (via sandbox.ValidatePath, the same
+// root-confinement check read_file/grep/glob already use) outside root (P32.1).
+//
+// Being conservative here is deliberate: a false negative just means the call
 // keeps requiring an execute approval like today; a false positive would
 // auto-approve something that mutates state or exfiltrates data.
-func readOnlyShellCommand(root, command string) bool {
+func classifyShellCommand(root, command string) (tool.Capability, bool) {
 	command = strings.TrimSpace(command)
 	if command == "" || strings.ContainsAny(command, permission.ShellChainMetaChars) {
-		return false
+		return tool.CapExecute, false
 	}
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
-		return false
+		return tool.CapExecute, false
 	}
 	bin := strings.ToLower(baseBinaryName(fields[0]))
 	if bin == "git" {
-		return readOnlyGitCommand(root, fields[1:])
+		if readOnlyGitCommand(root, fields[1:]) {
+			return tool.CapRead, true
+		}
+		return tool.CapExecute, false
 	}
-	if !readOnlyShellArgv0[bin] {
-		return false
+	spec := readOnlyShellCommands[bin]
+	if spec == nil {
+		return tool.CapExecute, false
+	}
+	cap, ok := spec.classify(fields[1:])
+	if !ok {
+		return tool.CapExecute, false
 	}
 	// argvStaysInRoot (argv_confine.go) confines operands *and* attached flag
 	// values; the old local helper skipped every token starting with "-",
-	// which is what VULN-02 rode in on. A path outside root disqualifies the
-	// command from the CapRead downgrade — it still runs, just under the
-	// normal CapExecute approval flow instead of being silently auto-allowed
-	// under plan mode's read gate.
-	return argvStaysInRoot(root, fields[1:])
+	// which is what VULN-02 rode in on. Flag parsing above decided whether the
+	// command *can* be read-only; this decides whether this invocation is —
+	// both, never either. A path outside root disqualifies the command from
+	// the downgrade — it still runs, just under the normal CapExecute approval
+	// flow instead of being silently auto-allowed under plan mode's read gate.
+	if !argvStaysInRoot(root, spec.confinementArgs(fields[1:])) {
+		return tool.CapExecute, false
+	}
+	return cap, true
+}
+
+// confinementArgs adapts an argv for argvPathCandidates, which knows the two
+// POSIX attached-value spellings ("--flag=value", "-fvalue") but not
+// PowerShell's third one: "-Path:C:\Windows" attaches its value with a colon.
+// Left alone, argvPathCandidates reads that token as the short-cluster form
+// and offers "ath:C:\Windows" — a relative name that resolves happily inside
+// the root, so the escape passes. Splitting the value out here hands it over
+// as an operand instead. This is the VULN-02 shape in a third spelling; a
+// missed attached value is a host-filesystem read that plan mode allows in
+// silence.
+func (s *commandSpec) confinementArgs(args []string) []string {
+	if !s.singleDashLong {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			if name, value, ok := strings.Cut(a, ":"); ok {
+				out = append(out, name, value)
+				continue
+			}
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// readOnlyShellCommand reports whether command is safe to gate as
+// tool.CapRead. It is the narrower question classifyShellCommand answers:
+// a command classified as tool.CapNetwork (gh) is not a *read*, so it neither
+// gets plan mode's silent allow nor counts as read-only anywhere else.
+func readOnlyShellCommand(root, command string) bool {
+	cap, ok := classifyShellCommand(root, command)
+	return ok && cap == tool.CapRead
+}
+
+// classify walks a command's arguments against its spec and returns the
+// capability the invocation earns. Every unrecognized flag fails closed.
+func (s *commandSpec) classify(args []string) (tool.Capability, bool) {
+	cap := s.capability
+	if cap == "" {
+		cap = tool.CapRead
+	}
+	if s.subcommands != nil {
+		if len(args) == 0 {
+			return tool.CapExecute, false
+		}
+		sub := s.subcommands[strings.ToLower(args[0])]
+		if sub == nil {
+			return tool.CapExecute, false
+		}
+		return sub.classify(args[1:])
+	}
+	positionals, ok := s.parseFlags(args)
+	if !ok {
+		return tool.CapExecute, false
+	}
+	if s.maxPositionals != anyPositionals && len(positionals) > s.maxPositionals {
+		return tool.CapExecute, false
+	}
+	if s.predicate != nil && !s.predicate(positionals) {
+		return tool.CapExecute, false
+	}
+	return cap, true
+}
+
+// parseFlags splits args into positionals, rejecting any flag the spec does
+// not list. A flag's value may be attached ("--glob=x", "-gx", "-Path:x") or
+// separated ("--glob x"); a separated value is consumed here so it is never
+// miscounted as a positional.
+func (s *commandSpec) parseFlags(args []string) ([]string, bool) {
+	var positionals []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			// The per-command POSIX "--" switch. A command that does not
+			// honor it sees "--" as an unlisted flag and fails closed, rather
+			// than silently treating the rest of the line as operands the way
+			// a "--"-honoring command would.
+			if !s.doubleDash {
+				return nil, false
+			}
+			positionals = append(positionals, args[i+1:]...)
+			return positionals, true
+		case a == "" || a == "-" || !strings.HasPrefix(a, "-"):
+			positionals = append(positionals, a)
+			continue
+		}
+
+		var name, value string
+		var hasValue, cluster bool
+		switch {
+		case s.singleDashLong:
+			// PowerShell: "-Recurse", "-Path x", "-Path:x". Case-insensitive.
+			name, value, hasValue = strings.Cut(a, ":")
+			name = strings.ToLower(name)
+		case strings.HasPrefix(a, "--"):
+			name, value, hasValue = strings.Cut(a, "=")
+		default:
+			if s.numericShorthand && isAllDigits(a[1:]) {
+				continue // head/tail/uniq's obsolete "-20" count
+			}
+			cluster = true
+		}
+
+		if cluster {
+			consumed, ok := s.parseShortCluster(a, args, i)
+			if !ok {
+				return nil, false
+			}
+			i = consumed
+			continue
+		}
+
+		spec, listed := s.flags[name]
+		if !listed {
+			return nil, false
+		}
+		switch {
+		case spec.arg == noArg:
+			if hasValue {
+				return nil, false // "--recursive=x" is not a flag we listed
+			}
+		case hasValue:
+			if !spec.valid(value) {
+				return nil, false
+			}
+		case spec.optional:
+			// "--color" with no attached value: takes none. Deliberately does
+			// not reach forward for the next token, which would swallow a path
+			// operand.
+		default:
+			if i+1 >= len(args) || !spec.valid(args[i+1]) {
+				return nil, false
+			}
+			i++
+		}
+	}
+	return positionals, true
+}
+
+// parseShortCluster handles a single-dash token as a cluster of short flags
+// ("-la", "-n20", "-ofoo"). It returns the index of the last args element it
+// consumed. The first flag in the cluster that takes a value takes the rest of
+// the token as that value, or the next argument when the token ends there.
+func (s *commandSpec) parseShortCluster(a string, args []string, i int) (int, bool) {
+	for j := 1; j < len(a); j++ {
+		name := "-" + string(a[j])
+		spec, listed := s.flags[name]
+		if !listed {
+			return 0, false
+		}
+		if spec.arg == noArg {
+			continue
+		}
+		if rest := a[j+1:]; rest != "" {
+			if !spec.valid(rest) {
+				return 0, false
+			}
+			return i, true
+		}
+		if spec.optional {
+			return i, true
+		}
+		if i+1 >= len(args) || !spec.valid(args[i+1]) {
+			return 0, false
+		}
+		return i + 1, true
+	}
+	return i, true
+}
+
+// valid reports whether value satisfies the flag's argument type and pattern.
+func (f flagSpec) valid(value string) bool {
+	if f.arg == numArg {
+		if _, err := strconv.ParseFloat(value, 64); err != nil {
+			return false
+		}
+	}
+	if f.pattern != nil && !f.pattern.MatchString(value) {
+		return false
+	}
+	return true
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // readOnlyGitCommand reports whether a git invocation's arguments (fields

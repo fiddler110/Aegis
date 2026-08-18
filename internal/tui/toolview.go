@@ -28,7 +28,24 @@ const (
 // diff) shown when a tool is about to run. File edits are diffed from the tool
 // input — old_string/new_string for edits, content for writes — so the user
 // sees exactly what is changing without waiting for the result.
+//
+// P66.15: the name and the arguments are model-controlled, and every branch
+// below styles them with lipgloss/chroma *after* this point — nothing
+// downstream strips an escape sequence out of a diff body (renderLinesBlock
+// doesn't, and diffLines feeds it directly). P66.6 made exactly this fix for
+// the approval dialog, which is one branch of the same event stream; the
+// transcript is the other, and it renders the same bytes. Sanitizing here
+// rather than in each preview renderer is the same choice for the same
+// reason: seven branches plus a generic fallback, and renderShellCall's
+// per-renderer strip (P28.1) is the evidence that the per-branch form leaves
+// the next branch uncovered.
+//
+// This is also the choke point for replayed history (tui.go's loadHistory
+// calls it with a stored tool_use block), so a poisoned transcript reloaded
+// from the session store is covered by the same line.
 func renderToolCall(th theme, name string, input json.RawMessage, width int) string {
+	name = stripControlSeqs(name)
+	input = json.RawMessage(sanitizeToolInputJSON(string(input)))
 	switch name {
 	case "edit_file":
 		if s, ok := renderEditDiff(th, name, input, width); ok {
@@ -93,7 +110,9 @@ func renderToolCardStart(th theme, call string, step int) string {
 // provisional state above, matching renderToolCall's generic header so the
 // two line up when one replaces the other.
 func renderToolCardStartCall(th theme, name string) string {
-	return th.tool.Render("● " + name)
+	// The name arrives from the model, and this card goes up before any
+	// arguments exist to route through renderToolCall (P66.15).
+	return th.tool.Render("● " + stripControlSeqs(name))
 }
 
 // renderToolCardDone renders the finished ("ok"/"err") state of a combined
@@ -127,7 +146,11 @@ func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyL
 	}
 	// Untrusted raw tool output (P28.1) — strip anything beyond SGR colour
 	// before it reaches the real terminal, covering every branch below
-	// (single-line, read_file, and the generic renderBlock path).
+	// (single-line, read_file, and the generic renderBlock path). The name is
+	// model-controlled too and is echoed in every branch's header (P66.15);
+	// unlike the body it carries no legitimate styling, so it gets the
+	// stricter strip.
+	name = stripControlSeqs(name)
 	result = stripDangerousSeqs(strings.TrimRight(result, "\n"))
 
 	if !strings.Contains(result, "\n") {

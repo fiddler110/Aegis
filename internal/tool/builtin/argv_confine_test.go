@@ -106,10 +106,10 @@ func TestReadOnlyTierRefusesEscapesInPlanMode(t *testing.T) {
 	}{
 		{name: "git diff --no-index", argv: []string{"diff", "--no-index", "--", "/dev/null", outside}},
 		{name: "git diff --output=", argv: []string{"diff", "--output=" + outside}},
-		// VULN-02. `sort` is off the argv0 allowlist entirely (it has a
-		// documented file-writing form, so no argument parsing makes it
-		// read-only), and the attached-value confinement would refuse the
-		// escaping path even if it were not.
+		// VULN-02. Since P67.8 `sort` *is* classifiable, but its writing form
+		// is not: -o/--output is absent from sort's flag table, so the command
+		// fails closed on the flag alone — and the attached-value confinement
+		// would refuse the escaping path even if the flag were listed.
 		{name: "sort --output=", command: "sort --output=" + outside + " in.txt"},
 		{name: "sort -o attached", command: "sort -o" + outside + " in.txt"},
 		// SEC-04: `ps auxwwe` prints the daemon's environment, i.e. the

@@ -257,7 +257,13 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		// (the active theme) is available — the dispatcher that produced
 		// it has no theme reference, same reason /theme and /clear pass
 		// through a \x00 marker instead of pre-rendering.
-		diffText := strings.TrimPrefix(msg.Output, "\x00diff\n")
+		// P66.15: a slash command's text tail is not all harness-authored —
+		// /scan network prints nmap's service banners, i.e. bytes a remote
+		// host chose, and /scan path prints whatever a scanner put in a
+		// finding title — and nothing between here and the terminal strips an
+		// escape sequence. Same posture as raw tool output (P28.1): drop
+		// everything but SGR colour, which the diff's own colours use.
+		diffText := stripDangerousSeqs(strings.TrimPrefix(msg.Output, "\x00diff\n"))
 		rendered := diffText
 		if lines, ok := highlightUnifiedDiff(m.th, diffText); ok {
 			rendered = strings.Join(lines, "\n")
@@ -276,7 +282,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		if title == "" {
 			title = "info"
 		}
-		p := newTransientPanel(title, msg.Output, msg.IsError, m.width, m.height)
+		p := newTransientPanel(title, stripDangerousSeqs(msg.Output), msg.IsError, m.width, m.height)
 		m.transientPanel = &p
 		m.ta.Blur()
 		m.refresh()
@@ -287,7 +293,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		if msg.IsError {
 			style = m.th.errLine
 		}
-		m.transcript.Append(style.Render(msg.Output) + "\n\n")
+		m.transcript.Append(style.Render(stripDangerousSeqs(msg.Output)) + "\n\n")
 	}
 	if msg.Drive != nil {
 		// P52.12: an unattended phased drive. The transcript treats it as an

@@ -235,7 +235,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 	if loaded := preloadPersonaTools(sessionTools, p); len(loaded) > 0 {
 		s.logger.Debug("preloaded persona's deferred tools", "persona", p.Name, "tools", loaded)
 	}
-	eng, runModel, err := s.newEngine(sess.Mode, runApprover, steers.ch, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages)
+	eng, runModel, err := s.newEngine(sess.Mode, runApprover, steers.ch, p, guardEnabled, tracker, sessionTools, sess.Model, workdir, req.Text, sess.Messages, sess.UpdatedAt)
 	if err != nil {
 		send(api.Event{Kind: api.KindError, Error: err.Error()})
 		return

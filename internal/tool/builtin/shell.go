@@ -55,8 +55,14 @@ func (t *shellTool) CapabilityFor(input json.RawMessage) tool.Capability {
 	var args struct {
 		Command string `json:"command"`
 	}
-	if json.Unmarshal(input, &args) == nil && readOnlyShellCommand(t.root, args.Command) {
-		return tool.CapRead
+	if json.Unmarshal(input, &args) == nil {
+		// P67.8: the classifier answers with a capability, not a bool — a
+		// recognized `gh` subcommand is read-only on the *filesystem* but is
+		// still network egress, and plan mode Asks for CapNetwork where it
+		// silently Allows CapRead.
+		if cap, ok := classifyShellCommand(t.root, args.Command); ok {
+			return cap
+		}
 	}
 	return tool.CapExecute
 }
@@ -133,7 +139,10 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	// see shell_checkpoint.go — unless the command is already known safe.
 	var text string
 	var err error
-	if readOnlyShellCommand(root, args.Command) {
+	if _, classified := classifyShellCommand(root, args.Command); classified {
+		// Any classified command is non-mutating (CapRead or, for gh,
+		// CapNetwork), so there is nothing for the checkpoint snapshot to
+		// capture.
 		text, err = t.exec(ctx, root, args.Command, timeout)
 	} else {
 		text, err = captureShellWrites(ctx, checkpoint.SnapshotterFrom(ctx), root, func() (string, error) {

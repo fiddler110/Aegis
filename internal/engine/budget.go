@@ -80,6 +80,24 @@ func (b *runBudget) deadline(ctx context.Context) (context.Context, context.Canc
 	return context.WithTimeout(ctx, b.wallClock)
 }
 
+// spendBounded reports whether this run has a bound that only the *end* of a
+// turn can decide: a USD cap or either token cap, all three of which are read
+// off usage the provider does not report until the turn is done.
+//
+// P67.7 needs it. Dispatching a tool call while the turn is still streaming
+// moves that call to *before* the pre-tool-round gate, and the gate's whole
+// reason for existing (see exceeded) is that a turn which itself pushes spend
+// over the cap must stop before its tool calls run, not one iteration later. A
+// call started mid-stream cannot honor a bound that is not yet decidable, so
+// when one is configured the engine does not start calls mid-stream at all.
+//
+// The wall-clock bound is deliberately absent: it is attached to the context as
+// a real deadline (see deadline), so it already reaches a running tool round and
+// needs no gate to be honored. Same for the P39.17 stall watch.
+func (b *runBudget) spendBounded() bool {
+	return b.usd > 0 || b.tokens > 0 || b.genTokens > 0
+}
+
 // exceeded reports the first bound this run has crossed, or nil.
 //
 // Both gates in Run — before each model turn and before each tool round — call

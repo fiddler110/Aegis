@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -325,7 +324,30 @@ type Options struct {
 	// call. The zero value (provider.PurposeUnspecified) leaves the request
 	// untagged, which resolves to the baseline policy and to whatever
 	// run-scoped default the launcher put on the context.
-	Purpose             provider.Purpose
+	//
+	// P67.6 gives it a second reader inside the engine: the cold-cache pass
+	// rewrites the conversation, so it must not fire for an analysis-only caller
+	// inspecting one. See coldCachePurposeEligible.
+	Purpose provider.Purpose
+	// ColdCacheAfter is the idle gap past which the engine clears stale,
+	// re-fetchable tool results from the conversation before the next request
+	// (P67.6) — a trigger on cache *temperature*, orthogonal to the compaction
+	// trigger's context pressure. 0 disables it.
+	//
+	// It requires a Compactor implementing ColdCacheCompactor; with any other
+	// Compactor it is inert rather than an error, the way every other optional
+	// capability on that seam is.
+	ColdCacheAfter time.Duration
+	// LastActivityAt is when this conversation last saw an assistant message,
+	// for callers that resume one from storage (the daemon reads it off the
+	// session row). It is what makes the *resume* case — the one ColdCacheAfter
+	// is really about — visible at all, since the engine's own clock starts at
+	// run entry and sees a gap of zero.
+	//
+	// The zero value means "not known", not "long ago": a caller with no such
+	// record gets no cold-cache pass until the run's own first turn establishes
+	// one, which is the safe direction.
+	LastActivityAt      time.Time
 	Model               string
 	MaxTokens           int
 	Temperature         *float64
@@ -445,6 +467,8 @@ type Engine struct {
 	temperature         *float64
 	seed                *int
 	purpose             provider.Purpose // P67.3: call-purpose tag stamped on every request
+	coldCacheAfter      time.Duration    // P67.6: idle gap that triggers the cold-cache clear; 0 = off
+	lastActivityAt      time.Time        // P67.6: when the resumed conversation last saw an assistant message; zero = unknown
 	maxIterations       int
 	loopThreshold       int
 	contextWindowTokens int
@@ -623,6 +647,8 @@ func New(opts Options) (*Engine, error) {
 		temperature:         opts.Temperature,
 		seed:                opts.Seed,
 		purpose:             opts.Purpose,
+		coldCacheAfter:      opts.ColdCacheAfter,
+		lastActivityAt:      opts.LastActivityAt,
 		maxIterations:       maxIter,
 		loopThreshold:       loopThreshold,
 		contextWindowTokens: opts.ContextWindowTokens,
@@ -645,6 +671,18 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	if emit == nil {
 		emit = func(Event) {}
 	}
+	// P67.7: a run now has more than one producer of events. Tool calls can be
+	// dispatched while the turn that requested them is still streaming, so the
+	// round's goroutines emit concurrently with this loop — and every consumer of
+	// an EmitFunc (the TUI, the daemon's SSE writer, an eval collector) was
+	// written for a single producer.
+	//
+	// Serializing once here rather than at each producer is deliberate: the
+	// alternative is every future concurrent caller remembering to wrap, and the
+	// failure mode of forgetting is a data race in a consumer nobody was looking
+	// at. Everything below — the turn, the compaction guard, the round — takes
+	// this emit, so the run has exactly one lock and one ordering.
+	emit = serializedEmit(emit)
 
 	// runID ties this run's turn traces together (P66.11/GAP-01). A session
 	// accumulates the traces of many runs — one per request — so without it a
@@ -758,7 +796,25 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		runUsageEstimated bool
 	)
 
+	// P67.7: the round a turn's stream may have started dispatching into, held
+	// across the loop body so every exit can tear it down.
+	//
+	// A deferred abort plus one at the top of each iteration covers every path
+	// out of the body — the `return`s through the defer, the `continue`s through
+	// the top-of-loop call — without wrapping the body in a closure. abort() is
+	// nil-safe and idempotent, and runTools clears the variable once it has taken
+	// ownership, so a consumed round is never torn down under its own results.
+	var pendingRound *toolRound
+	defer func() { pendingRound.abort() }()
+
 	for iter := 0; iter < e.maxIterations; iter++ {
+		// Any round the previous iteration started and did not consume — a turn
+		// that ended in a corrective nudge, a discarded hallucinated call —
+		// belongs to a turn that is over. Cancel it and wait for its goroutines
+		// before starting another.
+		pendingRound.abort()
+		pendingRound = nil
+
 		select {
 		case <-ctx.Done():
 			return budget.override(stall.override(ErrInterrupted))
@@ -820,7 +876,30 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		}
 
 		turnStart := time.Now()
-		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit, suppressTools, format)
+		// P67.7: open a round for this turn's stream to dispatch into, when
+		// early dispatch is admissible at all.
+		//
+		// Two exclusions, both structural rather than cautious. Under
+		// suppressTools the request carries no schemas, so any tool_use in the
+		// reply is a hallucination P2.6 discards — dispatching it would run a
+		// call the engine is about to decide never happened. Under the tool-call
+		// shim the calls are not in the stream: they are parsed out of the reply
+		// *text* after it completes, so there is nothing to dispatch early and
+		// the whole mechanism has no purchase.
+		//
+		// And a third, which is a real limit on this item rather than a detail.
+		// The pre-tool-round budget gate exists precisely so that a turn whose
+		// own usage crosses the cap stops before its tool calls run — and that
+		// usage is not known until the turn ends. A call dispatched mid-stream
+		// cannot honor a bound that is not yet decidable, so a run with a spend
+		// cap keeps the pre-P67.7 batch behaviour. This is the workload the item
+		// targets either way: it names local models, where generation latency
+		// dominates and pricing is zero, so BudgetUSD is unset. See
+		// runBudget.spendBounded.
+		if !suppressTools && !e.toolShim && e.tools != nil && !budget.spendBounded() {
+			pendingRound = e.newToolRound(ctx, emit)
+		}
+		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit, suppressTools, format, pendingRound)
 		if err != nil {
 			// P59.2: when the run deadline above is what killed the turn, the
 			// adapter reports whatever cancellation looked like from its side —
@@ -1100,7 +1179,9 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			return err
 		}
 
-		results, toolTraces, err := e.runTools(ctx, toolUses, emit)
+		round := pendingRound
+		pendingRound = nil // runTools owns it from here, including its teardown
+		results, toolTraces, err := e.runTools(ctx, toolUses, emit, round)
 		if err != nil {
 			// P59.2: the run deadline cancels tool execution too, so the same
 			// re-attribution the model turn needs applies here — and P39.17's
@@ -1704,7 +1785,7 @@ const coldLoadNoticeThresholdMS = 1000
 
 // turn performs a single model call, accumulating the assistant message and any
 // tool-use blocks from the stream.
-func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, suppressTools bool, format json.RawMessage) (provider.Message, []provider.ToolUseBlock, *provider.Usage, provider.StopReason, error) {
+func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, suppressTools bool, format json.RawMessage, round *toolRound) (provider.Message, []provider.ToolUseBlock, *provider.Usage, provider.StopReason, error) {
 	req := provider.Request{
 		Model:       e.model,
 		System:      conv.System,
@@ -1751,6 +1832,9 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		toolUses   []provider.ToolUseBlock
 		usage      *provider.Usage
 		stopReason provider.StopReason
+		// dispatchEarly latches off at the first call this turn may not start
+		// before the turn is complete; see the EventToolUse case below.
+		dispatchEarly = true
 	)
 	for ev := range stream {
 		// P39.17: every event, not only the ones that emit. A turn streaming
@@ -1775,6 +1859,37 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		case provider.EventToolUse:
 			if ev.ToolUse != nil {
 				toolUses = append(toolUses, *ev.ToolUse)
+				// P67.7: this call is fully specified now. Hand it to the
+				// scheduler rather than making it wait for the rest of the turn
+				// to finish generating — on a local model, where generation
+				// latency dominates, the fifth call of a round can be many
+				// seconds behind the first.
+				if round != nil && dispatchEarly {
+					if e.serializeTool(ev.ToolUse.Name, ev.ToolUse.Input) {
+						// A write or execute call, and the point at which early
+						// dispatch stops for this turn — for two reasons, both
+						// of which would be defects rather than inefficiencies.
+						//
+						// Side effects. The gates between here and the tool
+						// round — the P53.2 loop guard, which can *abort* the
+						// run on the round's signature, and the budget gate,
+						// which exists to stop "before its side effects" — both
+						// rule on the complete round and structurally cannot
+						// rule on a prefix of it. A read dispatched early and
+						// then discarded costs latency; a write dispatched early
+						// and then discarded has already changed the workspace.
+						//
+						// Ordering. runTools relies on the dispatched set being
+						// a *prefix* of the round, and the same-path waitFor
+						// graph is built from the calls added before each one —
+						// so skipping this call and dispatching the next would
+						// let a later read of the same path run ahead of the
+						// write it must follow.
+						dispatchEarly = false
+					} else {
+						round.add(*ev.ToolUse)
+					}
+				}
 			}
 		case provider.EventDone:
 			usage = ev.Usage
@@ -1889,225 +2004,32 @@ const maxParallelTools = 8
 // longer blocked behind a concurrent write/execute call in the same round).
 // Event emission is serialized so streamed output is never interleaved
 // mid-write. A single tool call takes the simple sequential path.
-func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, []trace.ToolCall, error) {
-	if len(toolUses) <= 1 {
+//
+// P67.7: the scheduler itself lives in toolround.go and can be fed one call at a
+// time while the model turn is still streaming. This function is the batch entry
+// point — the caller that already has the whole slice — and `started` is the
+// round the stream may have opened, or nil. Calls already dispatched from the
+// stream are skipped rather than re-run; only the tail the stream did not
+// dispatch is added here.
+func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc, started *toolRound) ([]provider.Block, []trace.ToolCall, error) {
+	// The sequential path stays for the single-call case, which is most rounds,
+	// and it is only reachable when the stream dispatched nothing: a round that
+	// already has a goroutine in flight cannot be re-run in-order.
+	if started == nil && len(toolUses) <= 1 {
 		return e.runToolsSequential(ctx, toolUses, emit)
 	}
 
-	results := make([]provider.Block, len(toolUses))
-	traces := make([]trace.ToolCall, len(toolUses))
-
-	// Per-call metadata for same-path ordering. Without it, a model that emits
-	// "write X, then read X back" as two calls in one round hits a
-	// read-before-write race: the read runs concurrently with the write (reads
-	// aren't serialized) and can observe the pre-write — often absent — file.
-	// serialize[i] marks write/exec calls (they take execLock); paths[i] is the
-	// call's filesystem target, if any.
-	serialize := make([]bool, len(toolUses))
-	paths := make([]string, len(toolUses))
-	done := make([]chan struct{}, len(toolUses))
-	for i, tu := range toolUses {
-		serialize[i] = e.serializeTool(tu.Name, tu.Input)
-		paths[i] = toolTargetPath(tu.Input)
-		done[i] = make(chan struct{})
+	r := started
+	if r == nil {
+		r = e.newToolRound(ctx, emit)
 	}
-	// waitFor[i] lists earlier calls whose completion call i must await: any
-	// prior write/exec call targeting the same non-empty path. It applies
-	// whether call i reads or writes that path, so both write→read and
-	// write→write pairs preserve the model-emitted order for a shared path;
-	// calls on distinct paths (or with no path) never gate one another and
-	// stay fully concurrent.
-	waitFor := make([][]int, len(toolUses))
-	for i := range toolUses {
-		if paths[i] == "" {
-			continue
-		}
-		for j := 0; j < i; j++ {
-			if serialize[j] && paths[j] == paths[i] {
-				waitFor[i] = append(waitFor[i], j)
-			}
-		}
+	// Everything the stream did not already dispatch. The prefix property holds
+	// because the stream adds calls in arrival order and stops adding at the
+	// first ineligible one, so `pending` is always a prefix of toolUses.
+	for _, tu := range toolUses[min(r.pending(), len(toolUses)):] {
+		r.add(tu)
 	}
-
-	var (
-		emitMu   sync.Mutex // serializes emit across goroutines
-		execLock sync.Mutex // exclusive among write/exec calls only
-		wg       sync.WaitGroup
-		sem      = make(chan struct{}, maxParallelTools)
-	)
-	safeEmit := func(ev Event) {
-		emitMu.Lock()
-		emit(ev)
-		emitMu.Unlock()
-	}
-
-	// P67.4: a round-scoped context derived from the turn's. When one call
-	// fails, the round is cancelled — sibling subprocesses die promptly instead
-	// of running a build to completion whose output the model is about to
-	// redirect past anyway, and the aggregate wait MaxTurnStall backstops gets
-	// shorter with them.
-	//
-	// The parent/child split is the whole point and the thing to preserve
-	// through any later change here: cancelling siblings must never cancel the
-	// turn. ctx is still the only source of "the run is over" — the checks
-	// after wg.Wait() below read ctx, not roundCtx, for exactly that reason.
-	roundCtx, cancelRound := context.WithCancel(ctx)
-	defer cancelRound()
-	var (
-		failMu     sync.Mutex
-		failedTool string // the call that cancelled the round, "" if none did
-	)
-	// failRound cancels the round on behalf of the first qualifying failure.
-	// Later failures are recorded by nobody: the first one is the one the
-	// siblings' results should name, and re-cancelling an already-cancelled
-	// context would only race over the reason.
-	failRound := func(name string) {
-		failMu.Lock()
-		defer failMu.Unlock()
-		if failedTool != "" {
-			return
-		}
-		failedTool = name
-		e.logger.Debug("cancelling parallel tool round after a failure", "tool", name, "round_size", len(toolUses))
-		cancelRound()
-	}
-	roundFailure := func() string {
-		failMu.Lock()
-		defer failMu.Unlock()
-		return failedTool
-	}
-	// abandon fills the result slot for a call the round cancelled. Every slot
-	// must be filled or the conversation goes back to the provider with a
-	// tool_use that has no tool_result — so this is not optional bookkeeping,
-	// it is what makes cancelling safe at all.
-	//
-	// abandon is only ever reached *before* a call has entered Execute — every
-	// path that has already executed reports the tool's own result instead,
-	// with siblingCancelledSuffix appended. That is what makes the plain
-	// "nothing was executed" wording honest here, and it is the P65.1 rule
-	// applied rather than relaxed: a call that may have landed effects is never
-	// told it did not run, because a model told that re-runs it.
-	abandon := func(i int, tu provider.ToolUseBlock) {
-		if ctx.Err() != nil {
-			// The turn itself is over: results are discarded wholesale below
-			// and repairOrphanedToolUses writes the synthetic ones instead.
-			return
-		}
-		content := siblingCancelledText(tu.Name, roundFailure())
-		traces[i] = trace.ToolCall{Name: tu.Name, IsError: true}
-		safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
-		safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: true})
-		results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: true}
-	}
-
-	for i, tu := range toolUses {
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, tu provider.ToolUseBlock) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			// Signal dependents that this call is complete — even on panic or
-			// interrupt below — so a waiter on done[i] can never hang.
-			defer close(done[i])
-			// A panic in one tool call (a buggy MCP tool, malformed builtin
-			// input) must not cross the goroutine boundary: unrecovered, it
-			// takes down the whole daemon process — every concurrent
-			// session, not just the one that triggered it. Recover here and
-			// report it back as an ordinary tool error instead.
-			defer func() {
-				if r := recover(); r != nil {
-					e.logger.Error("recovered panic in tool call", "tool", tu.Name, "panic", r, "stack", string(debug.Stack()))
-					content := fmt.Sprintf("tool %q panicked: %v", tu.Name, r)
-					traces[i] = trace.ToolCall{Name: tu.Name, IsError: true}
-					safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: true})
-					results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: true}
-				}
-			}()
-
-			// Wait for earlier same-path writes in this round to finish before
-			// touching the path. Deadlock-free: writes never wait on reads, and
-			// every awaited call has a lower index — so it was already spawned
-			// (holding its own semaphore slot) and runs to completion, closing
-			// done[j]. Give up if the run is interrupted or the round was
-			// cancelled by a sibling's failure (P67.4).
-			for _, j := range waitFor[i] {
-				select {
-				case <-done[j]:
-				case <-roundCtx.Done():
-					abandon(i, tu)
-					return
-				}
-			}
-			if roundCtx.Err() != nil {
-				abandon(i, tu)
-				return
-			}
-
-			if serialize[i] {
-				execLock.Lock()
-				defer execLock.Unlock()
-				// The wait for execLock is unbounded — it can sit behind a
-				// long-running write or shell — so a round cancelled while this
-				// call queued must not start it now (P67.4). This is the check
-				// that makes cancellation actually shorten a doomed round of
-				// serialized calls rather than only its concurrent tail.
-				if roundCtx.Err() != nil {
-					abandon(i, tu)
-					return
-				}
-			}
-
-			safeEmit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
-			// P39.17: same both-edges beat as the sequential path. The
-			// detector's state is mutex-guarded precisely so it can be beaten
-			// from these goroutines.
-			beat(ctx)
-			start := time.Now()
-			// P67.4: roundCtx, so a sibling's failure reaches this call's
-			// subprocess. Everything that ends the *turn* still reaches it too,
-			// since roundCtx is derived from ctx.
-			content, isErr := e.executeTool(roundCtx, tu)
-			// Read the round's state before failRound below, so a call cannot
-			// annotate its own result with a cancellation it is about to cause.
-			// A call that was genuinely running while a *sibling* failed does
-			// get the annotation, which is the honest reading: its error may be
-			// the cancellation rather than the tool's own verdict.
-			cutShort := roundCtx.Err() != nil && ctx.Err() == nil
-			beat(ctx)
-			if isErr && cutShort {
-				content = content + "\n\n" + siblingCancelledSuffix(roundFailure())
-			}
-			traces[i] = trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr}
-			safeEmit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
-			results[i] = provider.ToolResultBlock{ToolUseID: tu.ID, Content: content, IsError: isErr}
-			// Which failures qualify (P67.4). A read that fails is a normal
-			// negative result — `read_file` on a path the model guessed wrong
-			// is how it learns the path is wrong, and killing its siblings for
-			// that would make speculative parallel reads useless. A failing
-			// write or execute is different: the round was a plan, a step of it
-			// did not happen, and the steps after it are being carried out
-			// against a state that no longer matches.
-			//
-			// serialize[i] is exactly that classification, already computed for
-			// scheduling (serializeTool → tool.EffectiveCapability), so the
-			// policy hangs off it rather than off a second, drifting copy —
-			// including its per-call refinement, which is what keeps a shell
-			// call the tool reclassified as read-only from cancelling a round.
-			if isErr && serialize[i] && !cutShort {
-				failRound(tu.Name)
-			}
-		}(i, tu)
-	}
-	wg.Wait()
-
-	if ctx.Err() != nil {
-		return nil, nil, ErrInterrupted
-	}
-	e.capRound(ctx, results)
-	return results, traces, nil
+	return r.wait()
 }
 
 // capRound applies the P67.1 aggregate bound to a completed round, rewriting the

@@ -600,13 +600,23 @@ tui:
 
   # Inline image thumbnails (P16.9): render a small half-block ANSI preview
   # in the transcript when an image is attached, instead of only sending it
-  # to the model. "auto" (default): rendered when the terminal's detected
-  # color profile supports at least 256 colors, skipped otherwise (dumb
-  # terminals, NO_COLOR). "off": never render, text-only notice as before.
-  # "kitty" (P40.4, EXPERIMENTAL): use the real kitty graphics protocol for a
-  # true-resolution inline image on kitty/Ghostty/WezTerm/Konsole. Opt-in only —
-  # "auto" never selects it — and its placement in the render loop is not yet
-  # verified against real terminals, so expect rough edges.
+  # to the model. "auto" (default): the kitty graphics protocol when the
+  # terminal *answers* P67.9's startup capability query saying it speaks it,
+  # else a half-block preview when the detected color profile supports at
+  # least 256 colors, else nothing (dumb terminals, NO_COLOR). "off": never
+  # render, text-only notice as before. "halfblock": force the half-block
+  # tier whatever the terminal answered. "kitty" (P40.4): force the graphics
+  # protocol — only needed for a terminal that supports it but answers no
+  # queries; note its placement in the render loop is still not verified
+  # against real terminals, so expect rough edges.
+  #
+  # The capability probe itself (kitty graphics, synchronized output, true
+  # color — one DA1-terminated batch at startup, never per frame) has its own
+  # escape hatch, the AEGIS_TERM_CAPS environment variable:
+  #   AEGIS_TERM_CAPS=off                   do not ask; report nothing supported
+  #   AEGIS_TERM_CAPS=kitty,sync,truecolor  force this exact set, do not ask
+  # `aegis doctor` prints what the terminal answered, and falls back to the
+  # old TERM-based "plausible" wording only when its output is not a terminal.
   image_rendering: auto
 
   # Keybinding remap (P13.3.5): override the key sequence(s) for a named
@@ -743,6 +753,41 @@ compaction:
   # TestLiveWorkflowCompactionPrefixCacheGate, which runs one workload twice with
   # only this value changed.
   # preserve_prefix_cache: false
+
+  # How long a conversation may sit idle before its stale, re-fetchable tool
+  # results are cleared on the next turn (P67.6). Default: 20m. "off" disables.
+  #
+  # This is a SECOND, orthogonal trigger. Everything above tunes compaction on
+  # context *pressure* — how close the conversation is to the window — which is
+  # the right trigger for running out of room and the wrong one for a different
+  # problem: a session resumed after a long gap re-sends a prefix the backend has
+  # already evicted, paying full prefill on stale tool results it is going to
+  # summarize away later anyway. This one triggers on cache *temperature*. The
+  # observation behind it is a scheduling one: when the cache is already cold,
+  # clearing old tool results is free, because the usual reason not to rewrite the
+  # middle of a conversation (you invalidate the cache) has already happened.
+  #
+  # Only tool results are touched, only the re-fetchable kinds (reads, searches,
+  # shell, and read-only git/web), and never the model's own text. Errors are
+  # kept. Each cleared result becomes a fixed sentinel telling the model the
+  # content is gone and to re-run the tool if it still needs it. It fires at most
+  # once per run, and never for an analysis-only caller — the output guard's
+  # second pass, a title generation, a capability probe — which must be able to
+  # inspect a conversation without mutating it.
+  #
+  # 20 minutes sits clear of every cache TTL Aegis ships against rather than
+  # splitting the difference: Ollama unloads an idle model after 5 minutes by
+  # default, and Anthropic's prompt cache expires after 5 minutes (1 hour on the
+  # extended tier). Below ~5 minutes the pass would throw away context that is
+  # still cached. It is a default, not a finding — no live measurement has been
+  # taken at any value, which is why it is a knob.
+  # cold_cache_after: 20m
+
+  # How many of the most recent clearable tool results the pass leaves verbatim.
+  # Default: 3 — enough that the model still has the last read, the last search
+  # and the last command it ran. Floored at 1 no matter what is configured:
+  # clearing every result leaves the model with no working context at all.
+  # cold_cache_keep: 3
 
 
 # ── External host commands ────────────────────────────────────────────────────

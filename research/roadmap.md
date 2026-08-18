@@ -10,13 +10,29 @@ adding items.
 
 ## Status
 
-**31 open items: 26 build (Tier 1-4) + 5 verification-only. Tier 1 is empty again and Tier 2 is
-down to one.** Seven shipped on 2026-08-17 — **P67.3**, **P66.25**, **P67.2**, **P67.4**, **P67.5**,
-then **P66.13**, then **P69.6** (filed and shipped the same day) — the entire top five of the retired
-"Up next" ten plus the top two rows of the list that replaced it. Records in [releases.md](releases.md) (*The top five, 2026-08-17*; *The gate stack
-finally has one home*). **P66.25 was the last security item filed in the open set**, though P66.13
-turned out to be one as well — it closed three bare-or-partial permission gates and a hook-chain
-bug in the daemon. What remains in Tier 2 is **P68.1**, which is parked with row #6.
+**29 open items: 24 build (Tier 1-4) + 5 verification-only. Tier 1 is empty, Tier 2 holds one
+item, and Tier 3 holds two — both filed today.** Five shipped on 2026-08-18 — **P66.15**, **P67.6**,
+**P67.7**, **P67.8** and **P67.9** — which is the whole of the previous "Up next" table except its
+parked last row. Record in [releases.md](releases.md) (*Five rows of Up next, 2026-08-18*).
+
+**Read the P67.7 record before touching `internal/engine`.** That item asked for tool calls to be
+dispatched as their blocks complete in the stream, and named four constraints. Building it found two
+more the item did not: the P53.2 loop guard can *abort* a run on the complete round's signature, and
+the pre-tool-round budget gate exists specifically so a turn whose own usage crosses the cap stops
+before its tool calls run — and neither can rule on a prefix of a round. The resolution is a
+restriction on *when* early dispatch is active (no spend bound configured; stop at the first
+write/execute call), not a weakening of either gate. Anyone widening it is reopening that decision.
+
+**P66.15 was an audit, and audits produce items.** Seven verified findings were fixed in place with
+regression tests — including a Medium in `internal/tui/toolview.go` proving P66.6 was *not* the only
+unsanitized ingestion point, and a Medium in `captureShellWrites` where `git status --porcelain`
+paths (repo-relative) were joined onto the workspace root, so `/rewind` silently restored nothing
+whenever the workspace sat inside a larger repo. Four more were verified and deliberately left
+unfixed because each is a design decision rather than a line; they are filed as **P70.1**, **P70.2**
+and **P70.3** rather than carried silently inside a closed item. The sweep also records what it
+checked and cleared — `parseNmapXML` is not XXE-exposed, and the 60s auth-lockout cap is defeatable
+but irrelevant next to a 32-byte `crypto/rand` token — so the coverage gap is closed as *swept*
+rather than as skipped.
 
 **The P67 batch is a comparative reading of an external agent implementation**, not a review of this
 codebase. On 2026-08-16 the leaked Claude Code CLI source (`paperwave/claude-code-cli-leaked` @
@@ -168,65 +184,53 @@ instead, regardless of how large or urgent the underlying question is.
 
 ---
 
-## Up next — the six items to take in order
+## Up next — what is left, and it is short
 
-**Rewritten 2026-08-17, after the entire top five shipped** (P67.3, P66.25, P67.2, P67.4, P67.5) and
-**re-cut the same day when P66.13 shipped off the top of it**. Build records in
-[releases.md](releases.md) (*The top five, 2026-08-17*; *The gate stack finally has one home*); the
-retired tables are preserved there rather than carried here as strikethrough. This is a *reading* of
-the tiers, not a second ranking: every row's tier and size come from the item's own `Priority:` line.
+**Rewritten 2026-08-18, after five of the previous table's six rows shipped in one sitting** —
+**P66.15**, **P67.6**, **P67.7**, **P67.8** and **P67.9**, in that table's own order. Build records
+in [releases.md](releases.md) (*Five rows of Up next, 2026-08-18*); the retired table is preserved
+there rather than carried here as strikethrough.
 
-**Re-cut again 2026-08-17 when P69.6 was filed and then shipped the same day.** It went straight to
-the top as the only Tier 1 item and left again once built, which is why the table is six rows.
+**What is left is the row that was already parked plus what the sweep found.** Row #6 of the old
+table — the live-tier remainder — was parked by the user's choice and still is; it is unchanged and
+carried below. The three rows above it are new items filed *out of* the work that just shipped:
+P66.15 was an audit, and an audit's output is items.
 
-**It is six rows now, not ten, and that is a fact about the tiers rather than a shortened list.**
-Tier 1 is empty again (**P69.6** was filed and shipped on 2026-08-17), Tier 2 holds only the
-parked-with-#6 **P68.1**, and Tier 3 has exactly five items.
-Everything below them is Tier 4 with no fired trigger, and this document's own rule is not to build
-Tier 4 speculatively — so padding this table back to ten would mean recommending work the tiering
-says to leave alone. The next batch of ranked items comes from a review pass or a fired trigger, not
-from promoting the least-cold Tier 4 entry.
-
-**Both sequencing constraints are now discharged**, which is why the five Tier 3 items are freely
-reorderable: **P67.3** shipped the purpose-tag seam **P67.6** needs, and **P67.4** settled the
-cancellation policy **P67.7** would otherwise have had to settle mid-refactor.
-
-**One item is deliberately off this list: P68.1** (Tier 2, S). It is what the parked row needs before
-it is worth re-running — the eval tier deletes the database holding the trace its own closure
-conditions are written against. It travels with row #6, so it is off the list while that row is
-parked.
+**Tier 1 and Tier 2 are unchanged**: Tier 1 empty, Tier 2 holding only the parked-with-#4 **P68.1**.
 
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **P66.15** — sweep `internal/tui` and `internal/security` | T3 · M | 26% of production Go that nobody read. The highest-expected-value item with no fired trigger; the one hour eventually spent in `approval.go` during arbitration produced a Medium security finding, which is the case for it. |
-| 2 | **P67.6** — gate compaction and background work on the purpose tag | T3 · M | **Unblocked 2026-08-17**: P67.3 shipped `provider.Purpose`, so the discriminator this item needs exists — `EffectivePurpose(ctx, req)`, with the per-call tag beating the run-scoped one, which is exactly what keeps a compaction inside a foreground run distinguishable. Read P66.14's record too: the compaction trigger is one shared function with the caller's number passed per call, so the gating decision has one place to live. Its value went *up* when the live tier found compaction firing on eleven of fifteen turns while freeing less than one turn adds — P62.7's minimum-yield rule suppressed none of them, and that low-yield regime is this item's to fix. |
-| 3 | **P67.7** — restructure the parallel tool round | T3 · L | The largest engine change in either batch, and its prerequisite is now landed: P67.4 settled the cancellation policy, so the refactor inherits it rather than inventing it mid-flight. Two hooks must survive the restructure — P67.1's round-level result bound, and P67.4's round context with its "cancelling siblings never cancels the turn" split and its filled-every-slot rule. |
-| 4 | **P67.8** — read-only shell classification is per-binary | T3 · M | Useful commands stay execute-gated because the classification cannot see that `git log` and `git push` are different calls to one binary. Independent of everything above it. |
-| 5 | **P67.9** — terminal capability is inferred from `TERM`, not asked | T3 · S-M | The smallest of the six and the one most likely to be worth doing when the file is already open; it sits last only because the five above it are worth more per hour. |
-| 6 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | It ran on 2026-08-16 and gave up most of what it had: LLM-01 and LLM-02 measured, P65.3 closed, P62.9's watch item positive, P62.2's A/B non-empty. **Deliberately last, not blocked-last** — the user parked it. What is left is also no longer one sitting: **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show — a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
+| 1 | **P70.1** — `checkpoint.RestoreFiles` writes anywhere the database says to | T3 · M | The highest-value thing the sweep produced. `/rewind` replays BLOB rows to absolute paths with no validation, because the store has no notion of a workspace root. It is defence-in-depth *today* only because every capture site happens to resolve in-workspace — and the same sweep found the one that did not (`captureShellWrites`, fixed). The invariant is currently held by the honesty of every present and future caller, which is the arrangement this is worth spending a signature change to end. |
+| 2 | **P70.2** — the swarm mailbox is an unwrapped cross-agent injection channel | T3 · S-M | `trust.Wrap` covers MCP and web; nobody had checked the mailbox, and it is bare. **The decision is the work** — whether a sub-agent Aegis itself spawned is a hostile source has never been written down, and answering it settles [P70.3](#p703--scanner-output-reaches-the-model-unbounded-and-half-wrapped)'s wrap half too. Take it when there is appetite for a posture question, not when there is an afternoon. |
+| 3 | **P70.3**'s bound half — no per-call cap on scanner output | T4 · S | Split out of a Tier 4 item deliberately: the *wrap* half waits on row #2's posture decision, but `cmd.Output()` with no bound and no `truncate.go` posture entry is a plain fix with no question attached. It is here rather than left in Tier 4 because it is the only thing on this list anyone can finish in an hour. |
+| 4 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Unchanged from the previous table, and still last for the same reason: **the user parked it**, not a dependency. It is also no longer one sitting — **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show: a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
 
 **Notes on the ordering, and on what did not make it.**
 
-**#6 is a sitting, not a task, and it is no longer one sitting.** It stayed one row for as long as
-one setup answered all of it; the 2026-08-16 run split it into three unrelated blockers — a
-permission (P38.1), a task design (P62.9) and an instrumentation gap (P68.1, which the other three
-wait behind). Whoever picks it up should expect to take those separately rather than to book an
-afternoon.
+**This table is four rows because the tiers are nearly empty, not because it was trimmed.** Tier 1 is
+empty, Tier 2 holds one parked item, and Tier 3 now holds exactly the two items rows #1 and #2 name —
+both filed hours ago out of P66.15. Everything else is Tier 4 with no fired trigger, and this
+document's own rule is not to build Tier 4 speculatively. Row #3 is the one Tier 4 entry promoted,
+and it is promoted on a stated reason (its blocking question was answered by splitting it) rather
+than for being the least cold.
 
-**Nothing on this list is now sequence-blocked.** Both real orderings were discharged on 2026-08-17
-(P67.3 → #3, P67.4 → #4), so rows #2-#6 can be taken in any order to suit whatever file is already
-open; the ranking is expected value per hour and nothing more. #6 depends on nothing in the codebase
-except P68.1, and on a reachable model server.
+**Two of the four rows are decisions rather than code.** Row #2's posture question and row #4's
+parked-by-choice status both need a person, not a session. That is the actual state of the backlog
+after a review batch and an audit have both been worked through: what is left is disproportionately
+things that need someone to decide something.
+
+**Nothing here is sequence-blocked.** Rows #1-#3 are independent of each other and of everything
+shipped. Row #4 depends on nothing in the codebase except P68.1, and on a reachable model server.
+
+**One item is deliberately off this list: P68.1** (Tier 2, S). It is what the parked row needs before
+it is worth re-running — the eval tier deletes the database holding the trace its own closure
+conditions are written against. It travels with row #4, so it is off the list while that row is
+parked.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in *document*
 order, which is priority order only *within* a track — it cannot see a cross-tier ranking — and it
-also cannot see that #6 is parked by choice or that **P68.1** is deliberately off the list. Use it
-for repo state and for the parse; use this table for what to take.
-
-**What did not make it, and why the list is not padded.** Every remaining Tier 4 entry was
-re-verified as trigger-less on 2026-08-15 and nothing since has fired one. Promoting the least-cold
-of them to fill a ten-row table would contradict the tiering criteria this document is ranked by, so
-the table stops where the tiers do.
+also cannot see that row #4 is parked by choice or that **P68.1** is deliberately off the list. Use
+it for repo state and for the parse; use this table for what to take.
 
 ---
 
@@ -246,7 +250,7 @@ small and has no dependency.
 <details>
 <summary>P69.6 — Nothing plans a resident set, so every seat is sized as if it were alone (shipped 2026-08-17)</summary>
 
-### P69.6 — Nothing plans a resident set, so every seat is sized as if it were alone
+### P69.6 — Nothing plans a resident set, so every seat is sized as if it were alone — SHIPPED 2026-08-17
 
 **Filed 2026-08-17, from building P69.5** (`aegis models --fit`, see [releases.md](releases.md)) and
 from measuring the debate topology in
@@ -397,18 +401,85 @@ yields less.
 
 ## Open Work — Tier 3
 
-**Status: 5 filed items** — one from the P66 review batch and four from the P67 external-source
-reading, each larger or sequence-dependent rather than urgent. **P66.13 shipped 2026-08-17** — see
-[releases.md](releases.md) (*The gate stack finally has one home*), and read it before adding a
-permission layer or a run bound anywhere: both now live in `internal/enginecfg` and are built once
-rather than per entry point. **P66.14 shipped 2026-08-16**, closing
-LLM-02, LLM-03, ARCH-07 and PERF-03 — see [releases.md](releases.md), and read its record before
-touching the compaction path, because the shared trigger it introduced changed which numbers two
-already-shipped heuristics see. P62.9 and P65.2's prompt half both moved to
-[Verification Work](#verification-work) — in each case the code is already shipped and what remains
-is a live-run result, not a design or implementation task.
+**Status: 2 filed items**, both new — **P70.1** and **P70.2**, filed 2026-08-18 out of P66.15's
+sweep. The tier held five until that day, when **P66.15**, **P67.6**, **P67.7**, **P67.8** and
+**P67.9** all shipped: the entire "Up next" table below row #5, in one sitting. Their build records —
+including the three places the items were wrong about their own preconditions — are in
+[releases.md](releases.md) (*Five rows of Up next, 2026-08-18*). Read the P67.7 record before
+touching `internal/engine`: it found two pre-round gates the item never named, and the resolution it
+chose is a *restriction on when the feature is active*, not a widening of those gates.
 
-### P66.15 — Sweep the two packages this review did not read
+Also read **P66.13**'s record (shipped 2026-08-17) before adding a permission layer or a run bound
+anywhere: both now live in `internal/enginecfg` and are built once rather than per entry point. And
+**P66.14**'s (2026-08-16) before touching the compaction path, because the shared trigger it
+introduced changed which numbers two already-shipped heuristics see. P62.9 and P65.2's prompt half
+both moved to [Verification Work](#verification-work) — in each case the code is already shipped and
+what remains is a live-run result, not a design or implementation task.
+
+### P70.1 — `checkpoint.RestoreFiles` writes anywhere the database says to
+
+**Filed 2026-08-18 from P66.15's sweep**, which verified it at
+`internal/checkpoint/checkpoint.go:201` and deliberately left it unfixed because the fix is a
+signature change rather than a line.
+
+`/rewind` restores a turn by replaying BLOB rows: `os.WriteFile(fs.Path, …)` and `os.Remove(fs.Path)`
+for every file the checkpoint captured. There is **no path validation of any kind**, because the
+`Store` has no notion of a workspace root — it is a database that happens to hold absolute paths.
+
+Session ownership *is* checked, at the handler (`internal/server/sessions.go:565`), and every current
+capture site resolves inside the workspace, so this is defence in depth rather than a live hole. What
+makes it worth filing is that the sweep found the *one* capture site that did not: P66.15 fixed
+`captureShellWrites`, which was joining `git status --porcelain` paths (repo-relative) onto the
+workspace root and could record a pre-image against a path outside it. Restore is the layer that
+should not depend on every present and future capture site being correct, and it currently does.
+
+Two things to settle, which is why this is not a one-liner:
+
+- **Where the root comes from.** Threading it into `checkpoint.Store` makes every checkpoint
+  workspace-bound, which is probably right and is a schema-adjacent decision; passing it to
+  `RestoreFiles` keeps the store dumb but puts the invariant back at the call site, which is what
+  failed here.
+- **What a rejected path does.** Skipping it silently makes `/rewind` quietly partial, which is the
+  failure mode the whole feature exists to avoid; failing the restore wholesale is honest but turns a
+  stale row into an unusable checkpoint.
+
+Secondary, and worth fixing in the same pass: a file that existed before a turn, was deleted during
+it, and is recreated by restore comes back at `0o644` — its original mode is not captured.
+
+Priority: Tier 3 — M. No dependency. Security-adjacent: the fix is a boundary, so the test pass is
+the deliverable as much as the code.
+
+### P70.2 — The swarm mailbox is an unwrapped cross-agent injection channel
+
+**Filed 2026-08-18 from P66.15's sweep**, verified at `internal/tool/builtin/team.go:250`
+(`team_inbox`) against the file-backed queue in `internal/swarm/mailbox.go`.
+
+`trust.Wrap` marks untrusted content for MCP results and web fetches. It does not cover the mailbox,
+and nobody had checked: `team_inbox` formats `m.Text` into the tool result bare, with no wrap and no
+size cap. The queue is a file under the shared data dir, writable by any peer agent and by any local
+process with file access — so a teammate that ingested poisoned web or MCP content can relay it to a
+peer as plain, trusted-looking text, laundering the provenance marking on the way.
+
+**The reason it is filed rather than fixed is a posture question, not an effort one.** Wrapping
+intra-harness agent traffic as untrusted changes the shape of every swarm result and every prompt
+that reads one, and it asserts something about the trust model — that a sub-agent Aegis itself
+spawned is a hostile source — that has never been written down. The two defensible readings are:
+
+- **The mailbox is a laundering channel** and must be wrapped, because the content in it did not
+  originate with the agent that sent it.
+- **The mailbox is internal** and the wrap belongs at the *ingestion* points a sub-agent has (web,
+  MCP), which are already covered — in which case the real gap is that a wrapped result can be
+  unwrapped by being quoted into a message, and that is a different item.
+
+The size cap is not a posture question and can be taken either way: `truncate.go`'s per-call caps are
+not applied here.
+
+Priority: Tier 3 — S-M once the posture is decided; the decision is the work.
+
+<details>
+<summary>P66.15 — the unread-package sweep (shipped 2026-08-18)</summary>
+
+### P66.15 — Sweep the two packages this review did not read — SHIPPED 2026-08-18
 
 `internal/tui` (16,163 non-test lines) and `internal/security` (8,435) are **26% of production Go**
 and produced three findings between them, two of which were a struct-field count and a stale comment.
@@ -488,7 +559,12 @@ answer.
   publishing Aegis skills — this is distribution, not capability, and worth nothing until someone is on
   the other end of it.
 
-### P67.6 — Compaction fires on context pressure only, never on cache temperature
+</details>
+
+<details>
+<summary>P67.6 — compaction on cache temperature (shipped 2026-08-18)</summary>
+
+### P67.6 — Compaction fires on context pressure only, never on cache temperature — SHIPPED 2026-08-18
 
 Aegis compacts when the conversation approaches the context window. That is the right trigger for the
 problem it solves and the wrong trigger for a second problem it does not: a session resumed after a
@@ -532,7 +608,12 @@ Priority: Tier 3 — M. **Both prerequisites have shipped**: P67.3 (2026-08-17) 
 this item gates on, and P66.14 (2026-08-16) made the compaction trigger one shared function. No
 remaining dependency.
 
-### P67.7 — Tool calls are dispatched only after the whole model turn has streamed
+</details>
+
+<details>
+<summary>P67.7 — streaming tool dispatch (shipped 2026-08-18)</summary>
+
+### P67.7 — Tool calls are dispatched only after the whole model turn has streamed — SHIPPED 2026-08-18
 
 `Engine.turn` returns its `toolUses` slice after the stream drains
 (`internal/engine/engine.go:773`), and `runTools` is called on the finished slice
@@ -568,7 +649,12 @@ otherwise have settled mid-flight is already settled; inherit it (round context 
 turn's, write/execute failures only, every result slot filled) rather than re-deciding it. The largest
 payoff of the batch on local models, where generation latency dominates.
 
-### P67.8 — Read-only shell classification is per-binary, so useful commands stay execute-gated
+</details>
+
+<details>
+<summary>P67.8 — per-command shell classification (shipped 2026-08-18)</summary>
+
+### P67.8 — Read-only shell classification is per-binary, so useful commands stay execute-gated — SHIPPED 2026-08-18
 
 `internal/tool/builtin/shell_readonly.go` allowlists whole binaries and rejects the command outright
 if any shell metacharacter appears. The conservatism is deliberate and correct as a default — a false
@@ -604,7 +690,12 @@ afternoon.
 Priority: Tier 3 — M-L. No dependency. Security-sensitive: the test pass is the item, not an
 afterthought.
 
-### P67.9 — Terminal capability is inferred from `TERM`, not asked
+</details>
+
+<details>
+<summary>P67.9 — terminal capability is asked, not guessed (shipped 2026-08-18)</summary>
+
+### P67.9 — Terminal capability is inferred from `TERM`, not asked — SHIPPED 2026-08-18
 
 `internal/tui/imagerender.go:89` decides whether the terminal speaks the kitty graphics protocol by
 checking whether `TERM` contains `"kitty"`. The file is honest about the consequence: the kitty tier
@@ -631,10 +722,13 @@ Priority: Tier 3 — M. No dependency.
 
 ---
 
+</details>
+
 ## Open Work — Tier 4
 
-**Status: 20 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger),
-6 from the P66 review batch and 5 from the P67 external-source reading. (This line read "13 open …
+**Status: 21 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger),
+6 from the P66 review batch, 5 from the P67 external-source reading and **P70.3**, filed 2026-08-18
+out of P66.15's sweep. (This line read "13 open …
 plus 4 from P66" until 2026-08-16; it had not been updated when P66.23 was filed, and the Status
 block above was the correct count. It moved to 20 later that day when **P66.26** was refiled out of
 P66.9.)
@@ -644,6 +738,30 @@ one review domain. They are filed so no finding is lost, not because any of them
 Take one only when already working in that file. The P67 entries are a different kind of parked: each
 is a capability Aegis does not have and nobody has asked for, filed with the specific trigger that
 would make it worth building.
+
+### P70.3 — Scanner output reaches the model unbounded and half-wrapped
+
+**Filed 2026-08-18 from P66.15's sweep.** The sweep fixed the two clear cases —
+`recon_scan` and `dast_scan` now wrap their reports, because nmap's `product`/`version` fields are a
+banner a *remote host* chose to print and ZAP's findings quote the target's responses. Two smaller
+ones were left as deliberate decisions rather than incidental ones:
+
+- **`security_scan` (`internal/tool/builtin/security.go:63`) returns the same unwrapped shape**, but
+  its content is workspace-derived — files the model can already read — plus third-party rule-pack
+  text. Wrapping it is cheap; whether a workspace's own files count as untrusted input to the agent
+  that is reading them anyway is the question, and it should be answered once for the whole tree
+  rather than tool by tool.
+- **No per-call bound.** `security.runJSON` (`internal/security/scanners.go:56`) and
+  `runContainerCLI` (`method.go:1090`) both use `cmd.Output()`, so a rogue or compromised scanner's
+  stdout is read entirely into memory before parsing, and none of the scan tools apply a per-call cap
+  from `truncate.go`'s posture table. They rely solely on `CapRound`, which is the *aggregate* bound
+  and was never meant to be the only one.
+
+The bound half is a straightforward fix and could be taken alone. **Promote when** someone takes
+either, or when a scanner is observed producing an output large enough to matter.
+
+Priority: Tier 4 — S. Low severity, and the wrap half is a posture decision shared with
+[P70.2](#p702--the-swarm-mailbox-is-an-unwrapped-cross-agent-injection-channel).
 
 ### P66.26 — `synchronous=NORMAL` on the three SQLite databases (PERF-02, refiled from P66.9)
 

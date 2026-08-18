@@ -223,11 +223,13 @@ type TUIConfig struct {
 	// "bell", "desktop", or "both" (default).
 	Notifications string `koanf:"notifications"`
 	// ImageRendering controls the P16.9 inline thumbnail shown in the
-	// transcript when an image is attached: "auto" (default — a truecolor
-	// half-block thumbnail, rendered when the terminal's detected color profile
-	// supports it), "off", or "kitty" (P40.4, EXPERIMENTAL — the real kitty
-	// graphics protocol; opt-in only, never auto-selected, and unverified
-	// against terminals in CI).
+	// transcript when an image is attached: "auto" (default — the kitty
+	// graphics protocol when the terminal answers P67.9's capability query
+	// saying it speaks it, else a truecolor half-block thumbnail when the
+	// detected color profile supports it), "off", "halfblock" (force the
+	// half-block tier), or "kitty" (P40.4 — force the graphics protocol on a
+	// terminal that supports it but answers no queries). The probe itself has
+	// its own escape hatch, AEGIS_TERM_CAPS (see internal/termcaps).
 	ImageRendering string `koanf:"image_rendering"`
 	// Keybindings remaps named TUI actions (P13.3.5). Keys are the binding
 	// names from internal/tui's keyMap (e.g. "terminal", "palette",
@@ -1005,6 +1007,61 @@ type CompactionConfig struct {
 	// system was running on, and this one was measured in a regime that existed
 	// only because a different component was broken.
 	PreservePrefixCache *bool `koanf:"preserve_prefix_cache"`
+
+	// ColdCacheAfter is the idle gap after which a resumed conversation has its
+	// stale, re-fetchable tool results cleared before the next request (P67.6) —
+	// a trigger on cache *temperature*, orthogonal to the context-pressure
+	// trigger everything else here tunes. "0" or "off" disables it.
+	//
+	// The default is ColdCacheAfterDefault. It is a duration rather than a bool
+	// because the right answer is a property of the backend's cache TTL, and
+	// those differ: Ollama unloads an idle model after 5 minutes by default,
+	// Anthropic's prompt cache expires after 5 minutes or an hour depending on
+	// the tier. Past any of them the prefix this request re-sends has to be
+	// recomputed anyway, which is exactly when clearing it becomes free.
+	//
+	// It is a string so "off" and "20m" are both sayable; use ColdCacheAfterOr.
+	ColdCacheAfter string `koanf:"cold_cache_after"`
+
+	// ColdCacheKeep is how many of the most recent clearable tool results the
+	// cold-cache pass leaves verbatim. 0 takes the package default (3); the pass
+	// itself floors it at 1, because clearing every result leaves the model with
+	// no working context at all.
+	ColdCacheKeep int `koanf:"cold_cache_keep"`
+}
+
+// ColdCacheAfterDefault is the idle gap at which the P67.6 cold-cache pass fires
+// when compaction.cold_cache_after is unset.
+//
+// Twenty minutes, chosen to sit clear of every cache TTL this ships against
+// rather than to split the difference between them: Ollama's default keep-alive
+// is 5 minutes, Anthropic's default prompt-cache TTL is 5 minutes and its
+// extended tier is 1 hour. Below ~5 minutes the pass would fire on a cache that
+// is still warm and throw away context for nothing; at 20 minutes the two
+// 5-minute TTLs have certainly expired, and the 1-hour tier is a cloud backend
+// where the pass costs little either way. It is a default, not a finding — no
+// live measurement has been taken at any value, and the config knob exists so
+// one can be.
+const ColdCacheAfterDefault = 20 * time.Minute
+
+// ColdCacheAfterOr resolves compaction.cold_cache_after to a duration: unset
+// means ColdCacheAfterDefault, "off"/"0"/"none" means disabled, anything else is
+// parsed as a Go duration. An unparseable value returns the default and false,
+// so the caller can warn rather than silently disabling a feature the user was
+// trying to tune.
+func (c CompactionConfig) ColdCacheAfterOr() (time.Duration, bool) {
+	v := strings.TrimSpace(strings.ToLower(c.ColdCacheAfter))
+	switch v {
+	case "":
+		return ColdCacheAfterDefault, true
+	case "off", "none", "false", "0":
+		return 0, true
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return ColdCacheAfterDefault, false
+	}
+	return d, true
 }
 
 // PreservePrefixCacheOr resolves the tri-state against an auto-detected

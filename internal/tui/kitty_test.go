@@ -7,6 +7,8 @@ import (
 	"image/png"
 	"strings"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/termcaps"
 )
 
 func smallPNG(t *testing.T, w, h int) []byte {
@@ -51,9 +53,44 @@ func TestImageProtoForKitty(t *testing.T) {
 	if got := imageProtoFor("off"); got != protocolNone {
 		t.Errorf(`imageProtoFor("off") = %v, want protocolNone`, got)
 	}
-	// "auto" must never resolve to the opt-in kitty tier.
+	// "halfblock" forces the safe tier however the terminal answered.
+	if got := imageProtoFor("halfblock"); got == protocolKitty {
+		t.Error(`imageProtoFor("halfblock") must never resolve to protocolKitty`)
+	}
+	// Under `go test` stdin/stdout are pipes, so the P67.9 probe cannot run and
+	// "auto" has no affirmative answer to act on: it must not guess kitty.
 	if got := imageProtoFor("auto"); got == protocolKitty {
-		t.Error(`imageProtoFor("auto") must not auto-select protocolKitty`)
+		t.Error(`imageProtoFor("auto") auto-selected protocolKitty with no probe answer`)
+	}
+}
+
+// TestAutoImageProtoNeedsAnAnswer is P67.9's rule: the kitty tier is chosen
+// from what the terminal *said*, never from what TERM looks like, and the
+// colour floor still vetoes inline images entirely.
+func TestAutoImageProtoNeedsAnAnswer(t *testing.T) {
+	kittyish := []string{"TERM=xterm-kitty", "KITTY_WINDOW_ID=1", "COLORTERM=truecolor"}
+	plain := []string{"TERM=xterm-256color"}
+
+	cases := []struct {
+		name    string
+		caps    termcaps.Caps
+		environ []string
+		want    imageProtocol
+	}{
+		{"answered yes", termcaps.Caps{KittyGraphics: true, Probed: true}, plain, protocolKitty},
+		{"answered no, TERM says kitty", termcaps.Caps{Probed: true}, kittyish, protocolHalfBlock},
+		{"never asked, TERM says kitty", termcaps.Caps{}, kittyish, protocolHalfBlock},
+		{"answered yes but NO_COLOR", termcaps.Caps{KittyGraphics: true, Probed: true},
+			[]string{"TERM=xterm-256color", "NO_COLOR=1"}, protocolNone},
+		{"answered yes but dumb terminal", termcaps.Caps{KittyGraphics: true, Probed: true},
+			[]string{"TERM=dumb"}, protocolNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := autoImageProto(tc.caps, tc.environ); got != tc.want {
+				t.Errorf("autoImageProto(%+v, %v) = %v, want %v", tc.caps, tc.environ, got, tc.want)
+			}
+		})
 	}
 }
 

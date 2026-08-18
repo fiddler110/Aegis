@@ -3,6 +3,7 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -53,5 +54,5 @@ func (t *reconScanTool) Execute(ctx context.Context, input json.RawMessage) (too
 		return tool.Result{}, err
 	}
 	security.WriteReportArtifact(effectiveRoot(ctx, t.root), "network", report)
-	return tool.Result{Content: report.Format()}, nil
+	return tool.Result{Content: wrapNetworkScanReport("recon_scan", strings.Join(args.Targets, ", "), report.Format())}, nil
 }

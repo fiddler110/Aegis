@@ -267,7 +267,30 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	s.sessionSkills.Delete(id)
 	s.taskScopes.Delete(id)
 	s.promptSectionCache.Delete(id)
+	s.forgetSessionRunState(id)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// forgetSessionRunState drops the per-session run bookkeeping that lives in
+// process memory rather than in the store: the run semaphore
+// (sessionSemaphore) and every "allow always" grant cached against this
+// session (sseApprover's permCache). Both are created lazily on first use and
+// were the two entries missing from the cleanup list above — sessionTools and
+// friends were freed on delete, these two were not, so a caller creating and
+// deleting sessions in a loop grew two maps for the daemon's lifetime (P66.15).
+//
+// Neither entry means anything once the session is gone: ids are UUIDs, so a
+// later session never collides with a stale semaphore, and a permission grant
+// is scoped to the session whose user answered the prompt.
+func (s *Server) forgetSessionRunState(id string) {
+	s.sessionSems.Delete(id)
+	prefix := id + "\x00" // sseApprover's key: sessionID + "\x00" + toolName
+	s.sessionPermCache.Range(func(k, _ any) bool {
+		if key, ok := k.(string); ok && strings.HasPrefix(key, prefix) {
+			s.sessionPermCache.Delete(key)
+		}
+		return true
+	})
 }
 
 func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {

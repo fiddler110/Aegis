@@ -36,6 +36,16 @@ type Compaction struct {
 	MessagesAfter  int  `json:"messages_after,omitempty"`  // and after
 	Estimate       int  `json:"estimate"`                  // the calibrated prompt estimate the decision was made on
 	Trigger        int  `json:"trigger"`                   // the shared compaction trigger it was compared against
+
+	// ColdCleared is how many stale tool results the P67.6 cold-cache pass
+	// dropped on this turn, and ColdFreedTokens what that freed. They are
+	// separate from Applied/FreedTokens on purpose: that pass fires on cache
+	// *temperature* rather than on context pressure, so a turn can clear
+	// results while staying nowhere near the trigger — and a trace that folded
+	// the two together could not answer "did compaction fire?", which is the
+	// question LLM-02's closure condition is written as.
+	ColdCleared     int `json:"cold_cleared,omitempty"`
+	ColdFreedTokens int `json:"cold_freed_tokens,omitempty"`
 }
 
 // Guard records the output guard's verdict on a turn's final answer

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -53,15 +54,20 @@ func captureShellWrites(ctx context.Context, snap *checkpoint.Snapshotter, root 
 		return run()
 	}
 
+	top := gitRepoRoot(ctx, root)
 	budget := maxShellCaptureEntries
 	pre := gitStatusPaths(ctx, root)
 	for rel := range pre {
-		for _, f := range expandGitStatusEntry(root, rel) {
+		for _, f := range expandGitStatusEntry(top, rel) {
 			if budget <= 0 {
 				break
 			}
-			snap.Capture(filepath.Join(root, f))
 			budget--
+			abs, ok := workspaceAbs(top, root, f)
+			if !ok {
+				continue
+			}
+			snap.Capture(abs)
 		}
 	}
 
@@ -72,20 +78,75 @@ func captureShellWrites(ctx context.Context, snap *checkpoint.Snapshotter, root 
 		if pre[rel] {
 			continue
 		}
-		for _, f := range expandGitStatusEntry(root, rel) {
+		for _, f := range expandGitStatusEntry(top, rel) {
 			if budget <= 0 {
 				break
 			}
-			abs := filepath.Join(root, f)
-			if data, ok := gitHeadContent(ctx, root, f); ok {
+			budget--
+			abs, ok := workspaceAbs(top, root, f)
+			if !ok {
+				continue
+			}
+			if data, ok := gitHeadContent(ctx, top, f); ok {
 				snap.CaptureBytes(abs, true, data)
 			} else {
 				snap.CaptureBytes(abs, false, nil)
 			}
-			budget--
 		}
 	}
 	return out, err
+}
+
+// gitRepoRoot returns the top level of the git working tree containing root,
+// falling back to root itself when git can't say.
+//
+// It exists because `git status --porcelain` reports paths relative to the
+// *repository* root, not to the directory git ran in — porcelain mode forces
+// status.relativePaths off, by design, so scripts get a stable base. Joining
+// those paths onto the workspace root is therefore only correct when the
+// workspace *is* the repository root. When it is a subdirectory of a larger
+// repo — a package inside a monorepo, the ordinary case for a scoped
+// workspace — the join addressed files that mostly do not exist, which is
+// both a miss (the command's real writes were never captured, so `/rewind`
+// silently had nothing to restore) and a hazard (a path that happened to
+// exist under the wrong join got a pre-image recorded against it, and rewind
+// writes back whatever was captured). P66.15.
+func gitRepoRoot(ctx context.Context, root string) string {
+	out, err := checkpointGit(ctx, root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return root
+	}
+	top := strings.TrimSpace(out)
+	if top == "" {
+		return root
+	}
+	top = filepath.FromSlash(top)
+	// When the workspace *is* the repository root — the ordinary case — keep
+	// root's own spelling rather than git's. The two name the same directory
+	// but need not agree byte-for-byte (drive-letter case on Windows, a
+	// symlinked temp dir on macOS), and the containment check below is
+	// lexical, so preferring root here keeps the common case exact and
+	// engages the new base only for a genuine subdirectory.
+	if ti, err := os.Stat(top); err == nil {
+		if ri, err := os.Stat(root); err == nil && os.SameFile(ti, ri) {
+			return root
+		}
+	}
+	return top
+}
+
+// workspaceAbs resolves one repo-root-relative git-status path to an absolute
+// path, reporting false when it lands outside the workspace root. A sibling
+// package's file in the same monorepo is git's business, not this workspace's
+// — and checkpoint.Store.RestoreFiles writes back every captured path with no
+// root of its own to check against, so the boundary has to hold here.
+func workspaceAbs(top, root, rel string) (string, bool) {
+	abs := filepath.Join(top, filepath.FromSlash(rel))
+	r, err := filepath.Rel(root, abs)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return abs, true
 }
 
 // isGitWorkTree reports whether root is inside a git working tree. Best
@@ -95,8 +156,10 @@ func isGitWorkTree(ctx context.Context, root string) bool {
 	return err == nil && strings.TrimSpace(out) == "true"
 }
 
-// gitStatusPaths returns the set of workspace-relative paths git considers
-// modified, staged, or untracked right now (`git status --porcelain`, git's
+// gitStatusPaths returns the set of paths git considers modified, staged, or
+// untracked right now, each relative to the *repository* root rather than to
+// root — porcelain mode forces status.relativePaths off, so callers must join
+// against gitRepoRoot, not against the workspace (`git status --porcelain`, git's
 // own default untracked-directory collapsing left in place — expanding a
 // whole untracked directory is expandGitStatusEntry's job, done only for
 // entries the pre/post diff actually needs, not unconditionally here, so an
@@ -134,16 +197,16 @@ func gitStatusPaths(ctx context.Context, root string) map[string]bool {
 // which case it's walked and every file inside is returned. The walk is
 // implicitly bounded by captureShellWrites' shared entry budget, which the
 // caller enforces as it consumes this slice.
-func expandGitStatusEntry(root, rel string) []string {
+func expandGitStatusEntry(base, rel string) []string {
 	if !strings.HasSuffix(rel, "/") {
 		return []string{rel}
 	}
 	var out []string
-	_ = filepath.WalkDir(filepath.Join(root, rel), func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(filepath.Join(base, filepath.FromSlash(rel)), func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if r, rerr := filepath.Rel(root, path); rerr == nil {
+		if r, rerr := filepath.Rel(base, path); rerr == nil {
 			out = append(out, filepath.ToSlash(r))
 		}
 		if len(out) >= maxShellCaptureEntries {

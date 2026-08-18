@@ -53,6 +53,19 @@ func (m *model) applyStreamBatch(evs []api.Event) tea.Cmd {
 }
 
 func (m *model) applyEvent(ev api.Event) {
+	// P66.15: two event fields carry text this harness did not author and
+	// render it through lipgloss, which styles but never strips. A guard
+	// reason is the *judge model's* own words (guard.parseVerdict returns
+	// whatever the model wrote after the verdict keyword), and an error
+	// string routinely quotes a provider or subprocess. ev is a value copy,
+	// so this normalizes only what the branches below read.
+	switch ev.Kind {
+	case api.KindGuard:
+		ev.Text = stripControlSeqs(ev.Text)
+	case api.KindError:
+		ev.Error = stripControlSeqs(ev.Error)
+	}
+
 	switch ev.Kind {
 	case api.KindThinking:
 		// Buffer extended-thinking text; flushed as a collapsible block when

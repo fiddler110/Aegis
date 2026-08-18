@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/tokenest"
@@ -131,6 +132,59 @@ type YieldReportingCompactor interface {
 // before.
 type FileContextCompactor interface {
 	WithFiles(ctx context.Context, read, modified []string) context.Context
+}
+
+// ColdCacheCompactor is an optional capability of a Compactor: it can clear
+// stale, re-fetchable tool results without summarizing anything (P67.6).
+//
+// The split is the point. Aegis compacts on *context pressure*, which is the
+// right trigger for running out of window and the wrong one for a second problem
+// it does not solve: a conversation resumed after a long idle gap re-prefills a
+// prefix the backend has already evicted, paying full price on stale tool
+// results it will summarize away later anyway. When the cache is already cold,
+// clearing those results is free — the usual reason not to rewrite the middle of
+// a conversation (you invalidate the cache) has already happened.
+//
+// So the engine owns the *when* — the idle gap, and the call-purpose gate — and
+// the Compactor owns the *what*: which result kinds are disposable, how many to
+// keep, and the sentinel that replaces them. That sentinel is a wire format;
+// see compaction.ColdCacheSentinel.
+//
+// Plain values rather than a struct, and declared here rather than in
+// internal/compaction, for the same import-cycle reason YieldReportingCompactor
+// gives. No ctx parameter: unlike Compact this makes no provider call and has
+// nothing to cancel, and taking one would invite a future implementation to.
+type ColdCacheCompactor interface {
+	ClearColdToolResults(msgs []provider.Message) (out []provider.Message, cleared, freedTokens int)
+}
+
+// coldCachePurposeEligible reports whether a run under this purpose may have its
+// conversation rewritten by the cold-cache pass.
+//
+// This is P67.6's second named constraint, and the reason that item was
+// sequenced behind P67.3: the gate is on *call purpose*, not on "is this the
+// main loop". An analysis-only caller — the output guard's second pass, a title
+// generation, a capability probe, an MCP sampling request — must be able to run
+// a conversation through the engine without mutating it as a side effect. Those
+// callers all declare themselves (every provider.Purpose constant has a tagged
+// call site), which is what makes the gate answerable at all.
+//
+// PurposeUnspecified is eligible. That is the deliberate direction: the
+// conversation-owning callers are the ones that existed before purposes did, and
+// an undeclared run is one of them. The analysis-only purposes are precisely the
+// ones that were *added* with a tag, so the untagged default is the
+// conversation-owning case and defaulting the other way would make the feature
+// dead in every embedder that has not adopted the tag.
+func coldCachePurposeEligible(p provider.Purpose) bool {
+	switch p {
+	case provider.PurposeGuard, provider.PurposeCompaction, provider.PurposeProbe,
+		provider.PurposeTitle, provider.PurposeSampling:
+		return false
+	default:
+		// PurposeForeground, PurposeSubAgent, PurposeDebate, PurposeUnspecified:
+		// each owns the conversation it is running.
+		return true
+	}
 }
 
 // compactionGuard is the third concern lifted out of Engine.Run under P63.9:
@@ -305,6 +359,36 @@ type compactionGuard struct {
 	// Per-run like every other field on this guard, and reset by any compaction
 	// that does justify itself.
 	retryEstimate int
+
+	// coldCacheAfter is the idle gap past which the P67.6 cold-cache pass fires
+	// before a turn; 0 disables it entirely.
+	coldCacheAfter time.Duration
+	// lastActivity is when this conversation last saw an assistant message. It is
+	// seeded from the session store on entry (Options.LastActivityAt, zero when
+	// the caller has no such record) and advanced by afterTurn, so the gap the
+	// pass measures spans a resume *and* a user who walked away mid-session —
+	// the two are the same condition as far as a prefix cache is concerned.
+	lastActivity time.Time
+	// purpose is this run's declared kind, which is what the cold-cache pass
+	// gates on; see coldCachePurposeEligible.
+	purpose provider.Purpose
+	// now is the guard's clock, injectable for the same reason Engine.now is: a
+	// test asserting "an idle gap fired the pass" must not depend on the host's
+	// monotonic-clock resolution.
+	now func() time.Time
+	// coldClearedThisTurn and coldFreedThisTurn are what the cold-cache pass
+	// achieved on the current turn, for the trace to pick up. Per-turn rather
+	// than per-run — beforeTurn zeroes them before calling the pass — so a run's
+	// trace shows the clear on the turn it happened rather than repeating it on
+	// every turn afterwards, which is the same reason lastEvent is cleared.
+	coldClearedThisTurn int
+	coldFreedThisTurn   int
+	// coldCleared latches the pass to once per run. The condition it detects —
+	// the gap between the previous assistant message and this one — is true
+	// exactly once, at the first turn after the gap; leaving it unlatched would
+	// let a run whose Compactor keeps returning cleared>0 rewrite the
+	// conversation on every turn, which is the thrash P62.7 exists to stop.
+	coldCleared bool
 }
 
 // newCompactionGuard builds the guard for a run.
@@ -321,7 +405,14 @@ func (e *Engine) newCompactionGuard() *compactionGuard {
 		// P65.2: read at compaction time, not captured now — the whole point is
 		// the set of files touched *before* the compaction, and a compaction
 		// happens many turns into a run.
-		touchedFiles: e.touchedFiles,
+		touchedFiles:   e.touchedFiles,
+		coldCacheAfter: e.coldCacheAfter,
+		lastActivity:   e.lastActivityAt,
+		purpose:        e.purpose,
+		now:            e.now,
+	}
+	if g.now == nil {
+		g.now = time.Now
 	}
 	if e.tools != nil {
 		g.requestOverhead = memoizedOverhead(e.tools, e.toolShim)
@@ -455,6 +546,72 @@ func (g *compactionGuard) noticeOversizedSystem(conv *Conversation, emit EmitFun
 		fixed, win)})
 }
 
+// clearColdCache is P67.6's trigger: a second, orthogonal reason to shrink a
+// conversation that has nothing to do with how full the context window is.
+//
+// The compaction trigger measures *pressure* — how close the conversation is to
+// the window. This one measures *temperature* — how long the backend has had to
+// evict the prefix this request is about to re-send. They are independent: a
+// conversation at 30% of its window that resumes after two hours pays a full
+// prefill on every stale tool result in it, and the pressure trigger will never
+// fire to stop that. When the cache is already cold, clearing those results is
+// free, because the cost of rewriting the middle of a conversation is a cache
+// invalidation that has already happened.
+//
+// Four conditions, in cost order — the two free checks first, so a run with the
+// feature off never touches the clock or the conversation:
+//
+//   - the pass is configured (coldCacheAfter > 0),
+//   - it has not already fired this run (see coldCleared),
+//   - the run's purpose owns its conversation (coldCachePurposeEligible),
+//   - a recorded last-activity time exists and the gap exceeds the threshold.
+//
+// A zero lastActivity means "not known", not "the epoch": a caller with no
+// session record must not have the pass fire on its first turn as if the
+// conversation had been idle since 1970.
+func (g *compactionGuard) clearColdCache(ctx context.Context, conv *Conversation, emit EmitFunc) {
+	if g.coldCacheAfter <= 0 || g.coldCleared || g.compactor == nil {
+		return
+	}
+	purpose := g.purpose
+	if purpose == provider.PurposeUnspecified {
+		// A launcher may have declared the run on the context instead of on the
+		// engine; provider.EffectivePurpose's precedence in one line, with no
+		// Request to hand it.
+		purpose = provider.PurposeFrom(ctx)
+	}
+	if !coldCachePurposeEligible(purpose) {
+		return
+	}
+	if g.lastActivity.IsZero() {
+		return
+	}
+	gap := g.now().Sub(g.lastActivity)
+	if gap < g.coldCacheAfter {
+		return
+	}
+	cc, ok := g.compactor.(ColdCacheCompactor)
+	if !ok {
+		return
+	}
+	// Latch before the call, not after: whether or not this conversation had
+	// anything to clear, the idle gap has now been accounted for, and a
+	// Compactor that finds nothing is not a reason to ask again next turn.
+	g.coldCleared = true
+	out, cleared, freed := cc.ClearColdToolResults(conv.Messages)
+	g.coldClearedThisTurn, g.coldFreedThisTurn = cleared, freed
+	if cleared == 0 {
+		return
+	}
+	g.logger.Info("cold-cache clear: stale tool results dropped after an idle gap",
+		"idle", gap.Round(time.Second), "cleared", cleared, "freed_tokens", freed)
+	emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
+		"resumed after %s idle — cleared %d stale tool result(s) (~%d tokens) the model server has already evicted from its prefix cache",
+		gap.Round(time.Minute), cleared, freed)})
+	conv.Messages = out
+	conv.invalidate()
+}
+
 // beforeTurn is the P2.7 proactive per-turn check: measure token headroom before
 // every model turn so context-limit errors never interrupt a run mid-flight.
 //
@@ -463,17 +620,35 @@ func (g *compactionGuard) noticeOversizedSystem(conv *Conversation, emit EmitFun
 // when nothing can be compacted the user gets an explicit notice rather than a
 // model that quietly forgot its instructions.
 func (g *compactionGuard) beforeTurn(ctx context.Context, conv *Conversation, emit EmitFunc, toolsSuppressed bool) {
-	// Record the basis for this turn's calibration sample before anything else,
-	// and re-record it after compaction below: what afterTurn has to pair with
-	// the provider's count is the conversation as *sent*, not as it looked on
-	// entry. A turn whose schemas were suppressed carries no requestOverhead and
-	// must not be learned from at all (see afterTurn), which lastRaw = 0 marks.
+	// P67.6 runs first, ahead of the calibration basis recorded below, because it
+	// can rewrite the conversation — and what afterTurn has to pair with the
+	// provider's count is the conversation as *sent*, not as it looked on entry.
+	// It is also ahead of the window check: the cold-cache trigger is on cache
+	// temperature, so a run whose window is not known yet still has a stale
+	// prefix worth clearing.
+	g.coldClearedThisTurn, g.coldFreedThisTurn = 0, 0
+	g.clearColdCache(ctx, conv, emit)
+
+	// Record the basis for this turn's calibration sample, and re-record it
+	// after compaction below, for the same as-sent reason. A turn whose schemas
+	// were suppressed carries no requestOverhead and must not be learned from at
+	// all (see afterTurn), which lastRaw = 0 marks.
 	g.lastRaw, g.lastOverhead = 0, 0
 	if !toolsSuppressed {
 		g.lastRaw, g.lastOverhead = conv.estimatedTokens(), g.overhead()
 	}
 
+	// A cold clear on a turn that never reaches the compaction trigger — or on a
+	// run with no known window at all — still has to reach the trace, and every
+	// return below is an early one. Stamp it now; the fuller record overwrites
+	// it if compaction runs.
 	g.lastEvent = nil
+	if g.coldClearedThisTurn > 0 {
+		g.lastEvent = &trace.Compaction{
+			ColdCleared:     g.coldClearedThisTurn,
+			ColdFreedTokens: g.coldFreedThisTurn,
+		}
+	}
 	win := g.window()
 	if win <= 0 {
 		return
@@ -484,6 +659,9 @@ func (g *compactionGuard) beforeTurn(ctx context.Context, conv *Conversation, em
 	// prompt that merely fits is not a prompt that can be answered.
 	trigger := compactionTrigger(win, g.maxTokens)
 	if est <= trigger {
+		if g.lastEvent != nil {
+			g.lastEvent.Estimate, g.lastEvent.Trigger = est, trigger
+		}
 		return
 	}
 	// P62.7: a previous prune freed too little to be worth its cost and the
@@ -493,7 +671,8 @@ func (g *compactionGuard) beforeTurn(ctx context.Context, conv *Conversation, em
 	// downstream of an *applied* compaction, so the only way not to pay them is
 	// not to take the attempt.
 	if g.suppressed(est, win, trigger) {
-		g.lastEvent = &trace.Compaction{Suppressed: true, Estimate: est, Trigger: trigger}
+		g.lastEvent = &trace.Compaction{Suppressed: true, Estimate: est, Trigger: trigger,
+			ColdCleared: g.coldClearedThisTurn, ColdFreedTokens: g.coldFreedThisTurn}
 		return
 	}
 	pct := est * 100 / win
@@ -503,13 +682,15 @@ func (g *compactionGuard) beforeTurn(ctx context.Context, conv *Conversation, em
 	// BudgetedCompactor.
 	oc := g.compact(g.withTokenBudget(ctx, trigger), conv, emit, pct)
 	g.lastEvent = &trace.Compaction{
-		Applied:        oc.applied,
-		Summarized:     oc.summarized,
-		FreedTokens:    oc.freedTokens,
-		MessagesBefore: before,
-		MessagesAfter:  len(conv.Messages),
-		Estimate:       est,
-		Trigger:        trigger,
+		Applied:         oc.applied,
+		Summarized:      oc.summarized,
+		FreedTokens:     oc.freedTokens,
+		MessagesBefore:  before,
+		MessagesAfter:   len(conv.Messages),
+		Estimate:        est,
+		Trigger:         trigger,
+		ColdCleared:     g.coldClearedThisTurn,
+		ColdFreedTokens: g.coldFreedThisTurn,
 	}
 	if !oc.applied && !g.fullWarned && pct >= 95 {
 		g.fullWarned = true
@@ -646,6 +827,13 @@ func (g *compactionGuard) estimate(conv *Conversation) int {
 // prompt loudly, so the correction buys it nothing worth the risk of learning
 // from a number that means something else.
 func (g *compactionGuard) afterTurn(usage *provider.Usage, win int) {
+	// The turn just produced an assistant message, so the conversation is warm
+	// again as of now. Recorded before every early return below: whether the
+	// turn was admissible as a *calibration* sample is a question about token
+	// accounting and has nothing to do with when the backend last saw this
+	// prefix.
+	g.lastActivity = g.now()
+
 	if usage == nil || g.lastRaw <= 0 {
 		return
 	}

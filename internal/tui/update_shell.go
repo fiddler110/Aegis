@@ -15,7 +15,12 @@ func (m model) updateBang(msg bangMsg) (tea.Model, tea.Cmd) {
 		if msg.code != 0 {
 			style = m.th.toolErr
 		}
-		m.transcript.Append(style.Render(msg.output) + "\n")
+		// P66.15: the user chose the command, but not what it prints — a
+		// `!cat somefile` renders bytes nobody vetted straight into the
+		// transcript. Same strip the shell *tool*'s output already gets on
+		// the way to the same pane (P28.1); SGR survives, so a colourized
+		// command still looks like itself.
+		m.transcript.Append(style.Render(stripDangerousSeqs(msg.output)) + "\n")
 	}
 	if msg.code != 0 {
 		m.transcript.Append(m.th.toolErr.Render(fmt.Sprintf("exit %d", msg.code)) + "\n")

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"context"
 	"fmt"
 
@@ -184,7 +186,7 @@ func (s *Server) modelAdapter(ctxWin int) provider.Adapter {
 // priorMessages (the session's history *before* this turn's message is
 // appended) feed P9.4 task routing — see turnModel/routeModel in routing.go
 // — and are ignored entirely unless routing is opted into.
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir, userText string, priorMessages []provider.Message) (*engine.Engine, string, error) {
+func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir, userText string, priorMessages []provider.Message, lastActivity time.Time) (*engine.Engine, string, error) {
 	if s.adapter == nil {
 		return nil, "", s.providerUnconfiguredErr()
 	}
@@ -236,7 +238,12 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		// daemon sends (compaction, the guard, a spawn, a title) declares its
 		// own purpose at its own call site, so this stays the only foreground
 		// tag in the server.
-		Purpose:                 provider.PurposeForeground,
+		Purpose: provider.PurposeForeground,
+		// P67.6: when this conversation last saw a write, read off the session
+		// row before the run appends anything. It is what makes the *resume*
+		// case visible — the engine's own clock starts here and would measure a
+		// gap of zero no matter how long the session had been sitting idle.
+		LastActivityAt:          lastActivity,
 		Compactor:               s.compactor,
 		Hooks:                   engineHooks,
 		Cost:                    tracker,

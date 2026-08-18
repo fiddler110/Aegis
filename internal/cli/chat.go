@@ -977,6 +977,9 @@ func driveCompaction(ctx context.Context, cfg *config.Config, adapter provider.A
 		// against in the first place.
 		PreservePrefixCache: cfg.Compaction.PreservePrefixCacheOr(
 			config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL)),
+		// P67.6: mirrors the daemon. 0 takes the package default; the pass
+		// floors it at 1.
+		ColdCacheKeep: cfg.Compaction.ColdCacheKeep,
 	}
 	// A local provider whose window is still unknown: skip auto-compaction
 	// rather than defaulting to the 120k cloud budget, which on a 4k-32k local

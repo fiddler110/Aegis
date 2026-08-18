@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/colorprofile"
+	"github.com/fiddler110/aegis/internal/termcaps"
 )
 
 // imageProtocol identifies how attached images are shown inline in the
@@ -22,17 +23,21 @@ import (
 // cell-grid renderer like any other content, needs no out-of-band terminal
 // state, and is the default/auto pick everywhere truecolor is available.
 //
-// protocolKitty (P40.4) is the real kitty-graphics APC protocol. It remains
-// EXPERIMENTAL and strictly opt-in (image_rendering: "kitty") — never chosen by
-// auto-detection. The reason is the one the original descope recorded: this
+// protocolKitty (P40.4) is the real kitty-graphics APC protocol. It is
+// auto-selectable as of P67.9, but only on the strength of an actual answer:
+// the terminal is asked whether it speaks the protocol (internal/termcaps,
+// one DA1-terminated query batch at startup), and "auto" picks the kitty tier
+// only when the terminal said yes. A TERM string that merely looks kitty-ish
+// is no longer enough for auto — it never was evidence, and the tier being
+// permanently opt-in was the price of that guess.
+//
+// The tier is still EXPERIMENTAL in one respect the probe cannot settle: this
 // screen is a cell grid diffed and redrawn every frame by bubbletea/
 // ultraviolet, which has no primitive for "this span is opaque, out-of-band
 // terminal state" (contrast ultraviolet's Cell.Link for the far simpler OSC 8
-// hyperlink case), and there is no kitty terminal in this environment to verify
-// against. So the encoder and detector below are built and unit-tested as the
-// prototype the roadmap called for, but a user has to knowingly turn the tier
-// on; the safe half-block default is untouched. Placement-in-the-render-loop is
-// the remaining step that needs a real terminal to validate.
+// hyperlink case). Placement-in-the-render-loop remains the step that needs a
+// real terminal to validate; image_rendering: "off" and "halfblock" are the
+// escape hatches, alongside AEGIS_TERM_CAPS for the probe itself.
 type imageProtocol int
 
 const (
@@ -53,29 +58,56 @@ func detectImageProtocol(environ []string) imageProtocol {
 }
 
 // imageProtoFor resolves the tui.Config.ImageRendering setting to a protocol,
-// called once at startup:
-//   - "off"    → no inline images
-//   - "kitty"  → the experimental kitty-graphics tier (P40.4), an explicit
-//     opt-in that is deliberately never reached by auto-detection
-//   - "auto"/"" and anything else → the half-block tier when the terminal is
-//     truecolor/256-color capable, else none
+// called once at startup — which is also when the capability probe runs, since
+// resolving "auto" is what triggers it (see termcaps.Cached's doc for why that
+// ordering, strictly before bubbletea owns stdin, is the whole trick):
+//   - "off"        → no inline images
+//   - "kitty"      → force the kitty-graphics tier (P40.4) whatever the
+//     terminal says, for a terminal that supports it but answers no query
+//   - "halfblock"  → force the half-block tier, never kitty
+//   - "auto"/"" and anything else → kitty when the terminal *answered* that it
+//     speaks the graphics protocol, else the half-block tier when the terminal
+//     is truecolor/256-color capable, else none
 func imageProtoFor(setting string) imageProtocol {
 	switch setting {
 	case "off":
 		return protocolNone
 	case "kitty":
 		return protocolKitty
-	default:
+	case "halfblock", "half-block", "blocks":
 		return detectImageProtocol(os.Environ())
+	default:
+		return autoImageProto(termcaps.Cached(), os.Environ())
 	}
+}
+
+// autoImageProto is imageProtoFor's "auto" arm, split out so the decision is
+// testable without a terminal. The colour-capability floor still governs: a
+// NO_COLOR or dumb-terminal environment gets no inline images at all, however
+// the graphics query was answered — the user asked for no colour, and an image
+// is the loudest colour there is.
+func autoImageProto(caps termcaps.Caps, environ []string) imageProtocol {
+	base := detectImageProtocol(environ)
+	if base == protocolNone {
+		return protocolNone
+	}
+	if caps.KittyGraphics {
+		return protocolKitty
+	}
+	return base
 }
 
 // detectKittyGraphics reports whether the environment looks like a terminal
 // that speaks the kitty graphics protocol (kitty itself, Ghostty, WezTerm,
-// Konsole). It is intentionally NOT consulted by imageProtoFor's "auto" path —
-// the kitty tier is opt-in only (see imageProtocol's doc) — but it lets
-// `aegis doctor` and the config UI tell the user whether "kitty" is plausible
-// on their terminal before they enable it.
+// Konsole). Since P67.9 this is no longer how the tier is chosen — the
+// terminal is asked instead (internal/termcaps) — and it survives for the one
+// case where nobody can be asked: `aegis doctor` run with its output piped, or
+// any other non-TTY context, where the honest report is that kitty is
+// *plausible* rather than that it works.
+// KittyPlausible exposes that fallback heuristic to `aegis doctor`, which is
+// its only remaining caller.
+func KittyPlausible(environ []string) bool { return detectKittyGraphics(environ) }
+
 func detectKittyGraphics(environ []string) bool {
 	env := map[string]string{}
 	for _, kv := range environ {

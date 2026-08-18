@@ -96,6 +96,10 @@ type Summarizer struct {
 	// preservePrefixCache makes the deterministic pre-pass headroom-gated
 	// instead of unconditional; see shouldPrune.
 	preservePrefixCache bool
+	// coldCacheKeep is how many clearable tool results the P67.6 cold-cache pass
+	// leaves verbatim. Floored at 1 by ClearColdToolResults, which is where the
+	// reasoning for the floor lives.
+	coldCacheKeep int
 
 	// maxTokens is the completion budget the compaction trigger has to reserve
 	// room for (P66.14/LLM-02). Atomic for the same reason contextWindow is: the
@@ -149,6 +153,16 @@ type Options struct {
 	// answers a question about the *transport's* cost model and has no other
 	// reason to know what a Config is.
 	PreservePrefixCache bool
+	// ColdCacheKeep is how many of the most recent clearable tool results the
+	// P67.6 cold-cache pass leaves verbatim when a conversation resumes after an
+	// idle gap. Defaults to 3, and can never be driven below 1 — see
+	// ClearColdToolResults for why the floor is a named constraint rather than a
+	// nicety.
+	//
+	// It counts *clearable* results, not messages, so it is not KeepRecent and
+	// deliberately does not default to it: KeepRecent protects the shape of the
+	// conversation for the summarizer, this protects the model's working set.
+	ColdCacheKeep int
 }
 
 // New constructs a Summarizer.
@@ -163,6 +177,13 @@ func New(opts Options) *Summarizer {
 	if opts.SummaryTokens <= 0 {
 		opts.SummaryTokens = 1024
 	}
+	if opts.ColdCacheKeep <= 0 {
+		// Three: enough that the model still has the last read, the last search
+		// and the last command it ran, which is the working set a resumed turn
+		// almost always continues from, and few enough that the pass is worth
+		// taking at all on a tool-heavy conversation.
+		opts.ColdCacheKeep = 3
+	}
 	s := &Summarizer{
 		adapter:             opts.Adapter,
 		model:               opts.Model,
@@ -170,6 +191,7 @@ func New(opts Options) *Summarizer {
 		keepRecent:          opts.KeepRecent,
 		summaryTokens:       opts.SummaryTokens,
 		preservePrefixCache: opts.PreservePrefixCache,
+		coldCacheKeep:       opts.ColdCacheKeep,
 	}
 	s.contextWindow.Store(int64(opts.ContextWindow))
 	s.maxTokens.Store(int64(opts.MaxTokens))

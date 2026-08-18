@@ -82,12 +82,14 @@ func TestReadOnlyShellCommand(t *testing.T) {
 		{"ps env dump", "ps auxwwe", false},
 		{"less", "less file.txt", false},
 		{"more", "more file.txt", false},
-		// P66.3/VULN-02: every argv0 with a documented file-writing form is
-		// off the allowlist, in-root destination or not.
-		{"sort", "sort file.txt", false},
+		// P66.3/VULN-02, re-decided by P67.8: the binaries with a documented
+		// file-writing form are admitted, and it is the *writing form* that is
+		// refused now — see TestReadOnlyShellFlagParsing for the full pass.
+		{"sort", "sort file.txt", true},
 		{"sort output flag", "sort -o out.txt file.txt", false},
-		{"tree", "tree", false},
-		{"uniq", "uniq file.txt", false},
+		{"tree", "tree", true},
+		{"uniq", "uniq file.txt", true},
+		{"uniq output positional", "uniq in.txt out.txt", false},
 		// ...but grep's -o is --only-matching, and dropping the write-capable
 		// binaries must not cost it.
 		{"grep only-matching", "grep -o foo file.txt", true},

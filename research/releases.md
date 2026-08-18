@@ -8,7 +8,15 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-17 (sixth record the same day) — **P69.6 shipped**, the last open Tier 1
+**Last updated:** 2026-08-18 — **five items shipped in one sitting**: **P66.15**, **P67.6**,
+**P67.7**, **P67.8** and **P67.9**, which is the whole of the "Up next" table except its
+parked-by-choice last row. Record: [Five rows of Up next](#five-rows-of-up-next-2026-08-18-p6615-p676-p677-p678-p679).
+Two of the five **contradicted their own item text while being built** — P67.7 named four constraints
+and there were six, and P67.9's payoff turned out to be gated on a Windows console call the item did
+not mention — and P66.15, being an audit, ended by filing three new items (**P70.1**, **P70.2**,
+**P70.3**) out of what it verified but deliberately did not fix.
+
+**Last updated (previous):** 2026-08-17 (sixth record the same day) — **P69.6 shipped**, the last open Tier 1
 item and the multi-model half P69.5 deliberately left open. A debate now plans its seats as one
 resident set against a stated memory budget, installs the resulting windows for its duration, and
 restores them afterwards — or refuses before spending a turn. Record: [Nothing planned a resident
@@ -80,6 +88,243 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### Five rows of Up next, 2026-08-18 (P66.15, P67.6, P67.7, P67.8, P67.9)
+
+The 2026-08-17 "Up next" table had six rows. Five of them shipped on 2026-08-18, in the table's own
+order; the sixth is the live-tier remainder, which the user parked and which is untouched. What
+follows is per-item, and the parts worth reading are the places the *items were wrong about
+themselves* — three of the five were, in ways that changed what got built.
+
+---
+
+#### P66.15 — the sweep of the two packages nobody read
+
+`internal/tui` (16k non-test lines) and `internal/security` (8.4k) were 26% of production Go and had
+produced three findings between them, two of which were a struct-field count and a stale comment.
+The item's claim was that this is evidence nobody read them rather than evidence they are clean. It
+was right.
+
+**Seven findings verified and fixed, each with a regression test confirmed to fail with the fix
+stashed out.** The two that matter most:
+
+- **P66.6 was not the only unsanitized ingestion point** (`internal/tui/toolview.go:46`, Medium).
+  Every tool call is drawn into the transcript as well as into the approval dialog — before approval
+  on an auto-approved tool, on every history reload, and in build/auto mode where an allowed path
+  never opens the dialog at all. `renderWriteDiff`/`renderEditDiff`/`renderMultiEditDiff` handed
+  model-supplied file content straight to `diffLines`, which strips nothing, and the generic branch
+  printed the raw input (`strings.Fields` does not treat ESC as whitespace). Only `renderShellCall`
+  had a per-renderer strip, which is itself the evidence that the per-branch form leaks. Fixed at the
+  one choke point instead.
+- **`captureShellWrites` was addressing the wrong paths** (`shell_checkpoint.go:52`, Medium).
+  `git status --porcelain` reports paths relative to the **repository** root — porcelain forces
+  `status.relativePaths` off, verified empirically — and the code joined them onto the *workspace*
+  root. Whenever a workspace sat inside a larger repo, every capture addressed a path that did not
+  exist: the command's real writes were never captured, so `/rewind` silently restored nothing, *and*
+  a pre-image could be recorded against a bogus in-workspace path that restore would then write out.
+
+The other five: unsanitized slash-command output (`/scan network` prints nmap banners a *scanned
+remote host* chose), unsanitized guard/error events (a guard's text is the judge model's own words),
+unsanitized `!`-shell output, unwrapped `recon_scan`/`dast_scan` reports, and the two per-session maps
+(`sessionSems`, `sessionPermCache`) that no cleanup path ever freed — a loopback caller creating and
+deleting sessions in a loop leaked a channel plus one entry per approved tool for the daemon's
+lifetime.
+
+**What the sweep checked and cleared is recorded too**, so the coverage gap closes as *swept* rather
+than as skipped: `parseNmapXML` is not XXE- or entity-expansion-exposed (Go's `encoding/xml` resolves
+no external entities and expands no custom ones unless `Decoder.Entity` is set, which it never is);
+all five named parsers already have fuzz targets and no panic path was found; `notify.sanitize`
+correctly strips controls and semicolons before OSC 9/777; and the 60s auth-lockout cap *is*
+defeatable — any concurrent successful request resets the streak, so a TUI polling `/status` keeps it
+at zero — but the token is 32 bytes of `crypto/rand`, so the throttle is not the control that
+matters and it is not filed as a vulnerability.
+
+**Four findings were verified and deliberately not fixed**, because each is a design decision rather
+than a line, and are filed as **P70.1** (`checkpoint.RestoreFiles` path-validates nothing),
+**P70.2** (the swarm mailbox as an unwrapped cross-agent channel) and **P70.3** (scanner output,
+unbounded and half-wrapped). Filing them is the point: a sub-item quietly left undone inside a closed
+item is how P66.25 and P66.26 came to need refiling.
+
+---
+
+#### P67.6 — a second compaction trigger, on cache temperature
+
+Aegis compacted on *context pressure* only. That is the right trigger for running out of window and
+the wrong one for a different problem: a conversation resumed after a long gap re-sends a prefix the
+backend has already evicted, paying full prefill on stale tool results it will summarize away later
+anyway. The observation the item rests on is a scheduling one — **when the cache is already cold,
+clearing old tool results is free**, because the usual reason not to rewrite the middle of a
+conversation has already happened.
+
+`compaction.ClearColdToolResults` replaces every clearable tool result except the most recent N with
+`compaction.ColdCacheSentinel`; `engine.ColdCacheCompactor` is the optional seam, alongside the four
+this file already had. The engine owns the *when* (the idle gap, the purpose gate, a once-per-run
+latch), the compactor owns the *what* (which result kinds are disposable, how many to keep, the
+sentinel).
+
+All three of the item's named constraints are pinned by a test rather than by a comment:
+
+- **The keep-count is floored at 1.** `TestColdClearFloorsKeepAtOne` passes 0, -1 and -100.
+- **The gate is on call purpose**, which is why the item was sequenced behind P67.3.
+  `TestColdCacheGatesOnCallPurpose` walks all nine `provider.Purpose` values;
+  `TestColdCacheHonorsAContextDeclaredPurpose` covers the launcher path, mirroring
+  `provider.EffectivePurpose`'s precedence. `PurposeUnspecified` is eligible, deliberately: the
+  analysis-only purposes are exactly the ones that were *added* with a tag, so the untagged default
+  is the conversation-owning case.
+- **The sentinel is a wire format.** `TestColdClearSentinelIsStable` compares it to a literal and
+  fails with a paragraph explaining what a rename breaks — the same hazard the
+  `<read-files>`/`<modified-files>` tags carry, and it fails the same quiet way.
+
+Two decisions the item did not make. The default is **20 minutes** (`compaction.cold_cache_after`,
+`"off"` disables), chosen to sit clear of every cache TTL this ships against rather than to split the
+difference: Ollama's default keep-alive is 5 minutes, Anthropic's prompt cache is 5 minutes or 1 hour
+by tier. It is a default, not a finding — no live measurement has been taken at any value, which is
+why it is a knob. And the pass **fires at most once per run**: the condition it detects is true
+exactly once, and leaving it unlatched would rewrite the conversation every turn, which is the thrash
+P62.7 exists to stop.
+
+`LastActivityAt` is plumbed from the session row (`sess.UpdatedAt`, read before the run appends
+anything), because the engine's own clock starts at run entry and would measure a gap of zero no
+matter how long a session had been idle — which is the *resume* case, i.e. the one the item is
+actually about.
+
+---
+
+#### P67.7 — tool calls dispatched from the stream, and the two gates the item did not name
+
+The largest change of the five, and the one whose item turned out to be incomplete.
+
+**What was asked:** `Engine.turn` returned its `toolUses` slice after the stream drained, so the first
+call of a five-call round waited for the fifth to finish generating. Feed the scheduler each call as
+its block completes instead. The scheduler itself is correct and should not change.
+
+**What was built:** `internal/engine/toolround.go`, which is the old `runTools` restructured around a
+`toolRound` type with `add`/`wait`/`abort`. `turn` takes a round and calls `add` on `EventToolUse`;
+`Run` opens the round before the turn and either hands it to `runTools` or aborts it.
+
+The index arithmetic had to go. The old code sized `results`/`traces`/`serialize`/`paths`/`done` from
+`len(toolUses)` and had each goroutine write `results[i]`; appending to those slices while goroutines
+hold indices into them is a data race with a silent failure mode. Each call now owns a `*toolSlot`
+whose address never moves. The semaphore also moved from the dispatch loop into the goroutine —
+blocking the dispatch loop was free when the caller had nothing else to do, and is not when the
+caller is draining a provider stream and beating the P39.17 heartbeat.
+
+**Two constraints the item did not name, both found by a failing test rather than by reading:**
+
+- **`TestBudgetGateStopsRun` failed.** The pre-tool-round budget gate exists precisely so that a turn
+  whose *own* usage crosses the cap stops before its tool calls run — and that usage is not known
+  until the turn ends. A call dispatched mid-stream cannot honor a bound that is not yet decidable.
+- **The P53.2 loop guard can *abort the run*** on the complete round's signature, and structurally
+  cannot rule on a prefix of one.
+
+The temptation was to weaken the budget gate on the argument that a read-capability call costs no
+money and has no side effects. That argument is defensible and it was **not** taken: the gate is an
+explicit, tested, user-facing guarantee, and quietly narrowing it to buy latency is not a trade to
+make on the engine's behalf. The resolution is a restriction on *when* early dispatch is active:
+
+- **No spend bound configured** (`runBudget.spendBounded`: USD or either token cap). Wall-clock and
+  the stall watch are exempt — they are attached to the context as real deadlines and already reach a
+  running round.
+- **Early dispatch stops at the first write/execute call.** This is what keeps side effects behind
+  every pre-round gate, and it is also what keeps the dispatched set a *prefix* of the round, which
+  the same-path `waitFor` graph depends on.
+- **Not under `suppressTools`** (the calls are about to be discarded as hallucinations) and **not
+  under the tool-call shim** (the calls are not in the stream at all — they are parsed out of the
+  reply text afterwards).
+
+This lands the payoff on the workload the item names — local models, where generation latency
+dominates and pricing is zero, so no spend bound is set — and leaves a cloud run with a budget on the
+pre-P67.7 path. That is a real narrowing of the item and is recorded as one.
+
+A third thing the item did not name, found by `go test -race`: **a run now has more than one producer
+of events.** `Run` emits, and the round's goroutines emit, concurrently — and every consumer of an
+`EmitFunc` (the TUI, the daemon's SSE writer, an eval collector) was written for a single producer.
+Serialized once at the top of `Run` (`serializedEmit`) rather than at each producer, because the
+failure mode of a future caller forgetting to wrap is a race in code this package does not own.
+
+The item's four original constraints all hold, and one needed no code at all: **`startedTools` is
+already recorded at dispatch**, inside `executeTool`, so P65.1's distinction between a call that may
+have landed effects and one that never ran survives unchanged.
+
+---
+
+#### P67.8 — the shell allowlist is per-command, not per-binary
+
+`shell_readonly.go` allowlisted whole binaries and rejected anything with a shell metacharacter. Its
+own comments showed where that ran out: `sort`, `tree` and `uniq` were excluded because each has a
+file-*writing* form, with the reasoning "no argument parsing makes them read-only". Argument parsing
+is now there — a per-command table of permitted flags with argument types, optional value patterns, a
+predicate escape hatch, a per-command POSIX `--` switch, and **unlisted flags failing closed**.
+
+The interesting part is which flags are refused and why, because "does it write" is not the only
+question:
+
+- `sort --compress-program` execs a program over temp files; `rg --pre`/`--pre-glob` run a
+  preprocessor per file; `rg --hostname-bin` execs a binary and the name suggests a lookup;
+  `fd -l/--list-details` internally execs `ls`, which is the item's own PATH-hijack example.
+- `date` needed a **predicate**, not a flag rule: BSD `date 010112002026` sets the clock from a
+  *positional*. `uniq`'s writing form is likewise a positional, which is why the table has a
+  positional bound at all.
+- `gh` is classified **CapNetwork, not CapRead**. Every `gh` call is egress, and `permission.Policy`
+  *asks* for CapNetwork while silently *allowing* CapRead — a CapRead downgrade would have been more
+  permissive than the network gate it must sit behind. `gh api`, `gh auth`, `-w/--web` and
+  `--hostname` are refused outright.
+- The exclusions that were never about writing survive with their reasoning intact: `env`/`printenv`
+  (the *default* output is the provider keys), `ps` (same data by another route), `less`/`more`
+  (shell out). `find` was added to that list — its unsafe primaries are operands in an expression
+  language, not flags.
+
+**The test pass found a bug, which is the argument for having written it.** A PowerShell
+colon-attached path (`Get-Content -Path:<abs>`) escaped confinement: `argvPathCandidates` read the
+token as a short cluster and offered a benign relative name to `argvStaysInRoot`. That is VULN-02's
+shape in a third spelling, and it is now split into an operand before the path check.
+
+---
+
+#### P67.9 — the terminal is asked, not guessed
+
+`imagerender.go` decided whether a terminal speaks the kitty graphics protocol by checking whether
+`TERM` contains `"kitty"`. The obstacle to asking is that an unsupporting terminal simply stays
+silent, so the naive implementation needs a timeout that is either too short to be reliable or too
+long to sit in startup. The trick the item names removes it: terminate the batch with a **DA1 request
+(`CSI c`)**, which every terminal since the VT100 answers, and rely on in-order replies. A feature
+answer before the DA1 reply means the feature exists; DA1 first means it does not.
+
+New package `internal/termcaps`. `Decide(io.Reader)` consults no clock at all and is tested against
+13 recorded streams × 4 chunk sizes — kitty-supporting, kitty-silent, replies *after* DA1 not
+counted, out-of-order-but-pre-DA1, `DECRPM` 0/4, truncated mid-APC, interleaved type-ahead. The one
+timeout in the system (`ProbeDeadline`, 2s) is documented as a safety net that a conforming terminal
+never waits out, not as a decision input.
+
+**No second parser.** `internal/termsafe` grew `NextSeq`, exposing the completeness bit an
+incremental reader needs and a stripper does not, wrapping the existing recognizer.
+
+The Bubbletea problem the item warns about — replies arriving on the same channel as keystrokes — is
+solved structurally rather than hopefully: `termcaps.Cached()` runs from `newModel`, strictly before
+`tea.NewProgram(m).Run()`, so Bubbletea never owns stdin while replies are in flight. The honest
+caveat is documented: a keystroke typed inside the few-microsecond window is in the same read buffer
+and cannot be un-read, which is exactly why the probe must run before the program rather than
+alongside it.
+
+**One thing the item did not anticipate.** On Windows the probe cannot simply write: if
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING` cannot be enabled on the output handle, the query bytes would be
+*printed* into the console as garbage. The implementation writes nothing at all in that case, and the
+same rule covers every non-TTY path (piped, CI, `aegis serve`) — `TestProbeNonTTY` asserts both no
+hang and **zero bytes written**.
+
+The payoff the item asked for is delivered: kitty is now an **auto-selected** tier rather than
+permanently opt-in, and `aegis doctor` reports `supported: … — probed: the terminal answered
+(DA1-terminated batch)` instead of "plausible", falling back to the old wording only where it is
+actually correct (not a terminal). `AEGIS_TERM_CAPS` forces or disables the whole thing;
+`tui.image_rendering` gained `"halfblock"` to force the safe tier.
+
+---
+
+#### Testing
+
+`go build ./...`, `go vet ./...`, `staticcheck ./...` and `go test ./...` are all clean.
+`go test -race` is clean on every package touched — which is the load-bearing one for P67.7, and is
+what caught the concurrent-emit race that the ordinary run did not.
 
 ### Nothing planned a resident set, 2026-08-17 (P69.6)
 

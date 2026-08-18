@@ -161,3 +161,62 @@ func mustGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
+
+// TestShellCheckpointWorkspaceInsideLargerRepo is P66.15: `git status
+// --porcelain` reports paths relative to the *repository* root, not to the
+// directory git ran in, so a workspace that is a subdirectory of a larger repo
+// used to join those paths onto the wrong base. Two things went wrong at once
+// — the command's real writes were never captured (so /rewind silently
+// restored nothing), and a bogus path under the workspace could be recorded
+// instead and written back on restore.
+func TestShellCheckpointWorkspaceInsideLargerRepo(t *testing.T) {
+	gitAvailable(t)
+	repo := initRepo(t)
+	root := filepath.Join(repo, "app") // the workspace: a subdirectory
+	sibling := filepath.Join(repo, "other")
+	for _, d := range []string{root, sibling} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := "original content\n"
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	siblingBefore := "sibling content\n"
+	if err := os.WriteFile(filepath.Join(sibling, "keep.txt"), []byte(siblingBefore), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repo, "add", "-A")
+	mustGit(t, repo, "commit", "-m", "init")
+
+	snap, store, ctx := newTestSnapshotter(t)
+
+	sh := newShellTool(root, 30, nil, nil)
+	res, err := sh.Execute(ctx, mustJSON(t, map[string]any{
+		"command": echoToFile("tracked.txt", "overwritten content"),
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("shell: %v %+v", err, res)
+	}
+
+	if n, err := store.RestoreFiles(ctx, snap.CheckpointID()); err != nil || n == 0 {
+		t.Fatalf("RestoreFiles() = %d, %v; want the subdirectory workspace's write captured", n, err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "tracked.txt"))
+	if err != nil {
+		t.Fatalf("read after restore: %v", err)
+	}
+	if string(got) != original {
+		t.Errorf("app/tracked.txt after rewind = %q, want original %q", got, original)
+	}
+	// Nothing may be created at the doubled-up path the wrong join addressed.
+	if _, err := os.Stat(filepath.Join(root, "app")); !os.IsNotExist(err) {
+		t.Errorf("rewind created app/app/... from a repo-root-relative path (err=%v)", err)
+	}
+	// A sibling directory in the same repo is outside the workspace and must
+	// be left alone entirely — RestoreFiles has no root of its own to check.
+	if data, err := os.ReadFile(filepath.Join(sibling, "keep.txt")); err != nil || string(data) != siblingBefore {
+		t.Errorf("sibling file changed by a workspace rewind: %q, err=%v", data, err)
+	}
+}

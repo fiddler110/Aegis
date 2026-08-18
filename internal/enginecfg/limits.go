@@ -26,6 +26,11 @@ type Limits struct {
 	MaxIterations            int
 	LoopThreshold            int
 	RedactSecrets            bool
+	// ColdCacheAfter is the P67.6 idle gap that triggers the cold-cache clear.
+	// It rides here for the reason the three non-`cost:` fields above do: it is a
+	// per-run bound an operator sets once and expects every entry point to
+	// honor, and a field on this struct reaches all of them.
+	ColdCacheAfter time.Duration
 }
 
 // CostLimits reads the run bounds out of config.
@@ -42,7 +47,17 @@ func CostLimits(cfg *config.Config) Limits {
 		MaxIterations:            cfg.Provider.MaxIterations,
 		LoopThreshold:            cfg.Provider.LoopThreshold,
 		RedactSecrets:            cfg.Security.RedactSecrets,
+		ColdCacheAfter:           coldCacheAfter(cfg),
 	}
+}
+
+// coldCacheAfter resolves compaction.cold_cache_after, falling back to the
+// package default on an unparseable value. The *warning* for that case belongs
+// at startup where there is a logger (see internal/server), not here — this
+// function is called per engine construction and would repeat it every run.
+func coldCacheAfter(cfg *config.Config) time.Duration {
+	d, _ := cfg.Compaction.ColdCacheAfterOr()
+	return d
 }
 
 // WithoutContextTokenCap returns a copy with MaxTokensPerRun cleared.
@@ -70,4 +85,5 @@ func (l Limits) Apply(o *engine.Options) {
 	o.MaxIterations = l.MaxIterations
 	o.LoopThreshold = l.LoopThreshold
 	o.RedactSecrets = l.RedactSecrets
+	o.ColdCacheAfter = l.ColdCacheAfter
 }
