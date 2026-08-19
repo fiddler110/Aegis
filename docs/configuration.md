@@ -212,6 +212,26 @@ provider:
   # with `aegis models --fit-debate`. Only meaningful for a local Ollama backend.
   vram_budget_gb: 0
 
+  # Let the daemon solve context_window from vram_budget_gb instead of serving
+  # the number above (P72.1). Off by default, and the fit runs *without* it
+  # whenever context_window is unset — this flag answers the other case: a
+  # context_window you set on purpose (a debate topology pin, a figure worked out
+  # by hand) is never replaced silently, so replacing it is a separate yes.
+  #
+  # What it does at startup: load the default model (and small_model, planned as
+  # one co-resident set) so their weights can be measured, solve for the largest
+  # windows that fit the budget, reload at those windows, and check Ollama's own
+  # size/size_vram split to confirm nothing spilled. A model a session later
+  # switches to with /model joins the set and the whole set is re-planned after
+  # that turn. Nothing is written back to config.yaml: the fitted window is
+  # effective for the daemon's lifetime and reported by /status as the source
+  # "fit:vram-budget". `aegis models --fit` prints the same arithmetic without
+  # applying it, and `--fit --write` is still the only thing that edits config.
+  #
+  # Only meaningful for the native ollama adapter; the /v1 compat path cannot
+  # send num_ctx, so a fitted window would be a number the server never receives.
+  autofit_context: false
+
   # The element type Ollama stores K and V in — its OLLAMA_KV_CACHE_TYPE.
   # "f16" (default), "q8_0" (roughly half the cache) or "q4_0" (roughly a
   # quarter). Ollama does not report this over its API, so it is a declaration
@@ -1463,12 +1483,13 @@ and, under `provider:`, the model and tuning knobs — `model`, `small_model`,
 `mcp`, `mcp_server`, `hooks`, `plugins`, `lsp`, `commands`, `server`,
 `security`, `git`, `workspace`, `notify`, `search`, `embeddings`, `diagram`,
 `cleanup`, and the rest of `provider:` (`default`, `base_url`, `headers`,
-`fallback`, `vram_budget_gb`, `kv_cache_type`). The last two are frozen on a
-different ground from the rest: they describe the *operator's machine*, not the
-work, and a cloned repo declaring how much VRAM the model server may hold
-oversizes every window on hardware it has never seen. The list is deliberately
-the complement of the one above rather
-than an enumeration of its own: a config key added to Aegis in a later release
+`fallback`, `vram_budget_gb`, `kv_cache_type`, `autofit_context`). The last
+three are frozen on a different ground from the rest: they describe the
+*operator's machine*, not the work, and a cloned repo declaring how much VRAM the
+model server may hold oversizes every window on hardware it has never seen —
+`autofit_context` with it, since it is the permission to act on that figure. The
+list is deliberately the complement of the one above rather than an enumeration
+of its own: a config key added to Aegis in a later release
 is frozen until somebody classifies it, so the boundary cannot quietly develop
 a hole (P66.5/SEC-02).
 
@@ -1837,8 +1858,26 @@ hooks:
 
 The zero-config DuckDuckGo scrape (the default) throttles hard after roughly
 two searches in quick succession — fine for an occasional lookup, not for a
-research-shaped workload issuing several searches per round. A keyed provider
-is the fix:
+research-shaped workload issuing several searches per round. When DuckDuckGo
+is throttled, `web_search` falls back to a second unkeyed scrape (Marginalia)
+before giving up, but that ladder is still a degrade-honestly measure, not a
+fix. Configuring any of the three providers below makes it the **primary**
+backend — `web_search` tries it first and only falls through to the
+DuckDuckGo/Marginalia scrape ladder if that call itself errors.
+
+**If you already run a SearXNG instance, point at it — it's the best option
+you can have.** No key, no per-query cost, no external rate limit, and
+results stay on infrastructure you control:
+
+```yaml
+search:
+  provider: searxng
+  base_url: "http://your-searxng-instance:8080"
+  # api_key: "..."   # only if your instance requires auth
+```
+
+If you don't already run one, Tavily is the lowest-friction keyed option —
+no self-hosting, no card:
 
 ```yaml
 search:
@@ -1847,12 +1886,10 @@ search:
 ```
 
 Tavily's free tier (1,000 credits/month, no card required as of 2026-08) is
-the lowest-friction option. Brave's API is also supported
+the lowest-friction zero-infrastructure option. Brave's API is also supported
 (`provider: brave`), but as of February 2026 it no longer has a no-card free
 tier — it bills per query past a small monthly credit that requires public
-attribution to keep. A self-hosted SearXNG instance
-(`provider: searxng`, `base_url: "https://your-searxng-instance"`) avoids
-both a card and per-query billing if you already run one.
+attribution to keep; it's worth using only if you're already paying for it.
 
 ### Use an AI gateway
 

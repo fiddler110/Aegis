@@ -699,6 +699,26 @@ type ProviderConfig struct {
 	// Only meaningful for a local Ollama backend; a cloud provider has nothing
 	// resident to budget. Read via VRAMBudgetBytes(), never this field directly.
 	VRAMBudgetGB float64 `koanf:"vram_budget_gb"`
+	// AutofitContext lets the daemon size the serving context window from
+	// vram_budget_gb at startup and on first use of a newly-selected model,
+	// rather than serving whatever context_window says (P72.1).
+	//
+	// The fit itself is gated on vram_budget_gb, not on this flag: with a budget
+	// stated and *no* context_window configured, the daemon already has nothing
+	// to contradict and fits. This flag answers the other case — a
+	// context_window that IS set. That number is frequently load-bearing (the
+	// debate topology's 16k pin is documented as such), and silently replacing a
+	// figure an operator worked out is the one thing P72.1 was filed saying not
+	// to do. So overriding a configured window is a separate, explicit "yes".
+	//
+	//   false (default) — fit only when context_window is unset.
+	//   true            — fit always, and let the fitted window override a
+	//                     configured one (announced in the log, never written
+	//                     back to config.yaml).
+	//
+	// Like vram_budget_gb it is a property of the operator's machine, so it is
+	// frozen from project config (see freeze.go).
+	AutofitContext bool `koanf:"autofit_context"`
 	// KVCacheType declares the element type Ollama stores K and V in — its
 	// OLLAMA_KV_CACHE_TYPE, llama.cpp's --cache-type-k/v. "" (unset) means f16,
 	// Ollama's default; "q8_0" roughly halves the cache and "q4_0" roughly

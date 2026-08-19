@@ -28,6 +28,19 @@ type ProviderPatch struct {
 	// answer halves of one question: how big one model's window is, and how many
 	// models have to fit beside it.
 	VRAMBudgetGB float64
+	// AutofitContext writes provider.autofit_context, the permission for the
+	// daemon to re-solve context_window from VRAMBudgetGB at startup (P72.1).
+	// false omits the line entirely.
+	//
+	// The wizard sets it whenever a budget was stated, and the reasoning is that
+	// the flag exists to protect a *hand-tuned* context_window — a number someone
+	// worked out and would not want silently replaced. The window in a config
+	// this function just wrote is not that number: it is either the training-max
+	// recommendation or a fit taken against a model that happened to be loaded at
+	// the time. Stating a budget during setup is the operator saying "size this
+	// to my machine", so the daemon is allowed to finish the job on the first
+	// boot where the model is measurable.
+	AutofitContext bool
 }
 
 // PatchGlobalProvider replaces the provider: block in the global config file
@@ -77,6 +90,12 @@ func buildProviderBlock(p ProviderPatch) string {
 		b.WriteString("  # not the card's capacity: subtract the driver reserve and whatever\n")
 		b.WriteString("  # your desktop already holds. Debates plan their seats against this.\n")
 		fmt.Fprintf(&b, "  vram_budget_gb: %g\n", p.VRAMBudgetGB)
+	}
+	if p.AutofitContext {
+		b.WriteString("  # Re-solve context_window from vram_budget_gb at daemon startup, once\n")
+		b.WriteString("  # the model has been loaded and its weights can actually be measured.\n")
+		b.WriteString("  # The window above is a starting point; set this to false to keep it.\n")
+		b.WriteString("  autofit_context: true\n")
 	}
 	fmt.Fprintf(&b, "  max_tokens: %d\n", p.MaxTokens)
 	fmt.Fprintf(&b, "  max_retries: %d\n", p.MaxRetries)

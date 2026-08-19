@@ -411,7 +411,7 @@ func TestApplyDetectedWindowNativePathUnaffectedByCompatRule(t *testing.T) {
 // is otherwise spent believing there is 8x the room Ollama is serving.
 func TestConfigEntryCompatSubstitutesOllamaDefault(t *testing.T) {
 	s := ctxWinServer(32768, "openai", "http://127.0.0.1:11434/v1")
-	e := s.configEntry(false)
+	e := s.configEntry(s.cfg.Provider.Model, false)
 	if e.win != ollamainfo.DefaultServeContext || e.src != "ollama:compat-default" {
 		t.Errorf("got %d/%q, want %d/ollama:compat-default", e.win, e.src, ollamainfo.DefaultServeContext)
 	}
@@ -423,7 +423,7 @@ func TestConfigEntryCompatSubstitutesOllamaDefault(t *testing.T) {
 // a server that isn't Ollama would be a new wrong answer, not a fix.
 func TestConfigEntryAmbiguousCompatBaseKeepsConfig(t *testing.T) {
 	s := ctxWinServer(32768, "openai", "http://127.0.0.1:1234/v1")
-	if e := s.configEntry(true); e.win != 32768 || e.src != "config" {
+	if e := s.configEntry(s.cfg.Provider.Model, true); e.win != 32768 || e.src != "config" {
 		t.Errorf("got %d/%q, want 32768/config", e.win, e.src)
 	}
 }

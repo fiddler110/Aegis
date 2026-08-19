@@ -91,6 +91,17 @@ type savedWindow struct {
 // model turn on it, which is the earliest honest point to refuse, since a
 // resident set is a property of the workload and is not knowable at daemon start.
 //
+// The claim owns the *residency* of its set, not only the windows (P72.3).
+// Before planning it loads any member that is not already resident, because a
+// member whose weights have never been measured cannot be planned for at all —
+// which, for a debate whose arbiter runs a different model from the proposer, is
+// every cold start. After installing the plan it reloads the members whose
+// window moved, so the first seat runs against a runner that is actually the
+// planned size rather than the solo one. And on release it unloads the members
+// it brought in, so the solo window the daemon goes back to is one the card can
+// really serve rather than one contending with an arbiter that is still resident
+// on keep_alive.
+//
 // release is safe to call once; callers should defer it immediately.
 func (s *Server) claimResidentSet(ctx context.Context, models []string) (func(), error) {
 	noop := func() {}
@@ -132,19 +143,36 @@ func (s *Server) claimResidentSet(ctx context.Context, models []string) (func(),
 	}
 	release := func() { <-sem }
 
+	// Bring the set into residency before planning it. Weights are only
+	// measurable for a loaded model, so without this a debate whose arbiter is a
+	// different model from its proposer is refused on every cold start — not
+	// because it does not fit, but because nothing had asked the arbiter its
+	// size. This is bounded per model rather than in aggregate: each load waits
+	// at most autofitLoadTimeout, so a three-seat set collapsing to two distinct
+	// models cannot approach the turn-stall bound the caller runs under.
+	broughtIn := s.preloadForMeasurement(ctx, base, models, "resident-set claim")
+
 	pctx, cancel := context.WithTimeout(ctx, residentSetPlanTimeout)
-	plan, ok, reason := ollamainfo.PlanFor(pctx, base, models, budget, ollamainfo.KVCacheType(s.cfg.Provider.KVCacheType))
+	plan, ok, reason := ollamainfo.PlanFor(pctx, base, models, budget, ollamainfo.KVCacheType(s.cfg.Provider.KVCacheType), s.knownWeights())
 	cancel()
 	if !ok {
+		s.releaseResidency(broughtIn)
 		release()
 		return noop, fmt.Errorf("cannot fit %d models in the %s memory budget (provider.vram_budget_gb): %s",
 			len(models), ollamainfo.FormatGiB(budget), reason)
 	}
 
+	s.recordWeights(plan)
 	saved := s.installPlan(plan)
 	s.logger.Info("installed resident-set context windows",
 		"models", plan.Models, "windows", plan.Windows,
 		"total", ollamainfo.FormatGiB(plan.Total), "budget", ollamainfo.FormatGiB(plan.Budget))
+	// Reload the members whose window moved, so the first seat meets a runner of
+	// the planned size. Leaving it to the seat's own request works — num_ctx is
+	// stamped per request — but pays the reload inside the first model turn, and
+	// leaves the window Ollama is really serving disagreeing with the installed
+	// plan until then.
+	s.commitWindows(ctx, base, plan, savedModels(saved), "resident-set claim")
 
 	// sync.Once rather than a bool: a double release would return the semaphore
 	// twice and let two debates hold the GPU's windows at once, which is the one
@@ -153,6 +181,7 @@ func (s *Server) claimResidentSet(ctx context.Context, models []string) (func(),
 	return func() {
 		once.Do(func() {
 			s.restoreWindows(saved)
+			s.releaseResidency(broughtIn)
 			release()
 		})
 	}, nil
@@ -211,6 +240,57 @@ func (s *Server) restoreWindows(saved []savedWindow) {
 	}
 }
 
+// releaseResidency unloads the models a claim brought into memory, so the set
+// stops being resident when the workload that needed it is over (P72.3).
+//
+// Only models this claim loaded are unloaded, and never the daemon's own — the
+// global model and provider.small_model are what every ordinary turn runs on,
+// and evicting them to tidy up after a debate would make the next message pay a
+// cold load for nothing. A member that was already resident when the claim
+// started is left alone for the same reason in general form: this claim did not
+// make it resident and has no standing to say it is finished with.
+//
+// This matters because restoreWindows puts the daemon's model back to its solo
+// window, and that window was solved on the assumption that nothing else is on
+// the card. An arbiter still held by keep_alive for another thirty minutes makes
+// that assumption false, and Ollama's answer to a load it cannot place is to
+// spill to system RAM. The *reload* at the solo window is deliberately left to
+// the next turn, which stamps num_ctx and gets it for free: doing it here would
+// pay a cold load that a second debate — the common next action — would
+// immediately undo.
+func (s *Server) releaseResidency(models []string) {
+	if len(models) == 0 {
+		return
+	}
+	s.ctxWinMu.Lock()
+	base := s.ollamaBase
+	s.ctxWinMu.Unlock()
+	if base == "" {
+		return
+	}
+	for _, model := range models {
+		if s.isGlobalModel(model) || model == strings.TrimSpace(s.cfg.Provider.SmallModel) {
+			continue
+		}
+		if err := ollamainfo.Unload(context.Background(), base, model); err != nil {
+			s.logger.Warn("could not unload a model the resident-set claim loaded; it stays resident until keep_alive expires",
+				"model", model, "err", err)
+			continue
+		}
+		s.logger.Info("unloaded a model the resident-set claim had loaded", "model", model)
+	}
+}
+
+// savedModels names the models installPlan actually wrote, which are exactly the
+// ones whose runner is now the wrong size.
+func savedModels(saved []savedWindow) []string {
+	out := make([]string, 0, len(saved))
+	for _, sw := range saved {
+		out = append(out, sw.model)
+	}
+	return out
+}
+
 // warnResidentBudget sanity-checks a configured memory budget once at daemon
 // start, so a mistyped or misplaced one is named before the first turn rather
 // than as a mid-debate refusal.
@@ -236,8 +316,9 @@ func (s *Server) warnResidentBudget(ctx context.Context) {
 		return
 	}
 	budget := p.VRAMBudgetBytes()
-	plan, ok, reason := ollamainfo.PlanFor(ctx, s.ollamaBase, []string{p.Model}, budget, ollamainfo.KVCacheType(p.KVCacheType))
+	plan, ok, reason := ollamainfo.PlanFor(ctx, s.ollamaBase, []string{p.Model}, budget, ollamainfo.KVCacheType(p.KVCacheType), s.knownWeights())
 	if ok {
+		s.recordWeights(plan)
 		s.logger.Info("resident-set budget accepted", "budget", ollamainfo.FormatGiB(budget),
 			"model", p.Model, "solo_window", plan.Windows[p.Model])
 		return

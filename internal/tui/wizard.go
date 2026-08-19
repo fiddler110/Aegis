@@ -553,6 +553,13 @@ func (w *wizardModel) saveCmd() tea.Cmd {
 		MaxRetries:   4,
 		Think:        think,
 		VRAMBudgetGB: budgetGB,
+		// A stated budget is also the permission to keep sizing against it
+		// (P72.1). The fit below can only run when the model is already loaded,
+		// which at first-init it usually is not — so without this the operator
+		// answers "14.5 GiB", gets the training-max recommendation written
+		// anyway, and nothing ever revisits it. With it, the daemon solves the
+		// window on the first boot that can measure the weights.
+		AutofitContext: budgetGB > 0 && adapter == "ollama",
 	}
 	return func() tea.Msg {
 		var fitNote string

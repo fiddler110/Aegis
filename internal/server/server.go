@@ -207,8 +207,19 @@ type Server struct {
 	ctxWinSrc     string
 	ctxWinFinal   bool
 	ctxWinByModel map[string]ctxWinEntry
-	ollamaBase    string // native Ollama API base when (possibly) Ollama; "" otherwise
-	summarizer    *compaction.Summarizer
+	// autofitWin holds the windows the P72.1 boot fit solved for, per model. It
+	// is not a second answer to "what window is served" — that stays the ctxWin
+	// entries — but the *asked-for* number, which is what reconciliation compares
+	// a detection against. See configWindowFor (contextwindow.go, autofit.go).
+	// Guarded by ctxWinMu.
+	autofitWin map[string]int
+	// weightsSeen caches each model's measured resident weight bytes. Weights do
+	// not change with the window, but the *derivation* stops working at a large
+	// one for sliding-window models — see recordWeights (autofit.go). Guarded by
+	// ctxWinMu.
+	weightsSeen map[string]int64
+	ollamaBase  string // native Ollama API base when (possibly) Ollama; "" otherwise
+	summarizer  *compaction.Summarizer
 	// compModel is the model compaction runs on (provider.small_model when set,
 	// otherwise the global model). The summarizer is retuned from *this* model's
 	// window, not the global one — see setWindowLocked (P52.1).
@@ -701,7 +712,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	regOpts.FileTracker = ft
 	regOpts.LSP = lspMgr
 	regOpts.TodoList = todoList
-	regOpts.Search = builtin.SearchOptions{Provider: cfg.Search.Provider, APIKey: cfg.Search.APIKey, BaseURL: cfg.Search.BaseURL, ScanOutput: cfg.Search.ScanOutput}
+	// Search now comes from enginecfg.BuiltinOptions itself (a config-derived
+	// field, not host wiring) — see its own comment.
 	regOpts.TeamTasks = teamTasks
 	regOpts.MailboxRoot = swarm.MailboxRoot(cfg.DataDir)
 	regOpts.Knowledge = knowledgeStore

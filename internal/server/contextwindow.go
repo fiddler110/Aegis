@@ -135,15 +135,39 @@ func (s *Server) compatDefaultApplies() bool {
 // plus any skill body — which would otherwise be spent believing there is 8x
 // the room Ollama is actually serving, so nothing compacts and Ollama truncates
 // from the front (P39.9's shape).
-func (s *Server) configEntry(final bool) ctxWinEntry {
+func (s *Server) configEntry(model string, final bool) ctxWinEntry {
 	if s.compatDefaultApplies() {
 		return ctxWinEntry{win: ollamainfo.DefaultServeContext, src: "ollama:compat-default", final: final}
 	}
-	e := ctxWinEntry{win: s.cfg.Provider.ContextWindow, final: final}
+	e := ctxWinEntry{win: s.configWindowFor(model), final: final}
 	if e.win > 0 {
 		e.src = "config"
+		if s.autofitWin[model] > 0 {
+			e.src = autofitSrc
+		}
 	}
 	return e
+}
+
+// configWindowFor is the window config asks for, for this model: a fitted
+// window when one was installed for it (P72.1), else provider.context_window.
+// Callers must hold ctxWinMu.
+//
+// A fitted window is a *statement of intent* in exactly the sense a configured
+// one is — the number the daemon will stamp as num_ctx and wants served — so it
+// belongs on the config side of applyDetectedWindowFor's reconciliation, not as
+// a special case beside it. That placement is what makes the verification free:
+// if Ollama then serves less than the fit asked for (a spill, or a server-side
+// clamp), the existing authoritative-reading rule downgrades to reality and says
+// so, which is the same empirical check ollamainfo takes toward its own
+// arithmetic. The alternative — installing the fit as a plain entry — would have
+// the first post-fit refresh reconcile it against provider.context_window and
+// quietly undo it.
+func (s *Server) configWindowFor(model string) int {
+	if win := s.autofitWin[model]; win > 0 {
+		return win
+	}
+	return s.cfg.Provider.ContextWindow
 }
 
 // initContextWindow resolves the effective window once at daemon startup.
@@ -153,13 +177,23 @@ func (s *Server) configEntry(final bool) ctxWinEntry {
 // maybeRefreshContextWindowFor. Only the global model is resolved here; any other
 // model a turn routes to is resolved on first use (effectiveContextWindowFor).
 func (s *Server) initContextWindow(ctx context.Context) {
-	// The budget check runs whatever path the resolution below takes, including
-	// the early returns, so a budget set against a cloud provider is still named
-	// (P69.6, residentset.go). It only warns.
-	defer s.warnResidentBudget(ctx)
+	// Both of these run whatever path the resolution below takes, including the
+	// early returns, so a budget set against a cloud provider is still named
+	// (P69.6, residentset.go).
+	//
+	// The fit goes first and, when it installs windows, subsumes the warning:
+	// warnResidentBudget's whole output is a plan for the same models against the
+	// same budget, so running both would say it twice — once as advice and once
+	// as the thing that happened.
+	defer func() {
+		if s.autofitContextWindows(ctx) {
+			return
+		}
+		s.warnResidentBudget(ctx)
+	}()
 
 	model := s.cfg.Provider.Model
-	s.setWindowLocked(model, s.configEntry(false))
+	s.setWindowLocked(model, s.configEntry(model, false))
 
 	p := s.cfg.Provider
 	// The native Ollama adapter (P33.9) pins options.num_ctx to cfgWin on every
@@ -178,7 +212,7 @@ func (s *Server) initContextWindow(ctx context.Context) {
 	// (the documented way to run Aegis against a local server via the
 	// OpenAI-compat endpoint).
 	if p.Default != "ollama" && (p.Default != "openai" || p.BaseURL == "") {
-		s.setWindowLocked(model, s.configEntry(true))
+		s.setWindowLocked(model, s.configEntry(model, true))
 		return
 	}
 	base := ollamainfo.NativeBase(p.BaseURL)
@@ -195,7 +229,7 @@ func (s *Server) initContextWindow(ctx context.Context) {
 		} else {
 			// A non-Ollama OpenAI-compatible server (LM Studio, liteLLM, real
 			// OpenAI behind a gateway): nothing to detect, config stands.
-			s.setWindowLocked(model, s.configEntry(true))
+			s.setWindowLocked(model, s.configEntry(model, true))
 		}
 		return
 	}
@@ -210,7 +244,17 @@ func (s *Server) initContextWindow(ctx context.Context) {
 // what a *given* model is actually served is a property of that model, so each
 // entry is compared against config on its own.
 func (s *Server) applyDetectedWindowFor(model string, res ollamainfo.Result) {
-	cfgWin := s.cfg.Provider.ContextWindow
+	cfgWin := s.configWindowFor(model)
+	// A resident-set plan (P69.6) outranks both config and a fitted window while
+	// it is installed. The plan sized this model against everything else that is
+	// resident *right now*; config and the P72.1 fit both sized it as if it were
+	// alone, which is the assumption the plan exists to replace. Without this,
+	// the mid-debate refresh — which the plan deliberately leaves enabled, since
+	// /api/ps is the verdict on its own prediction — would reconcile the served
+	// window back up to the solo number and undo the plan for the next seat.
+	if cur, ok := s.windowLocked(model); ok && cur.src == residentSetSrc {
+		cfgWin = 0
+	}
 	// P61.8: on the /v1 compat path config is not a promise the server ever
 	// received, so any reading beats it regardless of authority — a modelfile
 	// or default reading there *is* what will be served, because nothing
@@ -235,12 +279,26 @@ func (s *Server) applyDetectedWindowFor(model string, res ollamainfo.Result) {
 		// Config promises more than Ollama is actually serving — trusting the
 		// config here is exactly the silent-truncation failure. Serve reality,
 		// tell the user how to get what they configured.
-		s.logger.Warn("configured context_window exceeds what Ollama is serving; using the served value",
-			"model", model, "configured", cfgWin, "served", res.ContextWindow,
-			"hint", "raise OLLAMA_CONTEXT_LENGTH on the Ollama server or pin num_ctx in a modelfile")
+		if s.autofitWin[model] > 0 {
+			// The asked-for number came from the P72.1 fit rather than from a
+			// config file, so the operator's lever is the budget, not
+			// OLLAMA_CONTEXT_LENGTH. Ollama serving less than the fit solved for
+			// is the empirical refutation of the arithmetic — the one signal
+			// worth surfacing, and worth naming accurately.
+			s.logger.Warn("Ollama is serving less than the fitted context window; using the served value",
+				"model", model, "fitted", cfgWin, "served", res.ContextWindow,
+				"hint", "provider.vram_budget_gb is larger than this card really has spare — lower it, or set provider.kv_cache_type if the server runs a quantized KV cache")
+		} else {
+			s.logger.Warn("configured context_window exceeds what Ollama is serving; using the served value",
+				"model", model, "configured", cfgWin, "served", res.ContextWindow,
+				"hint", "raise OLLAMA_CONTEXT_LENGTH on the Ollama server or pin num_ctx in a modelfile")
+		}
 		e.win, e.src = res.ContextWindow, "ollama:"+string(res.Source)
 	case cfgWin > 0:
 		e.win, e.src = cfgWin, "config"
+		if s.autofitWin[model] > 0 {
+			e.src = autofitSrc
+		}
 	default:
 		e.win, e.src = res.ContextWindow, "ollama:"+string(res.Source)
 		s.logger.Info("auto-detected Ollama context window", "model", model, "window", res.Describe(), "model_max", res.ModelMax)
@@ -280,7 +338,7 @@ func (s *Server) effectiveContextWindowFor(ctx context.Context, model string) (i
 		// is for the global model in initContextWindow.
 		s.ctxWinMu.Lock()
 		defer s.ctxWinMu.Unlock()
-		return s.storeLocked(model, s.configEntry(true))
+		return s.storeLocked(model, s.configEntry(model, true))
 	}
 
 	dctx, cancel := context.WithTimeout(ctx, ctxWinDetectTimeout)
@@ -298,7 +356,7 @@ func (s *Server) effectiveContextWindowFor(ctx context.Context, model string) (i
 	if !detected {
 		// Ollama stopped answering between startup and now. Keep config and
 		// stay non-final so the post-run refresh retries.
-		return s.storeLocked(model, s.configEntry(false))
+		return s.storeLocked(model, s.configEntry(model, false))
 	}
 	s.applyDetectedWindowFor(model, res)
 	e, _ = s.windowLocked(model)
@@ -321,6 +379,12 @@ func (s *Server) storeLocked(model string, e ctxWinEntry) (int, string) {
 // model taught us nothing about the primary's allocation, and everything about
 // the small one's.
 func (s *Server) maybeRefreshContextWindowFor(ctx context.Context, model string) {
+	// A model this run has just loaded is a model whose weights are measurable
+	// for the first time, which is the only moment the P72.1 fit can account for
+	// it. It runs before the refresh below so the refresh confirms the fitted
+	// window rather than the one that was served on the way to it.
+	s.autofitAdmit(ctx, model)
+
 	s.ctxWinMu.Lock()
 	e, known := s.windowLocked(model)
 	base := s.ollamaBase

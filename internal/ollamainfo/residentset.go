@@ -253,7 +253,19 @@ func kvTypeName(t KVCacheType) string {
 // GiB on qwen35-9b — a vision projector that is never resident unless an image
 // is sent — which is more than the margin a co-resident plan has to spend. See
 // WeightsBytes.
-func PlanFor(ctx context.Context, nativeBase string, models []string, budgetBytes int64, t KVCacheType) (Plan, bool, string) {
+//
+// known is a caller-held cache of weight figures measured earlier, consulted
+// only when the live derivation fails. Weights are window-invariant, so a figure
+// taken at any window stays true — and the derivation can fail at a *large*
+// window for a reason that says nothing about the weights: BytesPerToken is a
+// deliberate upper bound for sliding-window models, so subtracting it from the
+// footprint of a model loaded at a big window can leave nothing, or less than
+// nothing. Measured live 2026-08-19: aegis-qwen35-9b at 16000 reports 6.01 GiB
+// (weights derive cleanly at 4.00), and the same model at 82944 reports 8.01 GiB
+// against a predicted 10.44 GiB of cache — so the model that was measurable
+// before it was resized stopped being measurable by growing. nil is fine and
+// means "no cache", which is the pre-existing behavior exactly.
+func PlanFor(ctx context.Context, nativeBase string, models []string, budgetBytes int64, t KVCacheType, known map[string]int64) (Plan, bool, string) {
 	names, collapsed := dedupeNames(models)
 	if len(names) == 0 {
 		return Plan{}, false, "no models to plan for"
@@ -270,7 +282,9 @@ func PlanFor(ctx context.Context, nativeBase string, models []string, budgetByte
 		}
 		w, ok := WeightsBytes(f, g, t)
 		if !ok {
-			return Plan{}, false, fmt.Sprintf("could not derive resident weights for %q from its loaded footprint (%s at window %d)", name, FormatGiB(f.Size), f.ContextLength)
+			if w = known[name]; w <= 0 {
+				return Plan{}, false, fmt.Sprintf("could not derive resident weights for %q from its loaded footprint (%s at window %d)", name, FormatGiB(f.Size), f.ContextLength)
+			}
 		}
 		members = append(members, Member{Model: name, Geometry: g, WeightsBytes: w})
 	}

@@ -145,6 +145,12 @@ func runFit(ctx context.Context, out io.Writer, cfg *config.Config, o fitOptions
 	if !o.write {
 		fmt.Fprintf(out, "\nTo apply:\n\nprovider:\n  context_window: %d\n\n", win)
 		fmt.Fprintln(out, "Or re-run with --write to patch the global config in place.")
+		// The third option is to stop pasting the number at all (P72.1): with a
+		// budget stated, the daemon runs this same solver at startup. Worth
+		// naming here, because this report is where an operator learns the
+		// arithmetic exists.
+		fmt.Fprintln(out, "Or set provider.autofit_context: true and let the daemon solve this at")
+		fmt.Fprintln(out, "startup — it re-fits whenever the model changes, and never edits config.")
 		return nil
 	}
 	if err := config.PatchGlobalContextWindow(win); err != nil {
@@ -222,7 +228,7 @@ func runFitSet(ctx context.Context, out io.Writer, cfg *config.Config, base stri
 	fmt.Fprintf(out, "Resident set: %s\n", origin)
 	fmt.Fprintf(out, "Budget:       %s (%s KV cache)\n\n", ollamainfo.FormatGiB(budget), kvTypeLabel(kvType))
 
-	plan, ok, reason := ollamainfo.PlanFor(ctx, base, models, budget, kvType)
+	plan, ok, reason := ollamainfo.PlanFor(ctx, base, models, budget, kvType, nil)
 	if !ok {
 		fmt.Fprintf(out, "No assignment fits: %s\n", reason)
 		fmt.Fprintln(out, "\nRaise the budget, put a smaller model in one seat, or set kv_cache_type: q8_0")
@@ -325,7 +331,7 @@ func debateResidentPlan(ctx context.Context, out io.Writer, cfg *config.Config, 
 	if len(models) == 0 {
 		return nil, nil
 	}
-	plan, ok, reason := ollamainfo.PlanFor(ctx, base, models, budget, ollamainfo.KVCacheType(cfg.Provider.KVCacheType))
+	plan, ok, reason := ollamainfo.PlanFor(ctx, base, models, budget, ollamainfo.KVCacheType(cfg.Provider.KVCacheType), nil)
 	if !ok {
 		return nil, fmt.Errorf("this debate's models do not fit the %s budget (provider.vram_budget_gb): %s\n"+
 			"Run `aegis models --fit-debate` to see the arithmetic", ollamainfo.FormatGiB(budget), reason)

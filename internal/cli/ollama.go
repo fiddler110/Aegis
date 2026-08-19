@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/ollamainfo"
 )
 
 // unloadOllamaModel sends keep_alive=0 to the Ollama native API, which
@@ -24,22 +24,10 @@ func unloadOllamaModel(cfg *config.Config) {
 	if base == "" || cfg.Provider.Model == "" {
 		return
 	}
-	body, _ := json.Marshal(map[string]any{
-		"model":      cfg.Provider.Model,
-		"keep_alive": 0,
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/generate", bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return
-	}
-	resp.Body.Close()
+	// ollamainfo.Unload is the same request the daemon sends when a co-resident
+	// plan ends (P72.3). One spelling of "this model is finished with", so a
+	// change to how residency is released reaches both paths.
+	_ = ollamainfo.Unload(context.Background(), base, cfg.Provider.Model)
 }
 
 // ollamaHealthy returns true when the Ollama native API at base responds to a

@@ -35,6 +35,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -390,3 +391,84 @@ func psFootprints(ctx context.Context, nativeBase string) ([]psFootprint, bool) 
 
 // FormatGiB renders a byte count for display.
 func FormatGiB(b int64) string { return fmt.Sprintf("%.2f GiB", float64(b)/(1<<30)) }
+
+// WarmAt loads model into memory at a given serving window and waits for the
+// load to finish, so its resident weights can be measured.
+//
+// It exists because Warm (ollamainfo.go) is a pre-warm — best-effort, fixed 3s,
+// "the next request should not pay a cold load" — and this is not that. A
+// boot-time fit (P72.1) cannot proceed at all until /api/ps has something to
+// report, so the caller here needs to *wait* for the load and needs its own
+// deadline to decide how long that is worth. A cold 9B on a mid-range card is
+// well past 3s.
+//
+// numCtx > 0 loads at that window rather than the model's default. That is not
+// cosmetic either: the fit is computed from weights, which are window-invariant,
+// but the *runner* Ollama leaves behind is at whatever window this call asked
+// for — so loading at the window the first turn would have used means a fit that
+// changes nothing costs no reload at all.
+func WarmAt(ctx context.Context, nativeBase, model string, numCtx int) error {
+	if nativeBase == "" || model == "" {
+		return fmt.Errorf("no ollama base url or model")
+	}
+	payload := map[string]any{"model": model}
+	if numCtx > 0 {
+		payload["options"] = map[string]any{"num_ctx": numCtx}
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nativeBase+"/api/generate", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama load %s: %s", model, resp.Status)
+	}
+	// Ollama answers an empty-prompt /api/generate once the model is resident,
+	// but the body must be drained before /api/ps is asked about it — reading
+	// nothing and closing can return before the load is accounted for.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// Unload evicts a model from memory by sending keep_alive:0, the inverse of
+// WarmAt.
+//
+// It exists for the moment a co-resident plan ends (P72.3). A plan's members
+// stay resident for keep_alive after the workload that needed them is over, so
+// the model the daemon goes back to serving is restored to a solo window while
+// the others are still holding the memory that window assumes is free. Ollama
+// resolves that by evicting something itself, but only after it has tried to
+// place the load — the observable form being a spill to system RAM. Saying which
+// models are finished with is cheaper and deterministic.
+//
+// Best-effort: a non-nil error means the model may still be resident, which
+// costs memory rather than correctness.
+func Unload(ctx context.Context, nativeBase, model string) error {
+	if nativeBase == "" || model == "" {
+		return fmt.Errorf("no ollama base url or model")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]any{"model": model, "keep_alive": 0})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, nativeBase+"/api/generate", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama unload %s: %s", model, resp.Status)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}

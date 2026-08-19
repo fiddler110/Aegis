@@ -141,15 +141,17 @@ var configTrustPolicy = map[string]trustPolicy{
 	"provider.task_routing":            projectSettable,
 	"provider.tool_call_probe_trials":  projectSettable,
 	"provider.model_capabilities":      projectSettable,
-	// Deliberately NOT listed, so they stay frozen: provider.vram_budget_gb and
-	// provider.kv_cache_type (P69.6). Every knob above is a property of the
-	// *work* — which model, how many tokens, how patient to be — which is a
-	// reasonable thing for a repo to pin. Those two are properties of the
-	// operator's *machine*: how much VRAM the model server may hold, and how its
-	// KV cache is quantized. A cloned repo declaring the former oversizes every
-	// window on hardware it has never seen, which Ollama answers by spilling to
-	// system RAM. No repo has that knowledge, so no repo gets to state it
-	// untrusted.
+	// Deliberately NOT listed, so they stay frozen: provider.vram_budget_gb,
+	// provider.kv_cache_type (P69.6) and provider.autofit_context (P72.1). Every
+	// knob above is a property of the *work* — which model, how many tokens, how
+	// patient to be — which is a reasonable thing for a repo to pin. These are
+	// properties of the operator's *machine*: how much VRAM the model server may
+	// hold, and how its KV cache is quantized. A cloned repo declaring the first
+	// oversizes every window on hardware it has never seen, which Ollama answers
+	// by spilling to system RAM. No repo has that knowledge, so no repo gets to state it
+	// untrusted. autofit_context joins them because it is the permission to
+	// *act* on that budget — a repo that could set it could hand itself the
+	// override of a hand-tuned context_window that flag exists to gate.
 	// search.base_url/api_key send the model's search queries — and the user's
 	// provider key for that service — to a project-chosen endpoint.
 	"search": frozenUntilTrusted,

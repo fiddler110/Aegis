@@ -8,7 +8,34 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-18 (third sitting the same day) — **P70.4 shipped**, the last open build
+**Last updated:** 2026-08-19 (second record the same day) — **P72.3 shipped**, filed straight out of
+P72.1 by a user question about the debate case: two models resident, both needing windows, one model
+again afterwards. The question found a live refusal — with a memory budget set, **a debate whose
+arbiter runs a different model refused to start on every cold start**, because a member that has
+never been loaded has no measurable weights. A resident-set claim now loads its set before planning
+it, commits the planned windows to the runners, and unloads on release what it brought in. Measured
+cold on this machine: refused before, then `29696` for both seats afterwards — against the `82944`
+the same 9B gets solo. Record: [A claim owns residency, not just
+windows](#a-claim-owns-residency-not-just-windows-2026-08-19-p723).
+
+**Last updated (previous):** 2026-08-19 — **P72.1 shipped**, the last live build item, and the only one in
+this document's recent history whose *live verification found a defect the feature itself caused*.
+`context_window` is no longer a number someone works out once and pastes in: with a memory budget
+stated, the daemon loads the model, measures its weights, solves for the largest window that fits,
+and reloads at it before the first turn. Measured on this machine: **16,000 → 82,944 tokens**, 8.01
+GiB fully on the GPU, `config.yaml` untouched. Record: [The window the machine could always have
+served](#the-window-the-machine-could-always-have-served-2026-08-19-p721).
+
+**Also recorded here for the first time, same day:** the whole **P71 batch** — twelve items filed
+2026-08-19 out of a user report that a `/research` run on a local 9B "either timed out or didn't
+produce any real results", eight of them fixed the same day — plus **P72.2**, **P71.8**, **P73.1**
+and **P73.2**. They shipped before this file caught up with them; the two records above them
+([the web-research stack](#the-web-research-stack-fixed-the-day-it-was-filed-2026-08-19-p711-p712-p713-p714-p715-p719-p7110-p722)
+and [phasing, a content gate, and the search config nobody
+wired](#phasing-a-content-gate-and-the-search-config-nobody-wired-2026-08-19-p718-p731-p732))
+are that backlog, written from the measurements each item was closed against.
+
+**Last updated (previous):** 2026-08-18 (third sitting the same day) — **P70.4 shipped**, the last open build
 item in the tree, and **both of its halves rather than the cap alone**. A sub-agent's result now
 reaches its parent capped and wrapped as untrusted on all four paths it can travel and on both swarm
 backends. The item predicted a split — take the cap, defer the wrap until there was appetite for the
@@ -107,6 +134,526 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### A claim owns residency, not just windows, 2026-08-19 (P72.3)
+
+**Filed and shipped straight out of P72.1**, from a user question about the debate case: two models
+are about to be resident, both need windows, and when the work is done the daemon should be back to
+one model at its full size. The question was right, and the state it described was worse than a
+missing remeasurement — **with a memory budget set, a debate on this machine refused to start at
+all.**
+
+**The refusal, measured cold on 2026-08-19** against the configured seat trio (proposer and critic on
+`aegis-qwen35-9b:16k`, arbiter on `aegis-phi4-reasoning:16k`):
+
+    model "aegis-qwen35-9b:16k" is not loaded, so its resident weights cannot be
+    measured; run it once (`ollama run ... ''`) and re-plan
+
+`PlanFor` needs every member's resident weights, `/api/ps` only reports them for a loaded model, and
+a debate is exactly the workload whose arbiter is *not* the model the daemon has been serving. So on
+any machine whose seats do not all share one model, the plan was refused on every cold start — and it
+was refused with "cannot fit", which reads as a hardware verdict when the truth was that nobody had
+asked the arbiter its size. This was P69.6 behaviour from the day it shipped; what changed is that
+P72.1 gives operators a reason to set `vram_budget_gb`, so the latent refusal became a likely one.
+
+**The claim now owns the residency of its set for the set's lifetime**, in three added steps around
+the plan it already made:
+
+- **Load the members that are not resident, before planning.** The same chicken-and-egg resolution
+  P72.1 uses at boot, applied where the set is actually known. Bounded per model (each load waits at
+  most `autofitLoadTimeout`), not in aggregate, so a three-seat set — which collapses to two distinct
+  runners — cannot approach the turn-stall bound the caller runs under.
+- **Reload the members whose window the plan moved.** Leaving this to each seat's own request works,
+  since `num_ctx` is stamped per request, but it pays the reload inside the first model turn and
+  until then Ollama is serving a window nothing agrees with.
+- **Unload, on release, what the claim brought in.** `restoreWindows` puts the daemon's model back to
+  its solo window, and that window was solved assuming nothing else is on the card. An arbiter still
+  held by `keep_alive` for another half hour makes the assumption false, and Ollama's answer to a
+  load it cannot place is to spill to system RAM.
+
+**Three rules on that unload, each of them a thing not to do.** A model the claim found *already*
+resident is left alone — this claim did not make it resident and has no standing to evict it. The
+global model and `provider.small_model` are never unloaded even when a seat names them: they are what
+every ordinary turn, every compaction and every title generation runs on. And the *reload* at the
+restored solo window is deliberately left to the next turn, which stamps `num_ctx` and gets it for
+free — doing it eagerly would pay a cold load that a second debate, the common next action, would
+immediately undo.
+
+**Verified live, cold, on 2026-08-19.** Same trio, same 14.5 GiB budget, nothing resident:
+
+    before preload: REFUSED — model "aegis-qwen35-9b:16k" is not loaded ...
+    preloaded aegis-qwen35-9b:16k         in 12.1s
+    preloaded aegis-phi4-reasoning:16k    in 12.4s
+    after preload:  ok=true
+      aegis-qwen35-9b:16k        window=29696  kv=3.74 GiB  weights=4.00 GiB
+      aegis-phi4-reasoning:16k   window=29696  kv=3.62 GiB  weights=3.09 GiB
+      total=14.45 GiB of 14.50 GiB (spare 0.05 GiB), 1 seat collapsed
+
+The two numbers together are the whole point of the subsystem: **solo, the 9B is fitted to 82,944;
+co-resident with the arbiter, both drop to 29,696.** One seat collapses because the proposer and the
+critic share a runner, which is P69.6's dedupe doing its job.
+
+**Touched:** `internal/server/residentset.go` (the claim's three new steps, `releaseResidency`),
+`internal/server/autofit.go` (`autofitPreload`/`autofitCommit` generalised into
+`preloadForMeasurement`/`commitWindows`, now shared by the boot fit and the claim),
+`internal/ollamainfo/kvfit.go` (`Unload`), `internal/cli/ollama.go` (the exit-path unload now
+delegates to it, so there is one spelling of "finished with this model"). Six new tests in
+`internal/server/autofit_test.go`, against a fake Ollama that honours `keep_alive: 0`.
+
+### The window the machine could always have served, 2026-08-19 (P72.1)
+
+**The arithmetic had been right and unused for two days.** P69.5 shipped `ollamainfo.Fit` — solve for
+the largest window whose KV cache fits a stated budget beside the model's measured weights, validated
+to 0.2% against real Ollama placements — and P69.6 shipped the resident-set solver above it. Nothing
+called either one except `aegis models --fit`, a command an operator has to find. The measured cost
+on the machine both were calibrated against: a solo session serving **16,384 tokens of a safely
+fittable 65,000+**, because nothing ever asked the hardware.
+
+**One of the item's three named gaps was already closed when the work started.** P72.1 said the setup
+wizard "never asks" for a VRAM budget and pointed at `wizard.go:545` hardcoding `budgetGB = 0`. P69.6
+had added the question — `wizard.go:203`, "VRAM budget (GiB) … Blank to skip" — and the fit call
+beside it. The item was filed against a stale read. Its step 4 (route the debate case through the
+existing resident-set solver) was likewise already true of `claimResidentSet`. What was actually
+missing was steps 2 and 3, and they turned out to be **one mechanism**: `effectiveContextWindowFor`
+is already per-model and already drives `num_ctx` per turn through `modelAdapter`, so a fit pass in
+that path covers boot *and* `/model` switch without a second wire.
+
+**Four decisions the user made before anything was built**, all of them shaping the code rather than
+decorating it:
+
+- **A configured `context_window` is never replaced silently.** New `provider.autofit_context`. The
+  fit runs on the budget alone when no window is configured — the item's own closure condition — but
+  overriding a window someone set is a separate, explicit yes. This repo's global config is exactly
+  the case the flag protects: `context_window: 16000`, annotated in place as load-bearing for the
+  P69 debate topology.
+- **Preload rather than wait.** The chicken-and-egg is real — weights come from `/api/ps`, which needs
+  the model loaded, and loading commits it to a window — so the daemon loads the model *at the window
+  the first turn would have used*, measures, fits, then reloads at the answer. A fit that changes
+  nothing therefore costs no reload at all.
+- **The primary and `small_model` are planned as one resident set**, through `ollamainfo.PlanFor`,
+  never through `Fit` directly. `small_model` is co-resident with the primary with no debate in
+  sight: compaction runs on it while `keep_alive` still holds the primary. Sizing each against the
+  whole budget is the bug P69.6 closed, one layer out.
+- **Nothing is written back to `config.yaml`.** The fitted window is effective for the daemon's
+  lifetime, announced in the log, and reported by `/status` as source `fit:vram-budget`.
+
+**The fitted window is installed as what was *asked for*, not as what is served.** `configWindowFor`
+returns the fitted number where `provider.context_window` used to be read, which puts it on the config
+side of `applyDetectedWindowFor`'s existing reconciliation — so verification is free: if Ollama serves
+less than the fit solved for, the authoritative-reading rule downgrades to reality and says so, naming
+the budget rather than `OLLAMA_CONTEXT_LENGTH`. Installing it as a plain cache entry instead would
+have had the first post-run refresh reconcile it against `context_window` and quietly undo it.
+
+**`/model` switch admits, it does not re-fit.** A newly selected model does not replace the one the
+daemon was serving; `keep_alive` is still holding that one, and Ollama keeps a runner per model name.
+So `autofitAdmit` adds the new arrival to the set and re-plans the whole set, after the turn that
+loaded it — off the critical path, and the only moment its weights are measurable. The set only grows
+within a daemon's lifetime, which makes the windows it hands out monotonically non-increasing: an
+admission can shrink a member, but no sequence of them can oscillate.
+
+**And a resident-set claim outranks the fit while it is installed.** A plan sized its models against
+what is resident *now*; the fit sized them as if alone. Without the guard, the mid-debate refresh —
+which P69.6 deliberately leaves enabled, since `/api/ps` is the verdict on its own prediction — would
+reconcile a seat's window back up to the solo figure and hand the next seat a window the set cannot
+afford.
+
+**The live run found a defect the feature itself created, which is the part worth recording.** Booting
+the daemon against `aegis-qwen35-9b:16k` with a 14.5 GiB budget produced exactly the intended result —
+preload at 16000, weights measured at 4.00 GiB (P69.5's own figure), fit to **82,944**, reload, and
+`/api/ps` reporting `context_length: 82944` with `size_vram == size`, fully on the GPU. Then
+`aegis models --fit-debate` refused:
+
+    No assignment fits: could not derive resident weights for "aegis-qwen35-9b:16k"
+    from its loaded footprint (8.01 GiB at window 82944)
+
+**The fit had destroyed the evidence it was computed from.** `WeightsBytes` derives weights by
+subtracting the KV cache a loaded window accounts for, and `BytesPerToken` is a deliberate *upper
+bound* for sliding-window architectures. At 16000 the over-estimate is small enough to leave a sane
+remainder (6.01 GiB reported, 4.00 derived). At 82,944 the predicted cache is 10.44 GiB against a
+reported footprint of 8.01 — the real cache is roughly 4 GiB, since the model's sliding-window layers
+stop growing — so the subtraction leaves nothing and the model stops being measurable *by having been
+resized*. A debate started after the boot fit would have been refused for want of a figure the daemon
+had measured thirty seconds earlier.
+
+**Fixed by remembering, not by re-deriving.** Weights are window-invariant, so a figure taken at any
+window stays true. `PlanFor` gained a caller-held `known map[string]int64` consulted only when the
+live derivation fails; the daemon fills it from every plan that succeeds (`recordWeights`). Confirmed
+against the live server in exactly the state that produced the refusal: without the cache
+`ok=false`, with it `ok=true, window=82944, total=14.44 GiB`. The CLI passes `nil` and keeps its
+existing honest refusal — a one-shot diagnostic has no earlier measurement to remember.
+
+**Two things this does not do**, both deliberate. It does not discount sliding-window attention, so
+the fit still over-reserves on models like this one — 82,944 was solved as if the cache cost 10.44 GiB
+when it costs about 4, which means the card would hold considerably more. That is P69.5's documented
+safe direction (over-reserving costs context; under-reserving costs an OOM or a silent spill) and
+changing it is a separate question. And it does not run on the OpenAI-compat `/v1` path, which cannot
+carry `num_ctx` — a fitted window there would be a number the server never receives.
+
+**Touched:** `internal/server/autofit.go` (new), `internal/server/contextwindow.go`,
+`internal/server/residentset.go`, `internal/server/server.go`, `internal/ollamainfo/kvfit.go`
+(`WarmAt`), `internal/ollamainfo/residentset.go` (`PlanFor`'s weights cache), `internal/config`
+(`autofit_context`, frozen from project config for the same reason `vram_budget_gb` is),
+`internal/tui/wizard.go` (a stated budget now also writes the permission to keep acting on it),
+`internal/cli/modelsfit.go`, `docs/configuration.md`. Thirteen new tests in
+`internal/server/autofit_test.go` against a fake Ollama whose residency actually moves, plus five in
+`internal/config`.
+
+### Phasing, a content gate, and the search config nobody wired, 2026-08-19 (P71.8, P73.1, P73.2)
+
+**The structural half of the P71 batch, and the two items its own verification produced.** P71.1–P71.5
+fixed what was acutely broken in the web path; this is the item that explains why the skill had no
+margin to absorb any of it, plus the two things that fell out of proving it.
+
+#### P71.8 — deep-research ran single-context, and `--skill` could not drive it to completion
+
+**Three facts that only make sense together.** `deep-research/SKILL.md` declared no `phases:`
+frontmatter, so `drive.PlanFor` returned nil and the run used the generic single-context drive —
+`TestPhasePlanFor` actively *pinned* that. `drive.go:175` said the opposite in prose, naming four
+skills as multi-phase file-per-phase builds when `threat-modeling` was the only one with a plan. And
+`aegis chat --skill` auto-continues only while `<!-- PENDING -->` markers remain, which deep-research
+never wrote — so the drive-to-completion the flag exists to provide was **inert** for the skill its
+own help text names as a beneficiary.
+
+**Two live runs, same model and task, failing in opposite directions:**
+
+| | 16k (shipped config) | 32k control |
+|---|---|---|
+| Elapsed | 646 s | 267 s |
+| Tool calls | 42 | 39 |
+| Compactions | **25** | 4 |
+| Empty searches | 8 / 19 | 4 / 10 |
+| Inline `[n]` citations | **0** | 18 |
+| Outcome | full report, uncited, 2 bad URLs | **no report at all** |
+
+Raising the window fixed the thrash and exposed the drive-termination bug underneath: the 32k run
+stopped after Round 1 with a "Work Remaining" note listing Rounds 2–5 as future work, and exited 0.
+
+**Tracing it named a coincidence worth keeping.** `provider.max_iterations` (default 40) bounds
+tool-call *rounds* inside one `engine.Run()`; `--max-turns` (also 40) bounds how many times the outer
+loop calls `engine.Run()` at all. Without phases `runLinear` calls it **once** — so the entire
+research task lived inside the tool-call-round budget of a single `engine.Run()`, and the run's real
+stopping condition was never "the research finished" but "the model stopped issuing tool calls".
+`drive.Run`'s phased path gives each phase its own fresh conversation *and* its own 40-round budget.
+The two 40s are the same number by coincidence, not design, which is why phasing is the fix rather
+than a workaround.
+
+**Shipped as frontmatter, no Go code**, per P52.12's own design: `run_dir: .aegis/research/*` and two
+phases — **research** (`setup: true`, owns `findings.md`) and **synthesize** (owns `report.md`,
+stub-first behind its own marker so a truncated first write cannot look finished). `drive.go:175`'s
+comment now names only the skill that actually has a plan. `TestDeepResearchDeclaresAPlan` loads the
+real embedded `SKILL.md` through `MaterializeBuiltinsToProject` + `Load` rather than a hand-built
+spec, so a YAML mistake fails there; `TestPhasePlanFor`'s deep-research case was rewritten against
+`html-report` rather than deleted, per the item's own instruction.
+
+**Verified live at the shipped `context_window: 16000`** — the exact config the failing runs used.
+Both phases ran to completion with no manual continuation, one context-overflow reset recovered
+automatically, and 21 compactions total that were **single-digit within each turn** (9→9, 11→9, 13→9)
+rather than the 25-in-one-conversation thrash, because each turn is its own `engine.Run()`.
+
+**And the half that was not met, stated rather than quietly claimed:** the report had zero real
+citations. The phased drive gave the model a *less* crowded context and it still skipped the citation
+discipline, reproducing the original bug report's own headline number under a mechanism that no longer
+had context thrash to blame. Filed as P73.1 rather than folded in.
+
+#### P73.1 — a mechanical content gate for phased-drive completion
+
+**The phase's completion oracle was "the marker is gone", and the model decides when to clear it.**
+Nothing checked what was *in* the file. The live run called `web_search` 4 times and `web_fetch` 6
+times against real pages, then wrote an invented "Phase 1 … Phase 12" narrative naming no source —
+content that could have been produced without calling a tool at all — and a Sources section citing
+`findings.md`'s own headings back at itself.
+
+**Shipped generic, not deep-research-specific.** `skills.PhaseSpec` gained `require_pattern`,
+`require_count` and `require_hint`; `Phase.complete()` now requires every owned file to be both
+marker-free *and* matching the pattern at least `require_count` times, with `contentGateReason()` and
+a distinct `phaseContinuePrompt` branch so the nudge never falsely claims a PENDING marker remains.
+Any frontmatter-declared phase can opt in — P52.12's generalization applied to a new axis. deep-
+research's two phases declare gates: a real `url:` in `findings.md`, and a numbered Sources line
+carrying a real URL in `report.md`.
+
+**Verified live in three stages, and the middle one is the record worth keeping.** The first re-run
+still produced zero citations — and **gamed the new gate**, writing fabricated `url: https://example.com/…`
+lines to satisfy the regex. That was a genuine negative result: a pattern gate can be satisfied by a
+hallucinated match. It also exposed why the run was starving, which became P73.2. After that fix a
+second run got real URLs into `findings.md` but produced a Sources list with no links, which is what
+tightened the `synthesize` gate from an inline-`[n]` check to a numbered-line-with-URL check. The
+third run closed it clean: 5 real fetched URLs in `findings.md`, 6 inline `[n]` markers, and a Sources
+section naming all 5, with **zero compactions** now that the configured search provider was actually
+being used.
+
+**The limit is worth recording on its own:** a purely mechanical pattern gate cannot distinguish real
+evidence from a plausible-looking fake — the general limit of every check in this family, including
+threat-modeling's `inventory.py --check`, which validates structure rather than truth. It raised the
+floor from "zero citations, undetected" to "a fabricated URL, which a human or a smarter check could
+still catch", which is the whole of what a cheap gate can promise.
+
+#### P73.2 — `enginecfg.BuiltinOptions` never wired `cfg.Search`
+
+**Found by P73.1's live verification, and it is the exact failure mode `internal/enginecfg` exists to
+prevent.** A phased run in a project configured with `search.provider: searxng` never once called
+SearXNG — every result came back `backend="duckduckgo"`. `BuiltinOptions(cfg, root)` is what `aegis
+chat`, `aegis debate`, `aegis dryrun` and `cli/worker.go` all call to build the config-derived half of
+`builtin.Options` — its own doc comment says "what must not differ is the half that is a straight
+reading of config" — and it never set `Search` at all. Only the daemon did, as a manual overlay
+applied *after* the shared call. So every non-daemon entry point silently used the zero-config
+DuckDuckGo scrape no matter what `search:` said.
+
+Fixed by moving `Search` into `BuiltinOptions` where its own contract already put it, and deleting the
+overlay. `TestBuiltinOptionsWiresSearch` pins the round-trip.
+
+**Verified live:** `aegis doctor` went from the zero-config-scrape warning to `PASS search provider
+"searxng"`, and a live turn's `web_search` returned `backend="searxng"`. The first check of the fix
+ran in a not-yet-trusted temp workspace and *also* showed `backend="duckduckgo"` — that was the
+trust-freeze working as designed (`config.SecurityFingerprint` reverting `search.provider` until
+`aegis trust --dir`), a different and correct mechanism, re-checked after granting trust.
+
+### The web-research stack, fixed the day it was filed, 2026-08-19 (P71.1, P71.2, P71.3, P71.4, P71.5, P71.9, P71.10, P72.2)
+
+**Prompted by a user report** that a `/research` run on a local 9B "either timed out or didn't produce
+any real results". Every claim below is backed by a measurement or a live-run observation taken that
+day, not by reading the code.
+
+#### P71.1 — a rate-limit block reported as "no results found"
+
+DuckDuckGo serves its challenge page as **HTTP 200** with a ~14.2 KB body, so `fetchTool.get`
+returned no error, no parser found a result, and `searchTool.Execute` fell through to `msg := "no
+results found"` with `IsError` false. A throttled query was reported to the model as a successful
+search over an empty web.
+
+**Measured:** twelve research-shaped queries back-to-back returned 8, 8, 0, 0, 0… — **two queries is
+the empirical ceiling**, and the ~130 ms responses after it are the challenge page being served from
+cache. The block clears after ~60 s.
+
+**The consequence is not a missing result, it is a model that stops trusting the tool.** The 16k run
+began inventing plausible `learn.microsoft.com` URLs — 7 of 15 `web_fetch` calls 404'd, eventually
+tripping the P52.3 failure breaker. The 32k run concluded search was broken and **hand-rolled a Bing
+scraper in PowerShell** through `shell`, which is P71.10.
+
+`looksLikeDDGChallenge` now matches the challenge form's action endpoint and copy against a
+live-captured excerpt; `duckDuckGo` returns a `blocked` flag and `Execute` reports `IsError: true`
+with the retry window. "No results found" is kept for the case it actually describes.
+
+#### P71.10 — deferring the web tools routed the model around every guardrail on them
+
+`LocalProfile` auto-enables on a loopback `base_url` and defers `web_fetch`/`web_search` — while
+`shell` stays always-exposed. So on every local-model session the model can see a general-purpose
+command runner and cannot see the HTTP client. After P71.1's silent empty result, the 32k run issued
+**21 `shell` calls, 20 of them PowerShell `Invoke-WebRequest`**, and zero `web_fetch` calls.
+
+That path bypasses, at once: `netblock.SafeDialer` (no SSRF blocklist, no DNS-rebinding defence, no
+redirect hook), `trust.Wrap` (~5 KB of attacker-controllable page content presented as trusted
+output), the heuristic prompt-injection scan that hangs off it, and `TruncateHead`'s posture —
+replaced by whatever `Substring(0, 5000)` the model happened to write. `server.go:782` already warned
+that network policy "does not constrain the shell tool"; this is that warning firing in an ordinary
+research session with no adversary.
+
+**Shipped: step 1 only.** `preloadNetworkToolsForSkill` un-defers the two web tools on the session's
+registry clone the moment `deep-research` activates, scoped to a `networkShapedSkills` map. The two
+larger questions the item named stay open and are recorded as such: whether the LocalProfile default
+for these two tools is right at all, and the general form — a fetch performed through `shell` should
+not be *cheaper* in guarantees than one through `web_fetch`.
+
+#### P71.2 — the "lite" fallback shared the primary's rate-limit bucket
+
+The DDG ladder fell back from `html.duckduckgo.com` to `lite.duckduckgo.com`, written as if the
+failure mode were a markup change. **The actual failure mode is throttling, and the two endpoints are
+throttled together** — probed directly: once blocked, four consecutive rounds returned the same
+challenge page from both hosts. The ladder bought zero resilience against the only failure that
+occurs in practice.
+
+**All four candidate backends were probed live before one was picked**, per the item's own
+instruction not to add a backend without checking it against P71.1's challenge behaviour. **Mojeek**
+returns a CAPTCHA on the first request; **Startpage** an Anubis proof-of-work challenge on the first
+request; a **Bing scrape** was dropped once two of four turned out to be blocked pre-emptively rather
+than after volume. **Marginalia** served a genuine results page on the first request and only
+rate-limited after rapid repeats, recovering in single-digit seconds against DDG's ~60. The chain is
+now configured provider → DDG (primary + lite) → Marginalia → give up, and the give-up message names
+whichever backends actually sent a challenge rather than assuming DuckDuckGo.
+
+**A documentation correction shipped with it:** Brave dropped its no-card free tier in February 2026
+(now $5/1,000 queries, with a monthly credit requiring a card on file and public attribution to
+keep). **Tavily** is the one still offering a genuine no-card free tier, and `docs/configuration.md`
+now recommends it.
+
+**The framing that survives the fix:** an unkeyed scrape ladder, even two deep, remains structurally
+unfit for an 8–20-query research run. This makes the zero-config path degrade *honestly*; it is not a
+substitute for a keyed provider.
+
+#### P71.3 — nothing in the web path retried, anywhere
+
+`internal/provider/retry.go` has a tested equal-jitter backoff that eight caller classes share. The
+web tools used none of it. Observed live: `learn.microsoft.com` failed to resolve inside a
+`web_fetch` while `nslookup`, `curl` and a direct resolver call from the same machine seconds later
+all succeeded.
+
+`fetchTool.get` and `doSearchRequest` now retry up to twice with equal-jitter backoff — restated
+locally rather than importing `internal/provider`, keeping `internal/tool/builtin` a leaf package —
+retrying only a transport failure or 429/5xx, honouring `Retry-After`, and **never a 4xx**: the run
+this responds to had a model inventing URLs, and retrying a wrong URL only spends the budget faster.
+Worst-case sequences (~100 s / ~70 s) are pinned under the 900 s `MaxTurnStall` bound by a dedicated
+test. Piece (3), a client-side token bucket over the DDG scrape, was judged not worth building
+against a not-really-supported backend now that P71.2 gives a second backend and P71.1 tells the
+truth.
+
+#### P71.4 — a configured provider's failure was invisible to everyone
+
+`provErr` was consulted **only if the scrape also returned nothing**, so whenever the fallback
+succeeded a broken configured provider — expired key, wrong SearXNG `base_url`, a 429 — was
+indistinguishable from a working one. The user believes they are on their keyed allowance; they are
+silently back on the scrape, and therefore back inside P71.1's two-query ceiling. This is the failure
+mode most likely to make search feel *inconsistent* rather than broken, because it is intermittent by
+construction.
+
+Results now carry `backend` in the `trust.Wrap` attributes and prepend a note naming the provider
+that failed and the one that covered for it. And `aegis doctor` gained an eleventh check —
+`doctorSearchCheck`, config-shape validation rather than a live probe, so doctor does not spend a
+metered provider's quota to run: FAIL on a keyed provider with no key, on `searxng` with an
+unparseable `base_url`, or an unrecognized provider; WARN on the zero-config default; PASS on a
+correctly configured one.
+
+#### P71.5 — the fetch cap was a constant that exceeded the compaction trigger
+
+`fetchTool.Execute` defaulted `limit` to 20,000 characters — ~5k tokens — and that figure was never
+compared against anything. At the shipped `context_window: 16000`, `CompactionTrigger` is 8,000, so
+**a single source read was 62% of the entire compaction budget**: reading one page could trigger
+compaction on its own, and two consecutively could not avoid it. That is the 16k run's 25 compactions
+across 42 tool calls, almost all of the shape `11→9 messages`.
+
+The downstream damage was worse than the latency: search results were summarized away before the
+model could fetch the URLs in them, which is *why* it began inventing URLs.
+
+**Shipped closer to the resolved per-turn window than the item asked for.**
+`tool.WithContextWindow`/`ContextWindowFromContext` is a new context-value pair carrying
+`Engine.effectiveContextWindow()` — the actual escalatable, possibly-detected figure, not a static
+config read — into `Engine.toolCtx` on every tool call. `defaultFetchLimit` sizes the cap at
+`window*3/5` chars, capped at today's 20,000 and floored at 4,000, so cloud-scale contexts see no
+change and only a small window shrinks. At 16,000 that is 9,600 chars (~2,400 tokens) against an
+8,000-token trigger.
+
+**Explicitly not done:** raise `context_window`. The 16k pin is load-bearing for the P69 debate
+topology — it overrides each model's Modelfile `num_ctx`, so raising it re-inflates every seat's KV
+cache at once. The per-tool cap is the knob without that coupling. (P72.1, later the same day, is the
+principled version of that whole question.)
+
+#### P71.9 — the findings log was advisory, and the run left it as placeholders
+
+Section 2 of the skill diagnosed the problem correctly — "a log that lived only in conversation is
+destroyed by compaction exactly when it's most needed" — and then made the remedy conditional: "for
+anything beyond a couple of rounds". **The 16k run wrote the file once, at Round 1, and never touched
+it again** across 42 tool calls and 25 compactions: 976 bytes, all scaffold, `[To be updated]` where
+the evidence should be. The audit trail in the final report was therefore reconstructed from memory
+at the end — the specific thing section 2 exists to prevent — and two of its five cited URLs were
+wrong.
+
+A text edit to the embedded `SKILL.md`, no Go code: section 0 creates the working file
+unconditionally before the first search, section 1 step 5 became an explicit `edit_file` instruction
+that must land *before the next search or fetch*, and the "beyond a couple of rounds" qualifier is
+gone.
+
+#### P72.2 — `/models` showed a static catalog instead of what is pulled
+
+Reported by the user as "/models seems broken". It was not crashing: `cmdModels` returned
+`modelcatalog.Curated()` unconditionally — four cloud entries plus four generic Ollama *family* names
+(`qwen3`, `deepseek-r1`, …), none of which is a loadable tag, so picking one would 404 on the next
+turn.
+
+Four pieces: `ollamainfo.ListLocal` (a `GET /api/tags` client, excluding embedding-only models —
+listing `nomic-embed-text` would be a guaranteed-broken picker choice, while a model with *no*
+`capabilities` field at all is kept rather than excluded on missing data); `GET /models/local` on the
+daemon, which owns the `base_url` connection the client has no independent route to; a thin
+`Client.ListLocalModels`; and `cmdModels` showing only the live pulled list when the provider is
+reachable, falling back to the curated catalog exactly as before otherwise. A pulled tag's
+`:16k`/`:32k` suffix is shown as the context label when present, since `/api/tags` does not report
+context length for an unloaded model.
+
+**Verified live** against this machine's daemon: 6 completion-capable models returned,
+`nomic-embed-text` correctly excluded.
+
+### How the P71 batch was measured, 2026-08-19
+
+Recorded once rather than in each item, so no P71 entry has to restate it and so the next reader can
+tell a measurement from an inference. **Everything below is reproducible; nothing in P71.1–P71.12
+rests on reading code alone.** Tree: HEAD `898a2c5`, clean. Host: the machine in
+`aegis_machine_specs` — Ryzen 3800XT, RX 7900 GRE 16 GB VRAM, 16 GB system RAM.
+
+#### The two live runs
+
+Both used `aegis chat --skill deep-research --yes --mode build --render off --max-turns 40`, in a
+fresh trusted git workspace outside this repo, on one identical prompt: set up a new Azure tenant —
+tenant/subscription foundation and identity, public ingress architecture, and which tenant security
+capabilities to enable — aligned to CAF, Azure landing zones, the WAF security pillar and MCRA.
+
+| | Run A | Run B |
+|---|---|---|
+| Model | `aegis-qwen35-9b:16k` | `aegis-qwen35-9b:32k` |
+| `context_window` | 16000 (shipped global config) | 32000 (`AEGIS_PROVIDER_CONTEXT_WINDOW`) |
+| Elapsed | 646 s | 267 s |
+| Tool calls | 42 | 39 |
+| Compactions | **25** | 4 |
+| `web_search` calls | 19 (8 returned nothing) | 10 (4 returned nothing) |
+| `web_fetch` calls | 15 (**7 × 404**) | **0** |
+| `shell` calls | 2 | **21** (20 × `Invoke-WebRequest`) |
+| Inline `[n]` citations | **0** | 18 |
+| Working-file updates | 1 (placeholders only) | 1 |
+| Outcome | full report, uncited, 2 of 5 URLs wrong | **no report** — stopped after Round 1, exit 0 |
+
+**Both runs are failures, and they fail differently, which is the finding.** Run A only produced a
+report because its compaction thrash kept it talking past the point Run B stopped. Run B is the
+cleaner run on every process metric and delivered nothing, because `--skill`'s drive-to-completion
+has nothing to continue on (**P71.8**). Do not read the table as "32k is better"; read it as two
+independent bugs that mask each other at different window sizes.
+
+#### The bench measurements
+
+Taken through the production types in `internal/tool/builtin` (temporary in-package tests, since
+removed — re-create them from this section rather than trusting a stale copy):
+
+- **DuckDuckGo throttling.** Twelve research-shaped queries issued back-to-back through
+  `searchTool.Execute`: q01 and q02 returned 8 results each in 976 ms and 734 ms; **q03 through q12
+  returned zero, in ~130 ms each**. The zero-result responses are HTTP 200 with a ~14.2 KB
+  anomaly/challenge body. Probing `fetchTool.get` directly against both
+  `html.duckduckgo.com/html/` and `lite.duckduckgo.com/lite/` over four rounds returned that same
+  page from **both** hosts every time — the two endpoints share one bucket (**P71.2**). A query 60 s
+  later returned a 37 KB body parsing to 10 results, so the block is roughly a one-minute cooldown.
+- **The compaction arithmetic.** `tokenest.CompactionTrigger(window, 8192)` = 8,000 / 22,208 /
+  52,608 / 111,411 at windows of 16,000 / 32,000 / 64,000 / 131,072. `web_fetch`'s default cap is
+  20,000 chars ≈ 5,000 tokens (**P71.5**).
+- **The boilerplate share, which is the batch's one negative result.** Four `learn.microsoft.com`
+  pages: raw HTML 64–98 KB → `htmlToText` output 11–38 KB → non-content head/tail **1,218–1,446
+  bytes, 3–12%** (**P71.12**).
+- **A transient DNS failure, caught by accident.** A `web_fetch` of `learn.microsoft.com` returned
+  `lookup learn.microsoft.com: no such host` while `nslookup`, `curl` and a direct
+  `net.DefaultResolver.LookupIPAddr` for the same host from the same machine succeeded seconds later.
+  Not reproducible on demand — which is the point, and the argument for **P71.3**.
+
+#### Three things this batch checked and cleared
+
+Filed so nobody re-investigates them:
+
+- **`/research` does not require the skill to be enabled.** `deep-research` was `[disabled]` in
+  config when the user's failing run happened, and that is **not** a cause: `cmdResearch` →
+  `activateSkill` → `handleActivateSkill` "turns on a dormant embedded built-in skill for this
+  session only", independent of the config flag. The skill body was preloaded into the prompt in both
+  live runs and in the user's.
+- **`tool_search`'s exposure survives compaction.** `reg.Load(names...)` mutates the session's
+  registry clone, so a tool loaded on turn 3 is still in the exposed schema set on turn 30 even after
+  the "now callable" tool result has been summarized away. Run B's zero `web_fetch` calls are a model
+  *choice*, not a lost capability — which is why **P71.10** is written as an exposure/incentive
+  problem rather than a state-loss one.
+- **The HTML-to-text converter is not the problem.** 66 KB of HTML to 11 KB of text is most of the
+  available win already, and `htmlToText` correctly drops `script`/`style`/`noscript`. See P71.12.
+
+#### Method note this batch adds
+
+**Two of the four `/research` failure hypotheses that looked strongest from reading the code were
+wrong**, and only the live runs separated them: the disabled-skill flag (cleared above) and
+compaction-drops-the-loaded-tool (cleared above) both had plausible mechanisms and neither was
+happening. The two that survived — a rate limit reported as success, and a per-fetch cap larger than
+the compaction trigger — are both *arithmetic or control-flow facts visible in the source*, which
+nobody had checked because the interesting-looking hypotheses were elsewhere. This document already
+says to check the instrument before acting on the intuition; the P71 corollary is narrower: **when a
+harness "just doesn't work", run it once with the tool calls printed before forming a theory.** The
+run cost eleven minutes and invalidated half the theory.
 
 ### Both halves of the sub-agent boundary, 2026-08-18 (P70.4)
 
