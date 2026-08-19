@@ -32,7 +32,7 @@ func TestPromptsSuppressNarration(t *testing.T) {
 		"analysis":     phasePromptAnalysis(p),
 		"findings":     phasePromptFindings(p),
 		"assessment":   phasePromptAssessment(p),
-		"continue":     phaseContinuePrompt(ThreatModelPhases[2], []string{"2-stride-analysis.md"}),
+		"continue":     phaseContinuePrompt(ThreatModelPhases[2], []string{"2-stride-analysis.md"}, ""),
 		"hollow":       hollowBodyReentryPrompt(ThreatModelPhases[3], p.runDir, p.skillDir, "FAIL finding-bodies-nonempty\n  3-findings.md:12: empty body"),
 		"phase6":       phase6TurnPrompt(p.runDir, p.skillDir, "Fix the failing checks.", false),
 	}

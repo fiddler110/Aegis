@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -105,11 +106,92 @@ func TestPhaseCompletionAndPending(t *testing.T) {
 	}
 }
 
+// TestPhaseContentGate is the P73.1 regression, reproducing the exact live
+// failure: a phase whose `<!-- PENDING` marker is gone but whose file never
+// carries the evidence the phase's own author required (deep-research's
+// research phase cleared its marker over a fabricated "12-phase" narrative
+// with zero real `url:` entries). A marker-only oracle called that phase
+// done; requirePattern must not.
+func TestPhaseContentGate(t *testing.T) {
+	gated := Phase{name: "research", globs: []string{"findings.md"}, requirePattern: regexp.MustCompile(`url:\s*https?://`), requireCount: 1, requireHint: "a real source URL"}
+
+	dir := t.TempDir()
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "findings.md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Marker still present: complete() is false regardless of the gate — the
+	// marker check runs first and short-circuits. pending() reports the file
+	// (not the gate), so phaseContinuePrompt takes its ordinary marker-named
+	// branch rather than the gate-reason one.
+	write("# findings\n<!-- PENDING: findings -->\n")
+	if gated.complete(dir) {
+		t.Error("must be incomplete while the PENDING marker remains")
+	}
+	if got := gated.pending(dir); len(got) != 1 || got[0] != "findings.md" {
+		t.Errorf("pending() = %v, want [findings.md] while the marker remains", got)
+	}
+
+	// The P73.1 case: marker gone, no real content — the fabricated-narrative
+	// scenario from the live run this item is filed from.
+	write("# findings\n\n- Phase 1: did some things\n- Phase 2: did more things\n")
+	if gated.complete(dir) {
+		t.Error("must be incomplete: no PENDING marker, but the content gate is unmet")
+	}
+	if reason := gated.contentGateReason(dir); reason != "a real source URL" {
+		t.Errorf("contentGateReason = %q, want the configured hint", reason)
+	}
+	if got := gated.pending(dir); len(got) != 0 {
+		t.Errorf("pending() = %v, want empty — no PENDING marker is present, only the gate is unmet", got)
+	}
+
+	// Marker gone, gate satisfied: complete.
+	write("# findings\n\n- url: https://pkg.go.dev/context\n  summary: the context package\n")
+	if !gated.complete(dir) {
+		t.Error("must be complete once the marker is gone and the gate is satisfied")
+	}
+	if reason := gated.contentGateReason(dir); reason != "" {
+		t.Errorf("contentGateReason = %q once satisfied, want empty", reason)
+	}
+
+	// No requirePattern at all: gate is a no-op, matching every phase before P73.1.
+	ungated := Phase{name: "x", globs: []string{"findings.md"}}
+	write("# findings\n\nno urls here at all\n")
+	if !ungated.complete(dir) {
+		t.Error("a phase declaring no requirePattern must be judged on the marker alone")
+	}
+}
+
+// TestPhaseContinuePromptNamesTheGateReason checks the P73.1 nudge: once the
+// marker is gone but the gate is unmet, phaseContinuePrompt must say so
+// instead of (falsely) claiming a PENDING marker still exists.
+func TestPhaseContinuePromptNamesTheGateReason(t *testing.T) {
+	ph := Phase{name: "research"}
+	prompt := phaseContinuePrompt(ph, nil, "a real source URL")
+	if strings.Contains(prompt, "still contain `<!-- PENDING") {
+		t.Errorf("must not claim a PENDING marker remains when none does: %q", prompt)
+	}
+	if !strings.Contains(prompt, "a real source URL") {
+		t.Errorf("must name the gate reason: %q", prompt)
+	}
+
+	// The ordinary path is unchanged when a marker genuinely remains.
+	ordinary := phaseContinuePrompt(ph, []string{"findings.md"}, "")
+	if !strings.Contains(ordinary, "still contain `<!-- PENDING") {
+		t.Errorf("ordinary pending-marker path regressed: %q", ordinary)
+	}
+}
+
 func TestPhasePlanFor(t *testing.T) {
 	if p := PlanFor("threat-modeling", nil); p == nil {
 		t.Fatal("threat-modeling must have a phase plan")
 	}
-	if p := PlanFor("deep-research", nil); p != nil {
+	// deep-research declares its own phases now (P71.8) — a skill that
+	// genuinely declares none still falls back to the generic drive.
+	if p := PlanFor("html-report", nil); p != nil {
 		t.Error("a skill declaring no phases must fall back to the generic drive")
 	}
 	if p := PlanFor("", nil); p != nil {
@@ -207,7 +289,7 @@ func TestContentPromptsSuppressSelfVerification(t *testing.T) {
 	carriers := map[string]string{
 		"analysis": phasePromptAnalysis(p),
 		"findings": phasePromptFindings(p),
-		"continue": phaseContinuePrompt(ThreatModelPhases[2], []string{"2-stride-analysis.md"}),
+		"continue": phaseContinuePrompt(ThreatModelPhases[2], []string{"2-stride-analysis.md"}, ""),
 	}
 	for name, prompt := range carriers {
 		if !strings.Contains(prompt, noSelfVerifyInstruction) {
@@ -241,7 +323,7 @@ func TestContentPromptsForbidMonolithicWrites(t *testing.T) {
 	carriers := map[string]string{
 		"findings":   phasePromptFindings(p),
 		"assessment": phasePromptAssessment(p),
-		"continue":   phaseContinuePrompt(ThreatModelPhases[3], []string{"3-findings.md"}),
+		"continue":   phaseContinuePrompt(ThreatModelPhases[3], []string{"3-findings.md"}, ""),
 		"analysis":   phasePromptAnalysis(p),
 	}
 	for name, prompt := range carriers {

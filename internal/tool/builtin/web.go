@@ -307,11 +307,23 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 		}
 	}
 
-	var blocked bool
+	var ddgBlocked, marginaliaBlocked bool
 	if len(results) == 0 {
-		results, blocked = t.duckDuckGo(ctx, args.Query, max)
+		results, ddgBlocked = t.duckDuckGo(ctx, args.Query, max)
 		if len(results) > 0 {
 			backend = "duckduckgo"
+		}
+	}
+
+	if len(results) == 0 {
+		// P71.2: a real cross-provider fallback below DuckDuckGo, so a
+		// throttled DDG (P71.1) doesn't fall straight to "no results found"
+		// — the ladder used to be DDG's own primary+lite pair, which share
+		// one rate-limit bucket and buy zero resilience against throttling
+		// (confirmed live 2026-08-19).
+		results, marginaliaBlocked = t.marginalia(ctx, args.Query, max)
+		if len(results) > 0 {
+			backend = "marginalia"
 		}
 	}
 
@@ -321,14 +333,22 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 		// no parseable results, no transport error. Reporting that as "no
 		// results found" told the model the web was empty, and both live
 		// research runs that surfaced this bug reacted by inventing URLs to
-		// fetch or reimplementing the search through `shell`. `blocked`
-		// distinguishes that case from a query that genuinely returned
-		// nothing, which stays IsError:false — it is not a tool failure.
+		// fetch or reimplementing the search through `shell`. `ddgBlocked`/
+		// `marginaliaBlocked` distinguish that case from a query that
+		// genuinely returned nothing, which stays IsError:false — it is not
+		// a tool failure.
 		switch {
-		case blocked:
+		case ddgBlocked || marginaliaBlocked:
+			var which []string
+			if ddgBlocked {
+				which = append(which, "DuckDuckGo")
+			}
+			if marginaliaBlocked {
+				which = append(which, "Marginalia")
+			}
 			return tool.Result{
-				Content: "DuckDuckGo rate-limited this client (its anomaly-challenge page, not a parseable results page). " +
-					"This clears in roughly a minute; wait and retry, or switch search.provider to a keyed backend (tavily, brave, searxng) for a workload doing more than one or two searches.",
+				Content: fmt.Sprintf("%s rate-limited this client (an anti-bot challenge page, not a parseable results page). ", strings.Join(which, " and ")) +
+					"This clears in under a minute; wait and retry, or switch search.provider to a keyed backend (tavily, brave, searxng) for a workload doing more than one or two searches.",
 				IsError: true,
 			}, nil
 		case provErr != nil:
@@ -362,18 +382,28 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 	return tool.Result{Content: wrapped}, nil
 }
 
+// ddgHTMLURL, ddgLiteURL and marginaliaURL are the zero-config scrape
+// endpoints, overridable in tests (a real net.Listener URL swapped in) since
+// none of these three take a base URL in config the way brave/tavily/searxng
+// do.
+var (
+	ddgHTMLURL    = "https://html.duckduckgo.com/html/"
+	ddgLiteURL    = "https://lite.duckduckgo.com/lite/"
+	marginaliaURL = "https://old-search.marginalia.nu/search"
+)
+
 // duckDuckGo runs the zero-config HTML scrape (primary + lite fallback).
 // blocked reports whether every non-empty attempt was actually DuckDuckGo's
 // anomaly-challenge page rather than a genuine zero-result search — see
 // looksLikeDDGChallenge and P71.1. The two endpoints share one rate-limit
 // bucket (P71.2, confirmed live 2026-08-19: both return the challenge
 // simultaneously once throttled), so the lite fallback is a parse-format
-// fallback only, not a resilience one; a real second backend is still open
-// (P71.2 in research/roadmap.md).
+// fallback only, not a resilience one — searchTool.Execute falls further to
+// marginalia below when this returns nothing.
 func (t *searchTool) duckDuckGo(ctx context.Context, query string, max int) ([]searchResult, bool) {
 	f := &fetchTool{userAgent: t.userAgent}
 	encoded := url.QueryEscape(query)
-	body, _, err := f.get(ctx, "https://html.duckduckgo.com/html/?q="+encoded)
+	body, _, err := f.get(ctx, ddgHTMLURL+"?q="+encoded)
 	var results []searchResult
 	blocked := false
 	if err == nil {
@@ -384,7 +414,7 @@ func (t *searchTool) duckDuckGo(ctx context.Context, query string, max int) ([]s
 		}
 	}
 	if len(results) == 0 {
-		if body2, _, err2 := f.get(ctx, "https://lite.duckduckgo.com/lite/?q="+encoded); err2 == nil {
+		if body2, _, err2 := f.get(ctx, ddgLiteURL+"?q="+encoded); err2 == nil {
 			if looksLikeDDGChallenge(body2) {
 				blocked = true
 			} else {
@@ -407,6 +437,40 @@ func looksLikeDDGChallenge(body []byte) bool {
 	return bytes.Contains(body, []byte("duckduckgo.com/anomaly.js")) ||
 		bytes.Contains(body, []byte(`id="challenge-form"`)) ||
 		bytes.Contains(body, []byte("anomaly-modal"))
+}
+
+// marginalia is the P71.2 cross-*provider* fallback below duckDuckGo: a
+// second unkeyed scrape so a DDG-throttled client (P71.1) is still
+// survivable without a key. Candidates were probed live 2026-08-19 —
+// Mojeek and Startpage both return an anti-bot challenge (a CAPTCHA and an
+// Anubis proof-of-work page respectively) on the very first request from
+// this client, so neither is usable unauthenticated; Marginalia served a
+// genuine results page on the first request and only started rate-limiting
+// after rapid repeat queries, recovering in single-digit seconds (measured:
+// ~3s), against DuckDuckGo's ~60s. blocked mirrors duckDuckGo's return
+// convention: true only when every attempt was Marginalia's own challenge
+// page, never for a genuine zero-result search.
+func (t *searchTool) marginalia(ctx context.Context, query string, max int) ([]searchResult, bool) {
+	f := &fetchTool{userAgent: t.userAgent}
+	body, _, err := f.get(ctx, marginaliaURL+"?query="+url.QueryEscape(query))
+	if err != nil {
+		return nil, false
+	}
+	if looksLikeMarginaliaChallenge(body) {
+		return nil, true
+	}
+	return parseMarginalia(body, max), false
+}
+
+// looksLikeMarginaliaChallenge reports whether body is Marginalia's own
+// rate-limit interstitial ("The search engine is currently barraged by
+// queries from bots") rather than a results page — both are HTTP 200, so
+// this is the only way to tell them apart, mirroring looksLikeDDGChallenge
+// for the same reason (P71.1's lesson applied to the new backend, per this
+// item's own closure condition).
+func looksLikeMarginaliaChallenge(body []byte) bool {
+	return bytes.Contains(body, []byte("barraged by queries from bots")) ||
+		bytes.Contains(body, []byte("Wait For A Moment"))
 }
 
 type searchResult struct {
@@ -461,6 +525,35 @@ func parseDDG(body []byte, max int) []searchResult {
 			results = append(results, r)
 		}
 		if n.Type == html.ElementNode && hasClass(n, "result__snippet") && len(results) > 0 {
+			results[len(results)-1].snippet = collapse(nodeText(n))
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return results
+}
+
+// parseMarginalia parses Marginalia's search-result HTML. Each hit is an
+// `a.title` (the href lives on this element directly, unlike DDG's
+// redirect-wrapped `result__a`) optionally followed by a `p.description`
+// snippet.
+func parseMarginalia(body []byte, max int) []searchResult {
+	doc, err := html.Parse(strings.NewReader(string(body)))
+	if err != nil {
+		return nil
+	}
+	var results []searchResult
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if len(results) >= max {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "a" && hasClass(n, "title") {
+			results = append(results, searchResult{title: collapse(nodeText(n)), urlStr: attr(n, "href")})
+		}
+		if n.Type == html.ElementNode && hasClass(n, "description") && len(results) > 0 {
 			results[len(results)-1].snippet = collapse(nodeText(n))
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {

@@ -1,6 +1,73 @@
 ---
 name: deep-research
 description: Use when asked to research a topic in depth on the web — survey the state of something, compare options or tools, gather evidence for a decision, or produce a research report with citations. Triggers on "research X", "deep research", "do some research on", "find sources on", "what's the current state of", "literature review", and the /research command.
+run_dir: .aegis/research/*
+phases:
+  - name: research
+    setup: true
+    files: ["findings.md"]
+    require_pattern: 'url:\s*https?://'
+    require_count: 1
+    require_hint: "at least one findings-log entry with a real `url: https://…` line — a scope/audit-trail-only file with no source recorded is not research"
+    prompt: |
+      Research task: {task}
+
+      This is a fresh context for one research round — the findings file on
+      disk is the memory the previous round left you, not this conversation.
+      Read {skill_dir}/SKILL.md sections 0-4 if you have not already: they
+      define the findings-log format, the source-quality bar and citation
+      discipline this file has to follow.
+
+      If `{run_dir}/findings.md` does not exist yet, this is round 1: pick a
+      short topic slug and treat `.aegis/research/<slug>/` as {run_dir} for
+      every round from now on (it does not exist until you create it).
+      Restate the task as one primary question plus 2-5 sub-questions, then
+      write {run_dir}/findings.md with that scope, an empty findings log, an
+      empty audit trail, and a `<!-- PENDING: findings -->` line at the end
+      of the findings section.
+
+      If it already exists, read it, then run exactly one more round: plan
+      the sub-question or gap this round attacks, search (1-3 web_search
+      calls with varied phrasings), select against the source-quality bar,
+      read the selected URLs (web_fetch), and edit_file to append this
+      round's findings-log entries and audit-trail lines. Round cap: 8 —
+      count the audit trail's rounds before starting another.
+
+      Remove the `<!-- PENDING: findings -->` line (do not replace it with
+      anything) only when one of the stop conditions holds: every
+      sub-question is answered with corroborated sources; a full round
+      produced nothing material; the round cap is hit; or the remaining gaps
+      are not worth the remaining budget. In the last two cases, record the
+      open questions in the file first. Do not remove the marker in the same
+      round you create the file — round 1 scopes and searches, it does not
+      finish the research.
+  - name: synthesize
+    files: ["report.md"]
+    require_pattern: '(?m)^\d+\.\s.*https?://'
+    require_count: 1
+    require_hint: "at least one numbered Sources line carrying a real https:// URL, in the `n. title — url (type, published date)` shape section 5 specifies — a Sources list that names publications by title alone (\"1. Postman Blog: ...\") without the url is not verifiable and does not satisfy this phase"
+    prompt: |
+      Write the final research report for: {task}
+
+      If `{run_dir}/report.md` does not exist yet, first write it with just
+      one line, `<!-- PENDING: report -->`, so an interrupted report is never
+      mistaken for a finished one — then keep going in the same turn if you
+      can.
+
+      Read {run_dir}/findings.md in full — every source, the audit trail,
+      and any open questions the research phase recorded. Then write
+      {run_dir}/report.md following {skill_dir}/SKILL.md section 5's
+      structure (question & scope, TL;DR, findings with inline `[n]`
+      citations, contradictions & open questions, numbered sources, an
+      audit-trail summary), citing only what findings.md actually supports —
+      an unsupported claim goes under open questions, not into a citation.
+      One additional web_search/web_fetch is fine if a single claim
+      genuinely needs a source no round covered, but this phase's job is to
+      write the report, not run another research round.
+
+      Remove the `<!-- PENDING: report -->` line only once the report is
+      actually complete — a partial report with the marker still removed
+      would be indistinguishable from a finished one.
 ---
 
 # Deep Research Skill

@@ -52,6 +52,16 @@ type Phase struct {
 	// ignore. Names must match the registry's; an unknown name simply never
 	// matches and is therefore inert.
 	tools []string
+	// requirePattern, requireCount and requireHint are the P73.1 mechanical
+	// content gate: once every `<!-- PENDING` marker is gone, the phase's
+	// owned files must also match requirePattern at least requireCount times
+	// before complete() returns true. nil requirePattern means no gate (every
+	// phase before P73.1). See skills.PhaseSpec.RequirePattern for why a
+	// marker-only oracle isn't enough — it says "the model decided this is
+	// done," not "this is done."
+	requirePattern *regexp.Regexp
+	requireCount   int
+	requireHint    string
 }
 
 // PhaseParams carries everything a per-phase prompt needs to orient a fresh
@@ -172,12 +182,16 @@ func (ph Phase) Name() string { return ph.name }
 // no plan (the caller then uses the generic single-context drive).
 //
 // specs is the skill's own `phases:` frontmatter (skills.Skill.Phases), which
-// is how any skill opts in without a code change (P52.12) — deep-research,
-// latex-report, structured-build and documentation-as-code are all
-// multi-phase, file-per-phase builds with the same single-context problem
-// threat-modeling has. Pass nil when the skill has not been loaded yet; the
-// built-in plan below still resolves, which is enough for a caller that only
-// needs to know *whether* a run will be phased.
+// is how any skill opts in without a code change (P52.12). deep-research is
+// the one other built-in that has actually declared a plan this way (P71.8:
+// research → synthesize, working from the P71.9 findings file as its phase
+// artifact). latex-report, structured-build and documentation-as-code have
+// the same single-context problem threat-modeling had but do not yet declare
+// `phases:` — naming them here as if they already did was the P71.8 finding;
+// do not re-add them to this comment without giving them frontmatter first.
+// Pass nil when the skill has not been loaded yet; the built-in plan below
+// still resolves, which is enough for a caller that only needs to know
+// *whether* a run will be phased.
 //
 // The built-in threat-modeling plan wins over frontmatter for that one name.
 // Its per-phase prompts are hand-tuned Go functions carrying guardrails a
@@ -205,14 +219,28 @@ func planFromSpecs(specs []skills.PhaseSpec) []Phase {
 		// before the run dir exists would have nothing to scaffold into, and
 		// the drive's completion oracle assumes one pre-scaffold step.
 		setup := spec.Setup && i == 0
-		out = append(out, Phase{
+		ph := Phase{
 			name:  spec.Name,
 			globs: spec.Files,
 			setup: setup,
 			promptFn: func(p PhaseParams) string {
 				return declaredPhasePrompt(spec, p)
 			},
-		})
+		}
+		// An invalid regexp is silently not applied — a malformed
+		// `require_pattern` in a skill's frontmatter must never turn into a
+		// phase that can never complete.
+		if pat := spec.RequirePattern; pat != "" {
+			if re, err := regexp.Compile(pat); err == nil {
+				ph.requirePattern = re
+				ph.requireCount = spec.RequireCount
+				if ph.requireCount <= 0 {
+					ph.requireCount = 1
+				}
+				ph.requireHint = spec.RequireHint
+			}
+		}
+		out = append(out, ph)
 	}
 	return out
 }
@@ -320,17 +348,68 @@ func (ph Phase) complete(runDir string) bool {
 			return false
 		}
 	}
-	return true
+	return ph.contentGateReason(runDir) == ""
 }
+
+// contentGateReason reports why this phase's P73.1 mechanical content gate
+// (requirePattern/requireCount) is not yet satisfied, or "" when it is (or
+// the phase declares none). Distinct from pending(): the gate can fail even
+// after every `<!-- PENDING` marker is gone, which pending()'s marker scan
+// alone cannot see — the model decided the phase was done, and the output
+// still doesn't carry what the phase's author required. Callers that already
+// know files exist (complete(), having just checked resolveFiles is
+// non-empty) still pay one more resolveFiles call here; the phase file sets
+// are small enough (single-digit files) that this is not worth threading an
+// extra parameter through complete()'s simple boolean contract for.
+func (ph Phase) contentGateReason(runDir string) string {
+	if ph.requirePattern == nil || runDir == "" {
+		return ""
+	}
+	files := ph.resolveFiles(runDir)
+	if len(files) == 0 {
+		return "" // not scaffolded yet — the ordinary "phase not complete" path already covers this
+	}
+	if countPatternMatches(files, ph.requirePattern) >= ph.requireCount {
+		return ""
+	}
+	if ph.requireHint != "" {
+		return ph.requireHint
+	}
+	return fmt.Sprintf("needs at least %d match(es) of `%s`", ph.requireCount, ph.requirePattern.String())
+}
+
+// countPatternMatches sums re's non-overlapping matches across files, capped
+// per file at the same size fileHasPendingMarker uses — a mechanical content
+// gate has no business reading a multi-megabyte file to decide a phase is
+// unfinished.
+func countPatternMatches(files []string, re *regexp.Regexp) int {
+	total := 0
+	for _, f := range files {
+		info, err := os.Stat(f)
+		if err != nil || info.Size() > maxPhaseFileSize {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		total += len(re.FindAll(data, -1))
+	}
+	return total
+}
+
+// maxPhaseFileSize bounds both fileHasPendingMarker's and
+// countPatternMatches' reads — generated report/findings files are far
+// smaller than this in practice.
+const maxPhaseFileSize = 1 << 20 // 1 MiB
 
 // fileHasPendingMarker reports whether one file still contains the `<!-- PENDING`
 // prefix scaffold.py writes for unfilled sections. Mirrors scanPendingMarkers'
 // match, scoped to a single file so a phase can be judged complete without
 // walking the whole .aegis tree.
 func fileHasPendingMarker(path string) bool {
-	const maxFileSize = 1 << 20 // 1 MiB — generated report files are far smaller
 	info, err := os.Stat(path)
-	if err != nil || info.Size() > maxFileSize {
+	if err != nil || info.Size() > maxPhaseFileSize {
 		return false
 	}
 	data, err := os.ReadFile(path)
@@ -614,7 +693,7 @@ func Run(ctx context.Context, st *State, phases []Phase) error {
 			// AEGIS_PHASE_CONV=growing restores the old accumulate-then-reset
 			// behaviour for comparison (the measure-first escape hatch).
 			if growingPhaseConvForced() {
-				conv.Append(userMessage(nudge + phaseContinuePrompt(ph, pending)))
+				conv.Append(userMessage(nudge + phaseContinuePrompt(ph, pending, ph.contentGateReason(runDir))))
 			} else {
 				conv = st.freshPhaseConv(ph, runDir, pending, nudge)
 			}
@@ -695,7 +774,7 @@ func (st *State) freshPhaseConv(ph Phase, runDir string, pending []string, nudge
 			task: st.TaskPrompt, skillDir: st.SkillDir, cwd: st.Cwd, runDir: runDir,
 		})))
 	} else {
-		conv.Append(userMessage(nudge + phaseContinuePrompt(ph, pending)))
+		conv.Append(userMessage(nudge + phaseContinuePrompt(ph, pending, ph.contentGateReason(runDir))))
 	}
 	return conv
 }
@@ -1633,8 +1712,16 @@ const terseOutputInstruction = "Do not narrate: no plan of what you are about to
 
 // phaseContinuePrompt is the in-phase continuation turn: it names only THIS
 // phase's still-PENDING files and tells the model to fill the next marker,
-// without pulling other phases into scope.
-func phaseContinuePrompt(ph Phase, pending []string) string {
+// without pulling other phases into scope. gateReason is P73.1's mechanical
+// content gate: non-empty only when every `<!-- PENDING` marker is already
+// gone but the phase's own completion requirement isn't met, which is a
+// different situation from "a marker remains" and gets a different message
+// — telling the model markers remain when none do would be actively wrong.
+func phaseContinuePrompt(ph Phase, pending []string, gateReason string) string {
+	if len(pending) == 0 && gateReason != "" {
+		return fmt.Sprintf("Continue the %s phase — it is not finished. Every `<!-- PENDING` marker is gone, but this phase's own completion requirement is not met yet: %s. Add the real content the requirement needs, with `edit_file`/`edit_section` — do not just re-add a placeholder marker in its place. %s This is a non-interactive run: do not stop to ask whether to proceed. %s",
+			ph.label(), gateReason, noSelfVerifyInstruction, terseOutputInstruction)
+	}
 	return fmt.Sprintf("Continue the %s phase — it is not finished. These file(s) still contain `<!-- PENDING: … -->` markers:\n- %s\n\nFill the next single `<!-- PENDING: <section> -->` marker with real content using `edit_file` — one section, one edit; never a bare `<!-- PENDING -->` and never `replace_all` on a marker. %s Keep going until NO `<!-- PENDING` marker remains in the file(s) above. %s This is a non-interactive run: do not stop to ask whether to proceed, and do not start other files. %s",
 		ph.label(), strings.Join(pending, "\n- "), monolithicWriteGuardrail, noSelfVerifyInstruction, terseOutputInstruction)
 }

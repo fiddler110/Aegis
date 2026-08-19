@@ -160,6 +160,128 @@ func TestLooksLikeDDGChallenge(t *testing.T) {
 	}
 }
 
+// TestLooksLikeMarginaliaChallenge pins the P71.2 detector against a
+// byte-for-byte excerpt of Marginalia's real rate-limit interstitial
+// (captured live 2026-08-19, after four queries in quick succession) and
+// against a genuine results excerpt, mirroring TestLooksLikeDDGChallenge for
+// the new backend.
+func TestLooksLikeMarginaliaChallenge(t *testing.T) {
+	challenge := []byte(`<html lang="en-US"><head><title>Error</title></head>
+<body><div class="infobox"><h1>Wait For A Moment</h1>
+<p>The search engine is currently barraged by queries from bots</p>
+</div></body></html>`)
+	if !looksLikeMarginaliaChallenge(challenge) {
+		t.Error("want the captured challenge page detected as blocked")
+	}
+
+	results := []byte(`<html><body><section>
+<div class="url"><a rel="nofollow external" href="https://golangdocs.com/golang-context-package">https://golangdocs.com/golang-context-package</a></div>
+<h2> <a tabindex="-1" class="title" rel="nofollow external" href="https://golangdocs.com/golang-context-package">Golang Context Package - Golang Docs</a> </h2>
+<p class="description">An overview of the context package.</p>
+</section></body></html>`)
+	if looksLikeMarginaliaChallenge(results) {
+		t.Error("want a genuine results page NOT flagged as blocked")
+	}
+}
+
+// TestParseMarginalia is the parse-side counterpart, against the same
+// captured excerpt.
+func TestParseMarginalia(t *testing.T) {
+	body := []byte(`<html><body><section>
+<div class="url"><a rel="nofollow external" href="https://golangdocs.com/golang-context-package">https://golangdocs.com/golang-context-package</a></div>
+<h2> <a tabindex="-1" class="title" rel="nofollow external" href="https://golangdocs.com/golang-context-package">Golang Context Package - Golang Docs</a> </h2>
+<p class="description">An overview of the context package.</p>
+</section></body></html>`)
+	results := parseMarginalia(body, 10)
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d: %+v", len(results), results)
+	}
+	if results[0].urlStr != "https://golangdocs.com/golang-context-package" {
+		t.Errorf("wrong url: %q", results[0].urlStr)
+	}
+	if results[0].title != "Golang Context Package - Golang Docs" {
+		t.Errorf("wrong title: %q", results[0].title)
+	}
+	if results[0].snippet != "An overview of the context package." {
+		t.Errorf("wrong snippet: %q", results[0].snippet)
+	}
+}
+
+// TestSearchFallsBackToMarginaliaWhenDDGBlocked is the P71.2 integration
+// regression: with DuckDuckGo throttled, web_search must still return
+// results from the new second backend and name it, rather than reporting
+// the P71.1 rate-limit error DDG alone would produce.
+func TestSearchFallsBackToMarginaliaWhenDDGBlocked(t *testing.T) {
+	ddg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body><div id="challenge-form">duckduckgo.com/anomaly.js</div></body></html>`))
+	}))
+	defer ddg.Close()
+	marginalia := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body>
+<h2><a class="title" href="https://go.dev">Go</a></h2>
+<p class="description">the language</p>
+</body></html>`))
+	}))
+	defer marginalia.Close()
+
+	origHTML, origLite, origMarg := ddgHTMLURL, ddgLiteURL, marginaliaURL
+	ddgHTMLURL, ddgLiteURL, marginaliaURL = ddg.URL, ddg.URL, marginalia.URL
+	defer func() { ddgHTMLURL, ddgLiteURL, marginaliaURL = origHTML, origLite, origMarg }()
+
+	origTransport := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = origTransport }()
+
+	st := &searchTool{}
+	res, err := st.Execute(context.Background(), json.RawMessage(`{"query":"golang"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(res.Content, `backend="marginalia"`) {
+		t.Errorf("want backend=marginalia named, got: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "https://go.dev") {
+		t.Errorf("want marginalia's result, got: %q", res.Content)
+	}
+	if res.IsError {
+		t.Errorf("want success once marginalia serves results, got IsError with: %q", res.Content)
+	}
+}
+
+// TestSearchReportsBothBackendsBlocked covers the case neither scrape
+// serves anything: the message must name whichever backend(s) actually sent
+// a challenge page, not just DuckDuckGo.
+func TestSearchReportsBothBackendsBlocked(t *testing.T) {
+	ddg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body><div id="challenge-form">duckduckgo.com/anomaly.js</div></body></html>`))
+	}))
+	defer ddg.Close()
+	marginalia := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body>The search engine is currently barraged by queries from bots</body></html>`))
+	}))
+	defer marginalia.Close()
+
+	origHTML, origLite, origMarg := ddgHTMLURL, ddgLiteURL, marginaliaURL
+	ddgHTMLURL, ddgLiteURL, marginaliaURL = ddg.URL, ddg.URL, marginalia.URL
+	defer func() { ddgHTMLURL, ddgLiteURL, marginaliaURL = origHTML, origLite, origMarg }()
+
+	origTransport := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = origTransport }()
+
+	st := &searchTool{}
+	res, err := st.Execute(context.Background(), json.RawMessage(`{"query":"golang"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("want IsError when both scrapes are blocked, got: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "DuckDuckGo and Marginalia rate-limited") {
+		t.Errorf("want both backends named in the error, got: %q", res.Content)
+	}
+}
+
 // TestDefaultFetchLimitScalesWithContextWindow is the P71.5 regression: the
 // default fetch cap must shrink for a small serving window (so a single
 // fetch can't consume most of the compaction budget on its own) and stay at

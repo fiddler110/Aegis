@@ -58,5 +58,20 @@ func BuiltinOptions(cfg *config.Config, root string) builtin.Options {
 		ToolFamilies:            cfg.Tools.Families,
 		GitPreCommitTestCommand: cfg.Git.PreCommitTestCommand,
 		GitPreCommitTestTimeout: time.Duration(cfg.Git.PreCommitTestTimeoutSec) * time.Second,
+		// Search is a straight config reading, not host wiring — the class of
+		// field this function exists to decide once. Before this it was set
+		// only in server.go's daemon path (a manual overlay after this same
+		// call), so `aegis chat`/`debate`/`dryrun`/worker.go all silently
+		// ignored `search.provider`/`api_key`/`base_url` and used the
+		// zero-config DuckDuckGo scrape regardless of what was configured —
+		// found live 2026-08-19 running a phased `aegis chat --skill
+		// deep-research` against a project configured for `provider: searxng`
+		// that never once called it.
+		Search: builtin.SearchOptions{
+			Provider:   cfg.Search.Provider,
+			APIKey:     cfg.Search.APIKey,
+			BaseURL:    cfg.Search.BaseURL,
+			ScanOutput: cfg.Search.ScanOutput,
+		},
 	}
 }

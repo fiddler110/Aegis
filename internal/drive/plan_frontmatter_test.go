@@ -7,6 +7,54 @@ import (
 	"github.com/fiddler110/aegis/internal/skills"
 )
 
+// TestDeepResearchDeclaresAPlan is the P71.8 regression: deep-research's own
+// SKILL.md now declares `phases:` (research → synthesize) and a `run_dir:`
+// glob, loaded through the real frontmatter parser rather than a hand-built
+// PhaseSpec slice, so a future edit to the YAML that breaks parsing or drops
+// a required field (a phase with no files, which validPhases silently drops)
+// fails here instead of only showing up as "the generic drive ran instead".
+func TestDeepResearchDeclaresAPlan(t *testing.T) {
+	workDir := t.TempDir()
+	if err := skills.MaterializeBuiltinsToProject(workDir, []string{"deep-research"}); err != nil {
+		t.Fatal(err)
+	}
+	sk, ok := skills.Load(workDir, "", []string{"deep-research"}, "deep-research")
+	if !ok {
+		t.Fatal("deep-research skill not found")
+	}
+	if sk.RunDir != ".aegis/research/*" {
+		t.Errorf("run_dir = %q, want .aegis/research/*", sk.RunDir)
+	}
+	plan := PlanFor(sk.Name, sk.Phases)
+	if plan == nil {
+		t.Fatal("deep-research must have a phase plan now that its SKILL.md declares one")
+	}
+	if len(plan) != 2 {
+		t.Fatalf("got %d phases, want 2 (research, synthesize)", len(plan))
+	}
+	if plan[0].Name() != "research" || !plan[0].setup {
+		t.Errorf("phase 0 = %+v, want the research setup phase", plan[0])
+	}
+	if strings.Join(plan[0].globs, ",") != "findings.md" {
+		t.Errorf("research phase globs = %v, want [findings.md]", plan[0].globs)
+	}
+	if plan[1].Name() != "synthesize" || plan[1].setup {
+		t.Errorf("phase 1 = %+v, want the non-setup synthesize phase", plan[1])
+	}
+	if strings.Join(plan[1].globs, ",") != "report.md" {
+		t.Errorf("synthesize phase globs = %v, want [report.md]", plan[1].globs)
+	}
+	// P73.1: both phases declare a mechanical content gate now, not just the
+	// research file's own require_pattern — a report with no [n] markers
+	// must not look complete either.
+	if plan[0].requirePattern == nil || plan[0].requirePattern.String() != `url:\s*https?://` {
+		t.Errorf("research phase requirePattern = %v, want the url: pattern", plan[0].requirePattern)
+	}
+	if plan[1].requirePattern == nil || plan[1].requirePattern.String() != `(?m)^\d+\.\s.*https?://` {
+		t.Errorf("synthesize phase requirePattern = %v, want the numbered-source-with-URL pattern", plan[1].requirePattern)
+	}
+}
+
 // TestPlanForBuildsFromFrontmatterSpecs is the P52.12 generalization: any skill
 // declaring `phases:` gets the phased drive, with no code change and no name
 // hard-coded anywhere.

@@ -89,6 +89,23 @@ type PhaseSpec struct {
 	// `{run_dir}`, `{skill_dir}`, `{cwd}`, `{phase}` and `{files}` are
 	// substituted at run time; everything else is used verbatim.
 	Prompt string `yaml:"prompt"`
+	// RequirePattern, when set, is a regexp the phase's owned files must
+	// match at least RequireCount times (default 1) before the phase counts
+	// as complete — checked in addition to, and after, the ordinary
+	// `<!-- PENDING` marker check. A marker-only oracle lets a model decide
+	// unilaterally that a phase is done; this is a mechanical check on *what*
+	// filled the marker, for output whose author can name a structural
+	// invariant (e.g. "the findings log must cite a real URL") even without
+	// the fixed schema a bundled verify script needs (P73.1).
+	RequirePattern string `yaml:"require_pattern"`
+	// RequireCount is how many RequirePattern matches are required; 0 (the
+	// zero value, so it need not be set for a simple "at least one" gate)
+	// means 1 once RequirePattern is non-empty.
+	RequireCount int `yaml:"require_count"`
+	// RequireHint is shown to the model when the gate is unmet, in place of
+	// a generic "N matches of <pattern>" message — say what's actually
+	// missing in the skill's own vocabulary (e.g. "a real source URL").
+	RequireHint string `yaml:"require_hint"`
 }
 
 // discoverCache memoizes Discover's result per distinct (workDir, dataDir,
@@ -518,6 +535,8 @@ func validPhases(specs []PhaseSpec) []PhaseSpec {
 			}
 		}
 		p.Files = files
+		p.RequirePattern = strings.TrimSpace(p.RequirePattern)
+		p.RequireHint = strings.TrimSpace(p.RequireHint)
 		if p.Name == "" || len(p.Files) == 0 {
 			continue
 		}
