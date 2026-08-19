@@ -160,6 +160,50 @@ func preloadPersonaTools(reg *tool.Registry, p persona.Persona) []string {
 	return loaded
 }
 
+// networkShapedSkills names built-in skills whose whole premise is reaching
+// the web — deep-research today — so activating one should pre-Load
+// web_search/web_fetch immediately rather than leaving them deferred behind
+// tool_search (P25.6's LocalProfile). Not a general skill-tools mechanism
+// (there is no `tools:` skill frontmatter, unlike persona.Tools): a
+// single-purpose fix for the one skill this is actually true of, scoped to
+// avoid inventing an abstraction nothing else needs yet.
+var networkShapedSkills = map[string]bool{
+	"deep-research": true,
+}
+
+// preloadNetworkToolsForSkill un-defers web_search/web_fetch for reg — the
+// session-scoped clone, same requirement as preloadPersonaTools — when name
+// is network-shaped. P71.10: a local-profile session that can't see
+// web_fetch reaches for `shell` instead the first time a search looks empty,
+// which bypasses the SSRF dialer, the untrusted-content wrapper and the
+// injection scan those two tools carry. Loading them at skill-activation time
+// (rather than waiting for the model to discover tool_search on its own, or
+// never) closes that gap without touching the LocalProfile default for every
+// other session.
+func preloadNetworkToolsForSkill(reg *tool.Registry, name string) []string {
+	if reg == nil || !networkShapedSkills[name] {
+		return nil
+	}
+	deferred := make(map[string]bool)
+	for _, d := range reg.Deferred() {
+		deferred[d.Name] = true
+	}
+	var want []string
+	for _, t := range []string{"web_search", "web_fetch"} {
+		if deferred[t] {
+			want = append(want, t)
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	var loaded []string
+	for _, t := range reg.Load(want...) {
+		loaded = append(loaded, t.Name())
+	}
+	return loaded
+}
+
 // modelAdapter returns the daemon's shared adapter with the serving context
 // window this turn's model should be given attached to every request (P52.4).
 //

@@ -416,6 +416,7 @@ func (s *Server) handleActivateSkill(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("failed to materialize built-in skill into project", "skill", name, "workdir", workdir, "err", err)
 	}
 	s.activateSessionSkill(id, name)
+	preloadNetworkToolsForSkill(s.sessionToolRegistry(id), name)
 
 	// Load the just-activated skill's full body and hand it back so the caller
 	// (a slash command) can prepend it to the message it sends (P36.1). The

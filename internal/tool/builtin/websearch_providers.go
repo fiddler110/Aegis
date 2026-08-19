@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -145,20 +146,63 @@ func (t *searchTool) searxngSearch(ctx context.Context, query string, max int) (
 	return results, nil
 }
 
+// doSearchRequest runs req, retrying transient failures per P71.3 (webRetries
+// attempts beyond the first, webRetryable's 429/5xx rule, Retry-After
+// honored when the provider sends one). A request whose body can't be
+// re-read on retry (req.GetBody nil — a caller that built its own io.Reader
+// body rather than going through http.NewRequest's bytes.Reader/strings.Reader
+// auto-detection) gets exactly one attempt, same as before this existed;
+// every provider in this file uses bytes.NewReader or has no body, so this
+// never actually triggers today, but it is the correct fallback if one ever
+// doesn't.
 func doSearchRequest(req *http.Request) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		body, status, retryAfter, err := doSearchRequestOnce(req)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if attempt >= webRetries || (status > 0 && !webRetryable(status)) {
+			return nil, lastErr
+		}
+		if req.GetBody != nil {
+			rc, gerr := req.GetBody()
+			if gerr != nil {
+				return nil, lastErr
+			}
+			req.Body = rc
+		} else if req.Body != nil {
+			return nil, lastErr
+		}
+		if serr := sleepCtx(req.Context(), webBackoff(attempt, retryAfter)); serr != nil {
+			return nil, serr
+		}
+	}
+}
+
+// doSearchRequestOnce is the single-attempt request doSearchRequest retries
+// around. status is 0 for a transport-level failure, matching
+// fetchTool.getOnce's convention; retryAfter is parsed from the response's
+// Retry-After header (seconds form only — every provider here uses it that
+// way) when present.
+func doSearchRequestOnce(req *http.Request) (body []byte, status int, retryAfter time.Duration, err error) {
 	resp, err := searchAPIClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxWebBytes))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxWebBytes))
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, 0, err
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, clip(strings.TrimSpace(string(body)), 200))
+		if secs, perr := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); perr == nil && secs > 0 {
+			retryAfter = time.Duration(secs) * time.Second
+		}
+		return nil, resp.StatusCode, retryAfter, fmt.Errorf("status %d: %s", resp.StatusCode, clip(strings.TrimSpace(string(body)), 200))
 	}
-	return body, nil
+	return body, resp.StatusCode, 0, nil
 }
 
 // stripHTML removes tags from a snippet (Brave descriptions include <strong>).

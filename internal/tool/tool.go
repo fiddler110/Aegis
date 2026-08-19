@@ -700,6 +700,34 @@ func ExtraRootsFromContext(ctx context.Context) []sandbox.Root {
 	return roots
 }
 
+// contextWindowCtxKey is the context key for the run's resolved serving
+// context window.
+type contextWindowCtxKey struct{}
+
+// WithContextWindow returns a context carrying the run's effective serving
+// context window in tokens (P71.5) — the same figure the compaction trigger
+// is computed against, resolved per turn since it can come from config, a
+// detected local model, or a runtime escalation (see
+// Engine.effectiveContextWindow). Tools whose default output size should
+// scale with the window (web_fetch's cap) read this instead of carrying a
+// construction-time constant that a 16k local model and a 200k cloud model
+// would both be handed identically. n <= 0 carries nothing, so a caller with
+// no window to report (a cloud adapter with no configured figure) leaves
+// FromContext's "unknown" path in effect.
+func WithContextWindow(ctx context.Context, n int) context.Context {
+	if n <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, contextWindowCtxKey{}, n)
+}
+
+// ContextWindowFromContext returns the serving context window carried by
+// ctx, if any. ok is false when unset — the caller's own default applies.
+func ContextWindowFromContext(ctx context.Context) (int, bool) {
+	n, ok := ctx.Value(contextWindowCtxKey{}).(int)
+	return n, ok
+}
+
 // Get returns a registered tool by name.
 func (r *Registry) Get(name string) (Tool, bool) {
 	r.mu.RLock()

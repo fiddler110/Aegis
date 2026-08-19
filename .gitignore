@@ -18,6 +18,13 @@ internal/server/webui/frontend/node_modules/
 *.log
 *.err
 
+# Secrets. .aegis/.env is already covered by /.aegis/* above; this catches a
+# bare .env at the repo root or in any subdirectory (e.g. one dropped in for
+# local testing, as happened 2026-08-19 — a Tavily key sat untracked but
+# unignored at the repo root).
+.env
+.env.*
+
 # Editor / OS
 .DS_Store
 .idea/

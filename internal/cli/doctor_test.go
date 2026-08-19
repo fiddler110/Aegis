@@ -773,3 +773,49 @@ func TestDoctorGenerationBudgetFixNamesTheKnobThatMoves(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctorSearchCheck is P71.4's doctor-check closure condition: a search
+// misconfiguration must FAIL before any web_search call is ever made, and
+// the zero-config default must WARN (not fail — it works, just not for a
+// research-shaped workload) rather than pass silently.
+func TestDoctorSearchCheck(t *testing.T) {
+	warn := doctorSearchCheck(&config.Config{})
+	if warn.Severity != doctorWarn {
+		t.Errorf("empty provider (DuckDuckGo default): got %v, want warn", warn.Severity)
+	}
+
+	explicitDDG := doctorSearchCheck(&config.Config{Search: config.SearchConfig{Provider: "duckduckgo"}})
+	if explicitDDG.Severity != doctorWarn {
+		t.Errorf("explicit duckduckgo: got %v, want warn", explicitDDG.Severity)
+	}
+
+	missingKey := doctorSearchCheck(&config.Config{Search: config.SearchConfig{Provider: "tavily"}})
+	if missingKey.Severity != doctorFail {
+		t.Errorf("tavily with no api_key: got %v, want fail", missingKey.Severity)
+	}
+
+	keyed := doctorSearchCheck(&config.Config{Search: config.SearchConfig{Provider: "brave", APIKey: "test-key"}})
+	if keyed.Severity != doctorPass {
+		t.Errorf("brave with api_key set: got %v, want pass", keyed.Severity)
+	}
+
+	missingBase := doctorSearchCheck(&config.Config{Search: config.SearchConfig{Provider: "searxng"}})
+	if missingBase.Severity != doctorFail {
+		t.Errorf("searxng with no base_url: got %v, want fail", missingBase.Severity)
+	}
+
+	badBase := doctorSearchCheck(&config.Config{Search: config.SearchConfig{Provider: "searxng", BaseURL: "not a url"}})
+	if badBase.Severity != doctorFail {
+		t.Errorf("searxng with an unparseable base_url: got %v, want fail", badBase.Severity)
+	}
+
+	goodBase := doctorSearchCheck(&config.Config{Search: config.SearchConfig{Provider: "searxng", BaseURL: "https://searx.example.com"}})
+	if goodBase.Severity != doctorPass {
+		t.Errorf("searxng with a valid base_url: got %v, want pass", goodBase.Severity)
+	}
+
+	unknown := doctorSearchCheck(&config.Config{Search: config.SearchConfig{Provider: "bing"}})
+	if unknown.Severity != doctorFail {
+		t.Errorf("unrecognized provider: got %v, want fail", unknown.Severity)
+	}
+}

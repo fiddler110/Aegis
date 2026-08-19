@@ -2351,7 +2351,8 @@ func (e *Engine) toolCtx(ctx context.Context) context.Context {
 	if e.workdir != "" {
 		ctx = tool.WithWorkdir(ctx, e.workdir)
 	}
-	return tool.WithExtraRoots(ctx, e.extraRoots)
+	ctx = tool.WithExtraRoots(ctx, e.extraRoots)
+	return tool.WithContextWindow(ctx, e.effectiveContextWindow())
 }
 
 // executeTool looks up and runs a single tool, converting failures into

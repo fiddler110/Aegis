@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // TestFetchToolWrapsUntrustedContent is the FIND-04 regression: fetched web
@@ -119,7 +121,10 @@ func TestSearchToolWrapsUntrustedContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if !strings.HasPrefix(res.Content, `<web_untrusted_output query="golang">`) {
+	// P71.4: a successful result now names the serving backend, so a
+	// silently-failing configured provider is distinguishable from a working
+	// one on the result itself.
+	if !strings.HasPrefix(res.Content, `<web_untrusted_output query="golang" backend="searxng">`) {
 		t.Errorf("missing provenance marker: %q", res.Content)
 	}
 	if !strings.Contains(res.Content, "https://go.dev") {
@@ -127,5 +132,187 @@ func TestSearchToolWrapsUntrustedContent(t *testing.T) {
 	}
 	if !strings.HasSuffix(res.Content, "</web_untrusted_output>") {
 		t.Errorf("marker not closed: %q", res.Content)
+	}
+}
+
+// TestLooksLikeDDGChallenge pins the P71.1 detector against a byte-for-byte
+// excerpt of DuckDuckGo's real anomaly-challenge page (captured live
+// 2026-08-19) and against a genuine results page, so a future edit to either
+// side can't silently swap "rate-limited" and "actually empty" again.
+func TestLooksLikeDDGChallenge(t *testing.T) {
+	challenge := []byte(`<!DOCTYPE html><html><body>
+<form id="img-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=botnet" target="ifr" method="POST"></form>
+<form id="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=botnet" method="POST">
+<div class="anomaly-modal__mask"><div class="anomaly-modal__modal">
+<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+</div></div></form></body></html>`)
+	if !looksLikeDDGChallenge(challenge) {
+		t.Error("want the captured challenge page detected as blocked")
+	}
+
+	results := []byte(`<!DOCTYPE html><html><body>
+<div class="result results_links results_links_deep web-result">
+<a class="result__a" href="https://go.dev">Go</a>
+<a class="result__snippet">the language</a>
+</div></body></html>`)
+	if looksLikeDDGChallenge(results) {
+		t.Error("want a genuine results page NOT flagged as blocked")
+	}
+}
+
+// TestDefaultFetchLimitScalesWithContextWindow is the P71.5 regression: the
+// default fetch cap must shrink for a small serving window (so a single
+// fetch can't consume most of the compaction budget on its own) and stay at
+// today's flat number for anything roomy — including when the window is
+// unknown, which must reproduce today's unscaled behavior exactly.
+func TestDefaultFetchLimitScalesWithContextWindow(t *testing.T) {
+	cases := []struct {
+		name   string
+		window int // 0 means "no window in context"
+		want   int
+	}{
+		{"unknown window matches today's flat default", 0, maxFetchLimit},
+		{"16k local profile shrinks well below the flat default", 16000, 9600},
+		{"very small window floors rather than collapsing to ~0", 2048, minFetchLimit},
+		{"large window is capped at today's flat default, not enlarged", 131072, maxFetchLimit},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.window > 0 {
+				ctx = tool.WithContextWindow(ctx, tc.window)
+			}
+			if got := defaultFetchLimit(ctx); got != tc.want {
+				t.Errorf("defaultFetchLimit(window=%d) = %d, want %d", tc.window, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchToolUsesScaledCapByDefault confirms the scaled cap actually
+// governs Execute's truncation when the caller sets no explicit max_chars,
+// and that an explicit max_chars still overrides it exactly as before.
+func TestFetchToolUsesScaledCapByDefault(t *testing.T) {
+	long := strings.Repeat("x", 50000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(long))
+	}))
+	defer srv.Close()
+
+	orig := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = orig }()
+
+	ft := &fetchTool{userAgent: "test"}
+	ctx := tool.WithContextWindow(context.Background(), 16000)
+	res, err := ft.Execute(ctx, json.RawMessage(`{"url":"`+srv.URL+`"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	// The clipped text is somewhere under the 9,600-char scaled cap, well
+	// short of the full 50,000-char body — confirms the scaled limit, not the
+	// flat 20,000 one, governed this fetch.
+	if len(res.Content) >= 20000 {
+		t.Errorf("content len %d suggests the flat default was used, not the window-scaled cap", len(res.Content))
+	}
+}
+
+// TestFetchToolRetriesTransientFailureThenSucceeds is the P71.3 regression:
+// a 503 (the server's own transient failure) on the first attempt must not
+// be the final answer when a retry would have succeeded.
+func TestFetchToolRetriesTransientFailureThenSucceeds(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("recovered"))
+	}))
+	defer srv.Close()
+
+	orig := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = orig }()
+
+	ft := &fetchTool{userAgent: "test"}
+	res, err := ft.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("want the retry to recover, got error result: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "recovered") {
+		t.Errorf("want the successful retry's body, got: %q", res.Content)
+	}
+	if attempts != 2 {
+		t.Errorf("want exactly 2 attempts (1 failure + 1 retry that succeeded), got %d", attempts)
+	}
+}
+
+// TestFetchToolNeverRetries404 pins the other half of P71.3/P71.1: a 404 is
+// never worth retrying — the live run this fix responds to had a model
+// inventing URLs, and retrying a wrong URL just spends the round's budget
+// faster while reporting the same wrong answer.
+func TestFetchToolNeverRetries404(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	orig := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = orig }()
+
+	ft := &fetchTool{userAgent: "test"}
+	res, err := ft.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.IsError {
+		t.Error("want a 404 reported as an error result")
+	}
+	if attempts != 1 {
+		t.Errorf("want exactly 1 attempt for a 404 (never retried), got %d", attempts)
+	}
+}
+
+// TestDoSearchRequestHonorsRetryAfter covers doSearchRequest's Retry-After
+// handling: a 429 with a short Retry-After must be retried and can still
+// succeed, rather than being reported as a terminal provider failure that
+// falls through to the DuckDuckGo scrape for no reason.
+func TestDoSearchRequestHonorsRetryAfter(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[{"title":"Go","url":"https://go.dev","content":"ok"}]}`))
+	}))
+	defer srv.Close()
+
+	st := &searchTool{provider: "searxng", baseURL: srv.URL}
+	res, err := st.Execute(context.Background(), json.RawMessage(`{"query":"golang"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("want the 429 retry to recover, got error result: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "go.dev") {
+		t.Errorf("want the successful retry's results, got: %q", res.Content)
+	}
+	if attempts != 2 {
+		t.Errorf("want exactly 2 attempts (1 rate-limited + 1 retry that succeeded), got %d", attempts)
 	}
 }

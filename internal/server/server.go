@@ -1403,6 +1403,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /config/security", s.handleGetConfigSecurity)
 	mux.HandleFunc("PATCH /config/security", s.handlePatchConfigSecurity)
 	mux.HandleFunc("GET /config/skills", s.handleGetConfigSkills)
+	mux.HandleFunc("GET /models/local", s.handleListLocalModels)
 	mux.HandleFunc("PATCH /config/skills", s.handlePatchConfigSkills)
 	mux.HandleFunc("POST /config/harden", s.handleConfigHarden)
 	mux.HandleFunc("POST /debate", s.handleDebate)

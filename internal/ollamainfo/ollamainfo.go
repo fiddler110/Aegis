@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -324,6 +325,74 @@ func Digests(ctx context.Context, nativeBase string) (map[string]string, bool) {
 		}
 	}
 	return digests, true
+}
+
+// LocalModel is one entry from GET /api/tags, carrying the fields worth
+// showing in a model picker without a second round-trip per model.
+type LocalModel struct {
+	Name          string // as pulled, e.g. "aegis-qwen35-9b:16k"
+	Family        string
+	ParameterSize string // e.g. "9.2B"
+	Quantization  string // e.g. "Q4_K_M"
+	SizeBytes     int64  // on-disk size, /api/tags' figure — see kvfit.go's note on why this overstates resident weights for a multimodal model
+}
+
+// ListLocal fetches every locally-pulled model from GET /api/tags with the
+// metadata a model picker needs, so a client can show real tags instead of
+// generic family names. ok is false on an unreachable or non-Ollama base, the
+// same distinction Digests makes; a successful empty list means nothing is
+// pulled yet.
+func ListLocal(ctx context.Context, nativeBase string) ([]LocalModel, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nativeBase+"/api/tags", nil)
+	if err != nil {
+		return nil, false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var out struct {
+		Models []struct {
+			Name         string   `json:"name"`
+			Size         int64    `json:"size"`
+			Capabilities []string `json:"capabilities"`
+			Details      struct {
+				Family        string `json:"family"`
+				ParameterSize string `json:"parameter_size"`
+				Quantization  string `json:"quantization_level"`
+			} `json:"details"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, false
+	}
+	models := make([]LocalModel, 0, len(out.Models))
+	for _, m := range out.Models {
+		if m.Name == "" {
+			continue
+		}
+		// Embedding-only models (e.g. nomic-embed-text) cannot serve chat/tool
+		// turns at all; listing one in a model picker is a guaranteed-broken
+		// choice, not a degraded one. Ollama reports capabilities per model in
+		// this same response, so exclude on it rather than a name heuristic.
+		if len(m.Capabilities) > 0 && !slices.Contains(m.Capabilities, "completion") {
+			continue
+		}
+		models = append(models, LocalModel{
+			Name:          m.Name,
+			Family:        m.Details.Family,
+			ParameterSize: m.Details.ParameterSize,
+			Quantization:  m.Details.Quantization,
+			SizeBytes:     m.Size,
+		})
+	}
+	return models, true
 }
 
 // NativeToolSupport reports whether model's own manifest advertises the "tools"

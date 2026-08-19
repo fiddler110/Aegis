@@ -1835,11 +1835,24 @@ hooks:
 
 ### Configure pluggable web search
 
+The zero-config DuckDuckGo scrape (the default) throttles hard after roughly
+two searches in quick succession — fine for an occasional lookup, not for a
+research-shaped workload issuing several searches per round. A keyed provider
+is the fix:
+
 ```yaml
 search:
-  provider: brave
-  api_key: "$BRAVE_API_KEY"   # set BRAVE_API_KEY in environment or .aegis/.env
+  provider: tavily
+  api_key: "$TAVILY_API_KEY"   # set TAVILY_API_KEY in environment or .aegis/.env
 ```
+
+Tavily's free tier (1,000 credits/month, no card required as of 2026-08) is
+the lowest-friction option. Brave's API is also supported
+(`provider: brave`), but as of February 2026 it no longer has a no-card free
+tier — it bills per query past a small monthly credit that requires public
+attribution to keep. A self-hosted SearXNG instance
+(`provider: searxng`, `base_url: "https://your-searxng-instance"`) avoids
+both a card and per-query billing if you already run one.
 
 ### Use an AI gateway
 

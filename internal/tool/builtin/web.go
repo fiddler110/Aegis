@@ -1,11 +1,13 @@
 package builtin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"slices"
@@ -78,7 +80,7 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if strings.Contains(ctype, "html") {
 		text = htmlToText(body)
 	}
-	limit := 20000
+	limit := defaultFetchLimit(ctx)
 	if args.MaxChars > 0 {
 		limit = args.MaxChars
 	}
@@ -97,25 +99,162 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	return tool.Result{Content: wrapped}, nil
 }
 
+// maxFetchLimit is today's flat default — kept as the ceiling for any window
+// roomy enough not to need shrinking, so a cloud-scale context sees no
+// behavior change.
+const maxFetchLimit = 20000
+
+// minFetchLimit floors the scaled cap so even a very small serving window
+// still gets a usable read rather than a near-empty one.
+const minFetchLimit = 4000
+
+// defaultFetchLimit sizes web_fetch's output cap (P71.5) from the run's
+// resolved context window instead of a flat 20,000 chars. At
+// context_window: 16000 — this project's own shipped local-profile default —
+// tokenest.CompactionTrigger(16000, 8192) is 8,000 tokens, and the flat
+// default (~5,000 tokens) is 62% of that budget on its own: a single fetch
+// could trigger compaction, and two consecutive ones could not avoid it. The
+// live research runs that surfaced this took 25 compactions across 42 tool
+// calls at that window, against 4 at double it.
+//
+// window*3/5 chars is window*0.15*4 (roughly 15% of the window, at ~4
+// chars/token) restated as integer arithmetic: 9,600 chars at 16,000 tokens,
+// crossing the 20,000 ceiling only above ~33,000 tokens — so this only ever
+// shrinks the cap for a small window and leaves cloud-scale contexts at
+// today's number. No window in context (a cloud adapter with nothing to
+// report) also leaves today's number, unchanged.
+func defaultFetchLimit(ctx context.Context) int {
+	window, ok := tool.ContextWindowFromContext(ctx)
+	if !ok || window <= 0 {
+		return maxFetchLimit
+	}
+	limit := window * 3 / 5
+	if limit > maxFetchLimit {
+		return maxFetchLimit
+	}
+	if limit < minFetchLimit {
+		return minFetchLimit
+	}
+	return limit
+}
+
+// webRetries/webRetryBaseDelay/webRetryMaxDelay bound the P71.3 retry loop
+// shared by fetchTool.get and doSearchRequest. Two retries (three attempts
+// total) at these delays puts the worst case — three 30s ssrfClient timeouts
+// plus two backoff sleeps — around 100s, comfortably under the 900s
+// MaxTurnStall bound a single tool call must stay under
+// (TestToolTimeoutsStayUnderTheStallBound). Small on purpose: this is
+// recovering a transient failure inside one tool call, not a background job
+// that can afford to wait out a real outage.
+const (
+	webRetries        = 2
+	webRetryBaseDelay = 500 * time.Millisecond
+	webRetryMaxDelay  = 4 * time.Second
+)
+
+// maxFetchWait and maxSearchWait are the worst-case total time one
+// fetchTool.get / doSearchRequest call can block across every retry
+// attempt — every HTTP timeout back to back plus every backoff sleep.
+// TestToolTimeoutsStayUnderTheStallBound checks these, not the single
+// per-attempt client timeout: the stall detector isn't beaten between
+// retries inside one tool call, so the whole retry sequence is one
+// unbeaten wait from its perspective, the same way a single git subprocess
+// or agent spawn is.
+var (
+	maxFetchWait  = time.Duration(webRetries+1)*ssrfClient.Timeout + time.Duration(webRetries)*webRetryMaxDelay
+	maxSearchWait = time.Duration(webRetries+1)*searchAPIClient.Timeout + time.Duration(webRetries)*webRetryMaxDelay
+)
+
+// webBackoff computes the delay before retry attempt (0-indexed), honoring a
+// server's Retry-After header when retryAfter > 0, else falling back to
+// exponential backoff with equal jitter — the same shape
+// internal/provider/retry.go uses, restated locally rather than imported so
+// internal/tool/builtin stays a leaf package with no dependency on the
+// provider adapter stack.
+func webBackoff(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		if retryAfter > webRetryMaxDelay {
+			return webRetryMaxDelay
+		}
+		return retryAfter
+	}
+	d := webRetryBaseDelay << attempt
+	if d <= 0 || d > webRetryMaxDelay {
+		d = webRetryMaxDelay
+	}
+	half := d / 2
+	return half + time.Duration(mrand.Int64N(int64(half)+1))
+}
+
+// webRetryable reports whether an HTTP status is worth a retry: a 429/503
+// with an explicit Retry-After, or any 5xx (the server's own transient
+// failure). A 4xx otherwise — 404 above all, since P71.1/P71.10 both traced
+// a live run to a model that had started guessing URLs — must never be
+// retried: retrying a wrong URL just spends the budget faster while reporting
+// the same wrong answer.
+func webRetryable(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
+}
+
 func (t *fetchTool) get(ctx context.Context, rawURL string) ([]byte, string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= webRetries; attempt++ {
+		if attempt > 0 {
+			if err := sleepCtx(ctx, webBackoff(attempt-1, 0)); err != nil {
+				return nil, "", err
+			}
+		}
+		data, ctype, status, err := t.getOnce(ctx, rawURL)
+		if err == nil {
+			return data, ctype, nil
+		}
+		lastErr = err
+		// A transport-level error (DNS, connection reset, TLS) has no status
+		// to check and is always worth one retry; an HTTP error retries only
+		// per webRetryable.
+		if status > 0 && !webRetryable(status) {
+			return nil, "", err
+		}
+	}
+	return nil, "", lastErr
+}
+
+// getOnce is the single-attempt request fetchTool.get retries around. status
+// is 0 for a transport-level failure (no response at all), so the caller can
+// tell "never got a response" from "got one it didn't like."
+func (t *fetchTool) getOnce(ctx context.Context, rawURL string) (data []byte, contentType string, status int, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	req.Header.Set("User-Agent", t.userAgent)
 	resp, err := ssrfClient.Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, "", fmt.Errorf("status %d", resp.StatusCode)
+		return nil, "", resp.StatusCode, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxWebBytes))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, maxWebBytes))
 	if err != nil {
-		return nil, "", err
+		return nil, "", resp.StatusCode, err
 	}
-	return data, resp.Header.Get("Content-Type"), nil
+	return data, resp.Header.Get("Content-Type"), resp.StatusCode, nil
+}
+
+// sleepCtx waits for d or until ctx is cancelled, whichever comes first —
+// duplicated in miniature from internal/provider/retry.go's sleepCtx rather
+// than imported, for the same leaf-package reason as webBackoff.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // --- search (pluggable provider; DuckDuckGo HTML scrape is the zero-config default) ---
@@ -157,24 +296,49 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 
 	var results []searchResult
 	var provErr error
+	var backend string
 	if p := strings.ToLower(strings.TrimSpace(t.provider)); p != "" && p != "duckduckgo" {
 		results, provErr = t.providerSearch(ctx, p, args.Query, max)
 		if provErr != nil {
 			// Configured provider failed; fall through to the DuckDuckGo scrape.
 			results = nil
+		} else if len(results) > 0 {
+			backend = p
+		}
+	}
+
+	var blocked bool
+	if len(results) == 0 {
+		results, blocked = t.duckDuckGo(ctx, args.Query, max)
+		if len(results) > 0 {
+			backend = "duckduckgo"
 		}
 	}
 
 	if len(results) == 0 {
-		results = t.duckDuckGo(ctx, args.Query, max)
-	}
-
-	if len(results) == 0 {
-		msg := "no results found"
-		if provErr != nil {
-			msg = fmt.Sprintf("search failed (provider %q: %v; DuckDuckGo fallback returned nothing)", t.provider, provErr)
+		// P71.1: DuckDuckGo throttles after roughly two requests in quick
+		// succession and serves its anomaly-challenge page as HTTP 200/202 —
+		// no parseable results, no transport error. Reporting that as "no
+		// results found" told the model the web was empty, and both live
+		// research runs that surfaced this bug reacted by inventing URLs to
+		// fetch or reimplementing the search through `shell`. `blocked`
+		// distinguishes that case from a query that genuinely returned
+		// nothing, which stays IsError:false — it is not a tool failure.
+		switch {
+		case blocked:
+			return tool.Result{
+				Content: "DuckDuckGo rate-limited this client (its anomaly-challenge page, not a parseable results page). " +
+					"This clears in roughly a minute; wait and retry, or switch search.provider to a keyed backend (tavily, brave, searxng) for a workload doing more than one or two searches.",
+				IsError: true,
+			}, nil
+		case provErr != nil:
+			return tool.Result{
+				Content: fmt.Sprintf("search failed (provider %q: %v; DuckDuckGo fallback returned nothing)", t.provider, provErr),
+				IsError: true,
+			}, nil
+		default:
+			return tool.Result{Content: "no results found"}, nil
 		}
-		return tool.Result{Content: msg, IsError: provErr != nil}, nil
 	}
 	var b strings.Builder
 	for i, r := range results {
@@ -183,25 +347,66 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 			fmt.Fprintf(&b, "   %s\n", r.snippet)
 		}
 	}
-	wrapped := trust.Wrap("web_untrusted_output", [][2]string{{"query", args.Query}}, "a web search", b.String(), t.scanOutput)
+	attrs := [][2]string{{"query", args.Query}}
+	if backend != "" {
+		// P71.4: name the backend that actually served the results, so a
+		// configured provider silently falling through to the DuckDuckGo
+		// scrape (an expired key, a wrong searxng base_url, a 429) is visible
+		// on the result itself instead of looking identical to success.
+		attrs = append(attrs, [2]string{"backend", backend})
+		if provErr != nil {
+			fmt.Fprintf(&b, "\n[note: configured provider %q failed (%v); DuckDuckGo served this instead]\n", t.provider, provErr)
+		}
+	}
+	wrapped := trust.Wrap("web_untrusted_output", attrs, "a web search", b.String(), t.scanOutput)
 	return tool.Result{Content: wrapped}, nil
 }
 
 // duckDuckGo runs the zero-config HTML scrape (primary + lite fallback).
-func (t *searchTool) duckDuckGo(ctx context.Context, query string, max int) []searchResult {
+// blocked reports whether every non-empty attempt was actually DuckDuckGo's
+// anomaly-challenge page rather than a genuine zero-result search — see
+// looksLikeDDGChallenge and P71.1. The two endpoints share one rate-limit
+// bucket (P71.2, confirmed live 2026-08-19: both return the challenge
+// simultaneously once throttled), so the lite fallback is a parse-format
+// fallback only, not a resilience one; a real second backend is still open
+// (P71.2 in research/roadmap.md).
+func (t *searchTool) duckDuckGo(ctx context.Context, query string, max int) ([]searchResult, bool) {
 	f := &fetchTool{userAgent: t.userAgent}
 	encoded := url.QueryEscape(query)
 	body, _, err := f.get(ctx, "https://html.duckduckgo.com/html/?q="+encoded)
 	var results []searchResult
+	blocked := false
 	if err == nil {
-		results = parseDDG(body, max)
+		if looksLikeDDGChallenge(body) {
+			blocked = true
+		} else {
+			results = parseDDG(body, max)
+		}
 	}
 	if len(results) == 0 {
 		if body2, _, err2 := f.get(ctx, "https://lite.duckduckgo.com/lite/?q="+encoded); err2 == nil {
-			results = parseDDGLite(body2, max)
+			if looksLikeDDGChallenge(body2) {
+				blocked = true
+			} else {
+				results = parseDDGLite(body2, max)
+				if len(results) > 0 {
+					blocked = false
+				}
+			}
 		}
 	}
-	return results
+	return results, blocked && len(results) == 0
+}
+
+// looksLikeDDGChallenge reports whether body is DuckDuckGo's bot-check page
+// rather than a results page. Both come back as a 2xx HTTP status, so this is
+// the only way to tell them apart; markers are the challenge form's own
+// action endpoint and copy, which are far more specific than "no results
+// parsed" alone (a genuine zero-result query is a different, rarer page).
+func looksLikeDDGChallenge(body []byte) bool {
+	return bytes.Contains(body, []byte("duckduckgo.com/anomaly.js")) ||
+		bytes.Contains(body, []byte(`id="challenge-form"`)) ||
+		bytes.Contains(body, []byte("anomaly-modal"))
 }
 
 type searchResult struct {

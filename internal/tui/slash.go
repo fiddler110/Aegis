@@ -592,11 +592,65 @@ func (d *SlashDispatcher) cmdCommands(_ []string) SlashResult {
 	return SlashResult{Output: b.String()}
 }
 
-// cmdModels opens the interactive model picker (P16.6): curated models
-// grouped by provider with the current model marked. Use /model <id>
-// directly if the exact id is already known.
+// cmdModels opens the interactive model picker (P16.6). When the daemon's
+// configured provider is a local Ollama server, this now lists what is
+// actually pulled there — real, loadable tags — instead of the static
+// curated catalog. The catalog's local entries are family names ("qwen3",
+// "deepseek-r1"), not IDs Ollama can load; picking one would 404 on the next
+// turn, and it mixes in Anthropic/OpenAI/Gemini entries a local-only user
+// never asked for (P71 follow-up, filed 2026-08-19). Falls back to the
+// curated catalog when the provider isn't Ollama, isn't reachable, or has
+// nothing pulled yet — the pre-existing behavior, unchanged.
 func (d *SlashDispatcher) cmdModels(_ []string) SlashResult {
+	if d.client != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if resp, err := d.client.ListLocalModels(ctx); err == nil && resp.Reachable && len(resp.Models) > 0 {
+			return SlashResult{Models: localModelsToCatalog(resp.Models)}
+		}
+	}
 	return SlashResult{Models: modelcatalog.Curated()}
+}
+
+// localModelsToCatalog adapts the daemon's live GET /models/local result into
+// modelcatalog.Model entries the existing picker already knows how to render.
+// A pulled tag commonly carries its serving window in a ":<n>k" suffix (this
+// project's own aegis-*:16k/:32k convention) — shown there when present,
+// since /api/tags doesn't report context length (only /api/ps does, for a
+// model that's currently loaded, which most of the list won't be).
+func localModelsToCatalog(models []api.LocalModelSummary) []modelcatalog.Model {
+	out := make([]modelcatalog.Model, 0, len(models))
+	for _, m := range models {
+		ctxLabel := m.Quantization
+		if i := strings.LastIndex(m.Name, ":"); i >= 0 {
+			if tag := m.Name[i+1:]; tag != "" && tag != "latest" {
+				if _, err := strconv.Atoi(strings.TrimSuffix(strings.ToLower(tag), "k")); err == nil && strings.HasSuffix(strings.ToLower(tag), "k") {
+					ctxLabel = strings.ToUpper(tag)
+				}
+			}
+		}
+		var notes strings.Builder
+		if m.ParameterSize != "" {
+			fmt.Fprintf(&notes, "%s params", m.ParameterSize)
+		}
+		if m.Family != "" {
+			if notes.Len() > 0 {
+				notes.WriteString(", ")
+			}
+			fmt.Fprintf(&notes, "%s family", m.Family)
+		}
+		if m.SizeBytes > 0 {
+			if notes.Len() > 0 {
+				notes.WriteString(", ")
+			}
+			fmt.Fprintf(&notes, "%.1f GiB on disk", float64(m.SizeBytes)/(1<<30))
+		}
+		out = append(out, modelcatalog.Model{
+			Provider: "ollama", ID: m.Name, Tier: modelcatalog.TierLocal,
+			Context: ctxLabel, Notes: notes.String(),
+		})
+	}
+	return out
 }
 
 // cmdModel switches this session's model (P14.7). Unlike /mode, this isn't

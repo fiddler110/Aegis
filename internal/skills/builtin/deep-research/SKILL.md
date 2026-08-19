@@ -18,6 +18,17 @@ comparison table? a timeline? a recommendation with trade-offs?). If the
 request is too vague to decompose, ask the user to narrow it before spending
 searches on guesses.
 
+**Before the first search, `write_file` a working file** at
+`.aegis/research/<topic-slug>.md` with the scope above and the section 2
+skeleton (an empty findings log, an empty audit trail). This is unconditional
+— not "for anything beyond a couple of rounds" — because a run that turns out
+short cost nothing extra, while a run that turns out long and never got a
+file loses everything the moment compaction fires (P71.9: a live run on a
+16k-token local model compacted 25 times across 42 tool calls and the log was
+never touched past its round-1 placeholders — the audit trail in the final
+report was reconstructed from memory and two of five cited URLs were wrong).
+The file is the primary record; the conversation is the cache.
+
 Set budgets up front and hold to them:
 
 - **Round cap: 8.** Most questions resolve in 2–4 rounds; 8 is the hard stop.
@@ -42,8 +53,12 @@ Each round:
    the skip in the audit trail.
 4. **Read** — `web_fetch` the selected URLs. Output is capped; pass a larger
    `max_chars` when a page is load-bearing and the default window cut it off.
-5. **Record** — update the findings log and audit trail (section 2) before
-   starting the next round, not retroactively at the end.
+5. **Record** — `edit_file` the working file from section 0, appending this
+   round's findings-log entries and audit-trail lines, **before your next
+   `web_search` or `web_fetch` call**. Not "when convenient," not "at the end
+   of the round" if that means after several more tool calls — the write is
+   what protects the round's work from a mid-round compaction. A round is not
+   complete until this step has actually landed in the file.
 
 **Stop when any of these holds**, and say which one: every sub-question is
 answered with corroborated sources; a full round produced nothing material
@@ -70,10 +85,9 @@ trail is what lets a reader (or a later session) see what the research
 covered and what it deliberately passed over, and it prevents re-fetching the
 same dead ends when a topic gets revisited.
 
-For anything beyond a couple of rounds, keep the log and trail in a working
-file (e.g. `.aegis/research/<topic-slug>.md`), updated each round — a long
-research run can outlive the context window, and a log that lived only in
-conversation is destroyed by compaction exactly when it's most needed.
+Both live in the working file created in section 0, appended every round per
+section 1 step 5 — never only in conversation, which compaction can and will
+destroy exactly when the log is most needed.
 
 ## 3. Source-quality bar
 

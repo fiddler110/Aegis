@@ -515,6 +515,19 @@ func (c *Client) ActivateSkill(ctx context.Context, sessionID, name string) (str
 	return out.Content, nil
 }
 
+// ListLocalModels returns what the daemon's configured Ollama server
+// actually has pulled (GET /models/local), for a model picker that wants real
+// tags instead of the static curated catalog's generic family names.
+// Reachable is false for a cloud provider or an unreachable Ollama server;
+// callers fall back to the curated catalog in both cases.
+func (c *Client) ListLocalModels(ctx context.Context) (api.LocalModelsResponse, error) {
+	var out api.LocalModelsResponse
+	if err := c.do(ctx, http.MethodGet, "/models/local", nil, &out); err != nil {
+		return api.LocalModelsResponse{}, err
+	}
+	return out, nil
+}
+
 // ListPersonas returns available persona names and descriptions.
 func (c *Client) ListPersonas(ctx context.Context) ([]api.PersonaInfo, error) {
 	var out []api.PersonaInfo

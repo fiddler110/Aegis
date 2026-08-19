@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -279,6 +280,7 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 		doctorSandboxCheck(cfg),
 		doctorScannerCheck(ctx, cfg),
 		doctorGuardCheck(cfg),
+		doctorSearchCheck(cfg),
 		doctorWorkdirCheck(cfg),
 		doctorTerminalCapsCheck(cfg),
 	}
@@ -975,6 +977,60 @@ func doctorScannerCheck(ctx context.Context, cfg *config.Config) doctorCheck {
 // fixes make the combination survivable, not free — this stays a warning so
 // an operator adding a new thinking model later still gets pointed at
 // small_model.
+// doctorSearchCheck is P71.4's closure condition: catch a misconfigured
+// search provider (an empty api_key, a searxng base_url that isn't even a
+// URL) before a run does, rather than only after `web_search` silently falls
+// through to the DuckDuckGo scrape and the model never learns its configured
+// provider wasn't actually reachable. This is config-shape validation, not a
+// live network probe — deliberately, so `aegis doctor` doesn't spend a
+// metered provider's quota just to run, the same reason doctorProviderCheck's
+// live Ollama GET is the one live network check in this file and every other
+// check here is local.
+func doctorSearchCheck(cfg *config.Config) doctorCheck {
+	const name = "search"
+	provider := strings.ToLower(strings.TrimSpace(cfg.Search.Provider))
+	switch provider {
+	case "", "duckduckgo":
+		return doctorCheck{
+			Name: name, Severity: doctorWarn,
+			Detail: "using the zero-config DuckDuckGo scrape, which throttles after roughly two searches in quick succession — fine for an occasional lookup, not for a research-shaped workload",
+			Fix:    "set search.provider to a keyed backend (tavily has a no-card free tier; brave and a self-hosted searxng are also supported) — see docs/configuration.md",
+		}
+	case "brave", "tavily":
+		if strings.TrimSpace(cfg.Search.APIKey) == "" {
+			return doctorCheck{
+				Name: name, Severity: doctorFail,
+				Detail: fmt.Sprintf("search.provider is %q but search.api_key is empty — every search will fail over to the DuckDuckGo scrape", provider),
+				Fix:    fmt.Sprintf("set search.api_key (directly, or $%s_API_KEY in environment/.aegis/.env)", strings.ToUpper(provider)),
+			}
+		}
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: fmt.Sprintf("provider %q, api_key configured", provider)}
+	case "searxng":
+		base := strings.TrimSpace(cfg.Search.BaseURL)
+		if base == "" {
+			return doctorCheck{
+				Name: name, Severity: doctorFail,
+				Detail: "search.provider is \"searxng\" but search.base_url is empty",
+				Fix:    "set search.base_url to your SearxNG instance's URL",
+			}
+		}
+		if u, err := url.Parse(base); err != nil || u.Scheme == "" || u.Host == "" {
+			return doctorCheck{
+				Name: name, Severity: doctorFail,
+				Detail: fmt.Sprintf("search.base_url %q is not a valid http(s) URL", base),
+				Fix:    "correct search.base_url",
+			}
+		}
+		return doctorCheck{Name: name, Severity: doctorPass, Detail: fmt.Sprintf("provider \"searxng\", base_url %q", base)}
+	default:
+		return doctorCheck{
+			Name: name, Severity: doctorFail,
+			Detail: fmt.Sprintf("unrecognized search.provider %q (want \"\", \"duckduckgo\", \"brave\", \"tavily\" or \"searxng\")", cfg.Search.Provider),
+			Fix:    "correct search.provider",
+		}
+	}
+}
+
 func doctorGuardCheck(cfg *config.Config) doctorCheck {
 	const name = "output guard"
 	if !cfg.OutputGuard.Enabled || !strings.EqualFold(cfg.OutputGuard.Mode, "llm") {

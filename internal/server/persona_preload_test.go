@@ -228,3 +228,53 @@ func TestEffectiveSystemDropsPreloadedToolsFromDeferredBlock(t *testing.T) {
 		t.Errorf("another session lost the recon_scan advertisement:\n%s", other)
 	}
 }
+
+// TestPreloadNetworkToolsForSkillExposesWebToolsForDeepResearch is the P71.10
+// regression: activating deep-research must un-defer web_search/web_fetch
+// immediately, rather than leaving a local-profile session to discover them
+// via tool_search — or, observed live, give up on search entirely and
+// reimplement it through `shell` once a query looks empty.
+func TestPreloadNetworkToolsForSkillExposesWebToolsForDeepResearch(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := reg.Register(&preloadFakeTool{name: "read_file"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"web_search", "web_fetch", "security_scan"} {
+		if err := reg.RegisterDeferred(&preloadFakeTool{name: n}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	loaded := preloadNetworkToolsForSkill(reg, "deep-research")
+	if got, want := strings.Join(loaded, ","), "web_search,web_fetch"; got != want {
+		t.Errorf("preloadNetworkToolsForSkill returned %q, want %q", got, want)
+	}
+
+	exposed := exposedNames(reg)
+	for _, n := range []string{"web_search", "web_fetch"} {
+		if !exposed[n] {
+			t.Errorf("%q not exposed after activating deep-research", n)
+		}
+	}
+	// A deferred tool the fix isn't about stays deferred — this is scoped to
+	// the two web tools, not "expose everything on activation".
+	if exposed["security_scan"] {
+		t.Error("security_scan was exposed, but deep-research activation should only touch the web tools")
+	}
+}
+
+// TestPreloadNetworkToolsForSkillIgnoresOtherSkills confirms the fix is
+// scoped to network-shaped skills — activating an unrelated built-in must
+// not touch the web tools' deferred/exposed state at all.
+func TestPreloadNetworkToolsForSkillIgnoresOtherSkills(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := reg.RegisterDeferred(&preloadFakeTool{name: "web_search"}); err != nil {
+		t.Fatal(err)
+	}
+	if loaded := preloadNetworkToolsForSkill(reg, "threat-modeling"); len(loaded) != 0 {
+		t.Errorf("preloadNetworkToolsForSkill(threat-modeling) = %v, want nothing", loaded)
+	}
+	if deferredNames(reg)["web_search"] != true {
+		t.Error("web_search should still be deferred after an unrelated skill activation")
+	}
+}

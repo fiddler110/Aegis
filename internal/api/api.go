@@ -761,6 +761,26 @@ type ConfigSkillsPatchRequest struct {
 	BuiltinEnabled []string `json:"builtin_enabled"`
 }
 
+// LocalModelsResponse lists what GET /models/local found pulled on the
+// configured Ollama server, so a client-side model picker can offer real tags
+// instead of the static curated catalog's generic family names. Reachable is
+// false when provider.base_url isn't a local Ollama server at all (a cloud
+// provider) or the server didn't answer — the client's fallback in both cases
+// is the curated catalog, same as today.
+type LocalModelsResponse struct {
+	Reachable bool                `json:"reachable"`
+	Models    []LocalModelSummary `json:"models"`
+}
+
+// LocalModelSummary is one pulled model, trimmed to what a picker needs.
+type LocalModelSummary struct {
+	Name          string `json:"name"`
+	Family        string `json:"family,omitempty"`
+	ParameterSize string `json:"parameter_size,omitempty"`
+	Quantization  string `json:"quantization,omitempty"`
+	SizeBytes     int64  `json:"size_bytes,omitempty"`
+}
+
 // ConfigHardenRequest applies the hardened profile computed by
 // config.ComputeHardenPlan (POST /config/harden, P15.2) — the HTTP
 // equivalent of `aegis harden`. Confirm must be true for anything to be

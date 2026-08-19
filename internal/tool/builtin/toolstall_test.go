@@ -43,6 +43,29 @@ var perCallToolTimeouts = map[string]time.Duration{
 	"shell — caller-supplied timeout_sec ceiling": time.Duration(maxShellTimeoutSec) * time.Second,
 }
 
+// TestWebRetryWaitsStayUnderTheStallBound covers web_fetch/web_search's P71.3
+// retry loop separately from perCallToolTimeouts/TestEveryToolTimeoutIsAccountedFor:
+// ssrfClient and searchAPIClient bound a single attempt via http.Client.Timeout
+// rather than an explicit context.WithTimeout call site, so they were never
+// (before or after this retry loop) part of that stricter table's
+// call-site-counted accounting — adding them there breaks its count rather
+// than extending its coverage. maxFetchWait/maxSearchWait — every attempt
+// back to back plus every backoff sleep — are the actual bound relevant here,
+// since the stall detector isn't beaten between retries inside one tool call.
+func TestWebRetryWaitsStayUnderTheStallBound(t *testing.T) {
+	for name, d := range map[string]time.Duration{
+		"web — one web_fetch call, every retry (maxFetchWait)":   maxFetchWait,
+		"web — one web_search call, every retry (maxSearchWait)": maxSearchWait,
+	} {
+		if d <= 0 {
+			t.Errorf("%s has a non-positive bound (%s)", name, d)
+		}
+		if d >= stallBound {
+			t.Errorf("%s = %s exceeds the %s stall bound", name, d, stallBound)
+		}
+	}
+}
+
 // The provider admission queue is the fourth wait P66.8 covers and is
 // deliberately absent from both maps: it has no timeout at all (a queued
 // request waits for the slot or for its caller's cancellation), so there is no

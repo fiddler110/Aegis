@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-18. This document tracks only **open** work and what's next. For
+**Last updated:** 2026-08-19. This document tracks only **open** work and what's next. For
 shipped-feature history, batch origins, pass-by-pass narrative, refutation records and full design
 rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading with a
 `Priority:` line in its body — `scripts/roadmap-status.sh` parses exactly that shape, so keep it when
@@ -10,9 +10,68 @@ adding items.
 
 ## Status
 
-**26 open items: 21 build (Tier 4 only) + 5 verification-only. Tier 1, Tier 2 and Tier 3 are all
-empty** — every remaining build item is Tier 4 with no fired trigger, which this document's own rule
-says not to build speculatively. Nine shipped on 2026-08-18, in three sittings: **P66.15**,
+**33 open items: 28 build + 5 verification-only, plus eight shipped same-day (P71.1, P71.3, P71.4,
+P71.5, P71.9, P71.10, P72.2, and the doctor-check half of P71.4).** The **P71 batch — twelve items
+filed 2026-08-19 — re-filled three empty tiers**, and a same-day build pass closed six of them plus
+one from the follow-up P72 pair, the first time in this document's history a filed batch and its
+build have landed in one sitting. Before the P71 batch this line read "26 open items: 21 build (Tier
+4 only) + 5 verification-only. Tier 1, Tier 2 and Tier 3 are all empty", and the standing advice was
+that the next build item "does not exist yet and has to be *found*". It was found the way that note
+predicted: not by promoting a Tier 4 entry, but by a fresh pass producing new work — and then, unlike
+every prior batch in this document, mostly built the same day rather than only planned.
+
+**What shipped, in one place — see each item for the full record.** **P71.1**: DuckDuckGo's
+rate-limit page is now detected and reported as an error instead of "no results found". **P71.10**:
+`deep-research` activation un-defers `web_search`/`web_fetch` so a local-profile session doesn't
+reach for `shell` instead. **P71.5**: `web_fetch`'s output cap now scales with the resolved context
+window via a new `tool.WithContextWindow` context value threaded from `Engine.toolCtx`. **P71.9**: the
+deep-research skill's working-file update is now unconditional and enforced every round (a text-only
+`SKILL.md` edit). **P71.3**: `web_fetch`/`web_search` retry transient failures with backoff, never a
+4xx. **P71.4**: search results now name their serving backend, and a new `aegis doctor` check
+(`doctorSearchCheck`) catches a misconfigured provider before any search is attempted. **P71.2**:
+partially addressed — `docs/configuration.md` now recommends Tavily over Brave (whose free tier ended
+in February 2026); the actual second-backend fallback ladder is still open, deliberately, since its
+candidates remain untested. **P72.2** (filed and shipped in the prior sitting): `/models` shows live
+pulled Ollama models instead of a static cross-provider catalog. **Left open on purpose**: **P71.8**
+(deep-research phasing) and **P72.1** (dynamic boot/model-switch context sizing) are both real design
+work, not wiring, and stayed unbuilt this sitting for that reason — see their entries for why. Every
+shipped item above has a live-verified test or a live probe run against this machine recorded in its
+entry; none of this is asserted from reading the diff.
+
+**The P71 batch is an evaluation of `/research` and the web-search stack**, prompted by a user report
+that a `/research` run on a local 9B "either timed out or didn't produce any real results". Every
+claim in P71.1–P71.12 is backed by a measurement or a live-run observation taken on 2026-08-19
+against HEAD `898a2c5`; the two runs behind it are described in the batch note below. Four items are
+acute and two of them are Tier 1.
+
+**Read this before taking any P71 item: the batch has one root cause and eleven consequences.**
+`web_search` reports a DuckDuckGo rate-limit block as `"no results found"` with `IsError: false`
+(**P71.1**) — a 200 response carrying a challenge page, after a measured **two queries**. Everything
+downstream is a model reacting rationally to being told the web is empty: it invented URLs (7 of 15
+fetches 404'd), and in the second run it concluded the tool was broken and **hand-rolled a Bing
+scraper in PowerShell through `shell`**, bypassing the SSRF dialer, `trust.Wrap`'s provenance marker,
+the injection scan and the output cap in one move (**P71.10**). Fix the misreport first. Several of
+the other items are worth much less once the model is told the truth, and at least one of them
+(**P71.2**) cannot even be triggered without the detection P71.1 adds.
+
+**The second finding is independent of the first and is arithmetic, not behaviour.**
+`CompactionTrigger(16000, 8192)` is **8,000 tokens**; `web_fetch`'s default output cap is 20,000
+characters, about **5,000 tokens**. At the shipped local `context_window: 16000`, reading one source
+consumes 62% of the compaction budget, so a research run cannot read two pages without compacting
+(**P71.5**). The 16k live run took **25 compactions across 42 tool calls** and produced a report with
+**zero inline citations**; the 32k control took **4 compactions** — and then stopped after Round 1
+with no report at all, because `--skill`'s drive-to-completion keys on `<!-- PENDING -->` markers that
+deep-research never writes (**P71.8**). **Raising the window fixes the thrash and exposes a second
+bug underneath it**, which is why P71.8 is filed separately and ranked below the two acute fixes.
+
+**One P71 measurement is negative and is filed to stop it being re-derived.** Main-content extraction
+for `web_fetch` — dropping nav/header/footer before `htmlToText` — looked like an obvious context win
+and is worth only **3–12% (~1.2–1.5 KB) per page** on real documentation, because the existing
+converter already takes 66 KB of HTML down to 11 KB of text. It is **P71.12**, Tier 4, explicitly do
+not schedule. This is the method note this document keeps re-learning: measure the instrument before
+acting on the intuition.
+
+Nine shipped on 2026-08-18, in three sittings: **P66.15**,
 **P67.6**, **P67.7**, **P67.8** and **P67.9** (the whole of the then-current "Up next" table except
 its parked last row — record in [releases.md](releases.md), *Five rows of Up next, 2026-08-18*), then
 **P70.1**, **P70.2** and **P70.3**, the three build rows P66.15's sweep had filed that same morning
@@ -93,27 +152,35 @@ condition names. Mixing the two under one tiering scheme was misleading a reader
 "go run a test" and "go design and build a feature" as the same kind of next action. See
 [Verification Work](#verification-work) below.
 
-- **Tier 1:** 0 — **P69.6** (nothing plans a resident set, so every model is sized as if it were
-  alone) was filed and shipped on 2026-08-17. Before it the tier had been empty since **P66.5**
-  shipped 2026-08-16, closing the last exploitable-today finding.
-- **Tier 2:** 1 — **P68.1** (the instrumentation gap the live tier found), and it is deliberately off
-  the ranked list because it travels with the parked row #6. (**P66.25**, **P67.2**, **P67.3**,
-  **P67.4** and **P67.5** shipped 2026-08-17; **P66.11**, **P66.12**, **P66.21** and **P67.1**
-  shipped 2026-08-16.)
-- **Tier 3:** 5 — **P66.15**, plus four from P67: **P67.6**, **P67.7**, **P67.8**, **P67.9**.
-  (**P66.13** shipped 2026-08-17; **P66.14** 2026-08-16.) **Two of them are unblocked by their
-  prerequisite rather than waiting on it:** P67.3 built P67.6's purpose-tag seam, and P67.4 settled
-  the cancellation policy P67.7 would otherwise have had to settle mid-refactor.
-- **Tier 4:** 20 — **P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, **P66.26** (PERF-02,
-  refiled), the five from P67 (**P67.10**-**P67.14**), plus the nine pre-existing: **P65.4**,
-  **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
+- **Tier 1:** 0 — **P71.1** and **P71.10** both shipped 2026-08-19, the same day they were filed.
+  Before them the tier had been empty since **P69.6** shipped 2026-08-17, and **P66.5** before that
+  closed the last exploitable-today finding of the P66 review.
+- **Tier 2:** 2 — **P71.2** (partially addressed: the docs fix shipped, the cross-provider fallback
+  ladder is still open) and **P68.1** (the instrumentation gap the live tier found), which remains
+  deliberately off the ranked list because it travels with the parked live-tier row. **P71.3**,
+  **P71.4**, **P71.5** and **P71.9** all shipped 2026-08-19, same day filed. (**P66.25**, **P67.2**,
+  **P67.3**, **P67.4** and **P67.5** shipped 2026-08-17; **P66.11**, **P66.12**, **P66.21** and
+  **P67.1** shipped 2026-08-16; **P72.2** shipped 2026-08-19.)
+- **Tier 3:** 2 — **P71.8** (deep-research declares no phases, so it runs single-context and
+  `--skill` cannot drive it to completion) and **P72.1** (`context_window` is sized once by hand; no
+  boot-time or model-switch fit — filed 2026-08-19). Both stayed unbuilt this sitting on purpose:
+  each needs a design decision (a phase plan; a cold-start policy), not a wire. The tier was emptied
+  on 2026-08-18 when **P66.15**, **P67.6**, **P67.7**, **P67.8**, **P67.9** and then **P70.4** all
+  shipped. (**P66.13** shipped 2026-08-17; **P66.14** 2026-08-16.)
+- **Tier 4:** 24 — four from P71 (**P71.6**, **P71.7**, **P71.11**, **P71.12**), plus **P66.17**,
+  **P66.18**, **P66.19**, **P66.20**, **P66.23**, **P66.26** (PERF-02, refiled), **P70.3**, the five
+  from P67 (**P67.10**-**P67.14**), and the nine pre-existing: **P65.4**, **P65.5**, **P64.4**,
+  **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
 - **Verification:** 5 — **P66.22** (two conditions left, both blocked on P68.1), **P38.1**,
   **P62.9**, **P65.2** (prompt half, blocked on P68.1), **P62.8**. (**P65.3** closed 2026-08-16:
   both its questions are answered.)
 
-**What to do next.** **P66.15** — the sweep of `internal/tui` and `internal/security`, 26% of
-production Go that nobody has read. It was displaced from the top by P69.6, which is now shipped, so
-it returns to row #1. Tier 1 is empty and Tier 2 still holds only the parked **P68.1**.
+**What to do next.** **P71.1, P71.3, P71.4, P71.5, P71.9 and P71.10 all shipped 2026-08-19**, the day
+they were filed — see the Status block above for the one-line summary of each, and each item's own
+entry for the full record. What's left: **P71.2**'s cross-provider fallback ladder (the docs half
+already shipped), then **P71.8** (deep-research phasing, now that its **P71.9** prerequisite is in)
+and **P72.1** (dynamic context sizing) — both real design work, filed with the open questions each
+needs answered before either is a wire rather than a decision.
 
 **P66.13's own correction, which outlives it:** the item named four instances of one root cause and
 there were six. `aegis debate` was a fourth bare gate nobody had looked at, `cli/worker.go` was a
@@ -185,6 +252,94 @@ resolution — several obvious-looking gaps there have already been checked and 
 
 ---
 
+## The P71 batch — how it was measured (2026-08-19)
+
+Recorded here rather than in the items, so no P71 entry has to restate it and so the next reader can
+tell a measurement from an inference. **Everything below is reproducible; nothing in P71.1–P71.12
+rests on reading code alone.** Tree: HEAD `898a2c5`, clean. Host: the machine in
+`aegis_machine_specs` — Ryzen 3800XT, RX 7900 GRE 16 GB VRAM, 16 GB system RAM.
+
+#### The two live runs
+
+Both used `aegis chat --skill deep-research --yes --mode build --render off --max-turns 40`, in a
+fresh trusted git workspace outside this repo, on one identical prompt: set up a new Azure tenant —
+tenant/subscription foundation and identity, public ingress architecture, and which tenant security
+capabilities to enable — aligned to CAF, Azure landing zones, the WAF security pillar and MCRA.
+
+| | Run A | Run B |
+|---|---|---|
+| Model | `aegis-qwen35-9b:16k` | `aegis-qwen35-9b:32k` |
+| `context_window` | 16000 (shipped global config) | 32000 (`AEGIS_PROVIDER_CONTEXT_WINDOW`) |
+| Elapsed | 646 s | 267 s |
+| Tool calls | 42 | 39 |
+| Compactions | **25** | 4 |
+| `web_search` calls | 19 (8 returned nothing) | 10 (4 returned nothing) |
+| `web_fetch` calls | 15 (**7 × 404**) | **0** |
+| `shell` calls | 2 | **21** (20 × `Invoke-WebRequest`) |
+| Inline `[n]` citations | **0** | 18 |
+| Working-file updates | 1 (placeholders only) | 1 |
+| Outcome | full report, uncited, 2 of 5 URLs wrong | **no report** — stopped after Round 1, exit 0 |
+
+**Both runs are failures, and they fail differently, which is the finding.** Run A only produced a
+report because its compaction thrash kept it talking past the point Run B stopped. Run B is the
+cleaner run on every process metric and delivered nothing, because `--skill`'s drive-to-completion
+has nothing to continue on (**P71.8**). Do not read the table as "32k is better"; read it as two
+independent bugs that mask each other at different window sizes.
+
+#### The bench measurements
+
+Taken through the production types in `internal/tool/builtin` (temporary in-package tests, since
+removed — re-create them from this section rather than trusting a stale copy):
+
+- **DuckDuckGo throttling.** Twelve research-shaped queries issued back-to-back through
+  `searchTool.Execute`: q01 and q02 returned 8 results each in 976 ms and 734 ms; **q03 through q12
+  returned zero, in ~130 ms each**. The zero-result responses are HTTP 200 with a ~14.2 KB
+  anomaly/challenge body. Probing `fetchTool.get` directly against both
+  `html.duckduckgo.com/html/` and `lite.duckduckgo.com/lite/` over four rounds returned that same
+  page from **both** hosts every time — the two endpoints share one bucket (**P71.2**). A query 60 s
+  later returned a 37 KB body parsing to 10 results, so the block is roughly a one-minute cooldown.
+- **The compaction arithmetic.** `tokenest.CompactionTrigger(window, 8192)` = 8,000 / 22,208 /
+  52,608 / 111,411 at windows of 16,000 / 32,000 / 64,000 / 131,072. `web_fetch`'s default cap is
+  20,000 chars ≈ 5,000 tokens (**P71.5**).
+- **The boilerplate share, which is the batch's one negative result.** Four `learn.microsoft.com`
+  pages: raw HTML 64–98 KB → `htmlToText` output 11–38 KB → non-content head/tail **1,218–1,446
+  bytes, 3–12%** (**P71.12**).
+- **A transient DNS failure, caught by accident.** A `web_fetch` of `learn.microsoft.com` returned
+  `lookup learn.microsoft.com: no such host` while `nslookup`, `curl` and a direct
+  `net.DefaultResolver.LookupIPAddr` for the same host from the same machine succeeded seconds later.
+  Not reproducible on demand — which is the point, and the argument for **P71.3**.
+
+#### Three things this batch checked and cleared
+
+Filed so nobody re-investigates them:
+
+- **`/research` does not require the skill to be enabled.** `deep-research` was `[disabled]` in
+  config when the user's failing run happened, and that is **not** a cause: `cmdResearch` →
+  `activateSkill` → `handleActivateSkill` "turns on a dormant embedded built-in skill for this
+  session only", independent of the config flag. The skill body was preloaded into the prompt in both
+  live runs and in the user's.
+- **`tool_search`'s exposure survives compaction.** `reg.Load(names...)` mutates the session's
+  registry clone, so a tool loaded on turn 3 is still in the exposed schema set on turn 30 even after
+  the "now callable" tool result has been summarized away. Run B's zero `web_fetch` calls are a model
+  *choice*, not a lost capability — which is why **P71.10** is written as an exposure/incentive
+  problem rather than a state-loss one.
+- **The HTML-to-text converter is not the problem.** 66 KB of HTML to 11 KB of text is most of the
+  available win already, and `htmlToText` correctly drops `script`/`style`/`noscript`. See P71.12.
+
+#### Method note this batch adds
+
+**Two of the four `/research` failure hypotheses that looked strongest from reading the code were
+wrong**, and only the live runs separated them: the disabled-skill flag (cleared above) and
+compaction-drops-the-loaded-tool (cleared above) both had plausible mechanisms and neither was
+happening. The two that survived — a rate limit reported as success, and a per-fetch cap larger than
+the compaction trigger — are both *arithmetic or control-flow facts visible in the source*, which
+nobody had checked because the interesting-looking hypotheses were elsewhere. This document already
+says to check the instrument before acting on the intuition; the P71 corollary is narrower: **when a
+harness "just doesn't work", run it once with the tool calls printed before forming a theory.** The
+run cost eleven minutes and invalidated half the theory.
+
+---
+
 ## Tiering Criteria
 
 Applies to **build work** (Tier 1-4) only — items requiring new code. Items whose code is already
@@ -198,60 +353,63 @@ instead, regardless of how large or urgent the underlying question is.
 
 ---
 
-## Up next — what is left, and it is short
+## Up next — what is left of the web-research stack
 
-**Rewritten 2026-08-18 (third time that day), after its only build row shipped** — **P70.4**, the
-last item standing, filed that morning out of building P70.2 and closed that evening with *both*
-halves rather than the cap alone. Build record in
-[releases.md](releases.md#both-halves-of-the-sub-agent-boundary-2026-08-18-p704).
-
-**All three build tiers are now empty.** Tier 1, Tier 2's only entry (**P68.1**, parked with row #1
-below) and Tier 3 hold nothing that is both open and unparked. Four items shipped on 2026-08-18 —
-P70.1, P70.2, P70.3, P70.4 — and every one of them was filed the same day it closed.
-
-**The pattern the last three tables observed is now the whole story: the constraint was never
-effort, it was decisions.** Four posture questions were put to the user on 2026-08-18 and all four
-came back the same day. Three of the answers are the tree's stated reading and point in two
-directions on purpose — the mailbox (P70.2) and a sub-agent's result (P70.4) **are** wrapped because
-their content crossed a boundary before being relayed; `security_scan`'s workspace-derived output
-(P70.3) is **not**, because a file the model can already read is not a crossing. Settle the next such
-question against those three, not afresh.
+**Rewritten 2026-08-19 (second time that day), after a same-day build closed five of the six rows
+this table had.** The previous version was a six-row dependency chain — P71 is one root cause with
+eleven consequences, so order mattered — and it held: **P71.1, P71.5, P71.10, P71.9 and half of P71.2
+(the docs correction) and P71.4 all shipped in the order the chain specified**, the first time in
+this document's history a filed batch and its build landed in the same sitting rather than across
+several. Full detail of what shipped is in each item's own entry and in the Status block above; this
+table is now what's left, not the whole chain.
 
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Unchanged, and still last for the same reason: **the user parked it**, not a dependency. It is also no longer one sitting — **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show: a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
+| 1 | **P71.2** — a real second search backend below DuckDuckGo | Tier 2 / M | The one row not fully closed. The docs half shipped (Tavily recommended over Brave); the fallback-ladder half is still open because its candidates (Mojeek, Marginalia, Startpage, a Bing scrape) are untested, and this item's own text says not to add one without checking it against **P71.1**'s challenge-page detector first. |
+| 2 | **P71.8** — deep-research declares no phases, so `--skill` cannot drive it | Tier 3 / M-L | Now genuinely unblocked rather than sequence-dependent: its three prerequisites (**P71.1**, **P71.5**, **P71.9**) all shipped 2026-08-19. What's left is a design pass — the phase decomposition, the cold-start question of what the first phase's context looks like — not a bug fix. |
+| 3 | **P72.1** — `context_window` is sized once by hand; no boot-time or model-switch fit | Tier 3 / M-L | The general form of the arithmetic P71.5 fixed per-call: `aegis models --fit` already has the exact math, but nothing calls it at boot or on `/model` switch, the wizard never asks for a budget, and there's a real chicken-and-egg problem (a window is needed to load a model; weights are only measurable once loaded). Design work, not a wire — see the item for the three confirmed gaps. |
+| 4 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Unchanged, and still last for the same reason: **the user parked it**, not a dependency. It is also no longer one sitting — **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show: a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. Record in [releases.md](releases.md). |
 
-**Notes on the ordering, and on what did not make it.**
+**Notes on what shipped and what didn't.**
 
-**This table is one row because the build backlog is empty, not because it was trimmed.** Tier 1,
-Tier 2 and Tier 3 hold nothing open and unparked, and everything else is Tier 4 with no fired
-trigger — which this document's own rule says not to build speculatively. The previous two tables
-each promoted one Tier 4 entry on a stated reason (P70.3's bound half, then nothing); nothing in
-Tier 4 currently has one.
+**The forced order held, and is worth recording as a confirmed pattern rather than restating.** Six
+items were in dependency order because taking them out of order would waste work — retrying a
+misreport (P71.1) before believing the search result, phasing a drive (P71.8) whose evidence would be
+unreadable without the acute fixes underneath it. Five landed in that order in one sitting; the sixth
+(P71.8) is next precisely because its prerequisites are now satisfied, not because it moved up in
+priority.
 
-**There is no sequenced work left to rank.** The one row depends on nothing in the codebase except
-P68.1, and on a reachable model server.
+**The four Tier 4 P71 entries are still deliberately off this table** and none should be promoted
+yet. **P71.6** (response caching) and **P71.11** (window-derived budgets) are both blocked on row 2
+*by choice* — phasing changes the arithmetic under both, so setting them first fits a constant to a
+regime about to change. **P71.7** (publication dates on results) wants a keyed provider to be the
+default first, and neither Tavily's nor Brave's response schema was confirmed to carry a usable date
+field when checked 2026-08-19 — see the item. **P71.12** (main-content extraction) is a filed
+**negative** measurement: 3–12% per page, explicitly do not schedule.
 
-**One item is deliberately off this list: P68.1** (Tier 2, S). It is what the parked row needs before
-it is worth re-running — the eval tier deletes the database holding the trace its own closure
-conditions are written against. It travels with row #1, so it is off the list while that row is
+**One item is deliberately off this list: P68.1** (Tier 2, S). It is what the parked row #4 needs
+before it is worth re-running — the eval tier deletes the database holding the trace its own closure
+conditions are written against. It travels with that row, so it is off the list while the row is
 parked.
-
-**What to do when this table is picked up next.** The honest reading is that the next build item does
-not exist yet and has to be *found* rather than selected: either the user unparks the live tier
-(taking P68.1 first), or a fresh audit files new work the way P66.15's sweep filed P70.1–P70.3.
-Promoting a Tier 4 entry without a fired trigger is the thing this document tells you not to do.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in *document*
 order, which is priority order only *within* a track — it cannot see a cross-tier ranking — and it
-also cannot see that row #2 is parked by choice or that **P68.1** is deliberately off the list. Use
-it for repo state and for the parse; use this table for what to take.
+also cannot see that **P68.1** is deliberately off the list. Use it for repo state and for the parse;
+use this table for what to take.
 
 ---
 
 ## Open Work — Tier 1
 
-**Status: empty. P69.6 shipped 2026-08-17**, the same day it was filed — see [Nothing planned a
+**Status: empty. P71.1 and P71.10 both shipped 2026-08-19**, the day they were filed out of the P71
+evaluation of `/research` and the web-search stack — see their entries below for the full shipped
+record. They were one event seen twice: `web_search` reporting a DuckDuckGo rate-limit block as
+`"no results found"` with `IsError: false` (P71.1), and a model that consequently stopped trusting
+the tool reaching for `shell` instead, because `LocalProfile` hid `web_fetch` and left the command
+runner exposed (P71.10) — bypassing the SSRF dialer, `trust.Wrap`, the injection scan and the output
+cap in one move.
+
+**Before them: P69.6 shipped 2026-08-17**, the same day it was filed — see [Nothing planned a
 resident set](releases.md#nothing-planned-a-resident-set-2026-08-17-p696). Before it the tier had
 been empty since **P66.5** shipped (2026-08-16), closing the last of the findings the review
 classified as exploitable on the day it landed: P66.2 (2026-08-15), then P66.1, P66.4, P66.3, P66.6
@@ -261,6 +419,130 @@ before trusting [CodeReview.md](CodeReview.md) directly.
 
 An item enters this tier when it is a real, currently-exploitable security or robustness gap that is
 small and has no dependency.
+
+<details>
+<summary>P71.1 — the rate-limit misreport (shipped 2026-08-19)</summary>
+
+### P71.1 — `web_search` reports a rate-limit block as "no results found" — SHIPPED 2026-08-19
+
+**Filed 2026-08-19, from running `/research` rather than from reading it.** DuckDuckGo serves its
+anomaly/challenge page as **HTTP 200** with a ~14.2 KB body. `fetchTool.get` therefore returns no
+error, `parseDDG` finds no `result__a` node, `parseDDGLite` finds no external link, and
+`searchTool.Execute` falls through to `internal/tool/builtin/web.go:171`:
+
+```go
+msg := "no results found"
+if provErr != nil { … }
+return tool.Result{Content: msg, IsError: provErr != nil}, nil
+```
+
+On the zero-config path `provErr` is always nil, so a throttled query is reported to the model as a
+successful search over an empty web, indistinguishable from a genuinely unproductive query.
+
+**Measured 2026-08-19**, twelve research-shaped queries issued back-to-back through
+`searchTool.Execute` against the shipped user-agent:
+
+| query | results | elapsed |
+|---|---|---|
+| q01 | 8 | 976 ms |
+| q02 | 8 | 734 ms |
+| q03 | 0 | 345 ms |
+| q04–q12 | 0 | ~130 ms each |
+
+**Two queries is the empirical ceiling.** The ~130 ms responses are the challenge page being served
+from cache, not a search. The block clears after ~60 s (probed directly: a query 60 s later returned
+10 results from a 37 KB body).
+
+**The consequence is not a missing result, it is a model that stops trusting the tool.** Both live
+runs of the deep-research skill on 2026-08-19 (see the P71 batch note in [Status](#status)) reacted
+to the silent empty result by improvising:
+
+- The 16k run began inventing plausible `learn.microsoft.com` URLs to fetch instead of using search
+  results — **7 of 15 `web_fetch` calls 404'd**, eventually tripping the P52.3 failure breaker.
+- The 32k run concluded `web_search` was broken and **hand-rolled a Bing scraper in PowerShell**
+  through the `shell` tool — see **P71.10**, which is the security half of the same event.
+
+**Do:** detect the challenge response (no parseable results **and** the anomaly markers in the body)
+and return `IsError: true` with a message naming the condition and the retry window — "search
+provider rate-limited this client; retry in ~60s" — rather than "no results found". Keep "no results
+found" for the case it actually describes: a parseable results page with zero entries.
+
+**Closure condition:** a test fixture of the captured challenge page drives `searchTool.Execute` to
+an `IsError: true` result whose content names the rate limit, and a fixture of a genuine zero-result
+page still returns the non-error "no results found". Both fixtures committed, since the live page is
+not reproducible on demand.
+
+Priority: **Tier 1 — S.** No dependency. Real, currently-broken, measured, and the smallest fix in
+the batch. Take it first: **P71.2**, **P71.3** and **P71.10** all mitigate consequences of this one
+misreport, and are worth less until the model is told the truth.
+
+**Shipped 2026-08-19.** `looksLikeDDGChallenge` (`internal/tool/builtin/web.go`) matches the challenge form's action endpoint and copy against a live-captured excerpt; `duckDuckGo` now returns a `blocked` flag alongside results, and `Execute` reports `IsError: true` with the retry message rather than "no results found" when every attempt was the challenge page. Verified live against an actual throttled DuckDuckGo response. New tests: `TestLooksLikeDDGChallenge` pins the detector against both a captured challenge page and a genuine results page.
+</details>
+
+<details>
+<summary>P71.10 — un-defer the web tools for deep-research (shipped 2026-08-19)</summary>
+
+### P71.10 — Deferring the web tools routes the model around every guardrail on them — SHIPPED 2026-08-19
+
+**Filed 2026-08-19, observed live.** `builtin.Options.LocalProfile` auto-enables whenever
+`provider.base_url` resolves to loopback (`config.go:1082`, `LocalPromptProfile`), and moves
+`web_fetch`/`web_search` — with `git_pr` and `security_scan` — from the always-exposed set to the
+deferred set (`internal/tool/builtin/builtin.go:227-241`). `shell` stays always-exposed. So on every
+local-model session the model can see a general-purpose command runner and cannot see the HTTP
+client.
+
+**What the 32k live run did with that.** After `web_search` returned "no results found" (P71.1), the
+model stopped using the web tools entirely and issued **21 `shell` calls, 20 of them PowerShell
+`Invoke-WebRequest`** — first scraping `bing.com/search` for `learn.microsoft.com` hrefs with a
+regex, then fetching documentation pages directly. Zero `web_fetch` calls in the whole run.
+
+That path bypasses, at once, every control the fetch tool exists to apply:
+
+- **`netblock.SafeDialer`** — no SSRF blocklist, no resolve-once-dial-the-literal-IP rebinding
+  defence, no `CheckRedirect` hook.
+- **`trust.Wrap`** — the returned HTML arrived as a plain tool result with no
+  `<web_untrusted_output>` marker, so ~5 KB of attacker-controllable page content was presented to
+  the model as trusted output. This is the exact provenance property P70.2/P70.4 were built to
+  preserve elsewhere.
+- **The heuristic prompt-injection scan** (`Search.ScanOutput`, FIND-04/FIND-12), which hangs off
+  `trust.Wrap` and therefore never ran.
+- **`TruncateHead` and the P64.3 posture**, replaced by whatever `Substring(0, 5000)` the model
+  happened to write.
+
+`internal/server/server.go:782` already warns that network policy "does not constrain the shell tool;
+commands such as curl/wget/nc bypass it". This is that warning firing in an ordinary research
+session, with no adversary — the model reached for the tool it could see.
+
+**It also costs turns.** The 20 shell calls included repeated PowerShell parser errors on regex
+escaping; a large fraction of the run's 39 tool calls went to reimplementing `web_fetch` badly.
+
+**Do** (smallest first, and the first is probably enough):
+
+1. **Un-defer `web_search`/`web_fetch` when a network-shaped skill is active.** The registry already
+   supports per-session exposure — `tool_search` calls `reg.Load(names...)` on the session's clone
+   (`internal/tool/builtin/toolsearch.go:44-62`) — so activating `deep-research` can pre-`Load` them
+   the same way, with no profile change.
+2. Reconsider the profile default for these two. The P25.6 rationale is per-turn schema tokens, and
+   the two web schemas are small; the measured cost of deferring them is a wasted `tool_search` round
+   in one run and a full guardrail bypass in the other.
+3. Independently of both: a fetch performed through `shell` should not be *cheaper* in guarantees
+   than one through `web_fetch`. That is the general form, it is larger than this item, and it is the
+   thing `server.go:782` is really saying.
+
+**Note the first `tool_search` call of the 16k run**, which is its own small finding: the model
+searched the *tool registry* with a *research query* — `tool_search {"query":"Azure Cloud Adoption
+Framework landing zones tenant setup best practices"}` — and got `security_scan` back. The deferral
+indirection is not free even when it works.
+
+**Closure condition:** a live local-profile research run reaches the web through `web_fetch`, with
+zero `Invoke-WebRequest`/`curl`/`wget` shell calls, and every fetched byte carries its
+`<web_untrusted_output>` wrapper.
+
+Priority: **Tier 1 — S** for step 1, M for step 2. Depends on nothing; **P71.1** should land first,
+because the misreport is what triggers the improvisation.
+
+**Shipped 2026-08-19 — step 1 only** (step 2, reconsidering the LocalProfile default itself, and step 3, the general shell-vs-web_fetch guarantee gap, stay open — this closes the specific incentive that caused the live failure, not the two larger design questions it named). `preloadNetworkToolsForSkill` (`internal/server/engine_build.go`), the same shape as the existing `preloadPersonaTools`, un-defers `web_search`/`web_fetch` on the session's registry clone the moment `deep-research` activates (`handleActivateSkill`, `internal/server/sessions.go`) — scoped to a `networkShapedSkills` map rather than a general skill-level `tools:` mechanism, since deep-research is the only skill this is true of today. New tests: `TestPreloadNetworkToolsForSkillExposesWebToolsForDeepResearch`, `TestPreloadNetworkToolsForSkillIgnoresOtherSkills`.
+</details>
 
 <details>
 <summary>P69.6 — Nothing plans a resident set, so every seat is sized as if it were alone (shipped 2026-08-17)</summary>
@@ -366,14 +648,309 @@ Priority: Tier 1 — M. No dependency; P69.5 shipped the arithmetic it builds on
 
 ## Open Work — Tier 2
 
-**Status: 1 open** — **P68.1**, and it is deliberately off the ranked list because it travels with
-the parked live-tier row. **P66.25, P67.2, P67.3, P67.4 and P67.5 shipped 2026-08-17**, emptying the
-rest of the tier; P66.11, P66.12, P66.21 and P67.1 shipped 2026-08-16, and P66.7, P66.9, P66.10 and
-P66.16 earlier that day. Records for all of them are in [releases.md](releases.md).
+**Status: 2 open — P71.2 (partial) and P68.1.** **P71.3, P71.4, P71.5, P71.9 and P72.2 all shipped
+2026-08-19**, most the same day they were filed — see each entry below for the full record. **P71.2**
+is partially addressed: `docs/configuration.md` now recommends Tavily over Brave (whose no-card free
+tier ended February 2026), but the actual cross-provider fallback ladder is still open, deliberately
+— its candidates remain untested. **P68.1** stays deliberately off the ranked list because it travels
+with the parked live-tier row. (**P66.25, P67.2, P67.3, P67.4 and P67.5 shipped 2026-08-17**; P66.11,
+P66.12, P66.21 and P67.1 shipped 2026-08-16; P66.7, P66.9, P66.10 and P66.16 earlier that day. Records
+for all of them are in [releases.md](releases.md).)
 
-**P66.25 was the last P66 item and the last security item in the open set.** What that leaves in this
-tier is one instrumentation gap whose whole value is making the *next* live sitting readable — so a
-new Tier 2 entry now comes from a review pass or a fired trigger, not from what is already filed.
+**The note this tier carried until 2026-08-19 was that a new Tier 2 entry "now comes from a review
+pass or a fired trigger, not from what is already filed."** That held: all five P71 entries came from
+a live evaluation, and none was promoted from Tier 4. Five of them then shipped the same sitting they
+were filed — also new for this document.
+
+<details>
+<summary>P72.2 — /models showed a static cross-provider catalog instead of what's actually pulled (shipped 2026-08-19)</summary>
+
+### P72.2 — `/models` showed a static cross-provider catalog instead of what's actually pulled — SHIPPED 2026-08-19
+
+**Filed and shipped 2026-08-19**, reported directly by the user as "/models seems broken" while
+asking about local-only model switching. It wasn't crashing — `cmdModels` (`internal/tui/slash.go`)
+returned `modelcatalog.Curated()` unconditionally: four Anthropic/OpenAI/Gemini entries plus four
+generic Ollama *family* names (`qwen3`, `deepseek-r1`, `qwen2.5-coder`, `llama3.1`). None of those
+four is a loadable tag — this machine's actual pulled models are `aegis-qwen35-9b:16k`,
+`aegis-phi4-reasoning:16k`, `gemma4:12b`, etc. — so picking a catalog entry would 404 on the next
+turn (`cmdModel`'s own doc comment already named this failure mode), and the list was dominated by
+cloud providers a local-only user never asked for.
+
+**Do:** query the daemon for what Ollama actually has pulled and show that instead, falling back to
+the curated catalog exactly as before when the provider isn't Ollama or isn't reachable.
+
+**Shipped, four pieces:**
+
+- `ollamainfo.ListLocal` (`internal/ollamainfo/ollamainfo.go`) — a `GET /api/tags` client sibling to
+  the existing `Digests`, returning name/family/parameter size/quantization/size per model. Excludes
+  embedding-only models (`nomic-embed-text` reports `capabilities: ["embedding"]`, no `completion`) —
+  listing one would be a guaranteed-broken picker choice, not a degraded one. A model with no
+  `capabilities` field at all (an older Ollama server) is kept rather than excluded on missing data.
+- `GET /models/local` (`internal/server/models.go`), wired in `server.go`. The daemon does this
+  rather than the TUI because it already owns the `provider.base_url` connection; the client has no
+  independent route to it. `Reachable: false` covers both "not Ollama" and "unreachable" — the
+  client's fallback is identical either way.
+- `Client.ListLocalModels` (`internal/client/client.go`) — thin wrapper, same shape as
+  `ActivateSkill`.
+- `cmdModels` now calls it with a 5 s timeout; on `Reachable && len(Models) > 0` it shows **only**
+  the live pulled list via a new `localModelsToCatalog` adapter, matching the user's stated
+  preference ("I don't want to focus on or use cloud models at this time") without a new flag. A
+  pulled tag's `:16k`/`:32k` suffix (this project's own `aegis-*` convention) is shown as the
+  picker's context label when present; otherwise it falls back to the quantization level, since
+  `/api/tags` doesn't report context length for an unloaded model (only `/api/ps` does, for one
+  that's currently resident).
+
+**Verified live** against this machine's actual daemon (`GET /models/local` over the TLS loopback
+listener, bearer-token authed): returns the 6 completion-capable pulled models, correctly excludes
+`nomic-embed-text`. New unit tests: `TestListLocalExcludesEmbeddingOnlyModels`,
+`TestListLocalKeepsModelsWithNoCapabilitiesField`, `TestListLocalUnreachable`
+(`internal/ollamainfo/listlocal_test.go`), `TestLocalModelsToCatalog` (`internal/tui/localmodels_test.go`).
+Full `go build ./...`, `go vet ./...` and `go test ./internal/... -count=1` clean.
+
+**Left alone on purpose:** the setup wizard (`/config`) doesn't use `modelcatalog` at all — it has
+its own model-entry path — so this fix is scoped to `/models` only, which is what was reported
+broken.
+
+Priority: Tier 2 — S. Shipped same day, no dependency.
+
+</details>
+
+### P71.2 — The DuckDuckGo "lite" fallback shares the primary's rate-limit bucket
+
+**Filed 2026-08-19.** `searchTool.duckDuckGo` (`internal/tool/builtin/web.go:186-200`) tries
+`html.duckduckgo.com` and, on zero results, falls back to `lite.duckduckgo.com`. The comment says the
+lite page "has historically been more structurally stable", which is a statement about *parsing* —
+and the fallback is written as if the failure mode were a markup change.
+
+**The actual failure mode is throttling, and the two endpoints are throttled together.** Probed
+directly on 2026-08-19: once blocked, four consecutive rounds against both hosts returned the same
+~14.2 KB challenge page from *both*, in the same request pair. The ladder buys **zero** resilience
+against the only failure that occurs in practice, while costing a second round-trip on every
+genuinely empty result.
+
+**Do:** make the ladder cross-*provider* rather than cross-*path*. Keep lite as the parse fallback it
+was written to be, but add a real second backend below it so a throttled DDG is survivable without a
+key. Candidates worth evaluating (none yet tested): Mojeek, Marginalia, Startpage, or a Bing HTML
+scrape. Whatever is chosen must be checked for the same 200-with-challenge behaviour **P71.1** covers.
+
+**The honest framing, and it should be in the config comments too:** the DuckDuckGo scrape is fine
+for a one-off lookup and is structurally unfit for a workload issuing 8–20 queries in a few minutes.
+A research run is the second kind. The lasting fix is a keyed provider — `search.provider: tavily`
+or a self-hosted SearXNG, both already supported by `websearch_providers.go`. This item is what
+makes the *zero-config* path degrade honestly; it is not a substitute for recommending a provider.
+
+**Verified 2026-08-19, correcting what this item said when first filed: Brave is no longer the
+free recommendation.** Brave Search API dropped its no-card free tier in February 2026. It is now
+$5/1,000 queries with a $5/month credit (~1,000 queries) that requires a card on file at signup and
+public attribution on the calling project to keep the credit — drop the attribution and the credit
+is gone, and usage past it bills automatically. **Tavily is the one still offering a genuine
+no-card free tier**: 1,000 credits/month (a basic search = 1 credit), no card required. Recommend
+Tavily as the default keyed suggestion; keep Brave documented as an option for anyone already paying
+for it, not as the zero-friction path. `docs/configuration.md`'s "Configure pluggable web search"
+example currently shows `provider: brave` and should be updated to `tavily` alongside this.
+
+**Closure condition:** with DDG throttled (reproducible by issuing three queries in five seconds), a
+`web_search` call still returns results from another backend, and the result names which backend
+served it (**P71.4**).
+
+**Partially addressed 2026-08-19: the documentation half only.** `docs/configuration.md`'s "Configure pluggable web search" example now recommends `provider: tavily` (a genuine no-card free tier, confirmed live) over `provider: brave` (no longer free as of February 2026 — requires a card and public attribution to keep its monthly credit), with both trade-offs stated inline. **The actual cross-provider fallback ladder — a second scrape backend below DDG — remains open**: the candidates named above are still untested, and this item's own text says not to add one without checking it against the same challenge-page behavior **P71.1** detects. Do not read the docs fix as closing this item.
+
+Priority: **Tier 2 — M.** Depends on **P71.1** for the throttle *detection* that has to trigger the
+fallback.
+
+<details>
+<summary>P71.3 — retry/backoff for web_fetch and web_search (shipped 2026-08-19)</summary>
+
+### P71.3 — Nothing in the web path retries, anywhere — SHIPPED 2026-08-19
+
+**Filed 2026-08-19.** `internal/provider/retry.go` has a tested equal-jitter backoff that eight
+caller classes share (P67.3). The web tools use none of it:
+
+- **`fetchTool.get`** (`web.go:99-117`) makes exactly one attempt. A transient resolver failure
+  returns `fetch failed: lookup <host>: no such host` as a terminal tool error. **Observed live on
+  2026-08-19**: `learn.microsoft.com` failed to resolve inside a `web_fetch` while `nslookup`, `curl`
+  and a direct `net.DefaultResolver.LookupIPAddr` on the same host from the same machine seconds
+  later all succeeded. A single retry absorbs this class entirely.
+- **`doSearchRequest`** (`websearch_providers.go:145-158`) makes one attempt and does not read
+  `Retry-After`. A 429 from Brave or Tavily is reported as a terminal `status 429`, which then
+  silently falls through to the DDG scrape (**P71.4**).
+- **`searchTool.duckDuckGo`** has no client-side pacing at all, which is why two queries in a second
+  is enough to earn a 60-second block (**P71.1**).
+
+**Do**, in three separable pieces:
+
+1. Wrap `fetchTool.get` in the existing backoff for connection-class failures only — DNS, connection
+   reset, TLS handshake, and 5xx. Never retry a 4xx: **7 of 15 fetches in the 16k live run were 404s
+   on invented URLs**, and retrying those would have burned the budget faster, not slower.
+2. Honour `Retry-After` on 429/503 in `doSearchRequest`, with the backoff as the fallback delay.
+3. Add a token bucket in front of the DDG scrape — roughly one query per 3–5 s, derived from the
+   measured 2-query ceiling. This is pacing, not retry, and it belongs to the scrape path only; a
+   keyed provider must not be slowed by it.
+
+**Bound the total.** Every retry added here sits under `MaxTurnStall` (900 s) and must be entered in
+`TestToolTimeoutsStayUnderTheStallBound`'s table — the invariant in CLAUDE.md is that the table is
+exhaustive, so a new per-call wait that is not in it is the regression.
+
+Priority: **Tier 2 — S** for (1) and (2), **S** for (3). No dependency; (3) pairs naturally with
+**P71.1**.
+
+**Shipped 2026-08-19 — pieces (1) and (2); (3), a DDG-scrape token bucket, stays out of scope of this item** (P71.2's cross-provider ladder is the more durable fix for the same symptom, and P71.1's rate-limit detection already gives the model a truthful signal instead of a silent-empty one — a client-side pacer over an unkeyed scrape was judged not worth building against a not-really-supported backend). `fetchTool.get` and `doSearchRequest` (`internal/tool/builtin/web.go`, `websearch_providers.go`) now retry up to `webRetries` (2) times with equal-jitter backoff — restated locally rather than importing `internal/provider`'s decorator, keeping `internal/tool/builtin` a leaf package — retrying only a transport-level failure or a 429/5xx (`webRetryable`), honoring a provider's `Retry-After` header, and **never retrying a 4xx**: the live run this responds to had a model inventing URLs, and retrying a wrong URL just spends the round's budget faster. The worst-case retry sequence (`maxFetchWait`/`maxSearchWait`) is ~100s/~70s, verified under the 900s `MaxTurnStall` bound by a dedicated `TestWebRetryWaitsStayUnderTheStallBound` — kept separate from `TestEveryToolTimeoutIsAccountedFor`'s stricter table, which counts explicit `context.WithTimeout` call sites and doesn't cover the pre-existing `http.Client.Timeout` fields these retries wrap. New tests: `TestFetchToolRetriesTransientFailureThenSucceeds`, `TestFetchToolNeverRetries404`, `TestDoSearchRequestHonorsRetryAfter`.
+</details>
+
+<details>
+<summary>P71.4 — name the serving backend on a search result (shipped 2026-08-19)</summary>
+
+### P71.4 — A configured search provider's failure is invisible to everyone — SHIPPED 2026-08-19
+
+**Filed 2026-08-19.** `searchTool.Execute` (`web.go:152-165`) calls `providerSearch`, and on error
+sets `results = nil` and falls through to the DuckDuckGo scrape. `provErr` is then consulted **only
+if the scrape also returned nothing**:
+
+```go
+if len(results) == 0 {
+    msg := "no results found"
+    if provErr != nil { msg = fmt.Sprintf("search failed (provider %q: %v; …)", …) }
+```
+
+So whenever the fallback succeeds, a broken configured provider — expired key, wrong `base_url` on a
+self-hosted SearXNG, a 429 — is indistinguishable from a working one. The user believes they are on
+their keyed provider's monthly allowance; they are silently back on the scrape, and therefore back
+inside **P71.1**'s 2-query ceiling. This is the failure mode most likely to make search feel
+*inconsistent* rather than broken, because it is intermittent by construction.
+
+**Do:** stamp the serving backend into the wrapped result header — the `trust.Wrap` attribute list
+already carries `query`, so add `backend`. When a configured provider failed and the scrape covered
+for it, say so on the same line. Add a one-shot warning in the daemon log the first time a configured
+provider errors in a session.
+
+**There is no `aegis doctor` check for `search` at all — confirmed 2026-08-19 by reading
+`runDoctorChecks`** (`internal/cli/doctor.go:272-287`): it covers workspace trust, provider, provider
+adapter, generation budget, tool-call probe, sandbox, scanner, guard, workdir, terminal caps,
+per-command host binaries, and daemon — ten checks plus the two loops, and `search` is in none of
+them. `doctorCommandChecks`'s pattern (PASS if reachable, WARN if a fallback exists and nothing was
+asked for, FAIL if a specific config was given and it did not work) fits `search` directly: WARN on
+the zero-config DuckDuckGo default with the same "structurally unfit for a research workload" framing
+as this item's config-comment fix, FAIL on a configured provider whose key or `base_url` doesn't
+resolve. Add it as an eleventh check.
+
+**Closure condition:** with `search.provider: tavily` and a deliberately invalid key, a `web_search`
+call returns results *and* states that Tavily failed and DuckDuckGo served them; `aegis doctor` FAILs
+on the same misconfiguration without a `web_search` call being made first.
+
+**Shipped 2026-08-19, both halves.** `searchTool.Execute` (`internal/tool/builtin/web.go`) now stamps `backend` onto the `trust.Wrap` attributes (`"duckduckgo"`, the configured provider's name, or absent on a genuine empty result), and prepends a `[note: configured provider %q failed (%v); DuckDuckGo served this instead]` line when a fallthrough happened — verified live against a real Tavily key, which correctly shows `backend="tavily"`. Separately, `doctorSearchCheck` (`internal/cli/doctor.go`) is a new `aegis doctor` check — config-shape validation, not a live network probe, so doctor doesn't spend a metered provider's quota just to run: FAILs on a keyed provider with no `api_key`, on `searxng` with a missing or unparseable `base_url`, and on an unrecognized `provider` string; WARNs on the zero-config DuckDuckGo default with the same framing as the docs fix; PASSes a correctly-configured keyed provider. Verified live — `aegis doctor` on this machine's zero-config default correctly WARNs. New tests: `TestSearchToolWrapsUntrustedContent` (updated) and `TestDoctorSearchCheck`.
+</details>
+
+Priority: **Tier 2 — S.** No dependency. Cheap, and it is the difference between "search is flaky"
+and a diagnosable configuration error.
+
+<details>
+<summary>P71.5 — scale web_fetch's cap to the resolved context window (shipped 2026-08-19)</summary>
+
+### P71.5 — `web_fetch`'s output cap is a constant, and on a 16k window it exceeds the compaction trigger — SHIPPED 2026-08-19
+
+**Filed 2026-08-19, measured.** `fetchTool.Execute` defaults `limit` to **20,000 characters**
+(`web.go:81-84`), documented in `truncate.go`'s posture table as ~5.0k tokens. That figure is not
+compared against anything.
+
+`tokenest.CompactionTrigger(window, maxTokens)` is the one compaction threshold (CLAUDE.md, P66.14).
+Evaluated at `max_tokens: 8192`:
+
+| window | trigger | one default `web_fetch` |
+|---|---|---|
+| 16,000 | **8,000** (the `window/2` floor) | ~5,000 tok |
+| 32,000 | 22,208 | ~5,000 tok |
+| 64,000 | 52,608 | ~5,000 tok |
+| 131,072 | 111,411 | ~5,000 tok |
+
+**At the shipped local config — `context_window: 16000` in the generated global config — a single
+source read is 62% of the entire compaction budget.** Reading one page can therefore trigger
+compaction on its own, and reading two consecutively cannot avoid it.
+
+**This is what the 16k live run looked like: 25 compactions across 42 tool calls**, almost all of the
+shape `11→9 messages` — each compaction buying about two turns of headroom before firing again. Every
+one is an extra full inference over a ~10k-token prompt on a 9B, which is where the wall-clock went
+(646 s). The 32k control run, same model and same task, took **4 compactions and 267 s**.
+
+The downstream damage is worse than the latency. Search results were summarized away before the model
+could fetch the URLs in them — which is *why* it began inventing URLs (**P71.1**) — and the final
+report carried **zero inline `[n]` citations** despite the skill's section 4 requiring one on every
+non-obvious claim.
+
+**Do:** size the default cap from the resolved context window instead of pinning it — something on
+the order of `min(20000, window * 0.15 * 4)` chars, so a source read is a bounded fraction of the
+compaction budget rather than most of it. Keep the explicit `max_chars` argument as the override it
+already is, and keep the P64.1 no-spill exclusion exactly as it stands: the clipped remainder must
+not become an unwrapped workspace file.
+
+**Do not** simply raise `context_window`. The 16k pin is load-bearing for the P69 debate topology
+(user config comment, and `research/debate-topology-plan.md`): it overrides each model's Modelfile
+`num_ctx`, so raising it re-inflates every seat's KV cache at once and breaks residency on a 16 GB
+card. The per-tool cap is the knob that does not have that coupling.
+
+**Closure condition:** at `context_window: 16000`, a `web_fetch` with no `max_chars` returns a result
+that does not by itself cross `CompactionTrigger(16000, 8192)`; a unit test pins the relationship
+rather than the constant.
+
+Priority: **Tier 2 — S.** No dependency. Highest-value item in the batch after **P71.1**, and the one
+that makes local-profile research viable at all.
+
+**Shipped 2026-08-19**, and shipped closer to the resolved *per-turn* window than the item asked for: `tool.WithContextWindow`/`ContextWindowFromContext` (`internal/tool/tool.go`) is a new context-value pair, the same shape as the existing `WithRegistry`/`WithWorkdir`, carrying `Engine.effectiveContextWindow()` — the actual escalatable, possibly-detected figure, not a static config read — into `Engine.toolCtx` on every tool call. `defaultFetchLimit` (`internal/tool/builtin/web.go`) sizes the cap at `window*3/5` chars, capped at today's flat 20,000 and floored at 4,000, so cloud-scale contexts see no behavior change and only a small window shrinks. At `context_window: 16000` this is 9,600 chars (~2,400 tokens) against an 8,000-token `CompactionTrigger` — comfortably inside it, closing the item's own arithmetic. New tests: `TestWithContextWindowRoundTrips`, `TestWithContextWindowZeroOrNegativeCarriesNothing`, `TestContextWindowFromContextUnset` (`internal/tool`), `TestDefaultFetchLimitScalesWithContextWindow`, `TestFetchToolUsesScaledCapByDefault` (`internal/tool/builtin`).
+</details>
+
+<details>
+<summary>P71.9 — make the working-file update unconditional (shipped 2026-08-19)</summary>
+
+### P71.9 — The deep-research findings log is advisory, and the run leaves it as placeholders — SHIPPED 2026-08-19
+
+**Filed 2026-08-19, observed live.** Section 2 of `internal/skills/builtin/deep-research/SKILL.md`
+diagnoses the problem correctly — "a long research run can outlive the context window, and a log that
+lived only in conversation is destroyed by compaction exactly when it's most needed" — and then makes
+the remedy conditional: "**For anything beyond a couple of rounds**, keep the log and trail in a
+working file (e.g. `.aegis/research/<topic-slug>.md`), updated each round".
+
+**The 16k live run wrote that file once, at Round 1, and never touched it again** across 42 tool
+calls and 25 compactions. Its entire content at the end of the run, after the scope header:
+
+    **Sources Examined:**
+    - [url1] — kept/rejected — need to fetch and evaluate
+
+    **Findings:**
+    - [To be updated after web_search]
+
+    ---
+
+    ## Audit Trail
+    - [To be updated]
+
+(Indented rather than fenced on purpose: `scripts/roadmap-status.sh` treats any column-0 `## ` line
+as a section break, so a verbatim excerpt containing a markdown heading silently truncates the item's
+body and drops its priority line from the parse. Indent quoted headings.)
+
+976 bytes, all scaffold, no evidence. Everything real lived in the conversation, which was being
+compacted every two turns. The audit trail in the final report was therefore **reconstructed from
+memory at the end** — the specific thing section 2 exists to prevent — and it shows: two of the five
+cited URLs are wrong (`ready/landing-zones/` for `ready/landing-zone/`, and a bare directory listing
+cited as a source).
+
+**Do:** make the working file unconditional, and make the write part of the round rather than a
+recommendation about it. Concretely — reword section 1's step 5 from "Record — update the findings
+log" to an explicit "append to `<file>` **before** the next `web_search`", drop the "beyond a couple
+of rounds" qualifier, and have section 0 create the file with the round-1 skeleton as its first
+action. The file is the only artifact that survives compaction; the skill should treat it as the
+primary record and the conversation as the cache, not the other way round.
+
+**This is the cheap half of P71.8.** Phasing gives per-round context resets and is the structural
+fix; this makes the *current* single-context drive stop losing its own evidence, and it is a text
+edit to one embedded skill file. Note that `SKILL.md` is `go:embed`-ed — rebuild the binary or the
+old copy ships (CLAUDE.md, *Embedded assets*).
+
+**Closure condition:** a live run at `context_window: 16000` ends with a working file containing one
+populated log entry per round and no `[To be updated]` placeholders.
+
+Priority: **Tier 2 — S.** No dependency, no Go code. Take it alongside **P71.5**.
+
+**Shipped 2026-08-19** — a text edit to the embedded `internal/skills/builtin/deep-research/SKILL.md`, no Go code, exactly as filed. Section 0 now creates the working file unconditionally, before the first search, with the round-1 skeleton; section 1 step 5 is reworded from "update the findings log" to an explicit `edit_file` instruction that must land **before the next `web_search`/`web_fetch` call**, not "when convenient"; section 2's "for anything beyond a couple of rounds" qualifier is gone. Since `SKILL.md` is `go:embed`-ed (CLAUDE.md, *Embedded assets*), this ships with the next binary rebuild — confirmed via `go build ./...` in this same session. Full live re-verification (a research run whose working file is populated every round, not just at round 1) is still open — the SKILL.md change is textual and testable by inspection, but the behavior change needs a live run to confirm the model actually follows the stronger instruction.
+</details>
 
 ### P68.1 — The live tier can run a measurement it cannot read back
 
@@ -416,7 +993,21 @@ yields less.
 
 ## Open Work — Tier 3
 
-**Status: empty. P70.4 shipped 2026-08-18**, the day it was filed — see [Both halves of the
+**Status: 2 open — P71.8 and P72.1.** **P71.8**, filed 2026-08-19, is deep-research declaring no
+`phases:` frontmatter, so it runs single-context and `aegis chat --skill` cannot drive it to
+completion. It is the structural item of the P71 batch, and its three prerequisites are now all in
+place: **P71.9** (the working file that becomes its phase artifact), **P71.1** and **P71.5** (the two
+acute bugs that would otherwise make a phased run's evidence unreadable) all shipped 2026-08-19. It
+also corrects `internal/drive/drive.go:175`, which names four skills as multi-phase file-per-phase
+builds when `threat-modeling` is the only one with a plan.
+
+**P72.1**, filed the same day out of a follow-up conversation, is the general form of a question the
+P71 batch's `context_window: 16000` finding raised without naming: nothing computes or applies a
+context-window fit at daemon boot or `/model` switch. `aegis models --fit` (P69.5) already has the
+exact math; this item is the wiring, the wizard prompt, and the cold-start design decision the wiring
+needs — three gaps confirmed by reading the actual call graph, not assumed from the release note.
+
+**Before it: P70.4 shipped 2026-08-18**, the day it was filed — see [Both halves of the
 sub-agent boundary](releases.md#both-halves-of-the-sub-agent-boundary-2026-08-18-p704). The tier held
 two for a few hours that morning: **P70.1** and **P70.2** were filed out of P66.15's sweep and both
 shipped the same afternoon; P70.4 was the item their build produced, and it closed the same day. The tier held five
@@ -433,6 +1024,195 @@ anywhere: both now live in `internal/enginecfg` and are built once rather than p
 introduced changed which numbers two already-shipped heuristics see. P62.9 and P65.2's prompt half
 both moved to [Verification Work](#verification-work) — in each case the code is already shipped and
 what remains is a live-run result, not a design or implementation task.
+
+### P71.8 — deep-research declares no phases, so it runs single-context and `--skill` cannot drive it to completion
+
+**Filed 2026-08-19, from two live runs that failed in opposite directions.** This is the structural
+item of the P71 batch; **P71.1** and **P71.5** are the two acute bugs, and this is the reason the
+skill has no margin to absorb either.
+
+**Three facts that only make sense together.**
+
+1. `internal/skills/builtin/deep-research/SKILL.md` declares **no `phases:` frontmatter** — only
+   `name` and `description`. So `drive.PlanFor("deep-research", nil)` returns nil and the run uses
+   the generic single-context drive. `TestPhasePlanFor` (`internal/drive/drive_test.go:112`) actively
+   pins this: *"a skill declaring no phases must fall back to the generic drive"*.
+2. `internal/drive/drive.go:175` says the opposite in prose: "deep-research, latex-report,
+   structured-build and documentation-as-code are all multi-phase, file-per-phase builds with the
+   same single-context problem threat-modeling has." That comment describes an intent nobody
+   implemented. **`threat-modeling` is the only built-in skill with a phase plan**, and — grep
+   confirms — the only one that scaffolds `<!-- PENDING -->` markers.
+3. `aegis chat --skill` auto-continues *while `<!-- PENDING -->` markers remain under `.aegis/`*.
+   deep-research writes none, so the drive-to-completion the flag exists to provide is **inert** for
+   it. The flag's own help text names deep research as a beneficiary ("This is what lets a long,
+   multi-phase skill (threat model, deep research) finish non-interactively"). It does not.
+
+**What that produced live, on the same model and task, at two window sizes:**
+
+| | 16k (shipped config) | 32k control |
+|---|---|---|
+| Elapsed | 646 s | 267 s |
+| Tool calls | 42 | 39 |
+| Compactions | 25 | 4 |
+| Empty searches | 8 / 19 | 4 / 10 |
+| Failed fetches | 7 / 15 | — (0 `web_fetch` calls) |
+| Inline `[n]` citations | **0** | 18 |
+| Outcome | full report, uncited, 2 bad URLs | **no report at all** |
+
+**Raising the window fixes the thrash and exposes the drive-termination bug underneath.** The 32k run
+stopped after Round 1 with a status update headed "Work Remaining", listing Rounds 2–5 as future
+work, and exited 0. Nothing was wrong with the model's behaviour — it yielded, as a model does, and
+nothing continued it, because there were no markers to continue on. The 16k run only produced a
+report because its thrash happened to keep it talking past the point the 32k run stopped.
+
+**Traced 2026-08-19 through `internal/cli/chat.go` and `internal/drive/drive.go`, to name exactly
+which budget each run actually exhausted, since two different ones are in play with the same default
+value.** `provider.max_iterations` (default 40) bounds tool-call *rounds* inside one
+`engine.Run()` call; `--max-turns` (also defaulted 40, confusingly) bounds how many times
+`runLinear`'s outer loop calls `engine.Run()` at all. Without phases, `runLinear` calls `engine.Run()`
+**once**: on return, `scanPendingMarkers` finds nothing (deep-research writes no markers), so
+`drive.VerifySkillOutputs` reports `ran=false` (no verifier configured), and the loop `break`s,
+declaring the run done (`chat.go:849-851`). So the entire research task — every round, every search,
+every fetch — happened inside the tool-call-round budget of **one single `engine.Run()` call**, and
+the run's actual stopping condition was never "the research finished"; it was "the model stopped
+issuing tool calls," which `runLinear` then took at face value because there was nothing telling it
+otherwise. Compare `drive.Run`'s phased path (`drive.go:423-470`): each phase gets its **own** fresh
+`engine.Conversation` and its own call to `st.Engine.Run`, so phasing does not just reset context —
+it also resets the 40-round budget every phase, which single-context deep-research currently spends
+once for the whole task. This is *why* phasing is the fix and not just a workaround: the two 40s are
+the same number by coincidence, not by design, and single-context deep-research is silently living
+inside the smaller of two independent budgets that were sized for different things.
+
+**Do:** give deep-research a real phase plan, via the `phases:` frontmatter seam P52.12 built for
+exactly this ("how any skill opts in without a code change"). The natural decomposition is already
+written in the skill: scope → round → round → … → synthesize, with the working file from **P71.9** as
+the artifact each phase appends to and the next phase's fresh context reads back. Each round becomes
+a context-reset run, which is the actual fix for a small window — the per-fetch cap (**P71.5**)
+raises the ceiling, phasing removes it.
+
+**Three constraints on the design:**
+
+- **The phase artifact must be the marker-bearing file.** That is what re-arms `--skill`'s
+  auto-continue and what `drive.verify` reads. Without markers this item does not close, however good
+  the phase list is.
+- **Do not narrow phase tools.** `drive.phase6Phase` (`drive.go:148-166`) already reasons about this
+  and gets it right: a plan from frontmatter declares no per-phase tools, and narrowing its verify
+  round to a threat-model surface "would take capabilities away from a skill that never opted into
+  narrowing — deep-research wants `web_search` in a fix round exactly as much as a threat model does
+  not." Leave that behaviour alone.
+- **`drive.verify:71`** notes that skills without phases keep the pre-P39.6 "markers cleared = done"
+  behaviour. Adding phases moves deep-research onto the other path; check that transition rather than
+  assuming it.
+
+**And fix the comment either way.** `drive.go:175` names four skills as multi-phase and three of them
+(deep-research, latex-report, structured-build, documentation-as-code) declare no phases. Whichever
+of them is not going to get a plan should come out of that sentence, so the next reader does not
+trust it the way this investigation initially did.
+
+**Closure condition:** `aegis chat --skill deep-research "<topic>"` at `context_window: 16000` runs
+to a cited final report without manual continuation, with per-round compaction counts in single
+digits, and `PlanFor("deep-research", spec)` returns a non-nil plan (which means
+`TestPhasePlanFor`'s deep-research assertion has to be rewritten against a skill that genuinely
+declares nothing — do not simply delete it).
+
+Priority: **Tier 3 — M/L.** Sequence-dependent: **P71.9** should land first (the working file is this
+item's phase artifact), and **P71.1** and **P71.5** before that, or the phased run inherits both
+acute bugs and the evidence will not be readable.
+
+### P72.1 — `context_window` is sized once by hand; nothing computes or applies a fit at boot or model switch
+
+**Filed 2026-08-19, from a user question**: could the serving context window be set to whatever this
+machine can actually hold, automatically, at daemon boot or when `/model` switches models — instead
+of being a number someone worked out once and pasted into `config.yaml`.
+
+**The math to answer that question already exists and is exact.** P69.5 shipped `aegis models --fit`:
+given a KV budget in GiB, `ollamainfo.Fit` solves for the largest window that fits a model's measured
+weights plus its KV-cache cost, validated against real Ollama measurements to 0.2% error. Run live on
+2026-08-19 against this machine's `aegis-qwen35-9b:16k` (RX 7900 GRE, 16 GiB VRAM):
+
+| Budget | Window | KV cache | Total | Notes |
+|---|---|---|---|---|
+| — (curve) | 16,384 | 2.06 GiB | 6.02 GiB | today's shipped `context_window: 16000` |
+| — (curve) | 65,536 | 8.25 GiB | 12.21 GiB | 3.8 GiB spare on a 16 GiB card |
+| 14.00 GiB | 79,360 | 9.99 GiB | 13.95 GiB | f16 KV, 0.05 GiB spare |
+| 14.00 GiB | 135,680 | 8.77 GiB | 13.69 GiB | **q8_0 KV** — roughly halves cache cost per token |
+| — (curve) | 131,072 | 16.50 GiB | 20.46 GiB | the model-max recommendation — **does not fit this card at all** |
+
+So a solo session on this model is running at **16,384 of a safely-fittable 65,000+** — the number is
+not wrong, it is just far more conservative than the hardware requires, because nothing ever asked
+the hardware.
+
+**Three things stand between that math and "dynamic," confirmed by reading the actual call graph
+rather than assuming it from the release note:**
+
+1. **`provider.vram_budget_gb` defaults to 0, and the setup wizard never asks.** Grepped every
+   consumer (`internal/cli/modelsfit.go`, `internal/config/config.go`, `internal/config/write.go`,
+   `internal/tui/wizard.go`) — `wizard.go:545` hardcodes `budgetGB = 0` at the one place first-init
+   could collect it. The budget is "operator input" by design (`internal/hwinfo` forbids VRAM
+   auto-detection outright, P17.5 — it would mean reimplementing Ollama's own placement heuristic
+   unreliably), but today nothing ever prompts for that input, so the fit math never runs unless the
+   operator finds `--fit` on their own.
+2. **`--fit` cannot run before a model has been loaded once.** `fitWeights` measures resident weight
+   bytes from `/api/ps`, which requires the model already loaded — and loading a model *is* what
+   commits it to a serving window. This is a real chicken-and-egg constraint, not an oversight: you
+   cannot solve for the window before you know the weights, and you cannot cheaply know the weights
+   without loading at *some* window first. `--fit`'s own error path names this directly ("Model is not
+   currently loaded, so its resident weights cannot be measured").
+3. **Nothing calls any of this at boot or on `/model`.** `cmdModel` (`internal/tui/slash.go`) switches
+   the session's model override and nothing else — no re-fit, no window recomputation. Daemon startup
+   reads `context_window` from config as a plain int; no boot-time code path touches `ollamainfo.Fit`.
+   `--write` patches the *global* config file and needs a daemon restart to take effect — there is no
+   live "the model just changed, resize now" path even manually.
+
+**A fourth complication is architectural, not a missing wire: `context_window` is one global number,
+but the debate topology (P69.1/P69.5) already resolves each seat's window independently per model**
+via `effectiveContextWindowFor` (`internal/server/contextwindow.go:269`), detected from what Ollama
+reports for that specific tag rather than read from the global config. A boot-time "fit the window to
+the hardware" pass has to either leave debate's per-seat resolution alone (it already does something
+smarter than the plain config path) or explicitly account for it — sizing the *default* model's
+window against the full budget while debate is inactive would starve it, or overshoot it, the moment
+a debate seat needs to co-reside. **This is exactly the class of problem `--fit-debate`/`--fit-set`
+already solve for a manual run**; a boot-time version needs the same resident-set reasoning P69.6
+built, not just the single-model half.
+
+**Do**, roughly in landing order:
+
+1. **Wizard: ask for a VRAM budget instead of defaulting to 0.** `internal/hwinfo` cannot detect it,
+   so this stays a question to the operator — but ask it, rather than silently shipping the
+   pathological model-max default P69.6's own release note found (131072 tokens, 20.46 GiB, does not
+   fit this card).
+2. **A boot-time fit pass, gated on `provider.vram_budget_gb` being set** (P69.6's "inert until opted
+   in" pattern — keep it). On daemon startup, if the default model is already loaded (warm start) or
+   after its first load (cold start), run the existing `ollamainfo.Fit` against the configured budget
+   and apply the result as the *effective* window for that run — not necessarily rewriting
+   `config.yaml`, since the chicken-and-egg problem means the *first* load of a cold daemon still has
+   to pick something before it can measure anything. A safe floor (today's `RecommendContextWindow`
+   halving, or the last-written config value) for that first load, then re-fit and apply from the
+   second load onward, is one resolution; there may be a better one — this needs a design pass, not
+   just a wire.
+3. **`/model` switch: re-fit for the new model** using the same budget, once it has been loaded once.
+   Until then it necessarily runs at a fallback figure — the same first-load problem as (2), once per
+   newly-selected model rather than once per daemon lifetime.
+4. **Route the debate/resident-set case through P69.6's existing solver**, not a second, simpler one
+   — a boot-time fit that ignores co-residency would re-introduce the exact bug P69.6 closed (sizing
+   a seat as if it were alone).
+
+**Do not:** have this silently overwrite a `context_window` the operator hand-tuned for a reason —
+the debate topology's current 16k pin is exactly such a value, load-bearing per its own config
+comment and `debate-topology-plan.md`. Any automatic write needs to be opt-in and visible (a log line
+at minimum, matching what P69.6 already does for its resident-set claims), never a silent overwrite
+of a number someone set deliberately.
+
+**Closure condition:** with `provider.vram_budget_gb` set and no `context_window` configured, a fresh
+daemon boot against this machine's `aegis-qwen35-9b:16k` serves a window in the 55,000–80,000 range
+(matching the measured curve above, not the 16,384 default or the unfit 131,072 model-max
+recommendation) without a manual `--fit --write` step, and a debate started immediately afterward
+still gets P69.6's resident-set-aware per-seat windows rather than a value sized as if it were alone.
+
+Priority: **Tier 3 — M/L.** Real value, no fired trigger in the sense this document uses it (nobody
+was blocked), but genuinely sequence-dependent on a design decision for the cold-start problem in
+step 2, and it touches the wizard, the daemon boot path, and the existing resident-set solver rather
+than being a single self-contained change.
 
 <details>
 <summary>P70.4 — the sub-agent result boundary (shipped 2026-08-18)</summary>
@@ -810,18 +1590,126 @@ Priority: Tier 3 — M. No dependency.
 
 ## Open Work — Tier 4
 
-**Status: 21 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger),
-6 from the P66 review batch, 5 from the P67 external-source reading and **P70.3**, filed 2026-08-18
-out of P66.15's sweep. (This line read "13 open …
-plus 4 from P66" until 2026-08-16; it had not been updated when P66.23 was filed, and the Status
-block above was the correct count. It moved to 20 later that day when **P66.26** was refiled out of
-P66.9.)
+**Status: 24 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger),
+6 from the P66 review batch, 5 from the P67 external-source reading, **P70.3** (filed 2026-08-18 out
+of P66.15's sweep) and 4 from the P71 batch filed 2026-08-19 (**P71.6**, **P71.7**, **P71.11**,
+**P71.12**). (This line read "21 open" against a Status block that said 20, a drift dating to
+2026-08-16 when it was not updated as P66.23 and then P66.26 were filed; it is reconciled here
+against the Status block, which has been the correct count throughout.)
 
 The P66 entries here are **deliberately grouped grab-bags**: each collects the Low-severity residue of
 one review domain. They are filed so no finding is lost, not because any of them should be scheduled.
 Take one only when already working in that file. The P67 entries are a different kind of parked: each
 is a capability Aegis does not have and nobody has asked for, filed with the specific trigger that
 would make it worth building.
+
+**The four P71 entries are a third kind, and two of them are parked by *choice* rather than by
+absence of demand.** **P71.6** (in-session response caching) and **P71.11** (window-derived research
+budgets) are both blocked on **P71.8**: phasing changes the arithmetic under each, so fixing them
+first would fit a constant to a regime about to change. **P71.7** (publication dates on search
+results) waits on a keyed provider being the default, because that is the only backend where the date
+is actually available. **P71.12** is different again — it is a filed **negative measurement**, kept
+so the next reader does not re-derive an intuition this batch already tested and found small.
+
+### P71.6 — Nothing memoizes a fetch or a search within a session
+
+**Filed 2026-08-19.** `web_fetch` and `web_search` re-issue every request. The deep-research skill's
+audit trail is explicitly designed around not repeating work — "it prevents re-fetching the same dead
+ends when a topic gets revisited" (SKILL.md §2) — but that guarantee lives entirely in the model's
+context, which compaction deletes. After a compaction the model has no record of what it fetched, so
+a re-fetch is both likely and silently expensive: full network round-trip, full token cost again.
+
+An in-session cache keyed on the normalized URL (and on query+max_results for search) would make the
+audit trail's promise real rather than aspirational, and would make a re-fetch after compaction
+nearly free — which is the recovery path P64.1 deliberately chose over spilling.
+
+**Promote when** **P71.8** lands: a phased run reads the working file back into each fresh context
+and will re-fetch by design at phase boundaries, which is the first time this stops being
+speculative. Until then the compaction thrash (**P71.5**) dominates and this would be measuring the
+wrong thing.
+
+Priority: Tier 4 — S. No fired trigger yet.
+
+### P71.7 — `web_search` results carry no publication date, so the source-quality bar cannot be applied
+
+**Filed 2026-08-19.** Section 3 of the deep-research skill requires the model to "note publication
+dates. For fast-moving topics prefer recent material and flag anything old enough that it may no
+longer hold." Section 1 step 3 requires that quality bar to be applied to "result titles/URLs/
+snippets *before* fetching".
+
+`searchResult` carries `title`, `urlStr`, `snippet` and nothing else (`web.go:203`), and DDG snippets
+rarely contain a date. So the skill instructs the model to filter on a signal the tool does not
+provide, at the one point where filtering is cheap. The only way to obey it is to fetch everything
+first — which inverts the budget the skill is trying to hold, and on a small window is exactly the
+behaviour **P71.5** makes unaffordable.
+
+A fetched page usually carries `og:article:published_time` or a `<time>` element, which is a real
+signal but only available *after* the fetch this section is trying to avoid.
+
+**Checked 2026-08-19, and weaker than assumed when this item was first filed: neither recommended
+provider is a clean win.** Tavily's `/search` response schema is `title`, `url`, `content`, `score`,
+`raw_content`, `favicon`, `images`, `id` — **no date field**. Brave's Web Search API supports
+`freshness` as a *query* filter (`pd`/`pw`/`pm`/`py`), which narrows *before* searching rather than
+labeling results *after*, and it was not possible to confirm from the public docs whether individual
+result objects carry an `age`/`page_age` field — needs a live authenticated call against
+`api.search.brave.com/res/v1/web/search` to settle, not another documentation read.
+
+**Promote when** that live call is made (a five-minute check once a Brave key exists for any other
+reason) and confirms a per-result date field, or when Brave's `freshness` filter is judged good
+enough on its own — it solves a related but different problem: "don't return old pages" rather than
+"tell me how old this page is". Until one of those is true this item stays unbuildable as stated.
+
+Priority: Tier 4 — S. Real, and unbuildable well on the zero-config backend.
+
+### P71.11 — The deep-research budgets are cloud-window constants handed to a local model
+
+**Filed 2026-08-19.** The skill fixes its budget in prose: "**Round cap: 8**", "roughly 5–12 quality
+sources", and it relies on `web_fetch`'s 20,000-char default per read. None of the three is a
+function of the context window.
+
+At `context_window: 16000` that budget is arithmetically impossible: 8 rounds × 5–12 sources ×
+~5,000 tokens per source is one to two orders of magnitude past a window whose compaction trigger is
+8,000 tokens. The model does not know this, so it plans a run it cannot execute and then discovers
+the wall one compaction at a time. The 16k live run's own opening plan states "**Budget:** 8 rounds
+max, targeting 5-12 quality sources" — copied faithfully from the skill, and never achievable.
+
+**Do:** derive the round and source targets from the resolved window at skill-activation time, the
+way `enginecfg` derives run limits once for every caller, rather than hard-coding a cloud-sized
+number in prose. Roughly: four rounds and three or four sources at 16k, the current numbers at 128k.
+
+**Promote when** **P71.8** lands. Phasing changes the arithmetic completely — a per-round context
+reset means the per-*run* budget stops being the binding constraint — so setting these numbers before
+phasing exists would be fitting a constant to a regime that is about to change. Filed now so the
+observation is not lost.
+
+Priority: Tier 4 — S. Blocked on **P71.8** by choice, not by dependency.
+
+### P71.12 — Main-content extraction for `web_fetch` — measured, and smaller than it looks
+
+**Filed 2026-08-19 as a negative measurement**, so the next reader does not re-derive it. `htmlToText`
+(`web.go:257`) keeps every text node outside `script`/`style`/`noscript`, so a fetched page carries
+its navigation, cookie prose, "This browser is no longer supported", breadcrumb and footer. The
+obvious improvement is to prefer `<main>`/`<article>` and drop `nav`/`header`/`footer`/`aside`.
+
+**It is worth less than it appears.** Measured across four `learn.microsoft.com` pages on 2026-08-19:
+
+| page | raw HTML | after `htmlToText` | boilerplate | share |
+|---|---|---|---|---|
+| `cloud-adoption-framework/ready/landing-zone/` | 66,399 | 11,374 | 1,395 | 12% |
+| `architecture/networking/architecture/hub-spoke` | 97,699 | 37,774 | 1,250 | 3% |
+| `defender-for-cloud/defender-for-cloud-introduction` | 64,194 | 17,305 | 1,218 | 7% |
+| `networking/design-guide/internet-ingress` | 84,672 | 29,850 | 1,446 | 5% |
+
+Roughly **1.2–1.5 KB per page, 3–12%** — a few hundred tokens. The existing converter is already
+doing the heavy lifting (66 KB of HTML down to 11 KB of text). Structural extraction is a real but
+marginal win, and it carries a real risk: `<main>` heuristics fail differently per site, and a
+mis-detected container silently returns *less* than the naive walk.
+
+**Promote when** already editing `htmlToText` for another reason, or if a site is found where the
+boilerplate share is large enough to change a fetch's usable content. Do **not** schedule it as a
+context-budget measure — **P71.5** is that measure, and it is worth roughly twenty times as much.
+
+Priority: Tier 4 — S. Confirmed small. Do not schedule.
 
 <details>
 <summary>P70.3 — the scanner-output bound, and the wrap declined (shipped 2026-08-18)</summary>
