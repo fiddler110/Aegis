@@ -33,6 +33,7 @@ func newRootCmd() *cobra.Command {
 		firstInit     bool
 		initProject   bool
 		initOverwrite bool
+		initDiff      bool
 	)
 
 	cmd := &cobra.Command{
@@ -65,9 +66,15 @@ Use "aegis <command> --help" for details on any command below.`,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if firstInit {
+				if initDiff {
+					return diffFirstInit()
+				}
 				return runFirstInit(initOverwrite)
 			}
 			if initProject {
+				if initDiff {
+					return diffProjectInit()
+				}
 				return runProjectInit(initOverwrite)
 			}
 
@@ -191,6 +198,7 @@ Use "aegis <command> --help" for details on any command below.`,
 	cmd.Flags().BoolVar(&firstInit, "first-init", false, "create the global config file with a full provider template (Ollama active by default)")
 	cmd.Flags().BoolVar(&initProject, "init", false, "create a project-level .aegis/config.yaml override in the current directory")
 	cmd.Flags().BoolVar(&initOverwrite, "overwrite", false, "with --init/--first-init, regenerate an existing config from the latest template (backs up the old file first) instead of aborting")
+	cmd.Flags().BoolVar(&initDiff, "diff", false, "with --init/--first-init, print what --overwrite would change vs the existing file, without writing anything")
 
 	const (
 		groupRun     = "run"

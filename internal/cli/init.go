@@ -2,8 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
@@ -12,9 +15,77 @@ import (
 // runFirstInit writes the global config template to the user's OS config
 // directory. It aborts if the file already exists to avoid clobbering changes,
 // unless overwrite is set, in which case the existing file is backed up first.
+//
+// Before writing, it makes a short best-effort probe of the local Ollama
+// instance (the template's active provider) and, if models are pulled,
+// substitutes concrete provider.model / provider.small_model values in place
+// of "auto" / the commented-out example — so a fresh install lands pinned to
+// what is actually on the machine rather than a sentinel resolved later at
+// runtime. A network hiccup or an empty Ollama library is not an error here;
+// the template's existing "auto" defaults are already the correct fallback.
 func runFirstInit(overwrite bool) error {
 	path := config.GlobalConfigPath()
-	return writeConfigTemplate(path, globalConfigTemplate, "global", overwrite)
+	template := applyOllamaTemplateDefaults(globalConfigTemplate)
+	return writeConfigTemplate(path, template, "global", overwrite)
+}
+
+// applyOllamaTemplateDefaults probes http://localhost:11434 for pulled models
+// and, if any are found, rewrites the template's provider.model line to the
+// most-recently-used one and (when a second, smaller model is also present)
+// uncomments provider.small_model with the smallest one by on-disk size.
+// Returns the template unchanged if Ollama isn't reachable or has no models.
+func applyOllamaTemplateDefaults(template string) string {
+	models, err := discoverOllamaModels("http://localhost:11434", 2*time.Second)
+	if err != nil || len(models) == 0 {
+		return template
+	}
+
+	main := models[0].Name
+	template = strings.Replace(template,
+		`model: "auto"              # "auto" picks the first available Ollama model`,
+		fmt.Sprintf(`model: %q            # detected at "aegis --first-init" time; re-run with`, main)+"\n"+
+			`                             # --overwrite after pulling new models, or edit by hand.`,
+		1)
+
+	if small := smallestOtherModel(models, main); small != "" {
+		template = strings.Replace(template,
+			`  # small_model: "llama3.2"  # Optional fast model for background calls`,
+			fmt.Sprintf("  small_model: %q     # detected at init time: smallest other model pulled", small),
+			1)
+	}
+	fmt.Printf("Detected Ollama model%s: %s\n", pluralS(len(models)), strings.Join(modelNames(models), ", "))
+	return template
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func modelNames(models []ollamaModelInfo) []string {
+	names := make([]string, len(models))
+	for i, m := range models {
+		names[i] = m.Name
+	}
+	return names
+}
+
+// smallestOtherModel returns the name of the smallest-by-size model in models
+// other than exclude, or "" if models has no second entry.
+func smallestOtherModel(models []ollamaModelInfo, exclude string) string {
+	var others []ollamaModelInfo
+	for _, m := range models {
+		if m.Name != exclude {
+			others = append(others, m)
+		}
+	}
+	if len(others) == 0 {
+		return ""
+	}
+	sort.Slice(others, func(i, j int) bool { return others[i].Size < others[j].Size })
+	return others[0].Name
 }
 
 // runProjectInit writes a project-level override template to .aegis/config.yaml
@@ -25,11 +96,92 @@ func runProjectInit(overwrite bool) error {
 	return writeConfigTemplate(path, projectConfigTemplate, "project", overwrite)
 }
 
+// diffFirstInit prints what an --overwrite of the global config would change,
+// without writing anything — the --diff counterpart to runFirstInit, for
+// deciding whether to overwrite (or what to copy forward by hand afterwards)
+// before committing to it.
+func diffFirstInit() error {
+	path := config.GlobalConfigPath()
+	template := applyOllamaTemplateDefaults(globalConfigTemplate)
+	return diffConfigTemplate(path, template, "global")
+}
+
+// diffProjectInit is diffFirstInit's project-config counterpart.
+func diffProjectInit() error {
+	return diffConfigTemplate(config.ProjectConfigPath(), projectConfigTemplate, "project")
+}
+
+func diffConfigTemplate(path, template, label string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		fmt.Printf("No existing %s config at %s — nothing to diff. Run --first-init/--init to create one.\n", label, path)
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("check existing config: %w", err)
+	}
+	printConfigDiff(path, template, os.Stdout)
+	return nil
+}
+
+// printConfigDiff prints every setting that differs between the config file
+// at existingPath and newTemplate (existing value first, then what the fresh
+// template would replace it with) — so `--overwrite` doesn't silently
+// discard a customization the operator forgot they'd made, and `--diff` can
+// answer "what would change" before committing to it.
+//
+// This is advisory only: a failure to read or parse either side is reported
+// to out and swallowed rather than returned, since diffing must never be
+// what stands between an operator and --overwrite actually writing the
+// backup and the new file.
+func printConfigDiff(existingPath, newTemplate string, out io.Writer) {
+	oldCfg, err := config.LoadFileRaw(existingPath)
+	if err != nil {
+		fmt.Fprintf(out, "(could not read existing config to diff: %v)\n", err)
+		return
+	}
+	tmp, err := os.CreateTemp("", "aegis-init-diff-*.yaml")
+	if err != nil {
+		fmt.Fprintf(out, "(could not diff against the new template: %v)\n", err)
+		return
+	}
+	defer os.Remove(tmp.Name())
+	_, werr := tmp.WriteString(newTemplate)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		fmt.Fprintf(out, "(could not diff against the new template: %v)\n", firstNonNil(werr, cerr))
+		return
+	}
+	newCfg, err := config.LoadFileRaw(tmp.Name())
+	if err != nil {
+		fmt.Fprintf(out, "(could not parse the new template to diff: %v)\n", err)
+		return
+	}
+	diffs := config.Diff(oldCfg, newCfg)
+	if len(diffs) == 0 {
+		fmt.Fprintln(out, "No settings differ from the fresh template.")
+		return
+	}
+	fmt.Fprintf(out, "%d setting(s) in the existing config differ from the fresh template (existing -> new):\n", len(diffs))
+	for _, d := range diffs {
+		fmt.Fprintf(out, "  %s\n", d)
+	}
+	fmt.Fprintln(out, "Anything you want to keep, copy forward by hand — the original is kept as a .bak file alongside it after --overwrite.")
+}
+
+func firstNonNil(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
 func writeConfigTemplate(path, template, label string, overwrite bool) error {
 	if existing, err := os.ReadFile(path); err == nil {
 		if !overwrite {
 			return fmt.Errorf("%s config already exists at %s\nEdit it directly, re-run with --overwrite to regenerate from the latest template (a backup is kept), or use `aegis config update` to merge in new fields without discarding customizations", label, path)
 		}
+		printConfigDiff(path, template, os.Stdout)
 		backup := fmt.Sprintf("%s.bak-%d", path, time.Now().Unix())
 		if err := os.WriteFile(backup, existing, 0o600); err != nil {
 			return fmt.Errorf("write backup %s: %w", backup, err)
@@ -110,6 +262,13 @@ provider:
                              # verdicts). Strongly recommended before enabling
                              # output_guard below — pick a small NON-thinking
                              # model you have pulled.
+  # stream_idle_timeout raises the gap Aegis tolerates between two streamed
+  # chunks before it gives up on a wedged model call (default: 10 minutes).
+  # Raised here because local models can go quiet for a while mid-generation
+  # on a slow GPU/CPU or a long thinking pass. cost.max_turn_stall below is
+  # raised to match — it is the *other* bound on the same silence, and must
+  # stay above this one or it cuts the run first (see CLAUDE.md).
+  stream_idle_timeout: 1800   # 30 minutes
 
 
 # ┌─────────────────────────────────────────────────────────────────────────────
@@ -291,6 +450,12 @@ personas:
 
 cost:
   budget_usd: 0.0            # 0 = unlimited. Set e.g. 5.0 to abort past $5.00.
+  # max_turn_stall aborts a turn after this many seconds of complete silence
+  # (no streamed token, no tool activity). Default is 900 (15 min); raised
+  # here to stay above provider.stream_idle_timeout above — see CLAUDE.md's
+  # "the stall bound sits above every per-call timeout" invariant. Lower this
+  # back down (or to 0 to disable) if you'd rather fail fast on a wedged run.
+  max_turn_stall: 2100        # 35 minutes
 
 
 # ─────────────────────────────────────────────────────────────────────────────

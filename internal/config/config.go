@@ -1816,6 +1816,34 @@ func FileSecurity(path string) (SecurityConfig, error) {
 	return sec, nil
 }
 
+// LoadFileRaw is FileSecurity's whole-Config counterpart: it parses one file
+// with no other layer merged in — no built-in defaults, no environment, and
+// no other file — so a caller sees exactly what that file declares. Fields
+// it doesn't set come back at their Go zero value on both sides of a
+// comparison, which is what makes it fit for diffing two files against each
+// other (e.g. an existing config against a fresh template) without the
+// built-in defaults manufacturing differences neither file actually states.
+//
+// A missing file is not an error — it yields the zero Config, same as
+// FileSecurity. An unreadable or malformed one is.
+func LoadFileRaw(path string) (*Config, error) {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return &Config{}, nil
+		}
+		return nil, fmt.Errorf("stat config %s: %w", path, err)
+	}
+	k := koanf.New(".")
+	if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
+		return nil, fmt.Errorf("load config %s: %w", path, err)
+	}
+	var cfg Config
+	if err := k.Unmarshal("", &cfg); err != nil {
+		return nil, fmt.Errorf("unmarshal config %s: %w", path, err)
+	}
+	return &cfg, nil
+}
+
 // loadDotEnv reads a .env-style file and sets any variables it contains into
 // the process environment, skipping variables already present so that real
 // environment variables always take precedence. The file format is KEY=VALUE

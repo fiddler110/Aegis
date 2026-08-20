@@ -276,6 +276,22 @@ func walkPolicyValue(path string, cfgv, basev reflect.Value, visit func(string, 
 	visit(path, policyFor(path), cfgv, basev)
 }
 
+// Diff returns a human-readable "key: from -> to" line for every leaf field
+// that differs between from and to, across the whole Config — unlike
+// securityRelevantDiff below, with no trust-policy filtering. Meant for
+// operator-facing previews (e.g. `aegis --first-init --overwrite`/`--diff`
+// showing what a regenerated config file would change) rather than the
+// security gate, so every field is in scope, not just the frozen ones.
+func Diff(from, to *Config) []string {
+	var diffs []string
+	keys, indexes := configFieldKeys()
+	fv, tv := reflect.ValueOf(from).Elem(), reflect.ValueOf(to).Elem()
+	for i, key := range keys {
+		diffs = append(diffs, describeChanges(key, fv.Field(indexes[i]), tv.Field(indexes[i]))...)
+	}
+	return diffs
+}
+
 // securityRelevantDiff returns a human-readable line for each setting the
 // project layer would change that it is not allowed to change — i.e. every
 // non-project-settable key where full differs from base. The lines are what

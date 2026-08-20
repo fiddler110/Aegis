@@ -86,34 +86,50 @@ func resolveOllamaModel(cfg *config.Config) error {
 	if cfg.Provider.Model != "auto" && cfg.Provider.Model != "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/tags", nil)
+	models, err := discoverOllamaModels(base, 5*time.Second)
 	if err != nil {
 		return err
 	}
+	if len(models) == 0 {
+		return fmt.Errorf("model: auto — no models available in Ollama; pull one first: ollama pull <model>")
+	}
+	cfg.Provider.Model = models[0].Name
+	return nil
+}
+
+// ollamaModelInfo is one entry from GET /api/tags.
+type ollamaModelInfo struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+// discoverOllamaModels lists the models currently pulled into an Ollama
+// instance at base, in the order /api/tags reports them (most-recently-
+// pulled/used first, per Ollama's own convention — the same order
+// resolveOllamaModel treats "first" as "auto"'s pick).
+func discoverOllamaModels(base string, timeout time.Duration) ([]ollamaModelInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("list ollama models: %w", err)
+		return nil, fmt.Errorf("list ollama models: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read ollama models: %w", err)
+		return nil, fmt.Errorf("read ollama models: %w", err)
 	}
 	var result struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
+		Models []ollamaModelInfo `json:"models"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("decode ollama models: %w", err)
+		return nil, fmt.Errorf("decode ollama models: %w", err)
 	}
-	if len(result.Models) == 0 {
-		return fmt.Errorf("model: auto — no models available in Ollama; pull one first: ollama pull <model>")
-	}
-	cfg.Provider.Model = result.Models[0].Name
-	return nil
+	return result.Models, nil
 }
 
 // ollamaNativeBase returns the native Ollama base URL (e.g. "http://localhost:11434")
