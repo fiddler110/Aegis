@@ -35,8 +35,18 @@ func runFirstInit(overwrite bool) error {
 // uncomments provider.small_model with the smallest one by on-disk size.
 // Returns the template unchanged if Ollama isn't reachable or has no models.
 func applyOllamaTemplateDefaults(template string) string {
-	models, err := discoverOllamaModels("http://localhost:11434", 2*time.Second)
-	if err != nil || len(models) == 0 {
+	all, err := discoverOllamaModels("http://localhost:11434", 2*time.Second)
+	if err != nil || len(all) == 0 {
+		return template
+	}
+	// Exclude embedding-only models (nomic-embed-text and the like): neither
+	// the main model nor small_model can be one, since both need to serve
+	// chat completions. They stay in the "detected" list printed below, since
+	// that's just reporting what's on the machine.
+	models := chatCapableModels(all)
+	if len(models) == 0 {
+		fmt.Printf("Detected Ollama model%s: %s (none serve chat completions — leaving provider.model: \"auto\")\n",
+			pluralS(len(all)), strings.Join(modelNames(all), ", "))
 		return template
 	}
 
@@ -53,8 +63,19 @@ func applyOllamaTemplateDefaults(template string) string {
 			fmt.Sprintf("  small_model: %q     # detected at init time: smallest other model pulled", small),
 			1)
 	}
-	fmt.Printf("Detected Ollama model%s: %s\n", pluralS(len(models)), strings.Join(modelNames(models), ", "))
+	fmt.Printf("Detected Ollama model%s: %s\n", pluralS(len(all)), strings.Join(modelNames(all), ", "))
 	return template
+}
+
+// chatCapableModels filters out embedding-only models.
+func chatCapableModels(models []ollamaModelInfo) []ollamaModelInfo {
+	var out []ollamaModelInfo
+	for _, m := range models {
+		if m.chatCapable() {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func pluralS(n int) string {

@@ -99,8 +99,28 @@ func resolveOllamaModel(cfg *config.Config) error {
 
 // ollamaModelInfo is one entry from GET /api/tags.
 type ollamaModelInfo struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	Name         string   `json:"name"`
+	Size         int64    `json:"size"`
+	Capabilities []string `json:"capabilities"`
+}
+
+// chatCapable reports whether m can serve chat completions — i.e. is not an
+// embedding-only model. /api/tags reports embedding models (e.g.
+// nomic-embed-text) with capabilities: ["embedding"] and no "completion", and
+// they are typically the smallest thing pulled, which made them the accidental
+// "smallest model" pick before this check existed. A model that reports no
+// capabilities at all (older Ollama servers) is assumed chat-capable rather
+// than excluded, since absence of the field is not evidence either way.
+func (m ollamaModelInfo) chatCapable() bool {
+	if len(m.Capabilities) == 0 {
+		return true
+	}
+	for _, c := range m.Capabilities {
+		if c == "completion" {
+			return true
+		}
+	}
+	return false
 }
 
 // discoverOllamaModels lists the models currently pulled into an Ollama
