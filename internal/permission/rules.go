@@ -119,7 +119,12 @@ func (r Rule) matches(t tool.Tool, subject string) bool {
 		return false
 	}
 	switch t.Capability() {
-	case tool.CapRead, tool.CapWrite:
+	case tool.CapRead:
+		if bulkScopeToolNames[t.Name()] {
+			return r.matchesBulkScope(subject)
+		}
+		return r.rePath.MatchString(normalizePathLike(subject))
+	case tool.CapWrite:
 		return r.rePath.MatchString(normalizePathLike(subject))
 	case tool.CapExecute:
 		if r.Action == RuleAllow {
@@ -127,6 +132,110 @@ func (r Rule) matches(t tool.Tool, subject string) bool {
 		}
 	}
 	return r.re.MatchString(subject)
+}
+
+// bulkScopeToolNames are Read-capability tools whose path-like input argument
+// (if any) is a search *root*, not the object actually read — any descendant
+// of that root may end up in the tool's output (P74.1). grep and glob take no
+// root argument at all: both always walk the whole workspace root
+// (effectiveRoot) and use their glob-shaped field only as a filter, so their
+// scope is the entire tree unless that filter narrows it. This is why the
+// ordinary CapRead path match is wrong for them — subjectFor's old CapRead
+// branch (firstNonEmpty(path, file_path)) was always "" for grep, so
+// normalizePathLike("") = "." never satisfied a "secrets/**"-shaped pattern,
+// and a deny rule scoping a directory silently never fired. Keyed by name
+// because "is this call's path a scope or an object" is a property of the
+// tool, not something a generic schema field can advertise.
+var bulkScopeToolNames = map[string]bool{
+	"grep": true,
+	"glob": true,
+	"ls":   true,
+}
+
+// matchesBulkScope reports whether the rule's pattern can match anything a
+// bulk-scope call (grep/glob/ls) might actually surface. subject is either a
+// literal scope-narrowing filter — ls's path, or grep/glob's glob-shaped
+// field — or "." (bulkScopeSubject's sentinel) when the call named no root or
+// filter at all, meaning it walks the entire workspace unconstrained.
+//
+// Deny fires on any possible overlap between the two, including
+// unconditionally against the unconstrained "." case: over-matching a deny is
+// safe (the same asymmetry globToRegexpExec documents for exec allow-rules),
+// and this is specifically what closes the P74.1 gap — a deny rule that stops
+// read_file on a path must equally stop grep from surfacing the same file's
+// contents via a pathless call. Allow is the conservative direction instead:
+// an unconstrained "." call only satisfies a "*" allow, never a scoped one,
+// so a scoped "allow grep(docs/**)" can't be read as clearance to search the
+// whole tree just because one particular call happened to search all of it.
+func (r Rule) matchesBulkScope(subject string) bool {
+	scope := normalizePathLike(subject)
+	if scope == "." {
+		if r.Action == RuleDeny {
+			return true
+		}
+		return r.Pattern == "*"
+	}
+	return pathScopeIntersects(scope, r.Pattern)
+}
+
+// bulkScopeSubject picks the field that bounds a bulk-scope tool call's
+// search, or "." when the call gave none: ls's directory argument, glob's
+// pattern (which *is* its whole scope, not just a filter on top of one), or
+// grep's optional glob filter. Deliberately never "" — subjectFor returning
+// "" is the exact P74.1 symptom (a subject WarnUnmatchableRules cannot tell
+// apart from "no subject field exists at all"), and "." reads correctly as
+// "unconstrained" through normalizePathLike either way.
+func bulkScopeSubject(toolName, path, pattern, glob string) string {
+	switch toolName {
+	case "ls":
+		if path != "" {
+			return path
+		}
+	case "glob":
+		if pattern != "" {
+			return pattern
+		}
+	case "grep":
+		if glob != "" {
+			return glob
+		}
+	}
+	return "."
+}
+
+// pathScopeIntersects reports whether a bulk-scope call's narrowing filter
+// (already normalized) can share any match with a rule's pattern. Both are
+// Aegis's path-globs — literal runs plus "*"/"**"/"?" — simple enough that
+// comparing literal prefixes (the fixed text before either pattern's first
+// wildcard) decides intersection exactly for the cases that matter: if one
+// pattern's fixed prefix is a path-boundary prefix of the other's, some path
+// can satisfy both; otherwise the two are scoped to disjoint subtrees.
+func pathScopeIntersects(scope, pattern string) bool {
+	pattern = normalizePathLike(pattern)
+	scopePrefix := literalPrefix(scope)
+	patternPrefix := literalPrefix(pattern)
+	return isPathPrefixOf(scopePrefix, patternPrefix) || isPathPrefixOf(patternPrefix, scopePrefix)
+}
+
+// literalPrefix returns the portion of a glob before its first wildcard
+// character, which bounds every path the glob can possibly match.
+func literalPrefix(glob string) string {
+	if i := strings.IndexAny(glob, "*?"); i >= 0 {
+		return glob[:i]
+	}
+	return glob
+}
+
+// isPathPrefixOf reports whether prefix is a path-boundary-respecting prefix
+// of s: equal, empty (matches anything, e.g. a pattern like "**/*.go" whose
+// literal prefix is ""), or s continues past prefix at a "/" — so "secrets"
+// is a prefix of "secrets/x" but not of "secrets-archive".
+func isPathPrefixOf(prefix, s string) bool {
+	if prefix == "" || prefix == s {
+		return true
+	}
+	rest, ok := strings.CutPrefix(s, prefix)
+	return ok && strings.HasPrefix(rest, "/")
 }
 
 // normalizePathLike canonicalizes a file-path subject or pattern before a
@@ -191,15 +300,33 @@ func subjectFor(t tool.Tool, input json.RawMessage) string {
 		URL      string `json:"url"`
 		Query    string `json:"query"`
 		Pattern  string `json:"pattern"`
+		Glob     string `json:"glob"`
 	}
 	if json.Unmarshal(input, &args) != nil {
 		return ""
 	}
 	switch t.Capability() {
 	case tool.CapExecute:
-		return args.Command
-	case tool.CapWrite, tool.CapRead:
+		// Falling back to path/file_path covers execute-capability tools whose
+		// primary scoping field is a workspace path rather than a shell
+		// command — security_scan and latex_build both declare "path" and no
+		// "command" at all, so they hit the same P74.1 shape as grep: a
+		// recognized subject field the extraction switch never consulted.
+		return firstNonEmpty(args.Command, args.Path, args.FilePath)
+	case tool.CapWrite:
 		return firstNonEmpty(args.Path, args.FilePath)
+	case tool.CapRead:
+		if bulkScopeToolNames[t.Name()] {
+			return bulkScopeSubject(t.Name(), args.Path, args.Pattern, args.Glob)
+		}
+		// Falling back to query/pattern (not just path/file_path) closes the
+		// same class of gap P74.1 fixed for grep on other CapRead tools whose
+		// primary field is a search term rather than a path — project_knowledge
+		// and entity_recall both declare only "query", and previously landed
+		// here with neither path field set, so subjectFor returned "" for them
+		// exactly like it used to for grep despite toolHasSubjectField saying a
+		// rule could match.
+		return firstNonEmpty(args.Path, args.FilePath, args.Query, args.Pattern)
 	case tool.CapNetwork:
 		return firstNonEmpty(args.URL, args.Query)
 	}

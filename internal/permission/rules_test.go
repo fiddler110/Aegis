@@ -321,6 +321,50 @@ func TestRuleGateDenyPathNotEvadedBySeparator(t *testing.T) {
 	}
 }
 
+// TestRuleGateDenyBlocksPathlessGrep is the P74.1 regression: grep declares
+// no path/file_path field at all (it always walks the whole workspace root
+// and uses "glob" only as a filter), so a path-scoped deny rule used to be a
+// silent no-op against it — subjectFor's old CapRead branch
+// (firstNonEmpty(path, file_path)) was always "" for grep, normalizePathLike
+// resolved that to ".", and no non-wildcard path pattern ever matched "."
+// The schema here is copied from grepTool.InputSchema (search.go) so the test
+// exercises the real shape, not a stand-in.
+func TestRuleGateDenyBlocksPathlessGrep(t *testing.T) {
+	base := New(ModeBuild, AutoApprove{})
+	rules, err := ParseRules([]string{"deny grep(secrets/**)"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := NewRuleGate(base, rules)
+	ctx := context.Background()
+
+	grep := fakeTool{
+		name:   "grep",
+		cap:    tool.CapRead,
+		schema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"RE2 regular expression"},"glob":{"type":"string","description":"optional file glob filter"},"ignore_case":{"type":"boolean"}},"required":["pattern"]}`),
+	}
+
+	// A pathless grep call (no "glob" narrowing at all) walks the entire
+	// workspace, so it must be denied unconditionally by a rule scoping any
+	// subtree of it.
+	if ok, reason := gate.Check(ctx, grep, json.RawMessage(`{"pattern":"AWS_SECRET"}`)); ok {
+		t.Error("deny grep(secrets/**) should block a pathless grep call, since it searches the whole tree")
+	} else if reason == "" {
+		t.Error("expected reason on deny")
+	}
+
+	// A grep call whose glob filter is scoped entirely outside the denied
+	// subtree is unaffected.
+	if ok, _ := gate.Check(ctx, grep, json.RawMessage(`{"pattern":"AWS_SECRET","glob":"docs/**"}`)); !ok {
+		t.Error("grep scoped away from the denied subtree via glob should not be blocked")
+	}
+
+	// A grep call whose glob filter names the denied subtree is blocked too.
+	if ok, _ := gate.Check(ctx, grep, json.RawMessage(`{"pattern":"AWS_SECRET","glob":"secrets/*.env"}`)); ok {
+		t.Error("grep glob-scoped into the denied subtree should be blocked")
+	}
+}
+
 func TestRuleGateAuditObserver(t *testing.T) {
 	base := New(ModeBuild, AutoApprove{})
 	rules, _ := ParseRules([]string{"deny shell(*)"})
