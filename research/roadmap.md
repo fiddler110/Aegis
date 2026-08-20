@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-19. This document tracks only **open** work and what's next. For
+**Last updated:** 2026-08-20. This document tracks only **open** work and what's next. For
 shipped-feature history, batch origins, pass-by-pass narrative, refutation records and full design
 rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading with a
 `Priority:` line in its body — `scripts/roadmap-status.sh` parses exactly that shape, so keep it when
@@ -10,12 +10,21 @@ adding items.
 
 ## Status
 
-**34 open items: 26 build + 8 verification-only. Tier 1, Tier 2 (bar one deliberately-parked entry)
-and Tier 3 are all empty; every build item filed in the P71–P73 batches has shipped.** The standing
-advice from the last time this was true holds again: the next build item **does not exist yet and has
-to be found**. Tier 4 is not a queue to promote from — it is 25 entries that were each filed with a
-reason not to schedule them. Finding the next one means a fresh pass producing new work, which is
-exactly how the P71 batch appeared.
+**54 open items: 46 build + 8 verification-only.** The empty-tier state the last revision described
+lasted one day. **P74 — twenty items filed 2026-08-20 — is the fresh pass that advice called for**,
+and it did what the P71 batch did: a comparative reading of two external agent implementations
+against this tree, with every claim about *this* side checked at the file and line cited. Tier 1 has
+one entry again (a permission-rule gap proved against the live gate, not read off a diff), Tier 2 has
+fourteen, and Tier 3 has five in a stated dependency order.
+
+**The batch splits into two lanes that do not block each other**, so they can be worked in parallel or
+in either order: a **TUI lane** (thirteen items, answering a standing user complaint that the interface
+reads as an application where comparable agents read as a terminal) and a **harness lane** (six items
+from `langchain-ai/deepagents`, headed by the per-model profile mechanism Aegis compresses into one
+boolean). The twentieth, **P74.1**, belongs to neither and goes first because it is Tier 1.
+
+Tier 4 remains what it was — 25 entries each filed with a reason not to schedule them, and not a queue
+to promote from.
 
 **Shipped history lives in [releases.md](releases.md), not here.** This document tracks only open
 work; a completed item's full record — what it was, what building it found, and what was measured to
@@ -38,12 +47,18 @@ close it — moves there. The most recent sittings, newest first:
 machine, recorded in its release entry.** None of it is asserted from reading a diff. That standard
 is the one thing from the shipped record that constrains future work here.
 
-- **Tier 1:** 0. Empty since **P71.1**/**P71.10** shipped 2026-08-19; before them, since **P69.6**
-  (2026-08-17) and **P66.5** (2026-08-16), which closed the last exploitable-today finding of the P66
-  review. An item enters here only as a real, currently-exploitable gap that is small and unblocked.
-- **Tier 2:** 1 — **P68.1** (the instrumentation gap the live tier found), deliberately off the
-  ranked list because it travels with the parked live-tier row.
-- **Tier 3:** 0. Emptied 2026-08-18 and kept empty by the 2026-08-19 sitting.
+- **Tier 1:** 1 — **P74.1** (a path-scoped deny rule can never match `grep`), filed 2026-08-20 and
+  proved against the real gate. Empty for one day before that, since **P71.1**/**P71.10** shipped
+  2026-08-19. An item enters here only as a real, currently-exploitable gap that is small and
+  unblocked.
+- **Tier 2:** 15 — **P68.1** (the instrumentation gap the live tier found), deliberately off the
+  ranked list because it travels with the parked live-tier row, plus fourteen P74 entries: **P74.18**
+  (the selection-highlight bug, ranked third overall), **P74.20** (the OSC 52 clipboard fix),
+  **P74.19** (the mouse-capture escape hatch), **P74.5**, **P74.6**, **P74.7** (menus),
+  **P74.8**, **P74.9** (local-model tool-call repair), **P74.10**, **P74.11**, **P74.12**, **P74.13**
+  (motion and status), **P74.14**, **P74.15**.
+- **Tier 3:** 5, all P74 — **P74.2**, **P74.3**, **P74.4** (the TUI layout chain, strictly ordered),
+  **P74.16** and **P74.17**. Empty for two days before that.
 - **Tier 4:** 25 — five from P71 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), six from
   the P66 review (**P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, **P66.26**), five from
   P67 (**P67.10**–**P67.14**), and the nine pre-existing: **P65.4**, **P65.5**, **P64.4**, **P64.5**,
@@ -94,6 +109,42 @@ having here.
   cited, not against the docs. The claims about their side were not, and cannot be — treat them as
   motivation, never as a specification.
 
+**The two P74 constraints, which apply to every P74.\* entry and are not repeated in them.** That
+batch is a comparative reading of two external agent implementations, filed 2026-08-20.
+
+- **`tanbiralam/claude-code` contains two rendering modes and the batch was first read against the
+  wrong one.** `src/utils/fullscreen.ts:112` gates them on `process.env.USER_TYPE === 'ant'`:
+  alt-screen fullscreen internally, inline document flow for external users. The fullscreen path has
+  its own virtual scroll, transcript search and mouse selection. **Every TUI entry here has been
+  re-read against the alt-screen mode**; P74.2 was rewritten and P74.18 was filed as a result. Anyone
+  adding to this lane should check which mode a mechanism belongs to before filing it.
+- **`langchain-ai/deepagents` is Apache-2.0 and Python; `tanbiralam/claude-code` is neither.** The
+  second repository is a reconstruction of a shipped Claude Code bundle — its own README states the
+  source is Anthropic's property, several modules carry a literal `not included in leaked source`
+  stub, and the TypeScript has been through the React compiler. It is the same class of source as the
+  P67 batch and carries the same rule: **nothing may be transcribed from it.** Each TUI entry is a
+  reading of *observed interface behaviour* — glyphs, layout decisions, gating thresholds — and needs
+  an independent Bubbletea implementation written from this document. The practical point reinforces
+  the legal one: it is React and Ink, and none of it is portable anyway.
+- **Every claim about Aegis in these entries was checked against this tree**, at the file and line
+  cited. **P74.1 goes further and was proved by running the real gate** — a throwaway test against
+  `NewRuleGate` with the actual `grep` schema, not a reading of `subjectFor`. Claims about either
+  external side were not checked and cannot be: treat them as motivation, never as a specification.
+
+The batch was filed from a review artifact whose finding ids differ from the roadmap's, because the
+roadmap renumbers into implementation order. The mapping, for anyone reading the two side by side:
+
+| Roadmap | Artifact | Roadmap | Artifact | Roadmap | Artifact |
+|---|---|---|---|---|---|
+| P74.1 | SEC-1 | P74.7 | TUI-5 | P74.13 | TUI-9 |
+| P74.2 | TUI-1 | P74.8 | DA-2 | P74.14 | DA-5 |
+| P74.3 | TUI-2 | P74.9 | DA-3 | P74.15 | DA-6 |
+| P74.4 | TUI-3 | P74.10 | TUI-8 | P74.16 | DA-4 |
+| P74.5 | TUI-4 | P74.11 | TUI-7 | P74.17 | DA-1 |
+| P74.6 | TUI-6 | P74.12 | TUI-10 | P74.18 | *(new, 2026-08-20)* |
+| | | | | P74.19 | *(new, 2026-08-20)* |
+| | | | | P74.20 | *(new, 2026-08-20)* |
+
 **The P66 entries here are deliberately grouped grab-bags**, each collecting the Low-severity residue
 of one review domain, filed so no finding is lost rather than because any of them should be
 scheduled. Take one only when already working in that file. The review itself — six specialist
@@ -112,6 +163,48 @@ result (P70.4), because in both cases content crossed a boundary before being re
 model can already read directly is not a boundary crossing. Zero trust is the stated posture for
 *ingestion* and for *relayed* content, not a rule that every byte gets a marker. Settle the next such
 question against those three, not afresh.
+
+**The TUI keeps alt-screen and the app-owned frame. Decided 2026-08-20, after two wrong answers.** The
+question was how to get native-feeling scroll and selection. The first answer was "move to document
+flow and delegate scroll, selection and search to the terminal" — a 4–6 day commit/live rewrite that
+would have retired `/search`, deleted `selection.go`, and **silently given up re-wrap on resize**, since
+content hard-wrapped and printed into scrollback can never reflow. The user caught it by asking whether
+resize would still re-wrap.
+
+**What the check found is the reusable part.** The comparison client ships *two* rendering modes, and
+`src/utils/fullscreen.ts:112` decides between them with `return process.env.USER_TYPE === 'ant'` —
+**alt-screen fullscreen is the internal default; inline document flow is what external users get.** The
+fullscreen path carries its own virtual scroll, its own transcript search and its own mouse selection
+(the theme's `selectionBg` token is commented "alt-screen mouse selection"). The mode that re-wraps on
+resize is the alt-screen one, which is the architecture Aegis already has.
+
+So the settled position: **the gap was never the rendering model, it was the chrome and the quality of
+the in-app implementations.** P74.2 is a one-sitting chrome removal, P74.18 fixes the selection
+highlight, and `rawScrollback` stays as an opt-in for anyone who wants true terminal scrollback and
+will trade re-wrap for it. Anyone reopening this should start from the two-mode fact, not from the
+public build's behaviour.
+
+**The follow-on question was settled the same day: selection stays app-owned, and the clipboard gets
+fixed instead.** Releasing mouse capture (**P74.19**) would hand selection to the terminal, which is the
+only thing that works over SSH today — but in alt-screen a released wheel event goes to the emulator,
+so it buys terminal-side copy at the cost of wheel scroll, and both halves were named as important. The
+actual defect is narrower: `copyToClipboard` shells out to `pbcopy`/`xclip`/`wl-copy` with **no OSC 52
+path**, so a remote session copies to the wrong machine and says it succeeded. **P74.20** fixes that
+directly and keeps wheel scroll, click-to-focus and the P74.18 highlight. P74.19 survives as an
+off-by-default escape hatch for `tmux`/`kitty` copy-mode workflows. **Generalize: when a preference and
+a defect point at the same symptom, fix the defect before trading away a capability for the
+preference.**
+
+**Two method notes, both earned the hard way here.**
+
+- **A mode whose tests only assert on the frame the model produces has not been shown to work.**
+  `rawScrollback`'s P22.6 tests check `plainView(m)` — the string Aegis emits — and never what a
+  terminal does with a 3,000-line frame in a 40-row window. That is what let the mode read as finished
+  and drove the first wrong sizing. Applies to any future rendering-mode work in `internal/tui`.
+- **When reading an external implementation for mechanisms, establish which build you are reading
+  first.** The whole P74 TUI lane was filed against the public Claude Code behaviour while the
+  interesting mode was behind an env check in a file nobody had opened. Two of the batch's items had
+  their direction inverted by that one fact.
 
 **Read the P67.7 record before touching `internal/engine`.** That item asked for tool calls to be
 dispatched as their blocks complete in the stream, and named four constraints. Building it found two
@@ -168,61 +261,508 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
-**Rewritten 2026-08-19, after the last build row closed.** The P71–P73 chain that filled this table
-is gone: it was a six-row dependency order — one root cause with eleven consequences — and it held
-all the way through, with **P71.1, P71.5, P71.10, P71.9, P71.2, P71.4 and P71.8 shipping in the order
-the chain specified**, the first time in this document's history a filed batch and its build landed
-in the same sitting. Verifying P71.8 live produced **P73.1**, verifying *that* produced **P73.2**, and
-a follow-up conversation produced **P72.1** and then **P72.3**. All shipped. The full record is in
-[releases.md](releases.md).
+**Rewritten 2026-08-20, when the P74 batch filled the table the P71–P73 chain had emptied.** Document
+order in the Tier sections below is the same order as this table, deliberately, so
+`scripts/roadmap-status.sh` and this ranking agree for the first time.
 
-**What is left is one parked row, and it is parked by choice rather than by dependency.**
+**The ranking has three rules and they are worth reading before picking a row.**
+
+1. **P74.1 goes first because it is Tier 1** — currently exploitable, unblocked, and about an hour of
+   work. Nothing else in the batch competes with that.
+2. **P74.2 → P74.3 → P74.4 is a chain**, and its direction was settled on 2026-08-20 after two wrong
+   answers: **Aegis keeps alt-screen and the app-owned frame**, because that is what makes resize
+   re-wrap work and it is the mode the comparison client's own staff run. P74.2 is a one-sitting chrome
+   removal, not the 4–6 day document-flow rewrite it was filed as twice. The rationale and the two
+   method notes that came out of it are under [Decisions that outlive the items that made
+   them](#decisions-that-outlive-the-items-that-made-them) — **read that before reopening this**.
+   **P74.18 is deliberately ranked third out of tier**: it is XS, it is the one outright bug in the
+   selection path, and selection quality is the capability the direction decision named.
+3. **Everything else is parallel.** The menu rows (P74.5–P74.7), the harness rows (P74.8, P74.9,
+   P74.14–P74.17) and the motion rows (P74.10–P74.13) touch disjoint files, so a second sitting can
+   take a different lane without a merge conflict. The one intra-lane order that matters is
+   **P74.10 before P74.11 and P74.12**: both add animation, and both have to respect the flag P74.10
+   introduces.
 
 | # | Item | Tier / size | Why now |
 |---|------|-------------|---------|
-| 1 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Still last for the same reason: **the user parked it**, not a dependency. It is also no longer one sitting — **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need what the tier cannot show: a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. |
+| 1 | **P74.1** — a path-scoped deny rule can never match `grep` | Tier 1, S | The only currently-exploitable row. `deny read_file(secrets/**)` holds and `deny grep(secrets/**)` is a silent no-op returning matching lines from the same files, and `WarnUnmatchableRules` does not warn because the schema check and the extraction switch disagree. Proved against the real gate. |
+| 2 | **P74.2** — drop the chrome, keep alt-screen | Tier 3, S | **Rewritten 2026-08-20 after the direction correction**: sidebar to an overlay, scrollbar auto-hidden, title bar folded into the status line. One sitting, and it keeps re-wrap, `/search` and drag-selection, all of which the document-flow version would have traded away. |
+| 3 | **P74.18** — selection highlights with SGR-7 inverse | Tier 2, XS | Out of order deliberately: it is Tier 2 but it lands on the exact capability the direction decision named important, and it is the one outright *bug* in the selection path. Fragments visibly over every chroma-highlighted diff and `read_file`. |
+| 4 | **P74.20** — no OSC 52, so copy is broken over SSH | Tier 2, XS | A silent wrong result, not a preference: `copyToClipboard` shells to `pbcopy`/`xclip`/`wl-copy`, which over SSH is the remote machine's clipboard. Fixes `/copy` too, which a mouse-capture change does nothing for. |
+| 5 | **P74.19** — mouse capture is unconditional | Tier 2, XS | Pairs with the row above. A `tui.mouse: off` key is the only configuration that gives terminal-native selection *and* re-wrap, since releasing capture does not require releasing alt-screen. Escape hatch, not a default. |
+| 6 | **P74.3** — one tool block, not two events | Tier 3, S | Blocked by P74.2 on the gutter's indentation constant. Stops printing the tool name on both the call and the result line, and hangs the result off a `⎿` continuation carrying a summary. |
+| 7 | **P74.4** — collapse runs of reads and searches | Tier 3, M | Blocked by P74.3's gutter shape. The largest density win in the batch, and *more* valuable in a bounded viewport than in document flow — which is how the comparison client treats it too. |
+| 8 | **P74.5** — lighten the pickers | Tier 2, S | Head of the menu lane, and the most direct answer to the specific complaint that the menus feel wrong. Three heavy selection signals become one. |
+| 9 | **P74.6** — a filter affordance and a match count | Tier 2, XS | Same lane, same file. Removes the only genuinely undiscoverable interaction in the app for the cost of one row. |
+| 10 | **P74.7** — move the real terminal cursor onto the focused row | Tier 2, XS | Same lane. Disproportionate "native" payoff per line changed, and it is the accessibility half of the menu work. |
+| 11 | **P74.8** — salvage tool calls that arrive as prose | Tier 2, S | Head of the harness lane and the cheapest large reliability win for local models. A provider decorator beside `retry.go` and `numctx.go`; independent of everything above. |
+| 12 | **P74.9** — normalize empty tool results, repair argument-shape drift | Tier 2, S | Pairs with P74.8 and lands in the same sitting. An empty result a model cannot distinguish from a failure is a loop that reads as a model defect. |
+| 13 | **P74.10** — a reduced-motion setting | Tier 2, XS | Take before P74.11 and P74.12, which both add animation that has to honour it. Accessibility item *and* a CPU item on a machine already spending everything on inference. |
+| 14 | **P74.11** — show stall as a visual state, not just an abort | Tier 2, S | Between "working" and a 900-second abort there is currently nothing, and on a local model a 90-second silence is both normal and indistinguishable from a hang. |
+| 15 | **P74.12** — ease the token counter instead of jumping it | Tier 2, XS | Polish, and cheap: `animStep` already provides the clock. |
+| 16 | **P74.13** — give each running sub-agent a stable colour | Tier 2, XS | Independent of every other row. A three-agent swarm is currently three near-identical grey lines. |
+| 17 | **P74.14** — distinguish a malformed dangling call from a cancelled one | Tier 2, XS | One branch in `repairOrphanedToolUses`. "Possibly completed" is right for a cancellation and wrong for arguments that never parsed. |
+| 18 | **P74.15** — strip HTML comments from injected memory files | Tier 2, XS | Free bytes against a test-enforced prompt ceiling, and it makes tool-managed markers in project memory viable. |
+| 19 | **P74.16** — a reactive clip path on context overflow | Tier 3, M | Sequence-dependent on nothing, but larger than the rest of the harness lane and it touches the truncation posture table, so it wants a clear run. |
+| 20 | **P74.17** — per-model harness profiles | Tier 3, L | Deliberately last. It is the largest item in the batch and the one that pays off over time rather than on the day; take it once P74.8 and P74.9 have given it concrete cargo to carry, or it gets built as an empty abstraction. |
+| 21 | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — *parked by choice, 2026-08-16* | Verification | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a *better task* rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. |
 
-**One item is deliberately off this list: P68.1** (Tier 2, S). It is what the parked row needs before
-it is worth re-running — the eval tier deletes the database holding the trace its own closure
-conditions are written against. It travels with that row, so it is off the list while the row is
-parked.
+**One item is deliberately off this list: P68.1** (Tier 2, S). It is what row 18 needs before it is
+worth re-running — the eval tier deletes the database holding the trace its own closure conditions are
+written against. It travels with that row, so it is off the list while the row is parked.
 
-**There is no build row, and Tier 4 is not where the next one comes from.** Every entry there was
-filed with a reason not to schedule it, and none has a fired trigger. The next build item has to be
-*found* — by a review pass, a live evaluation, or a user report — which is exactly how the P71 batch
-appeared. The pattern that produced it is worth repeating rather than restating: run the thing that
-is reportedly broken, with its tool calls printed, before forming a theory about why.
+**Sizes are estimates from reading, not from building, and the batch has a known bias.** The P71
+record is the caution: several of its rows were smaller than filed and one was larger. Treat XS/S as
+"one sitting" and M/L as "expect the build to find something the reading did not" — which for P74.17
+in particular is close to certain, because a profile mechanism only reveals its real shape once a
+second model needs a different one.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in *document*
-order, which is priority order only *within* a track — it cannot see a cross-tier ranking — and it
-also cannot see that **P68.1** is deliberately off the list. Use it for repo state and for the parse;
-use this table for what to take.
+order. For P74 the two now agree by construction, but the script still cannot see the cross-tier
+ranking (P74.2 outranks eleven Tier 2 rows), cannot see the P74.2→P74.3→P74.4 chain, and cannot see
+that **P68.1** is deliberately off the list. Use it for repo state and for the parse; use this table
+for what to take.
 
 ---
 
 ## Open Work — Tier 1
 
-**Status: empty.** Last occupied by **P71.1** and **P71.10**, both shipped 2026-08-19 the day they
-were filed; before them **P69.6** (2026-08-17) and **P66.5** (2026-08-16), which closed the last of
-the P66 review's exploitable-on-the-day findings. Records for all of them are in
-[releases.md](releases.md), and several correct the item they were built from — which is the part
-worth reading before trusting [CodeReview.md](CodeReview.md) directly.
+**Status: 1 open — P74.1**, filed 2026-08-20. The tier was empty for one day; before that it was last
+occupied by **P71.1** and **P71.10**, both shipped 2026-08-19 the day they were filed, and before them
+**P69.6** (2026-08-17) and **P66.5** (2026-08-16), which closed the last of the P66 review's
+exploitable-on-the-day findings. Records for all of them are in [releases.md](releases.md), and
+several correct the item they were built from — which is the part worth reading before trusting
+[CodeReview.md](CodeReview.md) directly.
 
 An item enters this tier when it is a real, currently-exploitable security or robustness gap that is
 small and has no dependency.
+
+### P74.1 — A path-scoped deny rule can never match `grep`
+
+**Filed 2026-08-20 and proved against the real gate, not read off `subjectFor`.** A deny rule intended
+to keep a directory out of the model's context holds for `read_file` and is a silent no-op for `grep`,
+which returns matching lines from the same files.
+
+`subjectFor` (`internal/permission/rules.go:183`) extracts the string a rule's glob matches against by
+switching on capability. The `CapRead` branch returns `firstNonEmpty(args.Path, args.FilePath)`. The
+`grep` tool's schema (`internal/tool/builtin/search.go:301`) has neither: it takes `pattern`, `glob`
+and `ignore_case`, and always searches the whole workspace root — `effectiveRoot(ctx, t.root)` — with
+`glob` as the only narrowing. So the extracted subject is always the empty string,
+`normalizePathLike("")` cleans to `"."`, and no path pattern matches it.
+
+**The safety net misses it for a reason worth recording separately from the fix.**
+`WarnUnmatchableRules` asks `toolHasSubjectField`, which introspects the tool's *declared input
+schema* for any of the six names in `subjectFieldNames`. `grep` declares `pattern`, which is on that
+list, so the check passes — but the `CapRead` branch of `subjectFor` returns before `pattern` is ever
+consulted. **The schema-level check and the extraction-level switch disagree, and the warning is
+defeated precisely where it is needed.** Any fix has to close both halves or the next tool with the
+same shape reintroduces it silently.
+
+**Evidence.** A throwaway test against `NewRuleGate` with a stub carrying `grep`'s real schema and
+capability: rule `deny grep(secrets/**)`, input `{"pattern":"AWS_SECRET"}` → `allowed=true`,
+`reason=""`, and `WarnUnmatchableRules` emitted nothing. Reproduce before fixing; do not take this
+paragraph as the test.
+
+**Two candidate fixes, and the second is the one to prefer.** Adding `glob`/`pattern` to the `CapRead`
+extraction is the smaller change and is wrong in the general case — a `glob` is a filter, not a scope,
+and a `grep` with no `glob` at all still walks everything. The better shape is the one
+`deepagents`' `_fs_interrupt.py` uses: classify each filesystem tool as **exact** scope (the call
+operates on the named path — `read_file`, `write_file`, `edit_file`) or **bulk** scope (the path
+argument is a search root and any descendant may surface — `grep`, `glob`, `ls`), and for a bulk call
+fire whenever the searched subtree *intersects* a rule's pattern, unconditionally when the call names
+no root at all. That matches what a blast-radius rule means, and Aegis's globs already span path
+separators (`globToRegexp`) for exactly that reason.
+
+**Closure condition:** a test in `internal/permission` asserting `deny grep(secrets/**)` denies a
+pathless `grep`, plus a second asserting the schema/extraction agreement directly — for every
+registered tool, if `toolHasSubjectField` says a rule can match it, `subjectFor` must return non-empty
+for some input satisfying its schema. The second is what stops the regression class rather than the
+instance.
+
+Priority: Tier 1 — currently exploitable, small, no dependency. Take first.
 
 ---
 
 ## Open Work — Tier 2
 
-**Status: 1 open — P68.1**, which stays deliberately off the ranked list because it travels with the
-parked live-tier row. Everything else this tier held has shipped: **P71.2**, **P71.3**, **P71.4**,
-**P71.5**, **P71.9**, **P72.2**, **P72.3** and **P73.2** on 2026-08-19, and **P66.25**/**P67.2**–
-**P67.5** before them. Records in [releases.md](releases.md).
+**Status: 15 open — fourteen P74 entries filed 2026-08-20, plus P68.1**, which stays deliberately off
+the ranked list because it travels with the parked live-tier row. Everything else this tier held has
+shipped: **P71.2**, **P71.3**, **P71.4**, **P71.5**, **P71.9**, **P72.2**, **P72.3** and **P73.2** on
+2026-08-19, and **P66.25**/**P67.2**–**P67.5** before them. Records in [releases.md](releases.md).
 
-**The note this tier has carried since 2026-08-19 still stands:** a new Tier 2 entry now comes from a
-review pass or a fired trigger, not from what is already filed. All the P71 entries came from a live
-evaluation and none was promoted from Tier 4.
+**Document order below is priority order**, so the fourteen P74 entries come first and P68.1 sits last
+as the parked one. The note this tier has carried since 2026-08-19 held: a new Tier 2 entry comes from
+a review pass or a fired trigger, not from what is already filed — and the P74 batch is another review
+pass, not a promotion from Tier 4.
+
+**Four sub-lanes, and they do not block each other.** **P74.18** (the selection-highlight bug, ranked
+third overall despite its tier) **P74.20** (the OSC 52 clipboard fix) and
+**P74.19** (the mouse-capture escape hatch, off by default) are the selection/clipboard group. Menus (**P74.5**–**P74.7**) all live in
+`internal/tui/dialog.go` and want one sitting. Local-model tool-call repair (**P74.8**, **P74.9**)
+lives in `internal/provider` and `internal/tool/builtin`. Motion and status (**P74.10**–**P74.13**)
+live in `internal/tui`, and **P74.10 must precede P74.11 and P74.12**. The last two (**P74.14**,
+**P74.15**) are one-branch items that fit anywhere.
+
+### P74.18 — Drag-selection highlights with SGR-7 inverse, which fragments over syntax highlighting
+
+**Filed 2026-08-20 out of the P74.2 correction**, while comparing Aegis's selection implementation
+against the alt-screen one it should have been read against in the first place.
+
+`selection.go:305` highlights the selected range with `lipgloss.NewStyle().Reverse(true)` — SGR-7,
+which swaps foreground and background **per cell**. Over uniform text that looks fine. Over
+chroma-highlighted content it does not: every token that carries its own colour inverts to a different
+background, so the selection reads as a ragged stripe of mismatched blocks instead of one contiguous
+region. Aegis applies chroma to diffs (P16.3) and to `read_file` output (P16.2), which is exactly the
+content people drag-select.
+
+The comparison client hit this and moved off it. Its theme carries a dedicated `selectionBg` token
+whose comment is the whole finding:
+
+> *"Solid bg that REPLACES the cell's bg while preserving its fg — matches native terminal selection.
+> Previously SGR-7 inverse (swapped fg/bg per cell), which fragmented badly over syntax
+> highlighting."*
+
+**The fix is the same shape:** add a `selectionBg` role to `colorScheme` (both schemes — it has to
+clear text in each) and rewrite the highlight to set background only, leaving foreground untouched.
+That is what a real terminal's selection does, which is why it reads as native.
+
+**Two details worth getting right.** The token must be picked for contrast against *both* schemes'
+foreground tiers, not just eyeballed on dark — the light scheme's `fgBase` is near-black and needs a
+pale selection, the dark scheme's needs the inverse.
+
+**And do not "fix" the search highlighting while you are in there.** Inverse did not disappear from the
+comparison client, it moved: `selection.ts:914` uses the solid background for *selection*, while
+`searchHighlight.ts:84` still uses `withInverse` for *search matches*. Aegis is the exact mirror image
+— `highlightSearchMatches` (`selection.go:284`) already sets an explicit `colBrandFg`/`colBrandBg`
+pair, which is the better of the two treatments, and only the selection overlay inverts. The scope of
+this item is `selection.go:305` and nothing else.
+
+**Closure condition:** a test asserting the selection style sets a background and does not set
+`Reverse`, plus a rendered check over a chroma-highlighted line confirming every cell in the range
+carries the same background.
+
+Priority: Tier 2 — XS, no dependency, and it lands directly on the capability the 2026-08-20 direction
+decision named as important.
+
+### P74.20 — The clipboard has no OSC 52 path, so copy is broken over SSH
+
+`copyToClipboard` (`internal/tui/view.go:655`) switches on `runtime.GOOS` and shells out: `pbcopy` on
+darwin, then `xclip` / `xsel` / `wl-copy` on linux, erroring with "no clipboard tool found" when none is
+present. Every one of those writes to the clipboard of the machine **Aegis is running on**.
+
+Run Aegis over SSH — or in a container, or WSL reaching a Windows terminal — and that is the wrong
+machine. `/copy`, drag-selection, and every other copy affordance silently succeed and put the text
+somewhere the user cannot reach. On a headless remote box the `xclip`/`xsel`/`wl-copy` lookup fails
+outright and the feature just reports an error.
+
+**OSC 52 is the fix and it is the standard one**: the escape sequence asks the *terminal emulator* to
+set the local clipboard, so it crosses SSH, tmux and containers by construction. Support is broad
+(iTerm2, kitty, WezTerm, Windows Terminal, foot, recent xterm; tmux needs `set-clipboard on`), and the
+right shape is to try OSC 52 first and keep the native tools as the fallback, not the reverse.
+
+**Two things to get right.**
+
+- **Aegis already strips OSC 52 from untrusted output** (`termsafe.StripDangerousSeqs`, and the
+  transcript/tool-view tests assert it), which is correct and must not be weakened. Writing the sequence
+  is a *deliberate emission on a trusted path*, not a relaxation of the filter — keep the two clearly
+  separated so nobody later "simplifies" them into one place.
+- **Size limits.** Many terminals cap OSC 52 payloads (and tmux historically capped hard). Fall back to
+  the native tool above a conservative threshold rather than emitting a sequence that gets silently
+  truncated.
+
+**This is the better answer to the remote-clipboard problem than P74.19**, because it keeps wheel
+scroll, click-to-focus and the P74.18 highlight, and it fixes `/copy` — which a mouse-capture change
+does nothing for.
+
+Priority: Tier 2 — XS, additive, blocks nothing, and it fixes a silent-wrong-result bug rather than a
+preference.
+
+### P74.19 — Mouse capture is unconditional, so terminal-native selection is unreachable in the default layout
+
+`View()` sets `MouseMode = tea.MouseModeCellMotion` whenever `rawScrollback` is off, which is the
+default. That capture is what makes Aegis's own drag-selection possible — and it is also what stops the
+terminal emulator from offering its own click-drag select and copy-on-select.
+
+Today the only way to get terminal-native selection is `/scrollback`, which also releases alt-screen
+and therefore gives up resize re-wrap. **Those two things do not actually have to travel together.**
+The comparison client separates them explicitly: `CLAUDE_CODE_DISABLE_MOUSE=1` keeps alt-screen and the
+virtualized scroll but skips mouse capture, and its own comment names the reason — *"so tmux/kitty/
+terminal-native copy-on-select keeps working"* — while `CLAUDE_CODE_NO_FLICKER=0` is the all-or-nothing
+switch that also drops alt-screen. Two knobs, two different trades.
+
+A `tui.mouse: off` key doing the same in Aegis is a few lines in `View()`, and it is the **only**
+configuration that delivers terminal-native selection *and* re-wrap at once.
+
+**The advantage that actually justifies it is SSH, and it is real.** `copyToClipboard`
+(`internal/tui/view.go:655`) shells out to `pbcopy` / `xclip` / `xsel` / `wl-copy`, and there is **no
+OSC 52 path** — the only OSC 52 in the tree is in the sanitizers, which correctly strip it from
+untrusted output. Over SSH that means app-owned selection copies to the *remote* machine's clipboard,
+which is useless to the person at the keyboard. Terminal-native selection is the only thing that works
+there today. The secondary case is `tmux`/`kitty` users whose copy-mode and clipboard tooling assume
+the terminal owns selection.
+
+**But P74.20 is the better answer for the SSH case specifically**, because it fixes it without giving
+up anything. Take this item for the people who genuinely prefer terminal selection, not as the fix for
+a remote clipboard.
+
+**Three costs, and the first is the one that matters.**
+
+- **No wheel scroll.** In alt-screen a released wheel event goes to the emulator, which usually sends
+  nothing useful. Scrolling becomes keyboard-only — which cuts against "native scroll" being important,
+  so this cannot be the default without reopening that. Check the keyboard bindings are all reachable
+  while the composer holds focus before calling this done: today `Update` forwards only `pgup`/`pgdown`
+  to the pane while typing, so `GotoTop`/`GotoBottom` and the half-page keys are not.
+- **Selection is unreliable *during* streaming.** Most emulators drop a selection when the cells under
+  it change, and Aegis repaints every animation tick while a turn streams. Idle is fine — the only idle
+  redraw is the 20-second `statusRefreshInterval` tick, which mostly changes no cells — so this affects
+  selecting mid-turn, not selecting an answer after it lands.
+- **No click-to-focus, and `selection.go` goes idle.**
+
+**This is an escape hatch, not a direction.** It does not supersede P74.18: someone running with capture
+on still drags across chroma-highlighted diffs, and that is the bug.
+
+Priority: Tier 2 — XS, additive, blocks nothing. **Off by default, and that is settled, not open**: the
+wheel-scroll trade was put to the user on 2026-08-20 and declined in favour of **P74.20**, which fixes
+the remote clipboard without costing anything. Do not reopen it as a default without new information.
+
+### P74.5 — The pickers stack three heavy selection signals where one would do
+
+Aegis's overlay pickers say "selected" three times over. `configureDialogList`
+(`internal/tui/dialog.go:45`) sets a brand title chip — `Background(colBrandBg)`, `Foreground(colBrandFg)`,
+bold, padded — on a solid fill. `dialogFrame` (`:67`) wraps the result in a rounded primary border.
+`aegisListDelegate` (`:22`) marks the focused row with a left `NormalBorder` bar in `colPrimary`
+**plus** `colPrimary` foreground **plus** bold. The chip on a solid fill is the most
+application-shaped element anywhere in the UI, and the doubled selection cue is why a picker reads as
+a dialog box rather than a list.
+
+The comparison case draws a `❯` pointer in one accent colour, the label in the same colour, a `✓` when
+an item is chosen, and a dim description indented by two — with no frame, no fill and no border bar,
+letting the terminal's own background be the surface.
+
+**What to change, concretely:** replace the chip with plain bold `colPrimary` text over a hairline
+rule; replace the delegate's left border bar with a `❯` pointer and drop the bold, keeping the colour
+shift as the single cue; keep the rounded frame for genuinely modal dialogs (approval, quit-confirm)
+and drop it for pickers, which are transient and already composite over a dimmed transcript.
+
+**Watch the shared-chrome comment at the top of `dialog.go`** — it states the current styling is
+deliberate and mirrors Crush. That decision is being reversed here, so the comment needs rewriting
+rather than deleting, with the reason (the frame competes with the dimmed backdrop that P16.6 already
+provides for modality).
+
+**Closure condition:** the existing dialog snapshot tests updated, and a note in the rewritten comment
+naming which dialogs keep the frame and why.
+
+Priority: Tier 2 — cheap, self-contained, and the most direct answer to the standing menu complaint.
+
+### P74.6 — A picker gives no sign that typing filters it
+
+`configureDialogList` calls `SetShowHelp(false)` and `SetShowStatusBar(false)`, and `newPalette`'s
+comment states the intent: "Browse mode by default; typing any character activates filtering
+naturally." The behaviour is right and completely invisible — there is no visible query, no hint that
+input is accepted, and no match count.
+
+One dim footer line inside the picker fixes all three: `type to filter · ↑↓ move · enter select · esc
+close`, with `n/m` right-aligned once a filter is active. It costs one row of the height
+`dialogListH` already budgets and removes the only genuinely undiscoverable interaction in the app.
+
+**Do this in the same sitting as P74.5** — same function, same file, and the footer's styling depends
+on whether the frame is still there.
+
+Priority: Tier 2 — XS, no dependency beyond sharing a file with P74.5.
+
+### P74.7 — The terminal cursor never moves onto the focused row
+
+`View()` (`internal/tui/view.go:31`) sets `AltScreen`, `MouseMode`, `WindowTitle` and `ReportFocus`,
+but never positions a cursor. While a picker is open the hardware cursor is wherever the composer left
+it, which is why keyboard selection in an Aegis menu feels like watching a redraw rather than moving
+through a list.
+
+The comparison implementation declares a cursor position on every focused list row. Three things
+follow from the terminal's own cursor tracking the selection: screen readers follow it, terminal
+emulators that highlight the cursor line agree with the app about where "here" is, and IME composition
+lands in the right place.
+
+Bubbletea v2 carries cursor state on `tea.View`. The work is to thread a declared position out of
+`listDialog.View` (and the approval dialog, which has the same problem) up to `model.render`, which
+already returns a plain string — so this needs a small return-shape change, and that is the only part
+that is not mechanical.
+
+Priority: Tier 2 — XS, disproportionate payoff per line changed, and the accessibility half of the
+menu lane.
+
+### P74.8 — A tool call that arrives as prose is silently lost
+
+`internal/provider/openai/openai.go` reads `tool_calls` off the wire (`:248`, `:643`, `:702`) and
+nothing else. When a local model emits its call as text — a fenced JSON object, a tagged block, or a
+bare `{"name": ..., "arguments": ...}` — the turn produces prose, the engine sees no tool call, and the
+loop either stalls or retries blind against a model that already answered.
+
+`deepagents` handles this as a per-model middleware: intercept any response that came back with **no**
+structured tool calls, strip reasoning tags, then try a tagged-text parser followed by a bare-JSON
+parser. Two details in that implementation are the ones that make it safe rather than a source of
+false positives, and both must be carried across:
+
+- **Parsed names are validated against the tool list actually sent on that request.** A model writing
+  the word `read_file` in a sentence does not become a call.
+- **Leftover text is preserved as content**, not discarded. A model that narrates and then calls
+  loses neither half.
+
+The natural home is a provider decorator beside `retry.go`, `numctx.go` and `failover.go` — the same
+seam, applied to the response rather than the request. **Keep it off by default and let P74.17 turn it
+on per model**; until that exists, gate it on the existing local-profile boolean rather than making
+every cloud turn pay a regex pass.
+
+**Related but distinct, and worth not conflating:** the qwen3:14b Ollama-template issue drops the call
+from *history* after it was correctly parsed. That is a different bug with a different fix; this item
+is the general defence for the family, not that specific one.
+
+**Closure condition:** a table test over recorded local-model responses in each malformed shape,
+asserting the salvaged call, the surviving prose, and — the important negative — that a response
+merely *mentioning* a tool name yields no call.
+
+Priority: Tier 2 — the cheapest large reliability win for local models, and independent of every TUI
+row.
+
+### P74.9 — An empty tool result is indistinguishable from a failed one
+
+Two small repairs from the same `deepagents` shim, and the second is the one that matters.
+
+**Empty-result normalization.** A tool that legitimately returns nothing — a `grep` with no matches, a
+`read_file` on an empty file — hands the model an empty string. Many local models cannot tell that
+apart from "the tool failed", and re-call it, which then reads as a loop and can trip the P52.3 failure
+breaker or the loop detector for a reason that has nothing to do with either. Replacing an empty
+result with a named placeholder ends it. **This is correct for every model, so it belongs in
+`internal/tool/builtin` near the truncation posture table in `truncate.go`, not behind a profile** —
+and the posture table is where the decision should be recorded, since it is the same class of decision
+about what a result looks like when there is less of it than expected.
+
+**Argument-shape repair.** Rewriting `path` → `file_path` and filling a missing `limit` with a default
+is a per-model shim, not a universal one — a model that guesses argument names wrongly is a model
+problem, and papering over it globally hides a real signal from the tool-calling probe. **Hold this
+half until P74.17 exists**, then register it per model. Filed together because they come from the same
+source; they do not ship together.
+
+**Closure condition:** for the first half, a test that an empty `tool.Result` reaches the model as the
+placeholder, and that the loop detector does not count two such results as a repeat.
+
+Priority: Tier 2 — first half unblocked and small; second half deliberately deferred to P74.17.
+
+### P74.10 — There is no reduced-motion setting
+
+Nothing in `internal/tui` reads a motion preference — no config key, no env check, no equivalent of the
+`NO_COLOR` handling `imagerender.go` already does for colour. `shimmerText`, the blinking caret
+(`caretBlinkPeriod`), the cycling `thinkingPhrase` and every pending tool card animate unconditionally
+whenever `m.streaming && m.followBottom`.
+
+Two reasons this matters more here than for a cloud client. It is an **accessibility** item: the
+shimmer is a continuous moving-luminance sweep, which is the class of animation vestibular sensitivity
+reacts to, and there is currently no way to turn it off short of not using the tool. And it is a
+**CPU** item: `updateSpinnerTick` re-renders the status line and calls `updatePendingToolCards` every
+frame, on a machine that is simultaneously running inference against a 16 GB card.
+
+The implementation detail worth copying is that the comparison client does not merely skip the
+*drawing* — it passes a null interval so the clock **unsubscribes**. The Aegis equivalent is to stop
+re-queueing the spinner tick, not to keep ticking and render a static frame. Note that P3.7 already
+established the pattern by gating on `followBottom`; this is the same shape with a different
+condition.
+
+**Take this before P74.11 and P74.12.** Both add animation, and both have to honour the flag; adding
+them first means retrofitting two more call sites.
+
+Priority: Tier 2 — XS, and it gates two later rows.
+
+### P74.11 — Stall is an abort with nothing before it
+
+`MaxTurnStall` (900s, the only bound covering tool execution) is a hard fatal abort. Between "working"
+and that abort the UI shows exactly one thing: a shimmer that looks identical at second 2 and second
+400. On a local model a 90-second silence during prompt evaluation is completely normal *and*
+completely indistinguishable from a hang, which is the state the user is actually in when they reach
+for ctrl-c.
+
+The comparison client ramps its spinner toward red as the gap since the last token grows, continuously
+rather than at a threshold, so a run visibly gets stuck before it is stuck.
+
+Aegis has the pieces: `shimmerText` already takes a highlight colour and blends a ramp with
+`lipgloss.Blend1D`, and the stream already knows when the last token arrived. Interpolating the
+highlight from `colAccent` toward `colWarning` as a function of that gap is a few lines. **Pick the
+mapping against the real bound**, not an invented one — the ramp should be visibly underway well
+before `MaxTurnStall` fires, and the sidebar's `WAITING`/`GENERATING` section split already encodes
+the distinction that matters (no first token yet vs. tokens stopped).
+
+Must honour P74.10.
+
+Priority: Tier 2 — small, and it converts the single most anxious state in local-model use into a
+legible one.
+
+### P74.12 — The token counter jumps instead of climbing
+
+`renderStats` prints `in:%d out:%d` straight from the last counter update, so the number stutters in
+chunk-sized steps. The comparison client chases the real value with a gap-proportional increment each
+frame — small when close, larger when far behind — so it climbs smoothly and reads as continuous
+progress rather than as intermittent arrivals.
+
+`animStep` already provides the frame clock and `renderStats` is the only render site. Pure polish, and
+cheap; filed because it is the kind of detail that separates "works" from "feels finished".
+
+Must honour P74.10 — a reduced-motion run should print the true number immediately.
+
+Priority: Tier 2 — XS, no dependency beyond P74.10.
+
+### P74.13 — A running swarm is three near-identical grey lines
+
+The sidebar's `AGENTS` section renders every running teammate through `m.th.tool` with an id truncated
+to eight characters, so three concurrent sub-agents are three lines of the same colour differing only
+in a hash prefix. Nothing else in the UI ties a tool card, a transcript line or a status segment back
+to which agent produced it.
+
+The comparison client reserves a fixed eight-colour agent palette and uses one stable colour per
+teammate everywhere that teammate appears. Aegis already has the raw material — Charmtone gives eight
+distinct hues that sit inside the existing scheme, and `colorScheme` is the right place to name them
+as a slice rather than scattering literals.
+
+Hash the agent id to an index so the assignment is stable across restarts and across the sidebar,
+transcript and status bar without threading state.
+
+Priority: Tier 2 — XS, fully independent of every other row.
+
+### P74.14 — A dangling call whose arguments never parsed is reported as "possibly completed"
+
+`repairOrphanedToolUses` reports a started call as *possibly* completed, tracked via
+`Engine.startedTools`. For an interrupted call that is exactly right and is a deliberate, documented
+invariant — the call may genuinely have had an effect, and claiming it did not run is the dangerous
+direction.
+
+It is wrong for one case. A tool call whose **arguments were malformed or truncated** never dispatched
+at all; there is no ambiguity to preserve. Telling the model "possibly completed" there invites it to
+skip a retry it should make, and on local models truncated argument JSON is common enough to matter.
+`deepagents` splits exactly these two messages — *arguments were malformed or truncated* versus
+*another message came in before it could be completed*.
+
+One extra branch, keyed on whether the call ever reached dispatch rather than on parse success at the
+call site, so it stays correct if argument parsing moves.
+
+**Do not weaken the existing behaviour while adding the branch** — the "possibly completed" default is
+load-bearing and the invariant is documented in CLAUDE.md.
+
+Priority: Tier 2 — XS, no dependency.
+
+### P74.15 — Injected memory files pay for their own authoring notes
+
+`deepagents`' memory middleware strips `<!-- ... -->` from AGENTS.md-style content before it reaches
+the system prompt. Aegis injects project and user memory whole.
+
+Two things follow. Free bytes against `localBasePromptCeilingTokens`, which is a hard test-enforced
+ceiling — `TestEffectiveSystem_localProfileBudget` fails the suite when the local base prompt crosses
+it, so anything that reclaims budget without a policy argument is worth having. And it makes
+**machine-managed markers viable**: a tool that maintains a section of a memory file can leave a
+delimiter comment without spending prompt budget on it every turn.
+
+Watch the interaction with P67.5's still-unwired recall path, noted under [Decisions that outlive the
+items that made them](#decisions-that-outlive-the-items-that-made-them): memory currently reaches the
+prompt through `Sources.Load()`, which injects both files unfiltered, and that is the function to
+change — not `FormatEntries`, which has no production callers.
+
+Priority: Tier 2 — XS, no dependency.
 
 ### P68.1 — The live tier can run a measurement it cannot read back
 
@@ -265,20 +805,206 @@ yields less.
 
 ## Open Work — Tier 3
 
-**Status: empty.** The tier was emptied on 2026-08-18 (**P66.15**, **P67.6**, **P67.7**, **P67.8**,
-**P67.9**, then **P70.4**) and the 2026-08-19 sitting kept it that way: **P71.8**, **P73.1** and
-**P72.1** all shipped the day each was filed. Records in [releases.md](releases.md).
+**Status: 5 open, all P74**, filed 2026-08-20. The tier was emptied on 2026-08-18 (**P66.15**,
+**P67.6**, **P67.7**, **P67.8**, **P67.9**, then **P70.4**) and the 2026-08-19 sitting kept it that
+way: **P71.8**, **P73.1** and **P72.1** all shipped the day each was filed. Records in
+[releases.md](releases.md).
 
 Two of those records constrain future work here and are summarized under [Decisions that outlive the
-items that made them](#status): read **P67.7**'s before touching `internal/engine`, and **P66.13**'s
-before adding a permission layer or a run bound anywhere. Read **P66.14**'s (2026-08-16) before
-touching the compaction path, because the shared trigger it introduced changed which numbers two
-already-shipped heuristics see.
+items that made them](#decisions-that-outlive-the-items-that-made-them): read **P67.7**'s before
+touching `internal/engine`, and **P66.13**'s before adding a permission layer or a run bound anywhere.
+Read **P66.14**'s (2026-08-16) before touching the compaction path, because the shared trigger it
+introduced changed which numbers two already-shipped heuristics see.
 
 An item enters this tier when it has real value but is larger or sequence-dependent — it blocks, or
 is blocked by, other work. **P72.1 is the worked example of the "sequence-dependent" half**: it sat
 here rather than being built the day it was filed because it needed a cold-start policy decided, not
 a wire, and the resolution was to put four design questions to the user before writing anything.
+
+**P74.2 → P74.3 → P74.4 is the other kind of sequence-dependent: a chain.** Its ordering flipped twice
+on 2026-08-20 while P74.2's size was wrong; the settled shape is P74.2 first (one sitting of chrome
+removal), then the gutter, then the grouping. **P74.16 and P74.17 are here on size, not sequence** —
+neither blocks anything, both are larger than a sitting.
+
+### P74.2 — The chrome, not the rendering model: six framed regions where one would do
+
+**Filed as a document-flow rewrite, twice, and corrected on 2026-08-20 to something an order of
+magnitude smaller. The correction is the useful part and is recorded under [Decisions that outlive the
+items that made them](#decisions-that-outlive-the-items-that-made-them).** In short: the comparison
+client ships **two** rendering modes, the batch was originally read against the wrong one, and the mode
+Anthropic's own staff run is alt-screen — the architecture Aegis is already in.
+
+`renderChat` composes six framed regions: a title bar, a bordered sidebar column, a scrollbar glyph
+column, the transcript viewport, a todo strip, and a rounded-bordered composer over a status line. Only
+the frames are the problem. **Alt-screen and the bounded viewport are keepers**, because they are what
+let the app own every cell — which is what makes resize re-wrap work, and what keeps `/search`,
+`selection.go` and the timeline picker's `ScrollToItem` alive.
+
+Three consequences of the chrome, none of which need a rendering-model change to fix:
+
+- **Every frame is an edge the eye crosses.** A normal screen draws roughly a dozen box-drawing runs
+  before any content.
+- **Persistent chrome competes with content.** The sidebar is always saying *session, mode, model,
+  tools, files, agents, context, cost*, none of which changes more than twice a minute.
+- **Fixed columns squeeze prose.** Sidebar plus scrollbar plus padding is about 30 columns of an
+  80-column terminal — 37% of the width, permanently.
+
+**The work, and it is one sitting:**
+
+- **Sidebar off by default, reachable as an overlay.** `renderOverlay` already composites over live
+  chat and P33.11/P33.12 established the pattern, so this is a default plus a keybinding, not a new
+  component. `renderInputArea` already folds the context meter into the status bar when the sidebar is
+  hidden, which is most of the fallback already written.
+- **Auto-hide the scrollbar column.** It carries no information while pinned to the bottom, which is
+  the normal state. Render it only when scrolled away, the way a GUI overlay scrollbar behaves.
+- **Fold the title bar into the status line.** It carries a brand mark, the connection dot and the
+  model name; the status line already has a priority-ordered segment list with tail-dropping
+  (`joinedWidth`) that these fit into. That reclaims a row and removes the topmost frame.
+
+**Explicitly out of scope, and this is the reversal:** `tea.Println`, a commit/live split, retiring
+`/search`, and deleting `selection.go`. All of those followed from the document-flow reading and none
+of them survives it. **`rawScrollback` stays exactly as it is** — an opt-in for anyone who wants true
+terminal scrollback and will trade re-wrap for it.
+
+**Closure condition:** a fresh install shows no sidebar, no scrollbar while pinned to the bottom, and
+no title bar; the sidebar overlay opens and closes without perturbing transcript geometry; resize still
+re-wraps everything (assert it — this is the property the corrected direction exists to keep);
+`/search`, drag-selection and `ScrollToItem` all still work.
+
+Priority: Tier 3 — S, and sequence-dependent only because P74.3's gutter indentation depends on
+whether the scrollbar column is still there. Take before P74.3.
+
+### P74.3 — A tool call renders as two events that both announce themselves
+
+A completed call currently emits two lines, each leading with the tool name: `renderToolCall` produces
+`● read_file  internal/x.go`, then `renderToolResult` (`internal/tui/toolview.go:139`) produces
+`✓ read_file → …`. On a twelve-call round that is twelve redundant identifiers, and the pair reads as
+two events rather than one block with an outcome.
+
+The comparison client prints the call once — `⏺ Read(internal/x.go)` — and hangs the result off a
+continuation gutter, `  ⎿  Read 120 lines (ctrl+o to expand)`. Two properties do the work: the result
+line carries a **summary** rather than the name, and it carries the summary rather than the body by
+default. The gutter glyph is what makes call-plus-result read as a single unit.
+
+Aegis already has the harder half. `renderToolCardDone` composes the call block and the result into one
+transcript item, and `toolCompact` already exists as a per-session toggle. What changes is
+`renderToolResult`'s header — drop the repeated name, emit a `⎿` gutter, and make the default a
+one-line summary with the existing expand path.
+
+**The specialized renderers must keep working verbatim.** `renderEditDiff`, `renderShellCall`,
+`renderReadFileResult` and the chroma-highlighted read path all feed this; the P16.3 diff presentation
+and the P16.2 highlighting are the parts most likely to break on a gutter change.
+
+Blocked by P74.2, but only lightly — the coupling is the gutter's indentation constant, which depends
+on whether the scrollbar column is still there. **This briefly ran ahead of P74.2 while that item was a
+4–6 day rewrite; the 2026-08-20 correction shrank P74.2 to one sitting, so the natural order is back.**
+
+Priority: Tier 3 — small, sequence-dependent on P74.2.
+
+### P74.4 — An exploration phase renders as a wall of cards
+
+An exploration phase is ten to twenty consecutive `read_file`, `grep` and `glob` calls, and Aegis emits
+one card per call unconditionally. The result buries the actual answer under a log of syscalls, and it
+is the reason a long turn is hard to read back.
+
+The comparison client folds a run into a single line — *"Searched for 13 patterns, read 6 files"* —
+expandable on demand. **After P74.2 this is the largest remaining density win**, and it is the one that
+most changes how a turn reads: the transcript becomes a narrative of decisions rather than a
+transcript of calls.
+
+**Keep the grouping rule narrow, because the failure mode is hiding something that mattered.**
+Consecutive calls only, all read-capability, all succeeded — any error, any write, any execute breaks
+the group and renders normally. A grouped run must stay expandable, and the P21.2 combined-card
+machinery is where the state for that already lives.
+
+**The interaction with parallel rounds needs deciding, not assuming.** A parallel round is already a
+set of simultaneous calls; whether a round is one group, or groups merge across rounds, changes what
+the summary counts. Decide it explicitly and write it into the item's record.
+
+Blocked by P74.3 — the collapsed line is a summary in the same gutter shape that item introduces. **The
+commit-lifecycle argument that briefly also blocked this on P74.2 is void**: the corrected P74.2 does
+not introduce a commit boundary, so a group that stays open until a non-read call breaks it is just an
+item being re-rendered, which the pane already does on every tick for tool-card shimmer.
+
+**Aegis's comparison point does this too, and does it harder in the mode that matters**:
+`collapseReadSearch.ts` gates *additional* grouping — non-search Bash commands included — on
+`isFullscreenEnvEnabled()`, i.e. only in the alt-screen mode. Collapsing is more valuable in a bounded
+viewport, not less, which is the opposite of what the original document-flow framing implied.
+
+Priority: Tier 3 — medium, and last in the layout chain.
+
+### P74.16 — Truncation is entirely proactive; nothing clips in response to an actual overflow
+
+Aegis bounds tool results in three proactive layers: per-call caps with the posture table in
+`internal/tool/builtin/truncate.go`, a whole-round cap in `roundcap.go`, and spill to
+`<workspace>/.aegis/spill/`. All three fire on Aegis's own estimate of size.
+
+`deepagents` adds a second, reactive path: when the **provider itself** returns a context-overflow
+error, clip the trailing tool-result batch before retrying, split by kind. A `read_file` result is
+head-sliced and annotated with a pointer back to the original `file_path` — **no new write is needed,
+because the content already exists at that path**. Everything else is offloaded to a stub.
+
+The read-file shortcut is worth taking on its own merits regardless of the reactive path: Aegis's spill
+directory currently duplicates content that, for reads, is already on disk somewhere the model can
+reach with `read_file` plus an offset.
+
+**Two constraints from this tree.** The posture table in `truncate.go` is the documented home for
+"which end survives and what happens to the remainder", so a new posture goes in that table rather than
+beside the retry. And the spill directory is deliberately reachable by `read_file` and **not** by grep;
+a pointer-to-original path must not quietly widen that.
+
+**Check first whether the overflow error is even distinguishable.** `internal/provider/errors.go` and
+the P61.7 remainder both concern classifying backend-echoed text; if an overflow is not reliably
+separable from other 400-class failures on the local path, that classification is the real first step
+and this item is larger than it looks.
+
+Priority: Tier 3 — medium, no sequence dependency, but it touches the truncation posture table and
+wants a clear run rather than being squeezed between two TUI rows.
+
+### P74.17 — The entire local-model story is one boolean
+
+`builtin.Options.LocalProfile` is a `bool` (`internal/tool/builtin/builtin.go:104`), decided once in
+`enginecfg.BuiltinOptions` (`internal/enginecfg/tools.go:57`) from `cfg.Provider.LocalPromptProfile()`.
+Every local model — qwen3:14b, gpt-oss, LFM2.5 — lands in the same bucket and gets the same deferred
+tool set, the same prompt profile and the same tool descriptions. **Their failure modes are not the
+same**, and the boolean has no room to say so.
+
+`deepagents` keys a registry on **model spec** and merges profiles additively, so a provider-level
+profile layers under a model-level one. Each profile carries a system-prompt suffix, per-tool
+description overrides, an excluded-tools set, an excluded-middleware set, extra middleware and
+sub-agent overrides. The asymmetry in their tree is the argument for the shape: their Haiku profile is
+52 lines of prompt text, their Nemotron profile is 1,826 lines of quirk shims for one open-weight
+model.
+
+**Aegis already has both halves this needs.** `internal/modelcaps` persists per-model capability and is
+already keyed the right way; `internal/sysprompt` owns the prompt blocks and their byte caps. A
+`profile.Harness` resolved from the model id, carrying `PromptSuffix`, `ToolDescriptionOverrides`,
+`DeferredTools` and a response-decorator list, is the generalization.
+
+**Four constraints, and the first two are hard invariants of this tree.**
+
+- **The prompt budget is test-enforced.** `TestEffectiveSystem_localProfileBudget` fails the suite when
+  the local base prompt crosses `localBasePromptCeilingTokens`. A per-model `PromptSuffix` must be
+  measured against that ceiling per model, not once.
+- **A tool's description must never name a tool the active profile defers.** That is already an
+  invariant; per-model description overrides multiply the number of ways to break it, so the existing
+  test has to become per-profile rather than per-build.
+- **Required scaffolding must not be excludable.** `deepagents` rejects a profile that tries to strip
+  the middleware backing filesystem tools, subagent dispatch or permission enforcement, and formats the
+  rejection identically at construction and assembly time. Aegis enforces the same class of invariant
+  at *test* time with `TestEveryEngineCallSiteDecidesItsGate` and
+  `TestEveryRegisterCallSiteDecidesTheLocalProfile`. **Keep the tests and add the runtime error**, because
+  a profile is user-authorable in a way an `engine.New` call site is not.
+- **`LocalProfile` is load-bearing in the deferred-tool direction.** Under it `edit_file` is deferred
+  and the handle-based editors are not, and a test pins that direction. The migration has to preserve
+  it as a profile default, not lose it in the generalization.
+
+**Take this last, and take it with cargo.** Built before P74.8 and P74.9 exist it is an empty
+abstraction with one boolean's worth of content; built after, it has two concrete per-model behaviours
+asking to be registered, which is what will reveal the real shape of the interface.
+
+Priority: Tier 3 — largest item in the batch, no blocker, but deliberately sequenced last behind
+P74.8 and P74.9.
 
 ## Open Work — Tier 4
 
