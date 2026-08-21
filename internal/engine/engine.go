@@ -779,6 +779,13 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// Per-Run by construction, like every other counter here.
 	var toolFailures toolFailureTracker
 	toolRoundsCompleted := 0
+	// overflowClipRounds bounds P74.16's reactive clip: a context-overflow error
+	// on the turn just sent clips the trailing tool-result batch in place and
+	// retries, rather than failing the whole run the way every overflow did
+	// before. Bounded the same way the phased drive bounds its own overflow
+	// resets (maxPhase6OverflowResets) — a window too small for even one clipped
+	// result must not spin forever pretending to make progress.
+	overflowClipRounds := 0
 	// toolCallAsTextWarned bounds the P34.2 notice to one per run: the check
 	// sits on a path a guard retry can re-enter.
 	toolCallAsTextWarned := false
@@ -915,6 +922,21 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 			// outermost — a run past an explicit operator bound reports that
 			// bound even if it also happens to be silent.
 			err = budget.override(stall.override(err))
+			// P74.16: a context-overflow error is recoverable in place, not just
+			// at the phased drive's whole-conversation-reset granularity — the
+			// batch that just overflowed the request is still sitting at the end
+			// of conv.Messages, and clipping it usually frees enough headroom to
+			// retry the same turn rather than aborting the run. Bounded by
+			// maxOverflowClipRounds so a window too small for even one clipped
+			// result fails rather than spinning; each attempt still counts an
+			// iteration, same as every other corrective in this loop.
+			if provider.IsContextOverflowError(err) && overflowClipRounds < maxOverflowClipRounds {
+				if clipOverflowBatch(conv) {
+					overflowClipRounds++
+					emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context overflowed; clipped the most recent tool result(s) to make room and retrying (%d/%d)", overflowClipRounds, maxOverflowClipRounds)})
+					continue
+				}
+			}
 			emit(Event{Kind: KindError, Err: err})
 			return err
 		}

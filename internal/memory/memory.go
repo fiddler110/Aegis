@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -111,10 +112,10 @@ func (s Sources) loadDirect() string {
 	// The persona/skill precedent doesn't distinguish project from user/
 	// global provenance (only compiled-in built-ins are exempt), so both
 	// sections are wrapped here too.
-	if txt := readMemoryFileChecked(s.GlobalMemoryPath()); txt != "" {
+	if txt := stripHTMLComments(readMemoryFileChecked(s.GlobalMemoryPath())); txt != "" {
 		sections = append(sections, "# User memory\n\n"+wrapMemoryFile("user", txt))
 	}
-	if txt := readMemoryFileChecked(s.ProjectMemoryPath()); txt != "" {
+	if txt := stripHTMLComments(readMemoryFileChecked(s.ProjectMemoryPath())); txt != "" {
 		sections = append(sections, "# Project memory\n\n"+wrapMemoryFile("project", txt))
 	}
 
@@ -231,6 +232,26 @@ func (s Sources) SaveSkill(name, content string) (string, error) {
 func wrapMemoryFile(scope, content string) string {
 	return trust.Wrap("memory_untrusted_content", [][2]string{{"scope", scope}},
 		"the "+scope+" memory.md file", content, false)
+}
+
+// htmlCommentRE matches an HTML comment, including one spanning multiple
+// lines. Applied to memory.md content before it's injected into the system
+// prompt (P74.15): authoring notes left as `<!-- ... -->` (the same
+// convention `deepagents`' memory middleware strips from AGENTS.md-style
+// files) cost prompt budget on every turn for no model-facing value, and
+// stripping them makes machine-managed markers viable — a tool can leave a
+// delimiter comment in memory.md without paying for it every load. This
+// operates only on the text handed to the model; the on-disk file, the
+// integrity hash and Append are untouched.
+var htmlCommentRE = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+// stripHTMLComments removes HTML comments from txt and trims the result, so
+// a comment-only line doesn't leave a stray blank line behind.
+func stripHTMLComments(txt string) string {
+	if !strings.Contains(txt, "<!--") {
+		return txt
+	}
+	return strings.TrimSpace(htmlCommentRE.ReplaceAllString(txt, ""))
 }
 
 func readIfExists(path string) string {

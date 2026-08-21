@@ -24,6 +24,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/fsguard"
 	"github.com/fiddler110/aegis/internal/modelcaps"
+	"github.com/fiddler110/aegis/internal/profile"
 	"github.com/fiddler110/aegis/internal/provider/sse"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/toolshim"
@@ -842,6 +843,26 @@ type ProviderConfig struct {
 	// Unset fields declare nothing and leave discovery in charge; `think:
 	// false` is a declaration of non-support, not merely a default.
 	ModelCapabilities map[string]modelcaps.Declared `koanf:"model_capabilities"`
+	// ModelHarness declares per-model overrides for the P74.17 harness
+	// behaviors (prose-tool-call salvage, argument-shape repair), keyed by
+	// model id the same way ModelCapabilities is. Every model starts from the
+	// provider-level default LocalPromptProfile() already picks — both
+	// behaviors on for a local provider, both off for a cloud one — and a
+	// named entry here corrects individual fields on top of that default
+	// rather than replacing it, so naming a model only to flip one field
+	// leaves the other at the default instead of resetting to false.
+	//
+	//   provider:
+	//     model_harness:
+	//       "qwen2.5-coder:1.5b":
+	//         argument_shape_repair: true   # even if the provider default is cloud
+	//       "gpt-oss:20b":
+	//         prose_tool_call_salvage: false # this model's tool calls are already
+	//                                         # structured; skip the text scan
+	//
+	// Unset fields declare nothing and leave the provider-level default in
+	// charge, mirroring ModelCapabilities' pointer-field convention.
+	ModelHarness map[string]profile.Override `koanf:"model_harness"`
 	// ToolCallShim opts a session into the non-native tool-calling fallback
 	// (P53.6, internal/toolshim): tool schemas are serialized into the system
 	// prompt and the model's tagged JSON is parsed back into tool calls, for

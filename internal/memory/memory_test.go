@@ -103,6 +103,45 @@ func TestAppendPrunesOldestEntriesWhenOverCap(t *testing.T) {
 	}
 }
 
+// TestLoadStripsHTMLComments verifies P74.15: authoring notes left as HTML
+// comments in memory.md are stripped before injection into the system
+// prompt, matching deepagents' AGENTS.md-style memory middleware. The
+// on-disk file itself is untouched — only the string handed to Load's
+// caller changes.
+func TestLoadStripsHTMLComments(t *testing.T) {
+	s := Sources{ProjectRoot: t.TempDir(), DataDir: t.TempDir()}
+	if err := Append(s.ProjectMemoryPath(), "prefers Go over Python"); err != nil {
+		t.Fatal(err)
+	}
+	path := s.ProjectMemoryPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commented := string(data) + "<!-- internal note: do not surface this to the model -->\n" +
+		"<!-- multi-line\nauthoring note -->\nvisible line after comment\n"
+	if err := os.WriteFile(path, []byte(commented), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := s.Load()
+	if strings.Contains(got, "internal note") || strings.Contains(got, "authoring note") {
+		t.Errorf("expected HTML comments stripped from injected memory, got %q", got)
+	}
+	if !strings.Contains(got, "visible line after comment") {
+		t.Errorf("expected non-comment content to survive, got %q", got)
+	}
+
+	// The on-disk file must be untouched by Load.
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(onDisk), "internal note") {
+		t.Errorf("Load must not mutate the on-disk memory file")
+	}
+}
+
 // TestSaveSkillAndLoad checks that SaveSkill writes the file where
 // internal/skills expects to find it (that package, not this one, is
 // responsible for loading and injecting skill content with progressive

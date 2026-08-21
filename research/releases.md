@@ -8,7 +8,88 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-20 (sixteenth record the same day) — **P74.14 shipped**, the row Up next
+**Last updated:** 2026-08-21 (nineteenth record, same day as P74.16) — **P74.17 shipped its provider-
+decorator half** — the row that closed the Up next table. A new `internal/profile` package resolves a
+`Harness{ProseToolCallSalvage, ArgumentShapeRepair bool}` per `Request.Model` (P52.4: the model is a
+property of the request, not the adapter that carries it) instead of the blanket
+`cfg.Provider.LocalPromptProfile()` boolean P74.8 and P74.9's first half both had to gate on before this
+existed. `profile.NewResolver(local bool, overrides map[string]profile.Override) profile.Resolver` layers
+a per-model override — new config key `provider.model_harness`, keyed and pointer-fielded exactly like
+`model_capabilities` — additively on top of the provider-level local/cloud default, so naming a model to
+flip one field leaves the other at the default rather than resetting the harness to zero.
+
+**The second piece of P74.9's deferred cargo, argument-shape repair, is new code, not a rewire.**
+`provider.WithArgumentShapeRepair` (`internal/provider/argshaperepair.go`) inspects a genuine
+`EventToolUse`'s `Input` against the calling tool's JSON-Schema `properties` and repairs three shapes: a
+double-encoded JSON string (unwrap and recurse, so a wrapped-and-double-encoded call gets both repairs),
+an object nested one layer under a redundant key (`arguments`/`parameters`/`input`/`args`/`params` —
+the same vocabulary `parseCallObject` already accepts for a prose-salvaged call) when the object has
+exactly that one field and unwrapping it, and a bare scalar where the schema names exactly one property
+(wrapped into `{"<that property>": value}`; a multi-property schema is left alone rather than guessed at,
+since a wrong guess would fail silently instead of failing loud). An object that already names at least
+one declared property is left untouched — a wrong key name is not this decorator's problem, and it never
+invents one. Unlike `WithProseToolCallSalvage` it never buffers a turn: the OpenAI adapter's
+`chunkDecoder.Finish` only emits `EventToolUse` once the accumulated arguments are valid JSON, so each
+event is inspected and rewritten in place as it streams through.
+
+**`provider.WithHarness`** (`internal/provider/harness.go`) is the composition point: it builds all four
+decorator chains (neither / salvage only / repair only / both) once at wrap time and picks per request
+from `profile.Resolver(req.Model)`, so one shared adapter serving a primary model, a task-routed small
+model and a debate seat's model each get the harness their own model resolves to. `providerfactory.Build`
+wraps the primary adapter and every fallback target with it, replacing the old `salvage()` helper that
+only ever looked at the provider-level boolean; a cloud model with no override still resolves to the zero
+Harness and pays only the resolve call, not either decorator.
+
+**Deliberately scoped to the provider-decorator half — the tool-registration half is not this record.**
+The roadmap's generalization also asked for a `Harness` carrying `PromptSuffix`,
+`ToolDescriptionOverrides` and `DeferredTools` that would fold `builtin.Options.LocalProfile` itself into
+the same per-model mechanism, plus a runtime rejection for a profile that tries to exclude required
+scaffolding. Both are real, both are unbuilt: `LocalProfile` still gates tool registration exactly as it
+did, unchanged, and every one of P74.9's closure conditions was about the two response-repair behaviors
+specifically — those are what P74.8/P74.9 filed as this item's cargo, and what shipped here is that cargo
+registered per model rather than per provider boolean. The tool-registration generalization is a
+follow-up filed on its own terms, not a corner cut on this one.
+
+**Tests:** `TestNewResolver_*` (`internal/profile/profile_test.go`, five cases: cloud/local defaults,
+a single-field override on each default, and an unnamed model staying at the unmodified default);
+`TestArgumentShapeRepair_*` (`internal/provider/argshaperepair_test.go`, eight cases covering the three
+repairs, the two respects — an already-matching object and a schema-mismatched key both left alone — the
+no-tools bypass, and the empty-input-becomes-`{}` case `NormalizeEmptyResult`'s P74.9 sibling already
+established for tool *results*); `TestWithHarness_*` (`internal/provider/harness_test.go`: per-request
+model resolution on one shared adapter, neither-engaged passthrough, both-engaged composition — a
+wrapped-under-`arguments` prose-salvaged call getting shape-repaired too — and the nil-resolve no-op).
+`go build ./...`, `go vet ./...` and `go test -race ./internal/profile/... ./internal/provider/...
+./internal/providerfactory/... ./internal/config/...` are green; `go test ./...` is green.
+
+**Last updated (previous):** 2026-08-21 (eighteenth record, same day as P74.15) — **P74.16 shipped**, row #1
+of the Up next table. `engine.Run` treated any provider error as fatal to the run, including a
+context-overflow error the model server returned mid-turn — the same class of error the phased drive
+(`internal/drive`) already recovers from by resetting to a fresh conversation, but ordinary
+(non-phased) sessions had no equivalent. A new `clipOverflowBatch` (`internal/engine/overflowclip.go`)
+clips the most recent tool-result-bearing message in place when `provider.IsContextOverflowError`
+fires on a turn, and the run retries the same turn instead of aborting — bounded by
+`maxOverflowClipRounds` (3) so a window too small for even one clipped result still fails rather than
+spinning. A `read_file` result is head-sliced with a pointer back to the file it already read (no new
+write — `offset`/`limit` gets the rest), matching the roadmap entry's "no new write is needed" case;
+every other tool's oversized result collapses to a stub naming what ran and how much was discarded,
+since this package has no posture (head/tail) for a result it did not build. Record: [A context
+overflow now clips and retries instead of failing the
+run](#a-context-overflow-now-clips-and-retries-instead-of-failing-the-run-2026-08-21-p7416).
+
+**Last updated (previous):** 2026-08-21 (seventeenth record) — **P74.15 shipped**, the row Up next ranked
+first once the motion group and the harness lane's first three rows were shipped. Aegis injected
+`memory.md` (project and user) whole into the system prompt on every turn via `Sources.Load`, paying
+prompt budget for any hand-authored HTML comment left in either file — the same kind of authoring note
+`deepagents`' memory middleware strips before injection. A new `stripHTMLComments`
+(`internal/memory/memory.go`), applied to each file's text right after the integrity check and before
+it's wrapped in the untrusted-provenance marker, removes `<!-- ... -->` spans (including multi-line
+ones) from the copy that reaches the model. The on-disk file, the integrity hash and `Append` are all
+untouched — stripping happens only on the string `Load` returns, so a tool leaving a delimiter comment
+in `memory.md` no longer spends prompt budget on it every turn. Record: [Injected memory files stop
+paying for their own authoring
+notes](#injected-memory-files-stop-paying-for-their-own-authoring-notes-2026-08-21-p7415).
+
+**Last updated (previous):** 2026-08-20 (sixteenth record the same day) — **P74.14 shipped**, the row Up next
 ranked first once the motion group and the menu lane were both fully closed. `repairOrphanedToolUses`
 (`internal/engine/engine.go`) reported every orphaned tool_use the same way when the caller had no
 started-set record for it: "tool call interrupted; NAME did not run". That wording is correct for a
@@ -315,6 +396,191 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### Local-model repair behaviors resolve per model instead of per boolean, 2026-08-21 (P74.17)
+
+**Last row of the Up next table, taken with the two pieces of cargo the table said to take it with.**
+P74.8 (prose-tool-call salvage) and P74.9's first half (empty-result placeholders) both shipped
+2026-08-20 gated on `cfg.Provider.LocalPromptProfile()` — a single boolean answering "is the configured
+provider local", used as a stand-in for "does this model need this repair" because nothing more specific
+existed yet. P74.9's second half, argument-shape repair, was filed and explicitly deferred to this item
+rather than built against the same stand-in. This record builds the mechanism and, with it, the repair
+that had nowhere to live before it existed.
+
+**`internal/profile`** is the new package. `Harness{ProseToolCallSalvage, ArgumentShapeRepair bool}` is
+deliberately small — the roadmap entry's fuller sketch (`PromptSuffix`, `ToolDescriptionOverrides`,
+`DeferredTools`, a response-decorator list generalizing `builtin.Options.LocalProfile` itself) is not
+what shipped here; see the scoping note below. `profile.Resolver` is `func(model string) Harness`, and
+`profile.NewResolver(local bool, overrides map[string]profile.Override) Resolver` is the only
+constructor: `local` is `cfg.Provider.LocalPromptProfile()`, read once and used as the base every model
+starts from (both fields true under it, both false otherwise — exactly what P74.8/P74.9 already gated
+on, so nothing regresses for a model with no override), and `overrides` is the new
+`provider.model_harness` config key, keyed by model id like `provider.model_capabilities` and using the
+same pointer-field convention (unset = inherit the default, not "declare false").
+
+A `Resolver` is a function, not a lookup method, so `internal/provider` can depend on `internal/profile`
+(a leaf package, no imports of its own) without either package needing to know about `internal/config` —
+`providerfactory` is where the config reading and the provider wiring meet, same as it already was for
+`cfg.Provider.LocalPromptProfile()`.
+
+**`provider.WithArgumentShapeRepair`** (`internal/provider/argshaperepair.go`) is the repair itself. It
+inspects a genuine `EventToolUse`'s `Input` against the calling tool's `ToolSchema.InputSchema` (its
+top-level `properties` names, via a new `schemaPropertyNames` — no `$ref`/`oneOf` resolution, just enough
+to recognize the three mistakes below) and repairs:
+
+- **Double-encoded arguments** — the whole `Input` is a JSON string whose *contents* are themselves a
+  JSON object. Unwrapped and recursed, so a call that is both wrapped *and* double-encoded gets both
+  repairs in one pass. A JSON string whose contents are *not* further JSON (the ordinary case — a plain
+  string value) falls through to the scalar-wrap case below instead of being left alone.
+- **A redundant wrapper key** — the object has exactly one field, and that field is both an object and
+  named one of `arguments`/`parameters`/`input`/`args`/`params` (the same vocabulary
+  `prosetoolcall.go`'s `parseCallObject` already accepts for a call salvaged out of prose, kept
+  consistent so both repair paths recognize the mistake the same way). Unwrapped one layer.
+- **A bare scalar where an object was expected** — wrapped into `{"<property>": value}`, but only when
+  the schema names exactly one property. A multi-property schema is left alone: guessing which field a
+  bare value belongs to would fail *silently* instead of failing loud, which is worse than not repairing
+  at all.
+
+An object that already names at least one of the schema's declared properties is left untouched —
+`objectMatchesSchema` treats that as "already shaped correctly" without requiring every field present,
+since an omitted optional field is not a shape mistake. A wrong key name on an otherwise well-formed
+object (`{"filename": ...}` where the schema wants `path`) is deliberately left alone too: that is not a
+shape this decorator recognizes, and guessing at it is exactly the failure mode the multi-property case
+above refuses. Unlike `WithProseToolCallSalvage` this never buffers a whole turn — the OpenAI adapter's
+`chunkDecoder.Finish` (`internal/provider/openai/openai.go`) only emits `EventToolUse` once the
+accumulated `arguments` string is valid JSON, reporting a `MalformedToolCallError` otherwise, so every
+event this decorator sees is already syntactically valid and only its *shape* is in question — syntax
+repair stays out of scope, left to the existing malformed-call handling.
+
+**`provider.WithHarness`** (`internal/provider/harness.go`) is the composition point, and the reason the
+mechanism is per-request rather than per-adapter-build: `Request.Model` is "a property of the request,
+not the adapter" by the same reasoning P52.4 already established for `NumCtx` (one daemon-wide adapter
+serves a primary model, a persona-pinned model, and whatever `SmallModel` task routing picks — baking a
+decision in at `Build()` time would apply it to all of them regardless of which one is actually
+answering). It builds all four decorator combinations once at wrap time (neither / salvage only / repair
+only / both) and picks per request from `resolve(req.Model)`, so a request to a model with nothing
+engaged pays only the resolve call and a type switch — no decorator it isn't using, and no buffering
+`WithProseToolCallSalvage` would otherwise cost it.
+
+**`providerfactory.Build`** (`internal/providerfactory/factory.go`) replaces the old `salvage()` helper
+— which read `cfg.Provider.LocalPromptProfile()` once and conditionally applied
+`WithProseToolCallSalvage` — with one `resolve := profile.NewResolver(cfg.Provider.LocalPromptProfile(),
+cfg.Provider.ModelHarness)` built once, and `provider.WithHarness(..., resolve)` wrapping the primary
+adapter and every fallback target (each still resolves against its own `req.Model`, since
+`provider.WithFailover` sets `r.Model = t.Model` before calling a fallback target's `Stream` — the same
+per-target correctness the old code got by accident from wrapping each adapter individually, kept
+deliberately here rather than wrapping the whole failover chain once from outside).
+
+**Deliberately scoped to the provider-decorator half.** The roadmap entry's fuller shape — a `Harness`
+that also carries `PromptSuffix`, `ToolDescriptionOverrides` and `DeferredTools`, generalizing
+`builtin.Options.LocalProfile` itself so tool registration resolves per model too, plus a runtime
+rejection for a profile that tries to exclude required scaffolding — is not built here.
+`builtin.Options.LocalProfile` is completely unchanged: still one boolean, still gating tool
+registration exactly as it did before this record. What shipped is the cargo the table named —
+prose-tool-call salvage's engagement condition, generalized from the blanket boolean to per-model
+resolution, and P74.9's still-unbuilt argument-shape repair, built for the first time — registered
+through the mechanism the roadmap asked for rather than bolted onto the boolean a third time. The
+tool-registration generalization remains real, unbuilt, and is not filed as a new item here — it is the
+same corner P74.9 itself cut once already, cut the same way and for the same reason: cargo that exists
+gets built against the real mechanism, cargo that doesn't yet is not invented to justify the mechanism's
+full shape in one sitting.
+
+**Tests:** `internal/profile/profile_test.go` (`TestNewResolver_CloudDefaultEngagesNothing`,
+`_LocalDefaultEngagesBoth`, `_OverrideCorrectsOneFieldOnly`, `_OverrideCanEnableOnCloudDefault`,
+`_UnnamedModelUsesDefaultUnchanged`); `internal/provider/argshaperepair_test.go`
+(`TestArgumentShapeRepair_WellFormedInputUnchanged`, `_DoubleEncodedString`,
+`_UnwrapsRedundantWrapperKey`, `_WrapsBareScalarForSingleProperty`,
+`_MultiPropertyBareScalarLeftAlone`, `_UnmatchedObjectLeftAlone`, `_NoToolsBypassesEntirely`,
+`_EmptyInputBecomesEmptyObject`); `internal/provider/harness_test.go`
+(`TestWithHarness_ResolvesPerRequestModel`, `_NeitherBehaviorEngagedPassesThroughUnmodified`,
+`_BothBehaviorsCompose`, `_NilResolveReturnsBaseUnchanged`). `go build ./...`, `go vet ./...` and
+`go test -race ./internal/profile/... ./internal/provider/... ./internal/providerfactory/...
+./internal/config/...` are green; `go test ./...` (the full suite) is green.
+
+### A context overflow now clips and retries instead of failing the run, 2026-08-21 (P74.16)
+
+**Ranked first on the Up next table, filed as larger than the rest of the harness lane because it
+touches the truncation posture table.** Checking first, as the item said to: `provider.IsContextOverflowError`
+already existed and is well-tested (`internal/provider/errors_test.go`) — the "check first whether the
+overflow error is even distinguishable" caveat the roadmap entry raised was already answered, by
+`internal/drive`'s own use of it. What did not exist was a reactive path at the `engine.Run` level:
+`internal/drive` resets a whole phase to a fresh conversation on this error, but that recovery only
+exists inside the phased skill drive. An ordinary session — TUI, daemon, `aegis chat` — hit the same
+error and simply failed the run.
+
+**What changed.** `engine.Run`'s per-turn error handling (`internal/engine/engine.go`) now checks
+`provider.IsContextOverflowError(err)` before giving up. If a bounded `overflowClipRounds < maxOverflowClipRounds`
+(3) and `clipOverflowBatch` (`internal/engine/overflowclip.go`) finds something to clip, it emits a
+notice and `continue`s the turn loop instead of returning the error — the same iteration slot every
+other corrective in that loop already consumes, so `MaxIterations` still bounds it.
+
+`clipOverflowBatch` walks `conv.Messages` backward for the most recent `RoleUser` message carrying at
+least one `provider.ToolResultBlock`; only that trailing batch is a candidate; reaching further back
+would clip content the model has already reasoned over in a reply that followed it, so a message with
+no tool results, or one whose results already fit, reports false and the caller gives up rather than
+looping. Any result over `overflowClipKeepBytes` (2000 bytes) is clipped:
+
+- **`read_file`** — found via `findToolUse`, which looks back through the preceding messages for the
+  `tool_use` block the result answers — is head-sliced with `builtin.TruncateHead` and a recovery
+  sentence naming the file's own `path` argument. No new write and no spill: the content is already on
+  disk, and the model's own `offset`/`limit` contract gets the rest back, exactly the "no new write is
+  needed" case the roadmap entry called out.
+- **Everything else** collapses to a stub naming the tool and how many bytes were discarded. The
+  posture table in `truncate.go` is each tool's own stated property (which end carries the
+  information); this package has no such property for a result it did not build, so a guessed slice
+  would be worse than an honest stub — unlike the reactive path in `deepagents` this item read, which
+  offloads to a stub for the same reason.
+
+**What was deliberately not touched.** The posture table itself (`internal/tool/builtin/truncate.go`)
+gained no new entries — this is a second, later-firing recovery layered on top of it, not a new
+posture. The spill directory's `read_file`-not-`grep` reachability is unchanged: the clip's pointer
+names the original workspace path, nothing new.
+
+**Tested:** `internal/engine/overflowclip_test.go`. `TestClipOverflowBatchClipsReadFileWithPointer` and
+`TestClipOverflowBatchStubsNonReadResult` cover the two clip shapes directly;
+`TestClipOverflowBatchNothingToClip` covers both empty-candidate cases (no tool-result message; every
+result already fits). `TestEngineRetriesTurnAfterClippingOverflow` runs a full `Engine.Run` with a
+`scriptedAdapter` whose first turn emits a context-truncation `EventError` and whose second succeeds,
+asserting the run completes, a notice names the clip, and the oversized result in the retried
+conversation shrank. `TestEngineGivesUpWhenNothingToClip` asserts the overflow error still surfaces
+when there is nothing to clip, rather than the bound silently swallowing it. `go build ./...` and
+`go test ./...` both green.
+
+### Injected memory files stop paying for their own authoring notes, 2026-08-21 (P74.15)
+
+**Ranked first on the Up next table once the menu lane, the motion group and the harness lane's first
+three rows had all shipped, leaving it the sole remaining Tier 2 entry.** `Sources.Load`
+(`internal/memory/memory.go`) is the one function that injects `memory.md` into the system prompt —
+project and user scopes both, unfiltered — and it runs on every turn. Any HTML comment left in either
+file, whether a hand-authored note or a future tool-managed delimiter, was billed against
+`localBasePromptCeilingTokens` (test-enforced by `TestEffectiveSystem_localProfileBudget`) exactly as if
+it were content the model needed to see.
+
+**What changed.** A new `stripHTMLComments`, backed by a single `regexp.MustCompile("(?s)<!--.*?-->")`,
+strips comment spans — including ones that cross lines — from each file's text. It runs inside
+`loadDirect`, applied to the output of `readMemoryFileChecked` before `wrapMemoryFile` wraps it in the
+untrusted-provenance marker, so the integrity check still hashes and verifies the file's real,
+unstripped bytes; only the copy handed to the model loses the comments. `Append` and the on-disk file
+are untouched — this is purely a projection at injection time, the same shape `deepagents`' memory
+middleware uses for AGENTS.md-style files.
+
+**Why `Sources.Load` and not `FormatEntries`.** The roadmap entry flagged this explicitly: P67.5's
+`LoadRelevant`/`FormatEntries` path has no production callers at all — memory reaches the prompt through
+`Sources.Load()` today, which is the function that actually runs. Changing `FormatEntries` instead would
+have been correct-looking and inert.
+
+**What this unblocks.** A tool that maintains a section of `memory.md` can now leave a delimiter comment
+(e.g. `<!-- managed:start -->` / `<!-- managed:end -->`) without spending prompt budget on it every
+session — the mechanism P74.15 was filed to make viable, not built here.
+
+**Tested:** `TestLoadStripsHTMLComments` (`internal/memory/memory_test.go`) appends a real entry, then
+hand-appends a single-line and a multi-line HTML comment plus a trailing visible line directly to the
+on-disk file, and asserts `Load()` drops both comments' text while keeping the visible line — and that
+the on-disk file itself still contains the comment afterward, proving the strip is injection-time only.
+The existing suite (`TestLoadEmpty`, `TestAppendAndLoad`, `TestLoadWrapsUntrustedProvenance`,
+`TestAppendPrunesOldestEntriesWhenOverCap`, `TestSaveSkillAndLoad`) and
+`TestEffectiveSystem_localProfileBudget` (`internal/server/server_test.go`) both still pass unchanged —
+`go test ./internal/memory/... ./internal/server/... -run 'TestLoad|TestAppend|TestSaveSkill|TestEffectiveSystem_localProfileBudget'`.
 
 ### A dangling call whose arguments never parsed gets its own message, 2026-08-20 (P74.14)
 

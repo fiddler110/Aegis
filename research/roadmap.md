@@ -1,6 +1,6 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-20 (twelfth revision the same day, after **P74.14** shipped). This document
+**Last updated:** 2026-08-21, after **P74.17** shipped. This document
 tracks only **open** work and what's next. For
 shipped-feature history, batch origins, pass-by-pass narrative, refutation records and full design
 rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading with a
@@ -11,8 +11,9 @@ adding items.
 
 ## Status
 
-**37 open items: 29 build + 8 verification-only.** The empty-tier state two revisions back lasted one
-day, and seventeen items from the fresh P74 pass have already shipped the same day they were filed:
+**35 open items: 27 build + 8 verification-only.** The empty-tier state two revisions back lasted one
+day, and the entire fresh P74 pass — twenty items — has now shipped, seventeen of them the same day
+they were filed and **P74.15**/**P74.16**/**P74.17** over the two days after:
 **P74.1** (a permission-rule gap proved against the live gate, not read off a diff), **P74.2**
 (the TUI chrome removal — sidebar to an overlay, auto-hidden scrollbar, title bar folded into the status
 line), **P74.18** (the selection overlay's SGR-7 fragmentation over chroma color, replaced with a
@@ -31,19 +32,24 @@ and second 400), **P74.12** (the status bar's token counter eases toward the rea
 jumping in chunk-sized steps each time a turn's usage lands), **P74.13** (a running sub-agent gets a
 stable, hashed colour instead of reading as the same grey line as every other teammate), and **P74.14**
 (a dangling tool call whose arguments never parsed gets its own message instead of the "interrupted"
-wording). Records in [releases.md](releases.md). Tier 1 is empty again; Tier 2 has two; Tier 3 has two.
+wording), **P74.15** (HTML comments stripped from injected memory files so a tool-managed marker
+doesn't pay prompt budget every turn), **P74.16** (a context-overflow error clips the batch and retries
+instead of failing the run), and **P74.17** (prose-tool-call salvage and a new argument-shape repair
+both resolve per model via `internal/profile`, instead of the blanket `LocalPromptProfile()` boolean
+P74.8/P74.9 had to gate on). Records in [releases.md](releases.md). Tier 1 and Tier 3 are both empty
+again; Tier 2 has one.
 
-**The three P74 items left are all one lane now** — the harness lane, from `langchain-ai/deepagents`,
-now that P74.8, P74.9's first half and P74.14 have all shipped (P74.9's second half folds into P74.17
-rather than staying its own row). The TUI lane and the motion group it contained are both fully closed:
-P74.1 belonged to neither, P74.18, P74.20 and P74.19 — the TUI lane's selection/clipboard group — closed
-out first, P74.4 (the read/search grouping) landed right after, P74.5/P74.6/P74.7 (the menu lane, in
-full) closed out the TUI lane's last row, P74.8 opened the harness lane the same day, P74.9 immediately
-followed it, P74.10 (the reduced-motion flag P74.11/P74.12 must honour) closed out the TUI lane's
-remaining prerequisite, P74.11 (the stall ramp) shipped right after it, P74.12 (the eased token counter)
-shipped right after that, P74.13 (the stable per-agent colour), independent of every other row from the
-start, closed out the motion group entirely, and P74.14 (the malformed-call message) shipped right after
-it, taking the harness lane's third row.
+**The whole P74 batch is now shipped.** P74.17 was deliberately taken last — the table's own note said
+so — so it would carry P74.8's and P74.9's concrete cargo (prose-tool-call salvage's engagement
+condition, and P74.9's deferred argument-shape repair) into the mechanism rather than being built as an
+empty abstraction ahead of anything needing it. It shipped the provider-decorator half of the roadmap
+entry's fuller sketch — a `profile.Harness` resolved per `Request.Model`, carrying the two repair flags
+that had cargo — and left the tool-registration half (a `PromptSuffix`/`ToolDescriptionOverrides`/
+`DeferredTools`-carrying `Harness` generalizing `builtin.Options.LocalProfile` itself) explicitly
+unbuilt, filed on its own as **P74.21** in [Tier 4](#open-work--tier-4): real, but with no cargo of its
+own yet, the same reason P74.17 itself waited. See
+[releases.md](releases.md#local-model-repair-behaviors-resolve-per-model-instead-of-per-boolean-2026-08-21-p7417)
+for the scoping note in full.
 
 Tier 4 remains what it was — 25 entries each filed with a reason not to schedule them, and not a queue
 to promote from.
@@ -52,6 +58,11 @@ to promote from.
 work; a completed item's full record — what it was, what building it found, and what was measured to
 close it — moves there. The most recent sittings, newest first:
 
+- **2026-08-21** — **P74.16** (a context-overflow error now clips the trailing tool-result batch in
+  place and retries the turn, instead of failing the whole run), closing out Tier 3 alongside **P74.15**
+  (HTML comments stripped from injected memory files, freeing prompt budget against the test-enforced
+  local ceiling and making tool-managed markers viable), which shipped earlier the same day and took
+  the harness lane's fourth row.
 - **2026-08-20** — **P74.1** (a path-scoped deny rule can never match `grep`), **P74.2** (the TUI
   chrome removal), **P74.18** (the selection overlay's SGR-7 fragmentation over chroma color),
   **P74.20** (OSC 52 made the primary clipboard path), **P74.19** (`tui.mouse: off`), **P74.3**
@@ -127,19 +138,21 @@ is the one thing from the shipped record that constrains future work here.
   same day it was filed, proved against the real gate. Empty again as of that shipment; before P74.1 it
   was empty for one day, since **P71.1**/**P71.10** shipped 2026-08-19. An item enters here only as a
   real, currently-exploitable gap that is small and unblocked.
-- **Tier 2:** 2 — **P68.1** (the instrumentation gap the live tier found), deliberately off the
-  ranked list because it travels with the parked live-tier row, plus one P74 entry: **P74.15**.
-  **P74.7** (menus), **P74.8** (prose-tool-call salvage, the first half of local-model
-  tool-call repair), **P74.9**'s first half (empty-result normalization), **P74.10** (reduced motion),
-  **P74.11** (the stall shimmer ramp), **P74.12** (the eased token counter), **P74.13** (the stable
-  per-agent colour), and **P74.14** (the malformed-call message) shipped 2026-08-20 — P74.7 closed out
-  the menu lane, P74.8 opened the harness lane, P74.9's second half (argument-shape repair) folds into
-  P74.17 rather than staying its own row, P74.10 unblocked P74.11/P74.12, P74.11 shipped right behind
-  it, P74.12 shipped right after that, P74.13, independent of every other row, shipped right after
-  that, closing out the motion group entirely, and P74.14, also independent, shipped right after it,
-  taking the harness lane's third row.
-- **Tier 3:** 2, both P74 — **P74.16** and **P74.17**. Empty for two days before P74.2 landed;
-  **P74.4** shipped 2026-08-20.
+- **Tier 2:** 1 — **P68.1** (the instrumentation gap the live tier found), deliberately off the
+  ranked list because it travels with the parked live-tier row. **P74.7** (menus), **P74.8**
+  (prose-tool-call salvage, the first half of local-model tool-call repair), **P74.9**'s first half
+  (empty-result normalization), **P74.10** (reduced motion), **P74.11** (the stall shimmer ramp),
+  **P74.12** (the eased token counter), **P74.13** (the stable per-agent colour), **P74.14** (the
+  malformed-call message), and **P74.15** (stripping HTML comments from injected memory files) have
+  all shipped — the first eight on 2026-08-20, P74.15 on 2026-08-21. P74.7 closed out the menu lane,
+  P74.8 opened the harness lane, P74.9's second half (argument-shape repair) folds into P74.17 rather
+  than staying its own row, P74.10 unblocked P74.11/P74.12, P74.11 shipped right behind it, P74.12
+  shipped right after that, P74.13, independent of every other row, shipped right after that, closing
+  out the motion group entirely, P74.14, also independent, shipped right after it, taking the harness
+  lane's third row, and P74.15, also independent, shipped the next day, leaving this tier only P68.1.
+- **Tier 3:** 1, P74 — **P74.17**. **P74.16** (the reactive overflow clip-and-retry path) shipped
+  2026-08-21, the day it was filed. Empty for two days before P74.2 landed; **P74.4** shipped
+  2026-08-20.
 - **Tier 4:** 25 — five from P71 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), six from
   the P66 review (**P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, **P66.26**), five from
   P67 (**P67.10**–**P67.14**), and the nine pre-existing: **P65.4**, **P65.5**, **P64.4**, **P64.5**,
@@ -343,45 +356,39 @@ instead, regardless of how large or urgent the underlying question is.
 ## Up next
 
 **Rewritten 2026-08-20, when the P74 batch filled the table the P71–P73 chain had emptied**, and
-trimmed the same day once **P74.5**/**P74.6**, then **P74.7**, then **P74.8**, then **P74.9**'s first
-half, then **P74.10**, then **P74.11**, then **P74.12**, then **P74.13**, then **P74.14** shipped,
-closing out the menu lane and the motion group entirely, and taking the harness lane's first three rows.
-Document order in the Tier sections below is the same order as this table, deliberately,
-so `scripts/roadmap-status.sh` and this ranking agree.
+trimmed row by row as the batch shipped through **P74.16**, then emptied of every P74 build row on
+**P74.17**, the batch's last one, 2026-08-21. Document order in the Tier sections below is the same
+order as this table, deliberately, so `scripts/roadmap-status.sh` and this ranking agree.
 
-**The ranking has one rule left and it is worth reading before picking a row** (P74.1, P74.2, P74.18,
-P74.20, P74.19, P74.3, P74.4, P74.5, P74.6, P74.7, P74.8, P74.9's first half, P74.10, P74.11, P74.12,
-P74.13 and P74.14, the rules that put them first, all seventeen shipped 2026-08-20 — see
-[releases.md](releases.md)).
-
-1. **Everything left is parallel.** The menu lane is fully closed, the harness lane has its first three
-   rows shipped, and the motion group is now fully closed too; the remaining harness rows
-   (P74.15–P74.17) touch disjoint files, so a sitting can take a different lane without a merge
-   conflict. The one intra-lane order that mattered — **P74.10 before P74.11 and P74.12** — is moot now
-   that all three have shipped, and P74.13 (agent colour) and P74.14 (the malformed-call message) were
-   each independent of every other row from the start.
+**The whole P74 batch — twenty items, P74.1 through P74.20 — has shipped**, P74.17 last, deliberately.
+See [releases.md](releases.md) for every record. The only row left is the one that was never a P74 row
+to begin with.
 
 | #   | Item                                                                                       | Tier / size  | Why now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | --- | ------------------------------------------------------------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **P74.15** — strip HTML comments from injected memory files                                | Tier 2, XS   | Free bytes against a test-enforced prompt ceiling, and it makes tool-managed markers in project memory viable.                                                                                                                                                                                                                                                                                                                                                                                    |
-| 2   | **P74.16** — a reactive clip path on context overflow                                      | Tier 3, M    | Sequence-dependent on nothing, but larger than the rest of the harness lane and it touches the truncation posture table, so it wants a clear run.                                                                                                                                                                                                                                                                                                                                                 |
-| 3   | **P74.17** — per-model harness profiles                                                    | Tier 3, L    | Deliberately last. It is the largest item in the batch and the one that pays off over time rather than on the day; take it once P74.8 and P74.9 have given it concrete cargo to carry, or it gets built as an empty abstraction. Both have shipped 2026-08-20 — P74.9's second half (argument-shape repair) is this item's cargo now, not a separate row.                                                                                                                                       |
-| 4   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — _parked by choice, 2026-08-16_ | Verification | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. |
+| 1   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — _parked by choice, 2026-08-16_ | Verification | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. |
 
-**One item is deliberately off this list: P68.1** (Tier 2, S). It is what row 16 needs before it is
-worth re-running — the eval tier deletes the database holding the trace its own closure conditions are
-written against. It travels with that row, so it is off the list while the row is parked.
+**One item is deliberately off this list: P68.1** (Tier 2, S). It is what the live-tier row needs before
+it is worth re-running — the eval tier deletes the database holding the trace its own closure
+conditions are written against. It travels with that row, so it is off the list while the row is
+parked.
 
-**Sizes are estimates from reading, not from building, and the batch has a known bias.** The P71
-record is the caution: several of its rows were smaller than filed and one was larger. Treat XS/S as
-"one sitting" and M/L as "expect the build to find something the reading did not" — which for P74.17
-in particular is close to certain, because a profile mechanism only reveals its real shape once a
-second model needs a different one.
+**A second item is deliberately off this list for a different reason: P74.21** (Tier 4, filed
+2026-08-21). It is the half of P74.17's own roadmap entry that did not ship with it — see
+[P74.17's Tier 3 record](#p7417--the-entire-local-model-story-is-one-boolean) for what shipped and what
+didn't. It sits in Tier 4 rather than here because, exactly like P74.17 before it shipped, it has no
+concrete cargo yet: nothing in the tree today needs a per-model prompt suffix or tool-description
+override, only the flag-shaped repair behaviors P74.17 already covers. Promote it once something does.
+
+**Sizes are estimates from reading, not from building, and the batch had a known bias.** The P71
+record is the caution: several of its rows were smaller than filed and one was larger. P74.17 itself
+confirmed it again: the reading estimated it at Tier 3/L, and what shipped was a leaner, correctly-scoped
+provider-decorator mechanism rather than the full tool-registration generalization the reading sketched
+— the build found the real shape, same as the note here warned it would.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in _document_
-order. For P74 the two now agree by construction, but the script still cannot see the cross-tier
-ranking (P74.10 outranks the Tier 3 rows only by virtue of table position, not tier), and cannot see
-that **P68.1** is deliberately off the list. Use it for repo state and for the parse; use this table
+order. It still cannot see the cross-tier ranking, and cannot see that **P68.1** is deliberately off
+the list. Use it for repo state and for the parse; use this table
 for what to take.
 
 ---
@@ -403,10 +410,11 @@ small and has no dependency. Nothing is currently open here.
 
 ## Open Work — Tier 2
 
-**Status: 2 open — one P74 entry filed 2026-08-20, plus P68.1**, which stays deliberately off
-the ranked list because it travels with the parked live-tier row. Everything else this tier held has
-shipped: **P74.14** (a malformed dangling call gets its own message instead of the interrupted
-wording), right after **P74.13** (the stable per-agent colour), right after **P74.12** (the eased token counter),
+**Status: 1 open — P68.1**, which stays deliberately off the ranked list because it travels with the
+parked live-tier row. Everything else this tier held has shipped, most recently **P74.15** (HTML
+comments stripped from injected memory files) on 2026-08-21, right after **P74.14** (a malformed
+dangling call gets its own message instead of the interrupted wording), right after **P74.13** (the
+stable per-agent colour), right after **P74.12** (the eased token counter),
 right after **P74.11** (the stall shimmer ramp), which shipped right after **P74.10** (the reduced-motion
 setting), which shipped right after **P74.9**'s first
 half (empty-result normalization, `builtin.NormalizeEmptyResult`), which shipped right after **P74.8**
@@ -418,10 +426,10 @@ as directed, **P74.19** (the mouse-capture escape hatch), **P74.20** (the OSC 52
 **P71.9**, **P72.2**, **P72.3** and **P73.2** on 2026-08-19, and **P66.25**/**P67.2**–**P67.5** before
 them. Records in [releases.md](releases.md).
 
-**Document order below is priority order**, so the one remaining P74 entry comes first and P68.1
-sits last as the parked one. The note this tier has carried since 2026-08-19 held: a new Tier 2 entry
-comes from a review pass or a fired trigger, not from what is already filed — and the P74 batch is
-another review pass, not a promotion from Tier 4.
+**Document order below is P68.1 alone now** — it is the only entry this tier holds, parked with the
+live-tier row it travels with. The note this tier has carried since 2026-08-19 still holds for whatever
+lands here next: a new Tier 2 entry comes from a review pass or a fired trigger, not from what is
+already filed.
 
 **Two sub-lanes remain, and they do not block each other.** The selection/clipboard group and the
 whole menu lane are both fully shipped (**P74.19**, **P74.20**, **P74.18** — see
@@ -443,25 +451,9 @@ stable per-agent colour) have all shipped (see
 [releases.md](releases.md#stall-becomes-a-visible-ramp-not-just-an-abort-2026-08-20-p7411),
 [releases.md](releases.md#the-token-counter-jumps-instead-of-climbing-2026-08-20-p7412) and
 [releases.md](releases.md#a-running-swarm-gets-a-stable-colour-not-three-grey-lines-2026-08-20-p7413)).
-**P74.15** is a one-branch item that fits anywhere.
-
-### P74.15 — Injected memory files pay for their own authoring notes
-
-`deepagents`' memory middleware strips `<!-- ... -->` from AGENTS.md-style content before it reaches
-the system prompt. Aegis injects project and user memory whole.
-
-Two things follow. Free bytes against `localBasePromptCeilingTokens`, which is a hard test-enforced
-ceiling — `TestEffectiveSystem_localProfileBudget` fails the suite when the local base prompt crosses
-it, so anything that reclaims budget without a policy argument is worth having. And it makes
-**machine-managed markers viable**: a tool that maintains a section of a memory file can leave a
-delimiter comment without spending prompt budget on it every turn.
-
-Watch the interaction with P67.5's still-unwired recall path, noted under [Decisions that outlive the
-items that made them](#decisions-that-outlive-the-items-that-made-them): memory currently reaches the
-prompt through `Sources.Load()`, which injects both files unfiltered, and that is the function to
-change — not `FormatEntries`, which has no production callers.
-
-Priority: Tier 2 — XS, no dependency.
+**P74.15** (stripping HTML comments from injected memory files) shipped 2026-08-21 — see
+[releases.md](releases.md#injected-memory-files-stop-paying-for-their-own-authoring-notes-2026-08-21-p7415).
+Only **P68.1** remains in this tier.
 
 ### P68.1 — The live tier can run a measurement it cannot read back
 
@@ -504,7 +496,9 @@ yields less.
 
 ## Open Work — Tier 3
 
-**Status: 2 open, both P74**, filed 2026-08-20. **P74.2** (the chrome removal — sidebar to an overlay,
+**Status: 0 open.** **P74.17** (per-model harness profiles) shipped 2026-08-21, closing the tier —
+record in [releases.md](releases.md#local-model-repair-behaviors-resolve-per-model-instead-of-per-boolean-2026-08-21-p7417).
+**P74.2** (the chrome removal — sidebar to an overlay,
 auto-hidden scrollbar, title bar folded into the status line) shipped the same day, unblocking P74.3,
 which itself shipped the same day and unblocked P74.4, which shipped the same day in turn.
 The tier was emptied on 2026-08-18 (**P66.15**, **P67.6**, **P67.7**, **P67.8**, **P67.9**, then
@@ -527,89 +521,34 @@ a wire, and the resolution was to put four design questions to the user before w
 I'd like to revisit how text within the Aegis TUI is truncated as it's very limiting for a user to review the commands being run. Additionally when the model is working on something, it shows generating but it doesn't really stream the output well except in chunks or give insight to the user about the status of a command or request in action. It feels very blackbox that things are being done where a user might appreciate seeing some of the thinking that is taking place by the model as it reasons through the resquestbefore output and actions are taken.
 
 **P74.2, P74.3 and P74.4 (the chrome removal, the tool-block gutter, and the read/search grouping) all
-shipped 2026-08-20** — records in [releases.md](releases.md). **P74.16 and P74.17 are here on size, not
-sequence** — neither blocks anything, both are larger than a sitting.
+shipped 2026-08-20** — records in [releases.md](releases.md). **P74.16** (the reactive
+clip-and-retry path on a context-overflow error) shipped 2026-08-21, the day it was filed —
+`provider.IsContextOverflowError` was already there and already well-tested (`internal/drive` uses it
+for its own whole-conversation reset), so the "check first whether the overflow error is even
+distinguishable" caveat below turned out to already be answered; the new work was
+`clipOverflowBatch` (`internal/engine/overflowclip.go`), wired into `engine.Run`'s per-turn error
+handling. Record: [A context overflow now clips and retries instead of failing the
+run](releases.md#a-context-overflow-now-clips-and-retries-instead-of-failing-the-run-2026-08-21-p7416).
 
-### P74.16 — Truncation is entirely proactive; nothing clips in response to an actual overflow
-
-Aegis bounds tool results in three proactive layers: per-call caps with the posture table in
-`internal/tool/builtin/truncate.go`, a whole-round cap in `roundcap.go`, and spill to
-`<workspace>/.aegis/spill/`. All three fire on Aegis's own estimate of size.
-
-`deepagents` adds a second, reactive path: when the **provider itself** returns a context-overflow
-error, clip the trailing tool-result batch before retrying, split by kind. A `read_file` result is
-head-sliced and annotated with a pointer back to the original `file_path` — **no new write is needed,
-because the content already exists at that path**. Everything else is offloaded to a stub.
-
-The read-file shortcut is worth taking on its own merits regardless of the reactive path: Aegis's spill
-directory currently duplicates content that, for reads, is already on disk somewhere the model can
-reach with `read_file` plus an offset.
-
-**Two constraints from this tree.** The posture table in `truncate.go` is the documented home for
-"which end survives and what happens to the remainder", so a new posture goes in that table rather than
-beside the retry. And the spill directory is deliberately reachable by `read_file` and **not** by grep;
-a pointer-to-original path must not quietly widen that.
-
-**Check first whether the overflow error is even distinguishable.** `internal/provider/errors.go` and
-the P61.7 remainder both concern classifying backend-echoed text; if an overflow is not reliably
-separable from other 400-class failures on the local path, that classification is the real first step
-and this item is larger than it looks.
-
-Priority: Tier 3 — medium, no sequence dependency, but it touches the truncation posture table and
-wants a clear run rather than being squeezed between two TUI rows.
-
-### P74.17 — The entire local-model story is one boolean
-
-`builtin.Options.LocalProfile` is a `bool` (`internal/tool/builtin/builtin.go:104`), decided once in
-`enginecfg.BuiltinOptions` (`internal/enginecfg/tools.go:57`) from `cfg.Provider.LocalPromptProfile()`.
-Every local model — qwen3:14b, gpt-oss, LFM2.5 — lands in the same bucket and gets the same deferred
-tool set, the same prompt profile and the same tool descriptions. **Their failure modes are not the
-same**, and the boolean has no room to say so.
-
-`deepagents` keys a registry on **model spec** and merges profiles additively, so a provider-level
-profile layers under a model-level one. Each profile carries a system-prompt suffix, per-tool
-description overrides, an excluded-tools set, an excluded-middleware set, extra middleware and
-sub-agent overrides. The asymmetry in their tree is the argument for the shape: their Haiku profile is
-52 lines of prompt text, their Nemotron profile is 1,826 lines of quirk shims for one open-weight
-model.
-
-**Aegis already has both halves this needs.** `internal/modelcaps` persists per-model capability and is
-already keyed the right way; `internal/sysprompt` owns the prompt blocks and their byte caps. A
-`profile.Harness` resolved from the model id, carrying `PromptSuffix`, `ToolDescriptionOverrides`,
-`DeferredTools` and a response-decorator list, is the generalization.
-
-**Four constraints, and the first two are hard invariants of this tree.**
-
-- **The prompt budget is test-enforced.** `TestEffectiveSystem_localProfileBudget` fails the suite when
-  the local base prompt crosses `localBasePromptCeilingTokens`. A per-model `PromptSuffix` must be
-  measured against that ceiling per model, not once.
-- **A tool's description must never name a tool the active profile defers.** That is already an
-  invariant; per-model description overrides multiply the number of ways to break it, so the existing
-  test has to become per-profile rather than per-build.
-- **Required scaffolding must not be excludable.** `deepagents` rejects a profile that tries to strip
-  the middleware backing filesystem tools, subagent dispatch or permission enforcement, and formats the
-  rejection identically at construction and assembly time. Aegis enforces the same class of invariant
-  at _test_ time with `TestEveryEngineCallSiteDecidesItsGate` and
-  `TestEveryRegisterCallSiteDecidesTheLocalProfile`. **Keep the tests and add the runtime error**, because
-  a profile is user-authorable in a way an `engine.New` call site is not.
-- **`LocalProfile` is load-bearing in the deferred-tool direction.** Under it `edit_file` is deferred
-  and the handle-based editors are not, and a test pins that direction. The migration has to preserve
-  it as a profile default, not lose it in the generalization.
-
-**Take this last, and take it with cargo.** Both P74.8 and P74.9's first half have shipped 2026-08-20,
-so this is no longer an empty abstraction with one boolean's worth of content — it has two concrete
-per-model behaviours asking to be registered (prose-tool-call salvage's engagement condition, and
-P74.9's still-unbuilt argument-shape repair), which is what will reveal the real shape of the interface.
-
-Priority: Tier 3 — largest item in the batch, no blocker, but deliberately sequenced last, now carrying
-P74.9's deferred second half as its own first cargo.
+**P74.17 — the entire local-model story is one boolean — shipped 2026-08-21, closing this tier.** It
+built `internal/profile.Harness`/`Resolver`, resolved per `Request.Model`, and used it to move
+prose-tool-call salvage (P74.8) and a newly-built argument-shape repair (P74.9's deferred second half)
+off the blanket `LocalPromptProfile()` boolean they'd been gated on. It deliberately shipped only that
+provider-decorator half of the fuller sketch below — the tool-registration half
+(`builtin.Options.LocalProfile` generalized into the same per-model `Harness`, carrying `PromptSuffix`,
+`ToolDescriptionOverrides` and `DeferredTools`, plus the runtime rejection for a profile that tries to
+exclude required scaffolding) did not ship and is filed separately as **P74.21** in
+[Tier 4](#open-work--tier-4), because — like P74.17 itself before P74.8/P74.9 gave it cargo — it has no
+concrete behavior asking to be registered yet. Full record:
+[releases.md](releases.md#local-model-repair-behaviors-resolve-per-model-instead-of-per-boolean-2026-08-21-p7417).
 
 ## Open Work — Tier 4
 
-**Status: 25 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger),
-6 from the P66 review batch, 5 from the P67 external-source reading, and 5 from the P71 batch filed
-2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**). **P70.3** shipped 2026-08-18
-and has left this tier.
+**Status: 26 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger),
+6 from the P66 review batch, 5 from the P67 external-source reading, 5 from the P71 batch filed
+2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), and one new arrival: **P74.21**,
+filed 2026-08-21 the same day P74.17 shipped without it. **P70.3** shipped 2026-08-18 and has left this
+tier.
 
 The P66 entries here are **deliberately grouped grab-bags**: each collects the Low-severity residue of
 one review domain. They are filed so no finding is lost, not because any of them should be scheduled.
@@ -624,6 +563,41 @@ first would fit a constant to a regime about to change. **P71.7** (publication d
 results) waits on a keyed provider being the default, because that is the only backend where the date
 is actually available. **P71.12** is different again — it is a filed **negative measurement**, kept
 so the next reader does not re-derive an intuition this batch already tested and found small.
+
+### P74.21 — The local-model harness still can't touch a prompt or a tool description
+
+**Filed 2026-08-21, the day P74.17 shipped without it.** P74.17 built `internal/profile.Harness`,
+resolved per `Request.Model`, and used it to move two response-repair behaviors (prose-tool-call
+salvage, argument-shape repair) off the blanket `LocalPromptProfile()` boolean they were gated on
+before. What it deliberately left alone is `builtin.Options.LocalProfile` itself:
+`internal/tool/builtin/builtin.go:104` is still one bool, still deciding tool registration —
+which families are deferred, which prompt caps apply, that `edit_file` moves behind `tool_search` while
+the handle-based editors don't — for every local model identically, exactly as it did before P74.17.
+
+The roadmap entry P74.17 shipped from sketched a fuller `Harness`: one that also carries
+`PromptSuffix`, `ToolDescriptionOverrides` and a `DeferredTools` list, so a model-specific quirk could
+add a line to the system prompt or rename a tool's description without every local model paying for it.
+`deepagents` is still the reference for the shape — a provider-level profile layered under a
+model-level one, additive, the same way `profile.NewResolver`'s `Override` already layers for the two
+flag fields that shipped.
+
+**Two of the four constraints the original entry named are still real and still apply here
+unchanged:**
+
+- **The prompt budget is test-enforced.** `TestEffectiveSystem_localProfileBudget` fails the suite when
+  the local base prompt crosses `localBasePromptCeilingTokens`. A per-model `PromptSuffix` must be
+  measured against that ceiling per model, not once.
+- **Required scaffolding must not be excludable.** Aegis enforces the equivalent invariant at *test*
+  time today (`TestEveryEngineCallSiteDecidesItsGate`, `TestEveryRegisterCallSiteDecidesTheLocalProfile`).
+  A user-authorable per-model profile needs the same rejection enforced at *runtime*, because a config
+  file is not a call site a build-time scan can audit.
+
+**Promote when a concrete per-model prompt or tool-description need shows up** — a model whose own
+quirk needs a system-prompt line, or whose tool descriptions need renaming to match vocabulary it was
+trained on. P74.17 waited for exactly this kind of cargo (P74.8/P74.9) before it was worth building;
+this is the same wait, one layer up.
+
+Priority: Tier 4 — M. No fired trigger yet.
 
 ### P71.6 — Nothing memoizes a fetch or a search within a session
 

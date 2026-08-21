@@ -340,6 +340,19 @@ provider:
   #   "some-model:latest":
   #     tool_calling: ok    # or "unsupported"
 
+  # Per-model overrides for the harness repair behaviors (P74.17), keyed by
+  # model id like model_capabilities above. Every model starts from the
+  # provider-level default prompt_profile already picks — prose-tool-call
+  # salvage and argument-shape repair both on for the "local" profile, both
+  # off for "default" — and a named entry here corrects individual fields on
+  # top of that default rather than replacing it, so naming a model to flip
+  # one field leaves the other at the default instead of resetting to false.
+  model_harness: {}
+  #   "qwen2.5-coder:1.5b":
+  #     argument_shape_repair: true    # turn it on even under the cloud default
+  #   "gpt-oss:20b":
+  #     prose_tool_call_salvage: false # this model's calls are already structured
+
   # Non-native tool-calling fallback (P53.6). "off" (default) | "on".
   #
   # For models that cannot speak the provider's tool protocol at all — the
