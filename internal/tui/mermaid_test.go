@@ -58,7 +58,7 @@ func TestMermaidRendersInTranscript(t *testing.T) {
 	m.applyEvent(api.Event{Kind: api.KindTurnDone})
 	m.refresh()
 
-	view := ansi.Strip(m.render())
+	view := ansi.Strip(m.renderContent())
 	if !strings.Contains(view, "┌") || !strings.Contains(view, "▼") {
 		t.Fatalf("expected a rendered diagram in the transcript, got:\n%s", view)
 	}

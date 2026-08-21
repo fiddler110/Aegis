@@ -28,7 +28,7 @@ func driveUpdate(t *testing.T, m model, msg tea.Msg) model {
 // plainView renders the full screen and strips ANSI styling so assertions
 // can match on plain text.
 func plainView(m model) string {
-	return ansi.Strip(m.render())
+	return ansi.Strip(m.renderContent())
 }
 
 // TestTUIGuardRetryWithdrawsAnswer (P25.3): a KindGuard event flagged

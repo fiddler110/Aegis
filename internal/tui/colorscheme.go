@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"hash/fnv"
 	"image/color"
 	"strings"
 
@@ -23,6 +24,14 @@ type colorScheme struct {
 	// Background / surface tiers (base → most visible)
 	bgBase, bgLeast, bgLess, bgMost color.Color
 
+	// selectionBg (P74.18) is a solid fill for the drag-selection overlay —
+	// it replaces a cell's background while leaving its foreground untouched,
+	// which is what a real terminal's own selection does. Picked for contrast
+	// against this scheme's fgBase specifically, not just eyeballed on dark:
+	// a light scheme's near-black text wants a pale fill, a dark scheme's
+	// wants a bright one.
+	selectionBg color.Color
+
 	separator, onPrimary color.Color
 
 	// Status roles
@@ -32,6 +41,12 @@ type colorScheme struct {
 
 	// Logo / gradient art
 	shield, gradFrom, gradTo, wordFrom, wordTo color.Color
+
+	// agentPalette (P74.13) is a fixed set of distinct hues, one per running
+	// sub-agent, assigned by hashing the agent id (see agentColor) so the same
+	// teammate reads as the same colour everywhere it appears — sidebar,
+	// transcript, status — without threading assignment state anywhere.
+	agentPalette [8]color.Color
 
 	// ANSI-16 remap for raw shell-tool output
 	ansi [16]color.Color
@@ -60,6 +75,10 @@ func darkScheme() colorScheme {
 		bgLess:  charmtone.Char,   // low-contrast surface
 		bgMost:  charmtone.Iron,   // most-visible surface / borders
 
+		// A bright fill against the dark base — visibly past bgMost, not a
+		// subtle tint — so it reads as "selected" over any chroma foreground.
+		selectionBg: blend(charmtone.Pepper, charmtone.Charple, 0.55),
+
 		separator: charmtone.Char,
 		onPrimary: charmtone.Butter,
 
@@ -83,6 +102,17 @@ func darkScheme() colorScheme {
 		gradTo:   charmtone.Charple,
 		wordFrom: charmtone.Salt,
 		wordTo:   charmtone.Dolly,
+
+		agentPalette: [8]color.Color{
+			charmtone.Charple, // purple
+			charmtone.Malibu,  // blue
+			charmtone.Julep,   // green
+			charmtone.Mustard, // yellow
+			charmtone.Coral,   // red/orange
+			charmtone.Blush,   // pink
+			charmtone.Sardine, // cyan
+			charmtone.Guppy,   // bright blue
+		},
 
 		ansi: [16]color.Color{
 			charmtone.BBQ,     // 0  black
@@ -127,6 +157,11 @@ func lightScheme() colorScheme {
 		bgLess:  lipgloss.Color("#E8E8EE"),
 		bgMost:  lipgloss.Color("#D0D3DC"),
 
+		// A pale fill against the near-white base and near-black fgBase —
+		// enough to read as "selected" without the fg/bg contrast a bright
+		// fill would cost on light.
+		selectionBg: lipgloss.Color("#C7D2FE"),
+
 		separator: lipgloss.Color("#DCDDE4"),
 		onPrimary: lipgloss.Color("#FFFFFF"),
 
@@ -148,6 +183,17 @@ func lightScheme() colorScheme {
 		gradTo:   charmtone.Charple,
 		wordFrom: lipgloss.Color("#1F2328"),
 		wordTo:   lipgloss.Color("#6639BA"),
+
+		agentPalette: [8]color.Color{
+			lipgloss.Color("#7A5CDB"), // purple
+			lipgloss.Color("#0969DA"), // blue
+			lipgloss.Color("#1A7F37"), // green
+			lipgloss.Color("#9A6700"), // amber
+			lipgloss.Color("#C4432B"), // red
+			lipgloss.Color("#BF3989"), // pink
+			lipgloss.Color("#1B7C83"), // cyan
+			lipgloss.Color("#BC4C00"), // orange
+		},
 
 		ansi: [16]color.Color{
 			lipgloss.Color("#24292F"), // 0  black
@@ -195,6 +241,11 @@ var (
 	colBgLess color.Color
 	colBgMost color.Color
 
+	// colSelectionBg (P74.18) is the drag-selection overlay's fill — set
+	// background only, leave foreground untouched, unlike the old SGR-7
+	// Reverse() treatment which fragmented over per-cell chroma colors.
+	colSelectionBg color.Color
+
 	colSeparator color.Color
 	colOnPrimary color.Color
 
@@ -240,6 +291,10 @@ var (
 	colGradTo   color.Color
 	colWordFrom color.Color
 	colWordTo   color.Color
+
+	// colAgentPalette (P74.13) is the active scheme's fixed 8-colour agent
+	// set; agentColor hashes an agent id into it.
+	colAgentPalette [8]color.Color
 
 	// ansiPalette remaps the basic ANSI-16 terminal colours that programs
 	// emit (e.g. `ls --color`, `git`) onto legible theme colours, so raw
@@ -296,6 +351,7 @@ func applyScheme(s colorScheme) {
 	colPrimary, colSecondary, colAccentAlt, colKeyword = s.primary, s.secondary, s.accentAlt, s.keyword
 	colFgBase, colFgSub, colFgMore, colFgMost = s.fgBase, s.fgSub, s.fgMore, s.fgMost
 	colBgBase, colBgLess, colBgMost = s.bgBase, s.bgLess, s.bgMost
+	colSelectionBg = s.selectionBg
 	colSeparator, colOnPrimary = s.separator, s.onPrimary
 
 	colDestructive, colError = s.destructive, s.errorC
@@ -324,12 +380,24 @@ func applyScheme(s colorScheme) {
 
 	colGradFrom, colGradTo = s.gradFrom, s.gradTo
 	colWordFrom, colWordTo = s.wordFrom, s.wordTo
+	colAgentPalette = s.agentPalette
 
 	colDiffAddBg = blend(colBgBase, colSuccessRole, 0.16)
 	colDiffDelBg = blend(colBgBase, colDestructive, 0.16)
 
 	ansiPalette = s.ansi
 	glamourStyleName = s.glamourStyle
+}
+
+// agentColor (P74.13) picks a stable colour for an agent id out of the
+// active scheme's 8-colour agentPalette. Hashing (rather than assignment
+// order) means the same id renders the same colour across the sidebar,
+// transcript and status bar without any of them sharing assignment state,
+// and survives a restart since nothing is stored.
+func agentColor(id string) color.Color {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return colAgentPalette[h.Sum32()%uint32(len(colAgentPalette))]
 }
 
 // blend linearly interpolates from base toward tint by t (0 = base, 1 =

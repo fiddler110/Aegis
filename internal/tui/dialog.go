@@ -3,29 +3,71 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
-// Shared chrome for the overlay dialogs (command palette, persona/session
-// pickers) so they read as one cohesive component family — a rounded primary
-// frame, a brand title chip, and a left accent bar marking the selection. This
-// mirrors Crush's dialog styling (primary frame + accent selection) while
-// staying idiomatic to the bubbles list delegate.
+// listPointer is the glyph aegisListDelegate marks the selected row with
+// (P74.5) and the one findGlyphPos looks for to place the real terminal
+// cursor on that row (P74.7) — kept as a constant so the two stay in sync.
+const listPointer = "❯"
+
+// findGlyphPos returns the (column, row) of the first occurrence of glyph in
+// content, both measured in visible cells/lines rather than bytes — content
+// is stripped of ANSI escapes per line before searching so styling doesn't
+// throw off the column count. ok is false if glyph never appears.
+func findGlyphPos(content, glyph string) (x, y int, ok bool) {
+	for i, line := range strings.Split(content, "\n") {
+		stripped := ansi.Strip(line)
+		idx := strings.Index(stripped, glyph)
+		if idx < 0 {
+			continue
+		}
+		return utf8.RuneCountInString(stripped[:idx]), i, true
+	}
+	return 0, 0, false
+}
+
+// overlayOrigin returns the (x, y) renderOverlay places fg at when centering
+// it over a width×height frame — the same formula renderOverlay itself uses,
+// factored out so callers that need to translate a position local to fg (e.g.
+// a dialog's cursorPos) into screen coordinates don't duplicate the math.
+func overlayOrigin(fg string, width, height int) (x, y int) {
+	fw, fh := lipgloss.Width(fg), lipgloss.Height(fg)
+	return max(0, (width-fw)/2), max(0, (height-fh)/2)
+}
+
+// Shared chrome for the overlay pickers (command palette, persona/session
+// pickers, …) and the two genuinely modal dialogs (approval, quit-confirm).
+// Early versions mirrored Crush's dialog styling on every overlay alike — a
+// rounded primary frame, a brand title chip on a solid fill, and a left
+// accent bar for the selected row — but P74.5 reversed that for pickers:
+// they already composite over a dimmed transcript (renderOverlay, P16.6), so
+// a frame plus a filled chip plus a bordered, bold selection was three or
+// four "you are here" signals stacked on top of the dim, and read as an
+// application dialog box rather than a list. Pickers now render as plain
+// text straight over the terminal's own background — a bold title over a
+// hairline rule, and a single "❯" pointer plus a colour shift as the only
+// selection cue. `dialogFrame` stays for the dialogs that are actually
+// modal and gain from reading as a box: approval (approval.go) and
+// quit-confirm (quitconfirm.go), neither of which is a listDialog.
 
 // aegisListDelegate returns the shared list delegate styling for overlay
-// dialogs: the selected row is marked with a left primary accent bar, normal
-// rows use the base / muted foreground tiers.
+// pickers: the selected row is marked with a "❯" pointer and a primary
+// colour shift — no border bar, no bold — normal rows use the base / muted
+// foreground tiers.
 func aegisListDelegate() list.DefaultDelegate {
 	d := list.NewDefaultDelegate()
+	pointer := lipgloss.Border{Left: listPointer}
 	d.Styles.SelectedTitle = lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
+		Border(pointer, false, false, false, true).
 		BorderForeground(colPrimary).
 		Foreground(colPrimary).
-		Bold(true).
 		Padding(0, 0, 0, 1)
 	d.Styles.SelectedDesc = lipgloss.NewStyle().
 		Foreground(colSecondary).
@@ -39,17 +81,19 @@ func aegisListDelegate() list.DefaultDelegate {
 	return d
 }
 
-// configureDialogList applies the chrome common to overlay pickers: a brand
-// title chip, hidden status/help bars, and filtering. Pass pagination=true for
-// lists long enough to page.
+// configureDialogList applies the chrome common to overlay pickers: a plain
+// bold title over a hairline rule, hidden status/help bars, and filtering.
+// Pass pagination=true for lists long enough to page.
 func configureDialogList(l *list.Model, title string, pagination bool) {
 	l.Title = title
 	l.Styles.Title = lipgloss.NewStyle().
-		Background(colBrandBg).
-		Foreground(colBrandFg).
-		Bold(true).
-		Padding(0, 1)
-	l.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 1, 0)
+		Foreground(colPrimary).
+		Bold(true)
+	l.Styles.TitleBar = lipgloss.NewStyle().
+		Width(l.Width()).
+		Border(lipgloss.NormalBorder(), false, false, true, false).
+		BorderForeground(colSeparator).
+		Padding(0, 0, 1, 0)
 	l.SetFilteringEnabled(true)
 	l.SetShowStatusBar(false)
 	l.SetShowPagination(pagination)
@@ -63,7 +107,10 @@ func dialogListH(termH, n, minH int) int {
 	return min(termH-8, max(n*2+6, minH))
 }
 
-// dialogFrame wraps overlay content in the shared rounded primary border.
+// dialogFrame wraps overlay content in the shared rounded primary border. As
+// of P74.5 this backs only the genuinely modal dialogs (approval,
+// quit-confirm) — pickers (listDialog) render frameless, see the comment
+// above aegisListDelegate.
 func dialogFrame(content string) string {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -222,12 +269,47 @@ func (d listDialog) Update(msg tea.Msg) (listDialog, tea.Cmd) {
 	return d, cmd
 }
 
+// View renders the picker frameless: no border, no fill — the terminal's own
+// background is the surface, with only the hairline rule under the title and
+// the aegisListDelegate pointer marking selection (P74.5). A rounded frame
+// stays for dialogFrame's other callers (approval, quit-confirm), which are
+// actually modal rather than a transient list composited over the dimmed
+// transcript renderOverlay already provides.
 func (d listDialog) View() string {
 	v := d.list.View()
 	if d.fixedW {
 		v = lipgloss.NewStyle().Width(d.list.Width()).Render(v)
 	}
-	return dialogFrame(v)
+	v += "\n" + d.footer()
+	return lipgloss.NewStyle().Padding(0, 1).Render(v)
+}
+
+// cursorPos locates the selected row's pointer glyph within d.View(), so
+// render() can hand the real terminal cursor a position on it (P74.7) instead
+// of leaving hardware focus wherever the composer last left it.
+func (d listDialog) cursorPos() (x, y int, ok bool) {
+	return findGlyphPos(d.View(), listPointer)
+}
+
+// footer is the one dim hint line naming the picker's only genuinely
+// undiscoverable interaction — that typing filters it, with no visible query
+// or match count otherwise (P74.6). Once filtering is active it right-aligns
+// a "n/m" match count in the same row, budgeted by dialogListH's own "+6"
+// alongside the title/rule.
+func (d listDialog) footer() string {
+	style := lipgloss.NewStyle().Foreground(colTextMuted)
+	if d.list.FilterState() == list.Unfiltered {
+		return style.Render("type to filter · ↑↓ move · enter select · esc close")
+	}
+	// Once filtering is active "type to filter" no longer needs saying — drop
+	// it to make room for the match count, the thing the user needs mid-filter.
+	hint := style.Render("↑↓ move · enter select · esc close")
+	count := style.Render(fmt.Sprintf("%d/%d", len(d.list.VisibleItems()), len(d.list.Items())))
+	gap := d.list.Width() - lipgloss.Width(hint) - lipgloss.Width(count)
+	if gap < 1 {
+		return hint
+	}
+	return hint + strings.Repeat(" ", gap) + count
 }
 
 // renderOverlay composites fg centered over bg and fades bg to faint
@@ -238,14 +320,12 @@ func renderOverlay(bg, fg string, width, height int) string {
 	if width <= 0 || height <= 0 {
 		return fg
 	}
-	fw, fh := lipgloss.Width(fg), lipgloss.Height(fg)
-	x := max(0, (width-fw)/2)
-	y := max(0, (height-fh)/2)
+	x, y := overlayOrigin(fg, width, height)
 
 	root := lipgloss.NewLayer(bg, lipgloss.NewLayer(fg).X(x).Y(y).Z(1))
 	canvas := lipgloss.NewCanvas(width, height)
 	canvas.Compose(lipgloss.NewCompositor(root))
-	dimOutside(canvas, x, y, fw, fh)
+	dimOutside(canvas, x, y, lipgloss.Width(fg), lipgloss.Height(fg))
 	return canvas.Render()
 }
 

@@ -208,7 +208,7 @@ func TestCompletionPopupLeavesTranscriptGeometryAlone(t *testing.T) {
 		t.Errorf("renderChat height moved with the completion popup open: %d -> %d", beforeChat, got)
 	}
 
-	full := ansi.Strip(m.render())
+	full := ansi.Strip(m.renderContent())
 	if !strings.Contains(full, "/help") {
 		t.Errorf("expected a completion row (e.g. /help) in the composited view, got: %q", full)
 	}

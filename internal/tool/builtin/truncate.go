@@ -210,6 +210,27 @@ func trimToBoundary(s string) string {
 	return s
 }
 
+// NormalizeEmptyResult returns a named placeholder for a tool result a model
+// cannot otherwise distinguish from a failure (P74.9). A legitimately empty
+// result — a grep with no matches, a read of a zero-byte file — hands a model
+// an empty string, and many local models re-issue the same call believing it
+// failed, which reads as a loop and can trip the P52.3 failure breaker or the
+// loop detector for a reason that has nothing to do with either.
+//
+// content is returned unchanged unless it is empty or all whitespace; toolName
+// names the call in the placeholder so a model reading several such results in
+// one round can tell them apart. This is correct for every model — an empty
+// result is exactly as ambiguous to a capable model as to a small one, it is
+// just less likely to act on the ambiguity — so it applies unconditionally
+// rather than behind LocalProfile, unlike the per-model argument-shape repair
+// P74.9 filed alongside it and deferred to P74.17.
+func NormalizeEmptyResult(toolName, content string) string {
+	if strings.TrimSpace(content) != "" {
+		return content
+	}
+	return fmt.Sprintf("[%s returned no output. This is a legitimate empty result (e.g. no matches, an empty file), not a failure — do not retry the same call expecting a different outcome.]", toolName)
+}
+
 // trimFromBoundary is trimToBoundary's mirror for a tail cut: advance past the
 // first newline so the kept text starts at a line boundary.
 func trimFromBoundary(s string) string {

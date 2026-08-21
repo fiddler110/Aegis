@@ -123,8 +123,8 @@ func TestConfigSandboxGetReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConfigSandbox: %v", err)
 	}
-	if resp.Backend != "local" {
-		t.Errorf("Backend = %q, want default %q", resp.Backend, "local")
+	if resp.Backend != "os" {
+		t.Errorf("Backend = %q, want default %q", resp.Backend, "os")
 	}
 	if resp.Scope != "global" {
 		t.Errorf("Scope = %q, want %q", resp.Scope, "global")

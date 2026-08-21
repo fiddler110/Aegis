@@ -48,6 +48,13 @@ type Config struct {
 	Notifications  string              // attention-system mode (P16.1): off/bell/desktop/both
 	ImageRendering string              // inline image thumbnails (P16.9): "auto" (default) or "off"
 	Keybindings    map[string][]string // P13.3.5: action name -> key sequence overrides
+	Mouse          string              // mouse capture (P74.19): "on" (default) or "off"
+	ReducedMotion  bool                // disable shimmer/caret-blink/card animation (P74.10)
+	// MaxTurnStall is cost.max_turn_stall (P39.17) — the same bound the engine
+	// aborts a run against. The TUI never enforces it; it only reads it to ramp
+	// the P74.11 stall shimmer toward colWarning as a wait approaches it. Zero
+	// (stall bound off) disables the ramp — see stallRampColor.
+	MaxTurnStall time.Duration
 	// OllamaBaseURL is the native Ollama API base (e.g. "http://localhost:11434")
 	// when the provider points at Ollama, else "". Set, it enables the P33.10
 	// pre-warm: a keep_alive-neutral load request fired on focus regain or the
@@ -130,6 +137,23 @@ type toolCard struct {
 	name         string
 	call         string
 	awaitingCall bool
+
+	// groupLabel is the P74.4 short target descriptor (groupEntryLabel),
+	// computed once at KindToolCall time from ev.ToolInput — the only event
+	// that reliably carries it; the engine's KindToolResult does not repeat
+	// a call's input. Empty for a non-groupable tool.
+	groupLabel string
+}
+
+// toolGroup is the open collapsed card for a run of consecutive, successful
+// read_file/grep/glob calls (P74.4) — model.activeReadGroup's live state.
+// blk is an existing tool card's transcript item, repurposed as the group's
+// one visible slot the moment a second member merges into it; no extra
+// transcript item is ever created for the group itself (see
+// model.foldIntoReadGroup in stream.go).
+type toolGroup struct {
+	blk     *transcriptItem
+	entries []groupEntry
 }
 
 type model struct {
@@ -175,13 +199,20 @@ type model struct {
 	// it off as the in-flight turn's prompt size — P33.17: an absent number
 	// beats a wrong one, and the live hint has nowhere honest to source a
 	// mid-stream prompt size from until the model reports it.
-	inputTokensKnown    bool
-	cacheReadTokens     int  // prompt-cache hits (last turn)
-	cacheCreationTokens int  // prompt-cache writes (last turn)
-	tokensEstimated     bool // true when token counts are derived from heuristic
-	costUSD             float64
-	srvCtxWin           int    // effective context window from daemon /status; 0 = unknown (fall back to name-based guess)
-	srvCtxWinSrc        string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default", "ollama:compat-default"
+	inputTokensKnown bool
+	// displayedInputTokens/displayedOutputTokens (P74.12) ease toward
+	// inputTokens/outputTokens one animStep frame at a time instead of
+	// snapping, so the status bar's counter climbs smoothly rather than
+	// jumping in chunk-sized steps each time a turn's usage lands. See
+	// easeStatCounters in update_tick.go.
+	displayedInputTokens  int
+	displayedOutputTokens int
+	cacheReadTokens       int  // prompt-cache hits (last turn)
+	cacheCreationTokens   int  // prompt-cache writes (last turn)
+	tokensEstimated       bool // true when token counts are derived from heuristic
+	costUSD               float64
+	srvCtxWin             int    // effective context window from daemon /status; 0 = unknown (fall back to name-based guess)
+	srvCtxWinSrc          string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default", "ollama:compat-default"
 
 	// Connection/model-health indicator (P28.7): last known daemon /status
 	// result, refreshed periodically (see statusTickMsg) rather than only at
@@ -282,6 +313,29 @@ type model struct {
 	// default off, resets on restart (same convention as /tools, /humor).
 	rawScrollback bool
 
+	// mouseOff (P74.19), when true, releases mouse capture while keeping
+	// alt-screen — the combination rawScrollback can't give you, since that
+	// releases both. Set once from Config.Mouse ("off") at startup; unlike
+	// rawScrollback there is no runtime toggle, since the tradeoff (no wheel
+	// scroll, no click-to-focus) is meant to be a considered per-session
+	// choice, not a keystroke. View() reads this directly.
+	mouseOff bool
+
+	// reducedMotion (P74.10), when true, freezes animStep instead of advancing
+	// it on every spinner tick — shimmerText, caretGlyph and thinkingPhrase all
+	// read animStep, so freezing it freezes them without a separate check at
+	// each call site. Set once from Config.ReducedMotion at startup. pollTick
+	// is a second, independent tick counter for background polls (currently
+	// the P2.5 sub-agent roster fetch) that must keep their cadence even when
+	// animStep is frozen.
+	reducedMotion bool
+	pollTick      int
+
+	// maxTurnStall (P74.11) mirrors Config.MaxTurnStall — the engine's
+	// MaxTurnStall abort bound — so the stall shimmer can ramp toward
+	// colWarning as the current wait approaches it. Zero disables the ramp.
+	maxTurnStall time.Duration
+
 	// lastAssistantText holds the most recent complete assistant message for /copy.
 	lastAssistantText string
 
@@ -315,6 +369,20 @@ type model struct {
 	pendingTools     map[string]*toolCard
 	pendingToolOrder []string
 	pendingToolSeq   int
+
+	// activeReadGroup is the open P74.4 collapsed card that the next
+	// resolving read_file/grep/glob success can extend, or nil when nothing
+	// is currently extendable. soloReadCard/soloReadEntry remember the most
+	// recently finalized *ungrouped* successful read/search card so the very
+	// next resolving groupable call can detect it is positionally adjacent
+	// (transcriptPane.ItemBefore) and promote both into a new two-member
+	// group. See model.foldIntoReadGroup (stream.go) for the merge rule and
+	// why plain pointer-identity adjacency is enough to keep a genuinely
+	// out-of-order parallel-round result from ever joining a group its
+	// result hasn't actually confirmed yet.
+	activeReadGroup *toolGroup
+	soloReadCard    *transcriptItem
+	soloReadEntry   groupEntry
 
 	// Collapsible thinking blocks (TQ9): each flushed thinking block keeps
 	// both a one-line collapsed and a full expanded rendering; ctrl+o swaps
@@ -680,19 +748,22 @@ func newModel(cfg Config) model {
 		workDir:    workDir,
 		sidebarW:   sidebarInnerW, // P40.1: adjustable at runtime
 
-		transcript:   newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
-		liveText:     &strings.Builder{},
-		live:         &liveBlock{},
-		thinkText:    &strings.Builder{},
-		renderer:     newGlamourRenderer(80), // initial width; recreated on first resize
-		keys:         mustKeyMap(cfg.Keybindings),
-		followBottom: true,
-		toolCompact:  true,
-		humorMode:    cfg.HumorMode,
-		term:         newTermPane(workDir, 10), // height recalculated on first resize
-		stashPath:    stashPath,
-		notifyMode:   notify.ParseMode(cfg.Notifications),
-		imageProto:   imageProtoFor(cfg.ImageRendering),
+		transcript:    newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
+		liveText:      &strings.Builder{},
+		live:          &liveBlock{},
+		thinkText:     &strings.Builder{},
+		renderer:      newGlamourRenderer(80), // initial width; recreated on first resize
+		keys:          mustKeyMap(cfg.Keybindings),
+		followBottom:  true,
+		toolCompact:   true,
+		humorMode:     cfg.HumorMode,
+		term:          newTermPane(workDir, 10), // height recalculated on first resize
+		stashPath:     stashPath,
+		notifyMode:    notify.ParseMode(cfg.Notifications),
+		imageProto:    imageProtoFor(cfg.ImageRendering),
+		mouseOff:      strings.EqualFold(strings.TrimSpace(cfg.Mouse), "off"),
+		reducedMotion: cfg.ReducedMotion,
+		maxTurnStall:  cfg.MaxTurnStall,
 	}
 	// P13.3.5: keep /help's shortcut list in sync with any keybinding remap.
 	m.slash.keys = m.keys
@@ -1168,6 +1239,25 @@ func (m model) phaseStatus() string {
 	}
 }
 
+// stallElapsed is how long the current wait phase has been running: since
+// streamStart while waiting for the first token, since modelWaitAt during a
+// post-tool-round re-eval, and zero once the model is actively producing
+// output — tokens arriving is forward progress, not a stall, and P74.11's
+// ramp exists to flag the *absence* of that progress. Feeds stallRampColor.
+func (m model) stallElapsed() time.Duration {
+	switch {
+	case m.firstTokenAt.IsZero():
+		if m.streamStart.IsZero() {
+			return 0
+		}
+		return time.Since(m.streamStart)
+	case !m.modelWaitAt.IsZero():
+		return time.Since(m.modelWaitAt)
+	default:
+		return 0
+	}
+}
+
 // beginStream marks the start of a run and resets the per-run phase state.
 // streamStart is zeroed too so the elapsed readout can't briefly quote the
 // previous run's clock in the frames before streamStartedMsg lands.
@@ -1433,22 +1523,20 @@ func (m *model) cycleModeCmd() tea.Cmd {
 // --- layout ---
 
 // layout recalculates pane dimensions after a terminal resize.
-// Height budget: title(1) + content(vpH) + textarea+border(ta.Height()+2) + belowBar(1).
-// The completion popup (P33.18) is composited over this layout rather than
-// reserving space in it — see render()'s anchored-overlay compositing.
+// Height budget: content(vpH) + textarea+border(ta.Height()+2) + belowBar(1).
+// P74.2 removed the title-bar row from that budget, folding its content into
+// the status line instead. The completion popup (P33.18) is composited over
+// this layout rather than reserving space in it — see render()'s
+// anchored-overlay compositing, which is also how the sidebar composites
+// (P74.2) — it no longer reserves layout width the way it did here.
 func (m *model) layout() {
 	vpW := m.width - 1 // -1 for PaddingLeft on the main panel
 	if m.rawScrollback {
-		// P22.6: raw scrollback mode suppresses the sidebar, terminal pane,
-		// and scrollbar column (renderChat/renderScrollbar) — none of that
+		// P22.6: raw scrollback mode suppresses the terminal pane and
+		// scrollbar column (renderChat/renderScrollbar) — none of that
 		// dashboard-column width is reserved, so the plain transcript text
 		// gets the full body width instead.
 	} else {
-		if m.sidebarOpen && m.width >= sidebarMinTermW {
-			// sidebar consumes m.sidebarW + 1 border; main panel gets the rest
-			// minus left pad (P40.1: width is adjustable, was sidebarTotalW).
-			vpW = m.width - (m.sidebarW + 1) - 1
-		}
 		if m.termOpen {
 			vpW -= m.term.totalW()
 		}
@@ -1501,12 +1589,13 @@ func (m *model) resizePane(delta int) bool {
 	return true
 }
 
-// fixedH is the non-viewport vertical budget: title + textarea(+border) +
-// belowBar, plus optional strips. The completion popup (P33.18) is
-// composited over the finished layout instead of reserved here — see
-// renderCompletionPopup and render()'s anchored-overlay compositing.
+// fixedH is the non-viewport vertical budget: textarea(+border) + belowBar,
+// plus optional strips. P74.2 removed the title-bar row this used to add.
+// The completion popup (P33.18) is composited over the finished layout
+// instead of reserved here — see renderCompletionPopup and render()'s
+// anchored-overlay compositing.
 func (m *model) fixedH() int {
-	h := 1 + m.ta.Height() + 2 + 1
+	h := m.ta.Height() + 2 + 1
 	if len(m.todoItems) > 0 {
 		h += 1 // todo strip: one line
 	}
@@ -1710,7 +1799,7 @@ func (m *model) refresh() {
 			phrase = thinkingPhrase(m.animStep, m.humorMode, cat)
 			hint = formatStreamHint(m.streamStats())
 		}
-		work := shimmerText("● "+phrase, m.animStep, colTextMuted, colAccent)
+		work := shimmerText("● "+phrase, m.animStep, colTextMuted, stallRampColor(m.stallElapsed(), m.maxTurnStall))
 		tail.WriteString(wrap(work+m.th.elapsedDim.Render(hint), w))
 	}
 
@@ -2011,13 +2100,21 @@ func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
 func (m *model) applySwitchedSession(sess *session.Session) {
 	m.cfg.SessionID = sess.ID
 	m.cfg.Mode = sess.Mode
-	m.slash.SetSession(sess.ID, sess.Mode)
+	m.slash.SetSession(sess.ID, sess.Mode, sess.Model)
+	// The status bar/sidebar model badge (m.cfg.Model) otherwise keeps
+	// showing whatever session this replaced was on — SetSession above
+	// already resolved sess.Model against the TUI's boot-time default, so
+	// mirror that here the same way a successful "/model" does via
+	// SlashResult.Model (P14.7's own display-sync mechanism, applied to a
+	// session switch instead of a switch within one).
+	m.cfg.Model = m.slash.EffectiveModel()
 
 	m.transcript.Reset()
 	m.lastAnswerBlock = nil
 	m.thinkEntries = nil
 	m.tools = m.tools[:0]
 	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
+	m.displayedInputTokens, m.displayedOutputTokens = 0, 0
 	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
 	m.tokensEstimated = false
 	m.turnCount = 0
@@ -2027,6 +2124,8 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.pendingReadPaths = nil
 	m.pendingTools = nil
 	m.pendingToolOrder = nil
+	m.activeReadGroup = nil
+	m.soloReadCard = nil
 	m.streaming = false
 	m.status = "ready"
 	m.lastFailure = nil
@@ -2192,15 +2291,20 @@ func (m *model) renderTeammates(msg teammatesMsg) {
 	var b strings.Builder
 	b.WriteString("\n" + m.th.assistant.Render(fmt.Sprintf("⚇ Teammates (%d)", len(msg.items))) + "\n")
 	for _, tm := range msg.items {
-		tag, style := "•", m.th.tool
+		tag, tagStyle := "•", m.th.tool
 		switch tm.Status {
 		case "failed":
-			tag, style = "✗", m.th.toolErr
+			tag, tagStyle = "✗", m.th.toolErr
 		case "done":
 			tag = "✓"
 		}
-		line := fmt.Sprintf("  %s %s [%s] %s", tag, tm.AgentID, tm.Status, oneLine(tm.Summary))
-		b.WriteString(style.Render(truncate(line, m.width-1)) + "\n")
+		// P74.13: the agent id renders in its stable hashed colour (same as
+		// the sidebar), so a teammate reads as the same colour everywhere it
+		// appears; the tag keeps its status colour so failures still stand out.
+		idStyle := lipgloss.NewStyle().Foreground(agentColor(tm.AgentID))
+		rest := fmt.Sprintf(" [%s] %s", tm.Status, oneLine(tm.Summary))
+		line := "  " + tagStyle.Render(tag) + " " + idStyle.Render(tm.AgentID) + m.th.tool.Render(truncate(rest, m.width-1))
+		b.WriteString(line + "\n")
 	}
 	b.WriteString("\n")
 	m.transcript.Append(b.String())

@@ -71,6 +71,7 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 	policy := provider.DefaultRetryPolicy()
 	policy.MaxRetries = cfg.Provider.MaxRetries
 	primary := provider.WithRetry(admit(cfg, cfg.Provider.Default, cfg.Provider.BaseURL, primaryBase, logger), policy, logger)
+	primary = salvage(cfg, primary)
 
 	if len(cfg.Provider.Fallback) == 0 {
 		return primary, nil
@@ -91,7 +92,7 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 			continue
 		}
 		targets = append(targets, provider.FallbackTarget{
-			Adapter: provider.WithRetry(admit(cfg, fb.Provider, fb.BaseURL, fbBase, logger), policy, logger),
+			Adapter: salvage(cfg, provider.WithRetry(admit(cfg, fb.Provider, fb.BaseURL, fbBase, logger), policy, logger)),
 			Model:   fb.Model,
 		})
 	}
@@ -121,6 +122,22 @@ func admit(cfg *config.Config, name, baseURL string, base provider.Adapter, logg
 	}
 	logger.Debug("provider admission control", "provider", name, "max_in_flight", n)
 	return provider.WithAdmissionControl(base, n, logger)
+}
+
+// salvage wraps base with the P74.8 prose-tool-call decorator when the
+// resolved prompt profile is "local" (cfg.Provider.LocalPromptProfile()).
+// Small local models are the ones that answer a tool-enabled turn with a
+// fenced or bare JSON object instead of a structured call; a cloud model
+// essentially never does, so gating this on the same boolean that already
+// picks the trimmed local prompt keeps every cloud turn from paying a text
+// scan for a failure mode it doesn't have. P74.17's per-model profile
+// mechanism is the intended place to turn this on more selectively — until it
+// exists, the local-profile boolean is the only lever there is.
+func salvage(cfg *config.Config, base provider.Adapter) provider.Adapter {
+	if !cfg.Provider.LocalPromptProfile() {
+		return base
+	}
+	return provider.WithProseToolCallSalvage(base)
 }
 
 // isLocalProvider reports whether provider name keeps data on the local

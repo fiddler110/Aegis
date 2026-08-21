@@ -26,6 +26,7 @@ import (
 	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tokenest"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/fiddler110/aegis/internal/toolshim"
 	"github.com/fiddler110/aegis/internal/trace"
 )
@@ -2162,6 +2163,18 @@ func interruptedNotStartedText(name string) string {
 	return fmt.Sprintf("tool call interrupted; %s did not run", name)
 }
 
+// interruptedMalformedText is the synthetic result for an orphaned call whose
+// arguments never parsed as valid JSON at all (P74.14). Unlike
+// interruptedNotStartedText, this is not a claim about timing — the call
+// could not have dispatched regardless of whether the run was interrupted,
+// because its arguments are truncated or malformed. Telling the model
+// "interrupted" here invites a retry of the same call verbatim; the model
+// needs to know instead that it must reissue the call with valid arguments.
+func interruptedMalformedText(name string) string {
+	return fmt.Sprintf("tool call never dispatched; %s's arguments were malformed or truncated JSON."+
+		" Reissue the call with valid arguments.", name)
+}
+
 // siblingCancelledText is the result reported for a call that never started
 // because an earlier write/execute call in the same parallel round failed
 // (P67.4). This is the one cancellation case where "nothing happened" is
@@ -2285,9 +2298,16 @@ func repairOrphanedToolUses(msgs []provider.Message, started map[string]struct{}
 		var synth []provider.Block
 		for _, b := range msg.Content {
 			if tu, ok := b.(provider.ToolUseBlock); ok && !resolved[tu.ID] {
+				_, ran := started[tu.ID]
 				text := interruptedNotStartedText(tu.Name)
-				if _, ran := started[tu.ID]; ran {
+				switch {
+				case ran:
 					text = interruptedMaybeRanText(tu.Name)
+				case !json.Valid(tu.Input):
+					// P74.14: a call that never reached dispatch and whose
+					// arguments never parsed at all was never going to run,
+					// interruption or not — see interruptedMalformedText.
+					text = interruptedMalformedText(tu.Name)
 				}
 				synth = append(synth, provider.ToolResultBlock{
 					ToolUseID: tu.ID,
@@ -2392,6 +2412,13 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	if err != nil {
 		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)
 		content, isErr = fmt.Sprintf("tool error: %v", err), true
+	}
+	// P74.9: a legitimately empty, non-error result is indistinguishable from a
+	// failure to a model, and a local model in particular tends to re-issue the
+	// call. Applies after the error path above so a real error keeps its own
+	// message rather than being read as "empty".
+	if !isErr {
+		content = builtin.NormalizeEmptyResult(tu.Name, content)
 	}
 	// P63.8: effective capability (P25.4c), not the static one — a tool that
 	// reclassifies into CapWrite for a specific call would otherwise have its

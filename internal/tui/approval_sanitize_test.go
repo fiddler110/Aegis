@@ -113,7 +113,7 @@ func TestApprovalDialogStripsControlSequencesFromToolInput(t *testing.T) {
 
 			for _, r := range []struct{ label, out string }{
 				{"approval dialog", m.renderApprovalDialog()},
-				{"composited view", m.render()},
+				{"composited view", m.renderContent()},
 			} {
 				if left := sgrOnly.ReplaceAllString(r.out, ""); strings.ContainsRune(left, 0x1b) {
 					t.Errorf("%s: a model-supplied ESC byte reached the terminal:\n%q", r.label, left)

@@ -154,6 +154,55 @@ func TestResultCapsCanBindBeforeTheContextWindow(t *testing.T) {
 // max is complete), grep stops walking at max (exactly max means more exist).
 // Deriving it would put a false "more exist" notice on every glob that happens
 // to match exactly 1000 files.
+// TestNormalizeEmptyResultReplacesOnlyEmptyContent is P74.9's closure
+// condition: an empty (or whitespace-only) result reaches the model as a
+// named placeholder, and any non-empty content — including content that is
+// just whitespace-padded real output — passes through untouched.
+func TestNormalizeEmptyResultReplacesOnlyEmptyContent(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		wantRaw bool // true: NormalizeEmptyResult must return content unchanged
+	}{
+		{"empty", "", false},
+		{"whitespace only", "   \n\t  ", false},
+		{"real content", "3 matches found", true},
+		{"single space padded content", " x ", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := NormalizeEmptyResult("grep", c.content)
+			if c.wantRaw {
+				if got != c.content {
+					t.Fatalf("expected content unchanged, got %q", got)
+				}
+				return
+			}
+			if got == c.content {
+				t.Fatalf("expected a placeholder, got the original empty content back")
+			}
+			if !strings.Contains(got, "grep") {
+				t.Fatalf("placeholder does not name the tool: %q", got)
+			}
+			if strings.TrimSpace(got) == "" {
+				t.Fatalf("placeholder must not itself be empty")
+			}
+		})
+	}
+}
+
+// TestNormalizeEmptyResultIsDeterministic guards the P74.9 closure condition
+// that two empty results from the same tool must not look different to the
+// loop detector — the same call, empty twice, must produce byte-identical
+// placeholders.
+func TestNormalizeEmptyResultIsDeterministic(t *testing.T) {
+	a := NormalizeEmptyResult("read_file", "")
+	b := NormalizeEmptyResult("read_file", "")
+	if a != b {
+		t.Fatalf("placeholder is not deterministic: %q vs %q", a, b)
+	}
+}
+
 func TestCapItemsNeedsAnExplicitCappedFlag(t *testing.T) {
 	items := make([]string, 10)
 	for i := range items {

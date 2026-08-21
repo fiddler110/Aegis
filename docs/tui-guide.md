@@ -19,34 +19,54 @@ The daemon starts automatically in the same process — no second terminal neede
 
 ## Layout
 
-The sidebar is **off by default**. Toggle it with `Ctrl+B` or `/sidebar`. When hidden, glanceable stats (context %, cost, agent count) fold into the status bar.
+The sidebar is **off by default**. Toggle it with `Ctrl+B` or `/sidebar`. When hidden, glanceable stats (context %, cost, agent count) fold into the status bar, which also carries the brand mark and the connection/model badge — there is no separate title bar row (P74.2).
 
-**With sidebar open:**
+**With sidebar closed (the default):**
 
 ```
-⬡ AEGIS                                          abc12345  claude-opus-4-8
+ You
+ fix the timeout bug in the client
+
+ ✻ thinking
+ The retry loop reuses the same context…
+
+ Assistant
+ I'll patch the client timeout handling.
+
+ ⚙ edit_file internal/client/client.go
+ - http:  &http.Client{Timeout: 0},
+ + http:  &http.Client{Timeout: 30 * time.Second},
+ ✓ edit_file → edited client.go (1 replacement)
 ─────────────────────────────────────────────────────────────────────────
- SESSION       │  You
- abc12345      │  fix the timeout bug in the client
-               │
- MODE          │  ✻ thinking
- build         │  The retry loop reuses the same context…
-               │
- TOOLS         │  Assistant
- ✓ glob        │  I'll patch the client timeout handling.
- ✓ read_file   │
- ⚙ edit_file   │  ⚙ edit_file internal/client/client.go
-               │  - http:  &http.Client{Timeout: 0},
- CONTEXT       │  + http:  &http.Client{Timeout: 30 * time.Second},
- ▰▰▰▱▱▱▱ 31%   │  ✓ edit_file → edited client.go (1 replacement)
- cache 78% hit │
-               │
- COST          │
- $0.0123       │
- in  64210     │
- out 512       │
+ ◐ generating…  ↑4.2k ↓~380  ▌AEGIS ● claude-opus-4-8  build  ▰▰▱ 31% $0.01
 ─────────────────────────────────────────────────────────────────────────
- ◐ generating… · 12s · ↑4.2k · ↓~380 · ~14 tok/s   31% $0.01   build
+ │ Message Aegis…
+```
+
+**With sidebar open:** it draws as an overlay over the left edge of the transcript rather than pushing the transcript over — opening or closing it never reflows anything underneath (P74.2).
+
+```
+ SESSION       ┃  You
+ abc12345      ┃  fix the timeout bug in the client
+               ┃
+ MODE          ┃  ✻ thinking
+ build         ┃  The retry loop reuses the same context…
+               ┃
+ TOOLS         ┃  Assistant
+ ✓ glob        ┃  I'll patch the client timeout handling.
+ ✓ read_file   ┃
+ ⚙ edit_file   ┃  ⚙ edit_file internal/client/client.go
+               ┃  - http:  &http.Client{Timeout: 0},
+ CONTEXT       ┃  + http:  &http.Client{Timeout: 30 * time.Second},
+ ▰▰▰▱▱▱▱ 31%   ┃  ✓ edit_file → edited client.go (1 replacement)
+ cache 78% hit ┃
+               ┃
+ COST          ┃
+ $0.0123       ┃
+ in  64210     ┃
+ out 512       ┃
+─────────────────────────────────────────────────────────────────────────
+ ◐ generating…  ↑4.2k ↓~380  ▌AEGIS ● claude-opus-4-8  build
 ─────────────────────────────────────────────────────────────────────────
  │ Message Aegis…
 ```
@@ -408,3 +428,16 @@ By default the transcript lives in a bounded, in-app viewport: a fixed-height wi
 - In-app scroll keys and mouse-drag-to-copy selection have nothing to do in this mode (everything is already visible) — use your terminal's own scrollback and selection instead.
 
 It's off by default and resets on restart, the same as `/tools` and `/humor`.
+
+### Mouse capture escape hatch
+
+Raw scrollback mode releases mouse capture *and* the alternate-screen buffer together, which gives up resize re-wrap along with it — long transcript lines never reflow once they've scrolled into plain terminal history. If you want terminal-native selection (for a `tmux`/`kitty` copy-mode workflow, say) without that tradeoff, set `tui.mouse: off` in `config.yaml`:
+
+```yaml
+tui:
+  mouse: off
+```
+
+This releases mouse capture only, keeping the alternate-screen dashboard — resize re-wrap keeps working. The cost: no mouse-wheel scroll (a released wheel event goes to the terminal emulator in alt-screen, not back to Aegis — use `PageUp`/`PageDown` instead), no click-to-focus, and Aegis's own drag-to-copy selection goes idle in favor of your terminal's. Unlike raw scrollback mode there's no in-session toggle — it's read once from config at startup.
+
+Most people copying over SSH are better served by the default: Aegis writes to the clipboard via OSC 52, which works through SSH/tmux without releasing anything. Reach for `tui.mouse: off` only if you specifically want the terminal to own selection.

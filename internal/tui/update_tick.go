@@ -14,15 +14,28 @@ func (m model) updateSpinnerTick(msg spinner.TickMsg) (model, []tea.Cmd) {
 	m.sp, cmd = m.sp.Update(msg)
 	if m.streaming {
 		cmds = append(cmds, cmd) // always re-queue so animation resumes on scroll-back
+		// P74.12: ease the status bar's displayed token counts toward the
+		// real values every tick, independent of followBottom — cheap to
+		// update even when not redrawn, so the counter is already caught up
+		// by the time the view scrolls back into frame.
+		m.easeStatCounters()
 		// P3.7: suppress redraws when the "● thinking…" indicator is scrolled
 		// off-screen — it lives at the viewport bottom, visible only when
 		// followBottom is true.
 		if m.followBottom {
-			m.animStep++
-			m.updatePendingToolCards() // P21.2: keep pending cards' shimmer live
-			m.refresh()
-			// P2.5: poll sub-agent roster every 20 animation frames.
-			if m.animStep%20 == 0 {
+			m.pollTick++
+			// P74.10: reduced motion freezes animStep instead of advancing it,
+			// which freezes shimmerText/caretGlyph/thinkingPhrase (they all
+			// read it) and skips the re-render that would otherwise redraw an
+			// unchanging frame every tick.
+			if !m.reducedMotion {
+				m.animStep++
+				m.updatePendingToolCards() // P21.2: keep pending cards' shimmer live
+				m.refresh()
+			}
+			// P2.5: poll sub-agent roster every 20 ticks. Keyed on pollTick
+			// rather than animStep so reduced motion doesn't also silence it.
+			if m.pollTick%20 == 0 {
 				cmds = append(cmds, m.fetchTeammatesQuiet())
 			}
 		}
@@ -34,4 +47,42 @@ func (m model) updateSpinnerTick(msg spinner.TickMsg) (model, []tea.Cmd) {
 func (m model) updateToastExpired(msg toastExpiredMsg) model {
 	m.activeToast = nil
 	return m
+}
+
+// easeStatCounters advances displayedInputTokens/displayedOutputTokens one
+// frame toward inputTokens/outputTokens (P74.12): a gap-proportional step,
+// large when far behind and small when close, so the status bar's counter
+// climbs smoothly instead of jumping in chunk-sized increments each time a
+// turn's usage lands. Reduced motion (P74.10) snaps straight to the true
+// number instead of animating toward it.
+func (m *model) easeStatCounters() {
+	if m.reducedMotion {
+		m.displayedInputTokens = m.inputTokens
+		m.displayedOutputTokens = m.outputTokens
+		return
+	}
+	m.displayedInputTokens = easeTowards(m.displayedInputTokens, m.inputTokens)
+	m.displayedOutputTokens = easeTowards(m.displayedOutputTokens, m.outputTokens)
+}
+
+// easeTowards returns displayed moved one step toward target: an eighth of
+// the remaining gap, floored at a step of 1 (or -1 when target dropped, e.g.
+// a new run resetting the counter to zero) so it always converges rather than
+// stalling just short of the target.
+func easeTowards(displayed, target int) int {
+	gap := target - displayed
+	switch {
+	case gap == 0:
+		return displayed
+	case gap > 0:
+		if step := gap / 8; step > 1 {
+			return displayed + step
+		}
+		return displayed + 1
+	default:
+		if step := gap / 8; step < -1 {
+			return displayed + step
+		}
+		return displayed - 1
+	}
 }

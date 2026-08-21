@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -212,6 +213,64 @@ func TestRenderToolResult_SanitizesDangerousSeqs(t *testing.T) {
 			t.Errorf("expected file content preserved, got:\n%s", ansi.Strip(out))
 		}
 	})
+}
+
+// TestRenderToolResult_HeaderDropsRepeatedName covers P74.3: the result line
+// must not repeat the tool name (the call block already carries it) and must
+// hang off a "⎿" continuation gutter instead, for both the single-line and
+// multi-line branches.
+func TestRenderToolResult_HeaderDropsRepeatedName(t *testing.T) {
+	th := newTheme()
+
+	t.Run("single-line", func(t *testing.T) {
+		out := renderToolResult(th, "read_file", "3 files found", false, 80, 16, "")
+		plain := ansi.Strip(out)
+		if strings.Contains(plain, "read_file") {
+			t.Errorf("expected no repeated tool name, got: %q", plain)
+		}
+		if !strings.Contains(plain, "⎿") {
+			t.Errorf("expected a ⎿ continuation gutter, got: %q", plain)
+		}
+	})
+
+	t.Run("multi-line within cap", func(t *testing.T) {
+		out := renderToolResult(th, "shell", "line one\nline two\nline three", false, 80, 16, "")
+		plain := ansi.Strip(out)
+		if strings.Contains(plain, "shell") {
+			t.Errorf("expected no repeated tool name, got: %q", plain)
+		}
+		if !strings.Contains(plain, "⎿") || !strings.Contains(plain, "line one") {
+			t.Errorf("expected a gutter header followed by the body, got:\n%s", plain)
+		}
+	})
+}
+
+// TestRenderToolResult_CollapsesToSummaryWhenOverCap covers P74.3: output that
+// would need truncating collapses to a single one-line summary rather than a
+// chopped body, and the existing /tools full expand path (a raised
+// maxBodyLines) shows the full body again.
+func TestRenderToolResult_CollapsesToSummaryWhenOverCap(t *testing.T) {
+	th := newTheme()
+	var lines []string
+	for i := 1; i <= 20; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	result := strings.Join(lines, "\n")
+
+	compact := renderToolResult(th, "shell", result, false, 80, 10, "")
+	plainCompact := ansi.Strip(compact)
+	if strings.Contains(plainCompact, "line 1\n") || strings.Count(plainCompact, "\n") > 0 {
+		t.Errorf("expected a single collapsed summary line, got:\n%s", plainCompact)
+	}
+	if !strings.Contains(plainCompact, "20 lines") || !strings.Contains(plainCompact, "/tools full") {
+		t.Errorf("expected a line-count summary naming the expand path, got: %q", plainCompact)
+	}
+
+	full := renderToolResult(th, "shell", result, false, 80, 9999, "")
+	plainFull := ansi.Strip(full)
+	if !strings.Contains(plainFull, "line 1") || !strings.Contains(plainFull, "line 20") {
+		t.Errorf("expected /tools full to show the complete body, got:\n%s", plainFull)
+	}
 }
 
 // TestRenderShellCall_SanitizesDangerousSeqs covers P28.1 for the tool-call

@@ -238,6 +238,29 @@ type TUIConfig struct {
 	// actions keep their hardcoded default. Unknown action names are
 	// rejected at TUI startup.
 	Keybindings map[string][]string `koanf:"keybindings"`
+	// Mouse controls whether the TUI captures the mouse (P74.19): "on"
+	// (default) or "off". Capturing the mouse is what makes Aegis's own
+	// drag-selection possible, but it also stops the terminal emulator from
+	// offering its own click-drag select and copy-on-select — the only
+	// thing that reliably works today for a `tmux`/`kitty` copy-mode
+	// workflow or (before P74.20's OSC 52 path) over SSH. Setting this to
+	// "off" releases capture while keeping alt-screen, so resize re-wrap
+	// still works — the one combination `/scrollback` can't give you, since
+	// it releases both. The cost: no wheel scroll (a released wheel event
+	// goes to the terminal emulator in alt-screen), no click-to-focus, and
+	// `/copy`'s drag-selection goes idle. This is an escape hatch, not a
+	// default — most people are better served by P74.20's OSC 52 clipboard
+	// fix, which solves the SSH case without giving up capture.
+	Mouse string `koanf:"mouse"`
+	// ReducedMotion (P74.10) disables the continuous "working" animations —
+	// the shimmer sweep across the status line, the streaming caret's blink,
+	// the cycling thinking phrase, and the pending tool card's shimmer frame
+	// — freezing each at its last frame instead. Off by default. This is
+	// both an accessibility setting (the shimmer is a moving-luminance sweep,
+	// the class of animation vestibular sensitivity reacts to) and a CPU one
+	// (it skips the per-tick transcript re-render on a machine that may be
+	// simultaneously running local inference).
+	ReducedMotion bool `koanf:"reduced_motion"`
 }
 
 // CleanupConfig controls automatic pruning of old sessions.
@@ -308,7 +331,7 @@ type AdditionalRoot struct {
 
 // SandboxConfig configures command execution isolation.
 type SandboxConfig struct {
-	Backend  string   `koanf:"backend"`  // "local" (default), "container", or "auto" (detect & pick)
+	Backend  string   `koanf:"backend"`  // "os" (default; P4.7 OS-level isolation, falls back to "local"), "container", or "auto" (detect & pick)
 	Runtime  string   `koanf:"runtime"`  // forced runtime when backend=container: "docker", "podman", "wslc", "container" (Apple); empty = auto-detect
 	Priority []string `koanf:"priority"` // auto-detect order, e.g. ["wslc","docker","podman"]; empty = OS default
 	Image    string   `koanf:"image"`    // container image (default "ubuntu:22.04")
@@ -1692,9 +1715,18 @@ func defaults() map[string]any {
 		// one time-shaped signal that needs no operator judgement.
 		"cost.max_turn_stall": DefaultMaxTurnStallSec,
 		"swarm.backend":       "in_process",
-		"sandbox.backend":     "local",
-		"sandbox.image":       "ubuntu:22.04",
-		"sandbox.network":     false,
+		// "os" (P4.7 OS-level isolation, no container runtime needed) rather
+		// than the unsandboxed "local", so a daemon started before any config
+		// file exists — the truest zero-setup path, ahead of even
+		// --first-init's template writing this same value explicitly — isn't
+		// silently unconfined. SelectSandbox falls back to "local" with a
+		// startup WARN (never a hard failure, sandbox.strict aside) wherever
+		// "os" has nothing to attach to — every current Windows host, and any
+		// macOS/Linux box missing seatbelt/bwrap — so this changes nothing
+		// there and only tightens the platforms that can actually use it.
+		"sandbox.backend": "os",
+		"sandbox.image":   "ubuntu:22.04",
+		"sandbox.network": false,
 		// P60.1: conservative per-container caps. Sized to let ordinary
 		// build/test work through (a `go build`, an `npm ci`) while making a
 		// runaway inside the sandbox a failed command rather than a host-wide

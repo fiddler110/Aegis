@@ -57,6 +57,11 @@ func (m model) updateStreamClosed(msg streamClosedMsg) (tea.Model, tea.Cmd) {
 	// resolved everything.
 	m.resolveStuckToolCards()
 	m.streaming = false
+	// P74.12: ticks stop firing once streaming is false, so snap the
+	// displayed counters to the real values now rather than leaving them
+	// short of a target nothing will ease them toward again.
+	m.displayedInputTokens = m.inputTokens
+	m.displayedOutputTokens = m.outputTokens
 	m.events = nil
 	m.cancel = nil
 	m.status = "ready"
@@ -85,6 +90,8 @@ func (m model) updateStreamClosed(msg streamClosedMsg) (tea.Model, tea.Cmd) {
 // updateErr reports a failed run.
 func (m model) updateErr(msg errMsg) (tea.Model, tea.Cmd) {
 	m.streaming = false
+	m.displayedInputTokens = m.inputTokens
+	m.displayedOutputTokens = m.outputTokens
 	m.backtrackArmed = false
 	m.setQueueMode(false)
 	m.transcript.Append(m.th.errLine.Render("error: "+msg.err.Error()) + "\n\n")

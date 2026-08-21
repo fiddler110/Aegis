@@ -56,11 +56,11 @@ func TestTranscriptStripsControlSequencesFromToolCalls(t *testing.T) {
 			m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: c.tool, ToolID: "t1"})
 			m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: c.tool, ToolID: "t1", ToolInput: []byte(c.input)})
 			m.refresh()
-			noSmuggledESC(t, "pending tool card", m.render())
+			noSmuggledESC(t, "pending tool card", m.renderContent())
 
 			m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: c.tool, ToolID: "t1", ToolResult: "done"})
 			m.refresh()
-			noSmuggledESC(t, "finished tool card", m.render())
+			noSmuggledESC(t, "finished tool card", m.renderContent())
 		})
 	}
 }
@@ -108,7 +108,7 @@ func TestTranscriptStripsControlSequencesFromGuardAndError(t *testing.T) {
 			m.streaming = true
 			m.applyEvent(c.ev)
 			m.refresh()
-			noSmuggledESC(t, c.name, m.render())
+			noSmuggledESC(t, c.name, m.renderContent())
 		})
 	}
 }
@@ -136,7 +136,7 @@ func TestSlashOutputStripsDangerousSequences(t *testing.T) {
 			m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 			m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 			m = driveUpdate(t, m, c.msg)
-			noSmuggledESC(t, c.name, m.render())
+			noSmuggledESC(t, c.name, m.renderContent())
 			if !strings.Contains(plainView(m), "PORT 22 open") {
 				t.Errorf("%s: the report text itself should survive, got:\n%s", c.name, plainView(m))
 			}
@@ -151,7 +151,7 @@ func TestBangOutputStripsDangerousSequences(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = driveUpdate(t, m, bangMsg{cmd: "cat notes.txt", output: "hello " + escByte + "]0;pwned" + escByte + "\\"})
-	noSmuggledESC(t, "bang output", m.render())
+	noSmuggledESC(t, "bang output", m.renderContent())
 	if !strings.Contains(plainView(m), "hello") {
 		t.Errorf("expected the command's own output to survive, got:\n%s", plainView(m))
 	}

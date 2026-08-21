@@ -83,6 +83,61 @@ func TestBuildApproveRequestEmptyPatternNeverAllowsAlways(t *testing.T) {
 	}
 }
 
+// TestApprovalCursorPosTracksSelectionAndFeedbackMode checks the P74.7
+// cursor for the approval dialog: it sits on the selected option's "▸"
+// arrow normally, and moves to the typed-feedback caret once feedbackMode is
+// entered — so the real terminal cursor tracks whichever the user is
+// actually interacting with.
+func TestApprovalCursorPosTracksSelectionAndFeedbackMode(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.streaming = true
+	m.applyEvent(api.Event{
+		Kind:           api.KindApprovalRequest,
+		Tool:           "shell",
+		ToolInput:      []byte(`{"command":"npm test -v"}`),
+		ApprovalReason: "execute capability requires approval",
+		ApprovalID:     "run-1",
+	})
+	if m.approval == nil {
+		t.Fatal("expected pending approval state")
+	}
+
+	fg := m.renderApprovalDialog()
+	_, y1, ok := approvalCursorPos(fg, false)
+	if !ok {
+		t.Fatal("expected a cursor position on the selected option")
+	}
+
+	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	fg = m.renderApprovalDialog()
+	_, y2, ok := approvalCursorPos(fg, false)
+	if !ok {
+		t.Fatal("expected a cursor position after moving down")
+	}
+	if y2 <= y1 {
+		t.Errorf("expected cursor row to move down (%d -> %d)", y1, y2)
+	}
+
+	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if !m.approval.feedbackMode {
+		t.Fatal("expected feedback mode after 'f'")
+	}
+	fg = m.renderApprovalDialog()
+	if _, _, ok := approvalCursorPos(fg, true); !ok {
+		t.Error("expected a cursor position on the feedback caret")
+	}
+
+	// render() must translate this into full-frame coordinates.
+	_, cur := m.render()
+	if cur == nil {
+		t.Fatal("expected render() to return a cursor while the approval dialog is open")
+	}
+	if cur.X < 0 || cur.Y < 0 {
+		t.Errorf("expected a non-negative cursor position, got %#v", cur)
+	}
+}
+
 // TestApprovalDialogFlow_NoPTY drives the option-list approval dialog (TQ6)
 // through the real Update path: arrival, navigation, and each answer shape.
 func TestApprovalDialogFlow_NoPTY(t *testing.T) {

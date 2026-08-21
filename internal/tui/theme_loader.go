@@ -118,6 +118,9 @@ func (tf themeFile) toScheme() (colorScheme, error) {
 		bgLess:  blend(background, foreground, 0.12),
 		bgMost:  blend(background, foreground, 0.22),
 
+		// Past bgMost so a selection reads as distinct from the surface tiers.
+		selectionBg: blend(background, parsed["brightMagenta"], 0.45),
+
 		separator: blend(background, foreground, 0.16),
 		onPrimary: lipgloss.Color("#FFFFFF"),
 

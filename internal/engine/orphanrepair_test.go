@@ -145,15 +145,17 @@ func TestInterruptedToolRepairDistinguishesStartedFromUnreached(t *testing.T) {
 
 // TestRepairOrphanUsesNotStartedWordingWithoutARecord pins the fallback: with
 // no started-set (a session restored into a fresh process, where the in-process
-// map is gone), every orphan keeps the pre-P65.1 wording. That is not a claim
-// the runtime can back — it is the only answer available without the durable
-// record P65.4 would add — so it is asserted here rather than left to drift
-// into the confident half by accident.
+// map is gone), an orphan with well-formed arguments keeps the pre-P65.1
+// wording. That is not a claim the runtime can back — it is the only answer
+// available without the durable record P65.4 would add — so it is asserted
+// here rather than left to drift into the confident half by accident. The
+// arguments are deliberately valid JSON so this exercises the "no record"
+// branch rather than P74.14's malformed-arguments branch.
 func TestRepairOrphanUsesNotStartedWordingWithoutARecord(t *testing.T) {
 	msgs := []provider.Message{
 		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
 		{Role: provider.RoleAssistant, Content: []provider.Block{
-			provider.ToolUseBlock{ID: "tu_1", Name: "shell"},
+			provider.ToolUseBlock{ID: "tu_1", Name: "shell", Input: json.RawMessage(`{"command":"ls"}`)},
 		}},
 	}
 	got := repairOrphanedToolUses(msgs, nil)
@@ -166,6 +168,58 @@ func TestRepairOrphanUsesNotStartedWordingWithoutARecord(t *testing.T) {
 	}
 	if !strings.Contains(tr.Content, "did not run") {
 		t.Errorf("content = %q, want the not-started wording", tr.Content)
+	}
+}
+
+// TestRepairOrphanDistinguishesMalformedFromInterrupted covers P74.14: an
+// orphaned call whose arguments never parsed as JSON at all must be reported
+// differently from one that was simply cut off mid-flight, because the first
+// was never going to dispatch regardless of the interruption and "did not
+// run" invites the model to retry the identical, still-malformed call.
+func TestRepairOrphanDistinguishesMalformedFromInterrupted(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		{Role: provider.RoleAssistant, Content: []provider.Block{
+			provider.ToolUseBlock{ID: "tu_malformed", Name: "shell", Input: json.RawMessage(`{"command":`)},
+			provider.ToolUseBlock{ID: "tu_clean", Name: "shell", Input: json.RawMessage(`{"command":"ls"}`)},
+		}},
+	}
+	got := repairOrphanedToolUses(msgs, nil)
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	results := map[string]provider.ToolResultBlock{}
+	for _, b := range got[2].Content {
+		tr, ok := b.(provider.ToolResultBlock)
+		if !ok {
+			t.Fatalf("block is not a ToolResultBlock: %#v", b)
+		}
+		results[tr.ToolUseID] = tr
+	}
+
+	malformed, ok := results["tu_malformed"]
+	if !ok {
+		t.Fatal("no synthetic result for the malformed call")
+	}
+	if !strings.Contains(malformed.Content, "malformed") {
+		t.Errorf("malformed call result = %q, want it to name malformed arguments", malformed.Content)
+	}
+	if strings.Contains(malformed.Content, "interrupted") {
+		t.Errorf("malformed call result wrongly claims interruption: %q", malformed.Content)
+	}
+	if !malformed.IsError {
+		t.Error("malformed call result should be an error")
+	}
+
+	clean, ok := results["tu_clean"]
+	if !ok {
+		t.Fatal("no synthetic result for the clean call")
+	}
+	if !strings.Contains(clean.Content, "did not run") {
+		t.Errorf("clean call result = %q, want the not-started wording", clean.Content)
+	}
+	if strings.Contains(clean.Content, "malformed") {
+		t.Errorf("clean call result wrongly reported as malformed: %q", clean.Content)
 	}
 }
 

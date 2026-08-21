@@ -80,7 +80,10 @@ func TestSandboxUseRejectsUnknown(t *testing.T) {
 
 func TestSandboxStatusLocal(t *testing.T) {
 	redirectConfigDir(t)
-	// Default config has backend=local; status should not probe runtimes.
+	// backend=local forced explicitly (the built-in default is "os" — see
+	// config.defaults' sandbox.backend comment): status should not probe
+	// runtimes for local.
+	t.Setenv("AEGIS_SANDBOX_BACKEND", "local")
 	out, err := runSandbox(t, "status")
 	if err != nil {
 		t.Fatalf("sandbox status: %v", err)

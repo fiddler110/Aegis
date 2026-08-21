@@ -30,15 +30,42 @@ func runFirstInit(overwrite bool) error {
 }
 
 // applyOllamaTemplateDefaults probes http://localhost:11434 for pulled models
-// and, if any are found, rewrites the template's provider.model line to the
-// most-recently-used one and (when a second, smaller model is also present)
-// uncomments provider.small_model with the smallest one by on-disk size.
+// and, if any are found, rewrites the template so a fresh install lands
+// configured for what is actually on the machine instead of generic
+// placeholders the operator has to come back and fill in:
+//
+//   - provider.model is pinned to the most-recently-used pulled model instead
+//     of "auto".
+//   - provider.small_model is uncommented with the smallest *other* pulled
+//     model, when a second one is present.
+//   - provider.think flips to true when the chosen main model's name looks
+//     like a reasoning/thinking model (looksLikeThinkingModel, the same
+//     heuristic `aegis doctor` already warns from) — a wrong guess in either
+//     direction costs nothing: the native adapter already latches and
+//     silently drops `think` the first time a model 400s on it (P52.5).
+//   - output_guard.enabled flips to true, but *only* when small_model was
+//     also detected: the template's own documented reason it ships off is
+//     that the guard's extra rubric call runs on the primary model without
+//     one, roughly doubling turn latency for a local (often slow or
+//     thinking-style) model. Detecting small_model is exactly the condition
+//     that reasoning no longer applies, so a two-model machine gets response
+//     validation for free instead of a step the operator has to remember and
+//     come back for.
+//
 // Returns the template unchanged if Ollama isn't reachable or has no models.
 func applyOllamaTemplateDefaults(template string) string {
 	all, err := discoverOllamaModels("http://localhost:11434", 2*time.Second)
 	if err != nil || len(all) == 0 {
 		return template
 	}
+	return applyDiscoveredModelDefaults(template, all)
+}
+
+// applyDiscoveredModelDefaults is applyOllamaTemplateDefaults's pure half —
+// no network, no stdout — split out so the substitution rules themselves
+// (model/small_model/think/output_guard) are unit-testable against a
+// synthetic model list instead of a live Ollama instance.
+func applyDiscoveredModelDefaults(template string, all []ollamaModelInfo) string {
 	// Exclude embedding-only models (nomic-embed-text and the like): neither
 	// the main model nor small_model can be one, since both need to serve
 	// chat completions. They stay in the "detected" list printed below, since
@@ -57,13 +84,40 @@ func applyOllamaTemplateDefaults(template string) string {
 			`                             # --overwrite after pulling new models, or edit by hand.`,
 		1)
 
+	if looksLikeThinkingModel(config.ProviderConfig{Model: main}) {
+		template = strings.Replace(template,
+			`think: false               # true only for extended-thinking models such as
+                             #   qwen3 or deepseek-r1 served via Ollama.`,
+			`think: true                # detected at init time: `+main+` looks like a`+"\n"+
+				`                             #   reasoning/thinking model. Set to false if it`+"\n"+
+				`                             #   turns out not to be one, or answers ramble.`,
+			1)
+	}
+
+	guardEnabled := false
 	if small := smallestOtherModel(models, main); small != "" {
 		template = strings.Replace(template,
 			`  # small_model: "llama3.2"  # Optional fast model for background calls`,
 			fmt.Sprintf("  small_model: %q     # detected at init time: smallest other model pulled", small),
 			1)
+		// The template's own stated precondition for enabling the guard
+		// without a latency penalty — see this function's doc comment — is
+		// now met.
+		template = strings.Replace(template,
+			`output_guard:
+  enabled: false             # validate each final answer; /guard on enables per session`,
+			`output_guard:
+  enabled: true              # validate each final answer; auto-enabled at init time since
+                             # provider.small_model was detected (see it above) — verdicts
+                             # route there instead of doubling latency on the primary model.
+                             # /guard off disables per session.`,
+			1)
+		guardEnabled = true
 	}
 	fmt.Printf("Detected Ollama model%s: %s\n", pluralS(len(all)), strings.Join(modelNames(all), ", "))
+	if guardEnabled {
+		fmt.Println("Two or more chat models found — output_guard enabled (verdicts route to the detected small_model).")
+	}
 	return template
 }
 

@@ -111,6 +111,37 @@ func TestScrollbackViewReleasesAltScreenAndMouse(t *testing.T) {
 	}
 }
 
+// TestMouseOffKeepsAltScreenButReleasesCapture is the P74.19 premise check:
+// Config.Mouse: "off" must release mouse capture while leaving AltScreen on
+// (the combination /scrollback can't produce, since it releases both), and
+// it must not be reachable except through that config — there's no runtime
+// toggle, unlike rawScrollback.
+func TestMouseOffKeepsAltScreenButReleasesCapture(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir(), Mouse: "off"})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	v := m.View()
+	if !v.AltScreen {
+		t.Error("expected alt-screen to stay ON with mouse off — that's the point of this mode over /scrollback")
+	}
+	if v.MouseMode != tea.MouseModeNone {
+		t.Errorf("expected mouse capture released, got %v", v.MouseMode)
+	}
+}
+
+// TestMouseOffDefaultsOn confirms an unset Config.Mouse keeps the existing
+// default (capture on) — "off" must be explicit, matching the "escape hatch,
+// not a direction" framing in the roadmap record.
+func TestMouseOffDefaultsOn(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	v := m.View()
+	if v.MouseMode != tea.MouseModeCellMotion {
+		t.Errorf("expected mouse capture ON when Config.Mouse is unset, got %v", v.MouseMode)
+	}
+}
+
 // TestScrollbackModeUnclipsTranscript is the rendering-mode branch this mode
 // actually needs, per the investigation in tui.go's View()/applyViewportHeight
 // doc comments: releasing alt-screen alone does not restore native

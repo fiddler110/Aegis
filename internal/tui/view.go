@@ -35,11 +35,21 @@ import (
 // mode: it renders every segment unclipped so the frame truly grows. Mouse
 // capture is released too, since MouseModeCellMotion alone is enough to stop
 // a terminal emulator from offering its own click-drag text selection.
+//
+// mouseOff (P74.19) is the other way to release capture, and deliberately
+// independent of rawScrollback: it drops MouseMode while leaving AltScreen
+// on, so resize re-wrap keeps working — the one combination /scrollback
+// can't give you, since that releases both. It costs wheel scroll (a
+// released wheel event goes to the terminal emulator in alt-screen, not
+// back to Aegis) and click-to-focus; app-owned drag-selection (selection.go)
+// goes idle the same way it does under rawScrollback.
 func (m model) View() tea.View {
-	v := tea.NewView(m.render())
+	content, cursor := m.render()
+	v := tea.NewView(content)
+	v.Cursor = cursor
 	v.AltScreen = !m.rawScrollback
 	v.BackgroundColor = colSurface
-	if m.rawScrollback {
+	if m.rawScrollback || m.mouseOff {
 		v.MouseMode = tea.MouseModeNone
 	} else {
 		v.MouseMode = tea.MouseModeCellMotion
@@ -83,17 +93,33 @@ func (m model) notifyCmd(ev notify.Event) tea.Cmd {
 // the filterable-list dialogs, help, and quit-confirm, so closing them
 // doesn't lose your place — the transcript keeps running underneath a
 // long multi-step form exactly as it does behind the approval dialog.
-func (m model) render() string {
+// render returns the full frame plus, when a picker or the approval dialog is
+// open, the position the real terminal cursor belongs at (P74.7) — declaring
+// it is what lets a screen reader, a cursor-line-highlighting emulator, or
+// IME composition agree with the app about where "here" is, instead of
+// leaving hardware focus wherever the composer last left it. Every other
+// overlay (help, quit-confirm, wizard, …) has no notion of a focused row, so
+// they leave the cursor nil.
+func (m model) render() (string, *tea.Cursor) {
 	if !m.ready {
-		return "initializing…"
+		return "initializing…", nil
 	}
 
 	base := m.renderChat()
+	if m.sidebarOpen && m.width >= sidebarMinTermW && !m.rawScrollback {
+		// P74.2: the sidebar used to be joined into the layout, reflowing the
+		// transcript pane every time it opened or closed. It now composites
+		// over the live chat via renderAnchoredOverlay — the same mechanism
+		// P33.11/P33.12 established for the transient panel and wizard — so
+		// opening it never perturbs transcript geometry, and it draws as the
+		// lowest layer so every other overlay below still lands on top of it.
+		base = renderAnchoredOverlay(base, m.renderSidebar(m.height), 0, 0, m.width, m.height)
+	}
 	if m.wizard != nil {
-		return renderOverlay(base, m.wizard.view(), m.width, m.height)
+		return renderOverlay(base, m.wizard.view(), m.width, m.height), nil
 	}
 	if m.securityConfig != nil {
-		return renderOverlay(base, m.securityConfig.view(), m.width, m.height)
+		return renderOverlay(base, m.securityConfig.view(), m.width, m.height), nil
 	}
 
 	if m.completion.active {
@@ -107,70 +133,84 @@ func (m model) render() string {
 		popup, x, y := m.renderCompletionPopup()
 		base = renderAnchoredOverlay(base, popup, x, y, m.width, m.height)
 	}
+	var cur *tea.Cursor
 	if m.approval != nil {
 		// P33.6: the approval prompt used to sit between transcript and input,
 		// shrinking the pane by its own height every time the engine asked —
 		// the loudest layout jump in the normal flow. Compositing it leaves the
 		// transcript's geometry alone; modality is unchanged, since the
 		// composer was already blurred while one is pending (P25.4a).
-		base = renderOverlay(base, m.renderApprovalDialog(), m.width, m.height)
+		fg := m.renderApprovalDialog()
+		base = renderOverlay(base, fg, m.width, m.height)
+		if x, y, ok := approvalCursorPos(fg, m.approval.feedbackMode); ok {
+			ox, oy := overlayOrigin(fg, m.width, m.height)
+			cur = tea.NewCursor(ox+x, oy+y)
+		}
 	}
 	switch {
 	case m.helpOpen:
-		return renderOverlay(base, renderHelpBox(m.keys), m.width, m.height)
+		return renderOverlay(base, renderHelpBox(m.keys), m.width, m.height), nil
 	case m.quitConfirm:
-		return renderOverlay(base, renderQuitConfirmBox(), m.width, m.height)
+		return renderOverlay(base, renderQuitConfirmBox(), m.width, m.height), nil
 	case m.dialog != nil:
-		return renderOverlay(base, m.dialog.View(), m.width, m.height)
+		fg := m.dialog.View()
+		out := renderOverlay(base, fg, m.width, m.height)
+		if x, y, ok := m.dialog.cursorPos(); ok {
+			ox, oy := overlayOrigin(fg, m.width, m.height)
+			cur = tea.NewCursor(ox+x, oy+y)
+		}
+		return out, cur
 	case m.transientPanel != nil:
 		// P33.11: the informational panel composites over the live chat (dimmed
 		// behind it) rather than replacing the frame, so dismissing it drops the
 		// user straight back where they were.
-		return renderOverlay(base, m.transientPanel.View(), m.width, m.height)
+		return renderOverlay(base, m.transientPanel.View(), m.width, m.height), nil
 	}
-	return base
+	return base, cur
 }
 
-// renderChat renders the normal chat frame: title bar, transcript/sidebar/
-// terminal pane, todo strip, and input area. Split out of render() so overlay
-// dialogs — and, since P33.18, the completion popup — composite over it
-// instead of being laid out inline.
+// renderContent returns just the frame render() produces, discarding the
+// cursor position — the shape every test that inspects the rendered string
+// wants, without each call site destructuring a tuple it doesn't care about.
+func (m model) renderContent() string {
+	s, _ := m.render()
+	return s
+}
+
+// renderChat renders the normal chat frame: transcript/terminal pane, todo
+// strip, and input area (which now carries the brand mark and connection
+// badge that used to be their own title-bar row — see renderInputArea).
+// Split out of render() so overlay dialogs — and, since P33.18, the
+// completion popup — composite over it instead of being laid out inline.
+//
+// P74.2: the sidebar is no longer joined in here. It composites over the
+// finished frame as an overlay (render()), so it never reflows this content
+// regardless of whether it's open — six framed regions became one.
 func (m model) renderChat() string {
-	titleBar := m.renderTitleBar()
 	inputArea := m.renderInputArea()
 
 	var content string
 	if m.rawScrollback {
 		// P22.6: no scrollbar column (nothing to indicate — the terminal owns
-		// scroll position) and no sidebar/terminal pane (both assume a
-		// fixed-height dashboard next to a bounded transcript; here the
-		// transcript's own height is unbounded and grows with content, so
-		// joining a fixed-height column beside it would either misalign or,
-		// for the sidebar's Height()-padded block, emit thousands of blank
-		// lines). Plain sequential text gets the full body width instead.
+		// scroll position) and no terminal pane (it assumes a fixed-height
+		// dashboard next to a bounded transcript; here the transcript's own
+		// height is unbounded and grows with content, so joining a
+		// fixed-height column beside it would misalign). Plain sequential
+		// text gets the full body width instead.
 		content = lipgloss.NewStyle().PaddingLeft(1).Render(m.renderTranscriptContent())
 	} else {
 		main := lipgloss.JoinHorizontal(lipgloss.Top,
 			lipgloss.NewStyle().PaddingLeft(1).Render(m.renderTranscriptContent()),
 			m.renderScrollbar(),
 		)
-		if m.sidebarOpen && m.width >= sidebarMinTermW {
-			sidebar := m.renderSidebar(m.transcript.Height())
-			if m.termOpen {
-				content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
-			} else {
-				content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
-			}
+		if m.termOpen {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
 		} else {
-			if m.termOpen {
-				content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
-			} else {
-				content = main
-			}
+			content = main
 		}
 	}
 
-	parts := []string{titleBar, content}
+	parts := []string{content}
 	if len(m.todoItems) > 0 {
 		parts = append(parts, m.renderTodoStrip())
 	}
@@ -198,25 +238,14 @@ func (m model) renderCompletionPopup() (popup string, x, y int) {
 	return popup, 0, y
 }
 
-func (m model) renderTitleBar() string {
-	brand := renderBrandMark()
-	brandW := lipgloss.Width(brand)
-
-	// P16.5: the scroll-position indicator moved to a rendered scrollbar
-	// glyph column beside the transcript (see renderScrollbar) — this bar no
-	// longer carries scroll state.
-	rightW := max(m.width-brandW, 0)
-	// P28.7: a colored dot (+ latency once measured) ahead of the model name
-	// gives an always-visible, glance-only connection/model-health signal —
-	// no /status command or wasted "is the model connected" prompt needed.
-	right := lipgloss.NewStyle().
-		Background(colSurface).
-		Foreground(colTextMuted).
-		Width(rightW).
-		Align(lipgloss.Right).
-		Render(m.renderConnBadge(colSurface) + " " + m.cfg.Model + " ")
-
-	return brand + right
+// renderBrandSegment folds what used to be the always-visible title bar's
+// content — the brand mark and the P28.7 connection/model-health badge —
+// into a single status-line segment (P74.2). It carries the highest
+// priority of the right-hand segments in renderInputArea so it's the last
+// to drop on a narrow terminal, keeping the one signal that used to survive
+// on its own dedicated row.
+func (m model) renderBrandSegment() string {
+	return renderBrandMark() + m.renderConnBadge(colSurface) + " " + m.cfg.Model
 }
 
 func (m model) renderSidebar(h int) string {
@@ -297,7 +326,8 @@ func (m model) renderSidebar(h int) string {
 			if tm.Summary != "" {
 				label += ": " + oneLine(tm.Summary)
 			}
-			add(m.th.tool.Render(truncate(label, w)))
+			style := lipgloss.NewStyle().Foreground(agentColor(tm.AgentID))
+			add(style.Render(truncate(label, w)))
 		}
 		add("")
 	}
@@ -370,7 +400,7 @@ func (m model) renderInputArea() string {
 		// the whole run — on a local model the rate is the vital sign, and it
 		// is worth least when it disappears at the first token.
 		hint := m.th.elapsedDim.Render(formatStreamHint(m.streamStats()))
-		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, colAccent) + hint
+		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, stallRampColor(m.stallElapsed(), m.maxTurnStall)) + hint
 	} else if m.activeToast != nil {
 		tag, fg, bg := toastTag(m.activeToast.level)
 		statusLeft = statusTag(tag, fg, bg) + " " + m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
@@ -381,8 +411,8 @@ func (m model) renderInputArea() string {
 
 	// Right side segments, highest → lowest priority. The loop drops from the
 	// tail so lower-value segments disappear first on narrow terminals.
-	//   badge (always)  →  hints  →  stats  →  context/agents (sidebar off)  →  cwd
-	segs := []string{m.renderModeBadge()}
+	//   brand+conn (always, P74.2) → badge → hints → stats → context/agents (sidebar off) → cwd
+	segs := []string{m.renderBrandSegment(), m.renderModeBadge()}
 	segs = append(segs, m.th.statusDim.Render(m.contextualFooterHints()))
 	if stats := m.renderStats(); stats != "" {
 		segs = append(segs, m.th.statusDim.Render(stats))
@@ -524,7 +554,7 @@ func (m model) renderStats() string {
 	if m.tokensEstimated {
 		est = "~"
 	}
-	s := fmt.Sprintf("%sin:%d out:%d", est, m.inputTokens, m.outputTokens)
+	s := fmt.Sprintf("%sin:%d out:%d", est, m.displayedInputTokens, m.displayedOutputTokens)
 	if m.costUSD > 0 {
 		s += fmt.Sprintf("  $%.4f", m.costUSD)
 	}
@@ -644,14 +674,38 @@ func extractCodeBlocks(text string) []string {
 	return blocks
 }
 
-// copyToClipboardCmd returns a tea.Cmd that copies text to the system clipboard.
+// maxOSC52Payload is the largest raw payload sent over OSC 52. Its base64
+// encoding (ceil(n/3)*4) stays under tmux's historic 74,994-byte OSC 52
+// buffer cap with margin; above it we go straight to the native-tool
+// fallback rather than emit a sequence that gets silently truncated.
+const maxOSC52Payload = 50_000
+
+// copyToClipboardCmd returns a tea.Cmd that copies text to the system
+// clipboard. OSC 52 (P74.20) is the primary path: it asks the terminal
+// emulator itself to set the clipboard, which is correct over SSH, tmux and
+// containers, where the native tools below only ever reach the clipboard of
+// the machine Aegis is running on. There is no synchronous way to learn
+// whether a terminal honoured the sequence, so within the size limit we emit
+// it and report success; the native tools are used only as the fallback for
+// a payload OSC 52 can't carry reliably.
+//
+// This is a deliberate emission on a trusted, user-initiated path and must
+// stay separate from termsafe.StripDangerousSeqs, which strips the same
+// sequence from untrusted model/tool output (P28.1) — do not merge the two.
 func copyToClipboardCmd(text string) tea.Cmd {
+	if len(text) <= maxOSC52Payload {
+		return tea.Batch(
+			tea.SetClipboard(text),
+			func() tea.Msg { return clipboardResultMsg{} },
+		)
+	}
 	return func() tea.Msg {
 		return clipboardResultMsg{err: copyToClipboard(text)}
 	}
 }
 
 // copyToClipboard writes text to the platform clipboard using native tools.
+// Used as the copyToClipboardCmd fallback for payloads too large for OSC 52.
 func copyToClipboard(text string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {

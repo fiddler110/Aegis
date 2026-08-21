@@ -132,13 +132,19 @@ func renderToolCardStuck(th theme, call string) string {
 	return call + "\n" + th.toolErr.Render("  ⚠ interrupted — run ended before a result arrived")
 }
 
-// renderToolResult renders a finished tool call. Short, single-line results are
-// shown inline; multi-line output (shell, read, search) is shown as a capped,
-// gutter-marked block instead of being collapsed to one truncated line.
-// maxBodyLines controls the cap for multi-line output; pass a very large number
-// (e.g. 9999) to disable truncation (full mode). path is the file path
-// associated with the call that produced this result (read_file only, for
-// chroma syntax highlighting — P16.2); empty when unknown or not applicable.
+// renderToolResult renders a finished tool call as a continuation of the call
+// block already printed by renderToolCall (P74.3) — it never repeats the tool
+// name, which the call header already carries, and hangs off a "⎿" gutter
+// instead. Short, single-line results are shown inline; multi-line output
+// that already fits within maxBodyLines is shown as a gutter-marked block
+// (the specialized read_file/chroma path included); multi-line output that
+// would need truncating collapses to a single one-line summary instead of a
+// chopped body, with "/tools full" — which raises maxBodyLines past the
+// result's line count — as the expand path. maxBodyLines controls that cap;
+// pass a very large number (e.g. 9999) to disable truncation (full mode).
+// path is the file path associated with the call that produced this result
+// (read_file only, for chroma syntax highlighting — P16.2); empty when
+// unknown or not applicable.
 func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyLines int, path string) string {
 	tag, style := "✓", th.tool
 	if isErr {
@@ -147,15 +153,16 @@ func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyL
 	// Untrusted raw tool output (P28.1) — strip anything beyond SGR colour
 	// before it reaches the real terminal, covering every branch below
 	// (single-line, read_file, and the generic renderBlock path). The name is
-	// model-controlled too and is echoed in every branch's header (P66.15);
-	// unlike the body it carries no legitimate styling, so it gets the
-	// stricter strip.
+	// model-controlled too (P66.15); unlike the body it carries no legitimate
+	// styling, so it gets the stricter strip even though it's no longer
+	// echoed in the header.
 	name = stripControlSeqs(name)
 	result = stripDangerousSeqs(strings.TrimRight(result, "\n"))
+	header := fmt.Sprintf("%s %s", tag, th.toolGut.Render("⎿"))
 
 	if !strings.Contains(result, "\n") {
-		budget := max(width-len(name)-6, 20)
-		return style.Render(fmt.Sprintf("%s %s → %s", tag, name, truncate(oneLine(result), budget)))
+		budget := max(width-6, 20)
+		return style.Render(fmt.Sprintf("%s %s", tag, th.toolGut.Render("⎿"))) + " " + style.Render(truncate(oneLine(result), budget))
 	}
 
 	maxLines := maxBodyLines
@@ -166,14 +173,20 @@ func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyL
 		maxLines = maxSearchResultLines
 	}
 
+	lineCount := strings.Count(result, "\n") + 1
+	if lineCount > maxLines {
+		summary := fmt.Sprintf("%d lines  (/tools full to expand)", lineCount)
+		return style.Render(header) + " " + style.Render(summary)
+	}
+
 	if !isErr && name == "read_file" && path != "" {
 		if body, ok := renderReadFileResult(th, path, result, maxLines, width); ok {
-			return strings.TrimRight(style.Render(fmt.Sprintf("%s %s", tag, name))+"\n"+body, "\n")
+			return strings.TrimRight(style.Render(header)+"\n"+body, "\n")
 		}
 	}
 
 	var b strings.Builder
-	b.WriteString(style.Render(fmt.Sprintf("%s %s", tag, name)) + "\n")
+	b.WriteString(style.Render(header) + "\n")
 	b.WriteString(renderBlock(th, result, maxLines, width))
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -273,6 +286,109 @@ func renderReadFileResult(th theme, path, result string, maxLines, width int) (s
 		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("▶ %d more lines  (/tools full to expand)", hidden)) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n"), true
+}
+
+// isGroupableTool reports whether name is one of the read-capability tools
+// the P74.4 grouping folds into a single card: read_file, grep, glob. Any
+// other tool — and any of these three that errors — breaks a group rather
+// than joining one (see model.foldIntoReadGroup in stream.go).
+func isGroupableTool(name string) bool {
+	switch name {
+	case "read_file", "grep", "glob":
+		return true
+	}
+	return false
+}
+
+// groupEntry is one call folded into a P74.4 read/search group: enough to
+// both tally the collapsed summary line and, in expanded ("/tools full")
+// mode, list each call's target underneath it.
+type groupEntry struct {
+	tool  string
+	label string
+}
+
+// groupEntryLabel returns a short target descriptor for one call folded into
+// a group's expanded view — the same identifying detail its own
+// renderReadFileCall/renderGrepCall/renderGlobCall header would show (path,
+// or pattern plus location), without the bullet/name chrome those carry for
+// a standalone card.
+func groupEntryLabel(name string, input json.RawMessage) string {
+	switch name {
+	case "read_file":
+		var a struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal(input, &a) == nil && a.Path != "" {
+			return a.Path
+		}
+	case "glob":
+		var a struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if json.Unmarshal(input, &a) == nil && a.Pattern != "" {
+			if a.Path != "" {
+				return a.Pattern + "  in " + a.Path
+			}
+			return a.Pattern
+		}
+	case "grep":
+		var a struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if json.Unmarshal(input, &a) == nil && a.Pattern != "" {
+			if a.Path != "" {
+				return "/" + a.Pattern + "/  in " + a.Path
+			}
+			return "/" + a.Pattern + "/"
+		}
+	}
+	return name
+}
+
+// renderToolGroup renders a P74.4 group card: a single collapsed summary
+// line ("● searched 5 patterns, read 6 files") by default, or one line per
+// call underneath it in full ("/tools full") mode — the same expand
+// convention renderToolResult already uses for an over-cap single result.
+// entries is never empty (a group starts life with two members — see
+// model.foldIntoReadGroup).
+func renderToolGroup(th theme, entries []groupEntry, full bool) string {
+	reads, searches := 0, 0
+	for _, e := range entries {
+		if e.tool == "read_file" {
+			reads++
+		} else {
+			searches++
+		}
+	}
+	var parts []string
+	if searches > 0 {
+		parts = append(parts, fmt.Sprintf("searched %d pattern%s", searches, plural(searches)))
+	}
+	if reads > 0 {
+		parts = append(parts, fmt.Sprintf("read %d file%s", reads, plural(reads)))
+	}
+	summary := strings.Join(parts, ", ")
+	head := th.tool.Render("● " + strings.ToUpper(summary[:1]) + summary[1:])
+	if !full {
+		return head + "  " + th.diffMeta.Render("(/tools full to expand)")
+	}
+	var b strings.Builder
+	b.WriteString(head + "\n")
+	for _, e := range entries {
+		b.WriteString("  " + th.toolGut.Render("⎿") + " " + th.diffMeta.Render(e.label) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// plural returns "s" unless n is exactly 1.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // diffLines computes a proper unified diff between oldS and newS and returns a

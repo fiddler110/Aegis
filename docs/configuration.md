@@ -375,13 +375,17 @@ permission:
   # Skip approval prompts for shell/execute calls even in build mode.
   auto_approve_exec: false
 
-  # auto_approve_exec: true combined with an unsandboxed local backend (the
-  # default sandbox.backend) means every model-issued shell command runs on
-  # the host with no approval and no isolation — the daemon refuses to start
-  # with that combination unless this is explicitly set to true. Configure a
-  # real sandbox (sandbox.backend: container or os) instead of setting this
-  # unless the daemon itself is already running inside an isolated
-  # environment (e.g. a CI container).
+  # auto_approve_exec: true combined with an unsandboxed *local* backend means
+  # every model-issued shell command runs on the host with no approval and no
+  # isolation — the daemon refuses to start with that combination unless this
+  # is explicitly set to true. The default sandbox.backend is "os" (P4.7
+  # OS-level isolation, no container runtime needed), which is not this
+  # combination on a host that can serve it; it falls back to local — and so
+  # can trigger this refusal — wherever it can't (every current Windows host,
+  # any macOS/Linux box missing seatbelt/bwrap). Configure a real sandbox
+  # (sandbox.backend: container, or confirm "os" is actually active via
+  # `aegis sandbox status`) instead of setting this unless the daemon itself
+  # is already running inside an isolated environment (e.g. a CI container).
   allow_unsandboxed_auto_exec: false
 
   # Fine-grained allow/deny rules evaluated before the mode gate.
@@ -650,6 +654,26 @@ tui:
   keybindings:
     terminal: ["ctrl+x"]
     diagnose: ["ctrl+g"]
+
+  # Mouse capture (P74.19): "on" (default) or "off". Capturing the mouse is
+  # what makes Aegis's own drag-to-copy selection possible, but it also stops
+  # the terminal emulator from offering its own click-drag select — the only
+  # thing that reliably works for a tmux/kitty copy-mode workflow. "off"
+  # releases capture while keeping the alternate-screen dashboard (so resize
+  # re-wrap still works, unlike /scrollback, which releases both); the cost
+  # is no mouse-wheel scroll and no click-to-focus. Read once at startup —
+  # unlike /scrollback there's no in-session toggle. Most SSH users don't
+  # need this: the clipboard already goes over OSC 52.
+  mouse: on
+
+  # Reduced motion (P74.10): disable the continuous "working" animations —
+  # the status-line shimmer sweep, the streaming caret's blink, the cycling
+  # thinking phrase, and a pending tool card's shimmer frame — freezing each
+  # at its last frame instead of advancing every tick. Off by default. Also
+  # an accessibility setting (the shimmer is a moving-luminance sweep, the
+  # class of animation vestibular sensitivity reacts to) and a CPU one (skips
+  # the per-tick transcript re-render).
+  reduced_motion: false
 
 
 # ── Diagrams ──────────────────────────────────────────────────────────────────

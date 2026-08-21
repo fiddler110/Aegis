@@ -111,6 +111,85 @@ func TestExecuteToolWarnsOnZeroPathWriteCall(t *testing.T) {
 	}
 }
 
+// errorTool always fails, returning an empty-content error result — the
+// shape TestExecuteToolLeavesErrorResultsAlone must not turn into the P74.9
+// placeholder.
+type errorTool struct{}
+
+func (errorTool) Name() string                 { return "error_tool" }
+func (errorTool) Description() string          { return "" }
+func (errorTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (errorTool) Capability() tool.Capability  { return tool.CapRead }
+func (errorTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{Content: "", IsError: true}, nil
+}
+
+// TestExecuteToolNormalizesEmptySuccessResult is P74.9's closure condition at
+// the engine seam: a tool that legitimately returns nothing must not reach
+// the model as an empty string, since many local models cannot tell that
+// apart from a failed call and re-issue it.
+func TestExecuteToolNormalizesEmptySuccessResult(t *testing.T) {
+	reg := tool.NewRegistry()
+	empty := &namedFakeTool{name: "empty_tool"}
+	if err := reg.Register(empty); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := New(Options{Adapter: &scriptedAdapter{}, Tools: reg, Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		ID: "tu_1", Name: "empty_tool", Input: json.RawMessage(`{}`),
+	})
+	if isErr {
+		t.Fatalf("expected the empty result to still count as success")
+	}
+	if content == "" {
+		t.Fatalf("expected a non-empty placeholder, got an empty string")
+	}
+	if !strings.Contains(content, "empty_tool") {
+		t.Fatalf("placeholder does not name the tool: %q", content)
+	}
+
+	// Same call twice must produce byte-identical placeholders, so the loop
+	// detector's turn signature (name + canonicalized input) is the only thing
+	// that can ever distinguish two rounds — never the result content.
+	content2, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		ID: "tu_2", Name: "empty_tool", Input: json.RawMessage(`{}`),
+	})
+	if content != content2 {
+		t.Fatalf("placeholder is not deterministic: %q vs %q", content, content2)
+	}
+}
+
+// TestExecuteToolLeavesErrorResultsAlone ensures the P74.9 normalization only
+// touches successful-but-empty results: an empty error result must keep
+// reporting as an error with its own (possibly empty) content untouched, not
+// be rewritten into the success placeholder.
+func TestExecuteToolLeavesErrorResultsAlone(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := reg.Register(errorTool{}); err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := New(Options{Adapter: &scriptedAdapter{}, Tools: reg, Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		ID: "tu_1", Name: "error_tool", Input: json.RawMessage(`{}`),
+	})
+	if !isErr {
+		t.Fatalf("expected the call to still report as an error")
+	}
+	if content != "" {
+		t.Fatalf("expected the error tool's own empty content to pass through unchanged, got %q", content)
+	}
+}
+
 // capOverrideTool is a tool.CapabilityOverrider whose per-call capability is
 // chosen by a caller-supplied function, so a test can build the reclassifying
 // shapes no builtin currently has (only `shell` implements the interface in

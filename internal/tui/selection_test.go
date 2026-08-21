@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestWordBounds(t *testing.T) {
@@ -91,23 +93,29 @@ func TestPaneOriginAndToPaneCoord(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 
-	if col, row := m.paneOrigin(); col != 1 || row != 1 {
-		t.Fatalf("expected origin (1,1) without a sidebar, got (%d,%d)", col, row)
+	// P74.2: the title bar row is gone, so the origin is (1,0) — the origin
+	// itself no longer moves when the sidebar opens, since it composites as
+	// an overlay instead of being joined into the layout.
+	if col, row := m.paneOrigin(); col != 1 || row != 0 {
+		t.Fatalf("expected origin (1,0) without a title bar, got (%d,%d)", col, row)
 	}
 
-	if _, _, ok := m.toPaneCoord(1, 1); !ok {
-		t.Fatalf("expected (1,1) to fall inside the pane")
+	if _, _, ok := m.toPaneCoord(1, 0); !ok {
+		t.Fatalf("expected (1,0) to fall inside the pane")
 	}
-	if _, _, ok := m.toPaneCoord(0, 1); ok {
-		t.Fatalf("expected (0,1), over the left padding column, to fall outside the pane")
-	}
-	if _, _, ok := m.toPaneCoord(1, 0); ok {
-		t.Fatalf("expected (1,0), over the title bar, to fall outside the pane")
+	if _, _, ok := m.toPaneCoord(0, 0); ok {
+		t.Fatalf("expected (0,0), over the left padding column, to fall outside the pane")
 	}
 
 	m.sidebarOpen = true
-	if col, _ := m.paneOrigin(); col != 1+sidebarTotalW {
-		t.Fatalf("expected the sidebar width folded into the origin, got col %d", col)
+	if col, row := m.paneOrigin(); col != 1 || row != 0 {
+		t.Fatalf("expected the sidebar overlay to leave the pane origin unmoved, got (%d,%d)", col, row)
+	}
+	if _, _, ok := m.toPaneCoord(1, 0); ok {
+		t.Fatalf("expected (1,0), under the sidebar overlay, to fall outside the pane while it's open")
+	}
+	if _, _, ok := m.toPaneCoord(sidebarTotalW, 0); !ok {
+		t.Fatalf("expected (%d,0), just past the sidebar overlay, to fall inside the pane", sidebarTotalW)
 	}
 }
 
@@ -243,6 +251,50 @@ func TestMouseDragThroughUpdate(t *testing.T) {
 	}
 	if !m.sel.have || m.sel.active {
 		t.Fatalf("expected a completed selection after release via Update, got active=%v have=%v", m.sel.active, m.sel.have)
+	}
+}
+
+// TestSelectionOverlayUsesBackgroundNotReverse pins P74.18: the drag-selection
+// overlay must set a background fill and leave foreground untouched, not
+// SGR-7 Reverse — which fragments over chroma-highlighted content because it
+// swaps whichever fg/bg happen to be active per cell, so every differently
+// colored token inverts to a different background.
+func TestSelectionOverlayUsesBackgroundNotReverse(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	// Two differently-colored tokens on one line with no reset in between,
+	// the shape chroma-highlighted diff/read_file output actually takes.
+	red := "\x1b[38;2;255;0;0mHello"
+	green := "\x1b[38;2;0;255;0mWorld\x1b[0m"
+	m.transcript.items = nil // drop the welcome banner so our line is row 0
+	m.transcript.invalidateItemsHeight()
+	m.transcript.AppendRaw(red + " " + green + "\n")
+	m.transcript.GotoTop()
+
+	m.sel.have = true
+	m.sel.anchorRow, m.sel.anchorCol = 0, 0
+	m.sel.curRow, m.sel.curCol = 0, len("Hello World")
+
+	out := m.renderTranscriptContent()
+
+	if strings.Contains(out, "\x1b[7m") || strings.Contains(out, ";7m") {
+		t.Fatalf("selection overlay still emits SGR-7 Reverse: %q", out)
+	}
+
+	bgProbe := lipgloss.NewStyle().Background(colSelectionBg).Render("X")
+	bgCode, _, ok := strings.Cut(bgProbe, "X")
+	if !ok || bgCode == "" {
+		t.Fatalf("could not derive the selection background escape from probe %q", bgProbe)
+	}
+	if !strings.Contains(out, bgCode) {
+		t.Fatalf("expected the selection background code %q in rendered output %q", bgCode, out)
+	}
+
+	// Both original foreground colors must survive under the selection — a
+	// background fill replaces the cell's background only.
+	if !strings.Contains(out, "255;0;0") || !strings.Contains(out, "0;255;0") {
+		t.Fatalf("expected both chroma foreground colors preserved under the selection, got %q", out)
 	}
 }
 

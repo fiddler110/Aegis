@@ -127,6 +127,13 @@ func (m *model) applyEvent(ev api.Event) {
 				m.trackPendingTool(key, &toolCard{blk: blk, name: ev.Tool, call: call})
 			}
 		}
+		// P74.4: capture the grouping target descriptor now — ev.ToolInput
+		// is only ever populated on KindToolCall/KindToolCallStart, not on
+		// the KindToolResult that later decides whether this call folds
+		// into a group.
+		if c := m.pendingTools[key]; c != nil && isGroupableTool(ev.Tool) {
+			c.groupLabel = groupEntryLabel(ev.Tool, ev.ToolInput)
+		}
 		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending"})
 		if len(m.tools) > maxToolHistory {
 			m.tools = m.tools[1:]
@@ -175,12 +182,15 @@ func (m *model) applyEvent(ev api.Event) {
 			}
 		}
 		if card != nil {
-			m.transcript.SetItemRaw(card.blk, renderToolCardDone(m.th, card.call, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path))
+			if !m.foldIntoReadGroup(card, ev) {
+				m.transcript.SetItemRaw(card.blk, renderToolCardDone(m.th, card.call, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path))
+			}
 		} else {
 			// No matching pending card (e.g. a result event replayed or
 			// synthesized without a preceding KindToolCall in this session) —
 			// fall back to appending it as its own item rather than
 			// silently dropping the result.
+			m.soloReadCard = nil
 			m.transcript.Append(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path) + "\n")
 		}
 		for i := len(m.tools) - 1; i >= 0; i-- {
@@ -492,6 +502,56 @@ func (m *model) removePendingTool(key string) {
 			break
 		}
 	}
+}
+
+// foldIntoReadGroup applies the P74.4 read/search grouping rule to a
+// resolving KindToolResult: card is the individual card already appended for
+// this call at KindToolCall time (unchanged — the pending/shimmering state a
+// concurrent call goes through is exactly as before). Returns true when the
+// result has been folded into a group instead, so the caller skips its
+// normal renderToolCardDone rendering for card.
+//
+// Any error, or a tool outside isGroupableTool, closes off this card from
+// grouping entirely (it renders normally) and clears soloReadCard, so a
+// later unrelated success can't mistakenly chain onto whatever was pending
+// before the break.
+//
+// A successful groupable call extends m.activeReadGroup only if card.blk's
+// positional predecessor (transcript.ItemBefore, which already skips
+// members previously folded away) is that group's own item — i.e. nothing
+// else was appended between them. Failing that, it can still start a new
+// two-member group with m.soloReadCard under the same adjacency test.
+// Neither path ever merges a call whose own result hasn't arrived yet: a
+// still-pending sibling from the same parallel round is simply not
+// considered, so a genuinely out-of-order round result never gets counted
+// as part of a group before it actually succeeded. A call that can't merge
+// either way becomes the new soloReadCard, extending the chance for
+// whichever call resolves next.
+func (m *model) foldIntoReadGroup(card *toolCard, ev api.Event) bool {
+	if !isGroupableTool(ev.Tool) || ev.ToolIsError {
+		m.soloReadCard = nil
+		return false
+	}
+	prev := m.transcript.ItemBefore(card.blk)
+	entry := groupEntry{tool: ev.Tool, label: card.groupLabel}
+
+	if g := m.activeReadGroup; g != nil && prev == g.blk {
+		g.entries = append(g.entries, entry)
+		m.transcript.HideItem(card.blk)
+		m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, !m.toolCompact))
+		return true
+	}
+	if m.soloReadCard != nil && prev == m.soloReadCard {
+		g := &toolGroup{blk: m.soloReadCard, entries: []groupEntry{m.soloReadEntry, entry}}
+		m.activeReadGroup = g
+		m.soloReadCard = nil
+		m.transcript.HideItem(card.blk)
+		m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, !m.toolCompact))
+		return true
+	}
+	m.soloReadCard = card.blk
+	m.soloReadEntry = entry
+	return false
 }
 
 // resolveStuckToolCards finalizes every still-pending tool card to a

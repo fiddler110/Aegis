@@ -71,7 +71,7 @@ func TestRenderOverlayCompositesOverChat(t *testing.T) {
 	pal := newPalette(m.width, m.height, allCommandEntries(nil))
 	m.dialog = &pal
 
-	full := ansi.Strip(m.render())
+	full := ansi.Strip(m.renderContent())
 	if !strings.Contains(full, "Command Palette") {
 		t.Errorf("expected dialog title in composited view, got: %q", full)
 	}
@@ -166,6 +166,58 @@ func TestModelPickerGroupsByProviderAndMarksCurrent(t *testing.T) {
 	custom := d2.list.Items()[0].(modelItem)
 	if !custom.current || custom.id != "my-custom-model" {
 		t.Errorf("expected synthetic current entry for an out-of-catalog model, got %#v", custom)
+	}
+}
+
+// TestListDialogCursorPosMovesWithSelection checks the P74.7 cursor: it
+// tracks whichever row aegisListDelegate marks with the "❯" pointer, so
+// moving the selection moves the declared terminal cursor row with it.
+func TestListDialogCursorPosMovesWithSelection(t *testing.T) {
+	items := []list.Item{
+		paletteItem{name: "alpha", desc: "first"},
+		paletteItem{name: "bravo", desc: "second"},
+	}
+	d := newListDialog(dialogPalette, 40, 10, "Test", false, items)
+
+	_, y1, ok := d.cursorPos()
+	if !ok {
+		t.Fatal("expected a cursor position on the first row")
+	}
+
+	d, _ = d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	x2, y2, ok := d.cursorPos()
+	if !ok {
+		t.Fatal("expected a cursor position after moving down")
+	}
+	if y2 <= y1 {
+		t.Errorf("expected cursor row to move down (%d -> %d)", y1, y2)
+	}
+	if x2 < 0 {
+		t.Errorf("expected a non-negative cursor column, got %d", x2)
+	}
+}
+
+// TestRenderReturnsDialogCursor checks that render()'s returned *tea.Cursor
+// lands on the picker's selected row once translated into full-frame
+// coordinates by overlayOrigin, and that it is nil when nothing focusable is
+// open (P74.7).
+func TestRenderReturnsDialogCursor(t *testing.T) {
+	m := newModel(Config{SessionID: "test-session", Mode: "build", Model: "test-model", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	if _, cur := m.render(); cur != nil {
+		t.Errorf("expected no cursor with no dialog open, got %#v", cur)
+	}
+
+	pal := newPalette(m.width, m.height, allCommandEntries(nil))
+	m.dialog = &pal
+
+	_, cur := m.render()
+	if cur == nil {
+		t.Fatal("expected a cursor position with the palette open")
+	}
+	if cur.X < 0 || cur.Y < 0 {
+		t.Errorf("expected a non-negative cursor position, got %#v", cur)
 	}
 }
 

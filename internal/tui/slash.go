@@ -104,6 +104,13 @@ type SlashDispatcher struct {
 	sessionID    string
 	mode         string
 	model        string
+	// baseModel is the model the TUI was started with (persona/global
+	// default at boot) — the same fallback SlashResult.Model's doc describes.
+	// d.model tracks "/model"'s per-session override and is kept non-empty by
+	// falling back to this, so bare "/model", the picker's "current" marker,
+	// and "/model default" all have a real id to show instead of "" once an
+	// override has been cleared or a session switch lands on one with none.
+	baseModel    string
 	workDir      string // project root; used to validate/list project-local theme files (P16.7) and to name the workspace in /threat-model's default prompt
 	guardEnabled *bool  // per-session output-guard toggle; nil = server default
 	builtins     map[string]func(args []string) SlashResult
@@ -121,6 +128,7 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model, workDir strin
 		sessionID: sessionID,
 		mode:      mode,
 		model:     model,
+		baseModel: model,
 		workDir:   workDir,
 		keys:      defaultKeyMap(),
 	}
@@ -151,10 +159,28 @@ func NewSlashDispatcher(cl *client.Client, sessionID, mode, model, workDir strin
 }
 
 // SetSession points the dispatcher at a different session (used when the TUI
-// switches sessions via the picker).
-func (d *SlashDispatcher) SetSession(id, mode string) {
+// switches sessions via the picker, forks, or rewinds). model is the newly
+// loaded session's own per-session /model override — "" when it has none, the
+// same shape /model itself uses — so a switch onto a session with a different
+// (or no) override doesn't leave d.model showing the previous session's,
+// which is otherwise reported nowhere else once the switch is applied.
+func (d *SlashDispatcher) SetSession(id, mode, model string) {
 	d.sessionID = id
 	d.mode = mode
+	if model == "" {
+		model = d.baseModel
+	}
+	d.model = model
+}
+
+// EffectiveModel returns the model currently in effect for this session:
+// the per-session /model override, or the TUI's boot-time default when none
+// is set. Callers that need to reflect the active model in UI state (the
+// status bar, sidebar, the /models picker's "current" marker) after a
+// session switch should read this rather than caching a copy that a later
+// switch or "/model default" can silently invalidate.
+func (d *SlashDispatcher) EffectiveModel() string {
+	return d.model
 }
 
 // Dispatch executes a parsed slash command. It checks builtins first, then
@@ -680,8 +706,16 @@ func (d *SlashDispatcher) cmdModel(args []string) SlashResult {
 	}
 
 	if newModel == "" {
-		d.model = ""
-		return SlashResult{Output: "Cleared the session model override; reverts to the persona/global default on the next turn."}
+		// The daemon-side override is gone, but the TUI still needs something
+		// concrete to show (status bar, sidebar, the /models picker's "current"
+		// marker) — fall back to the boot-time default rather than leaving
+		// d.model empty, which used to make "/model" print a blank current
+		// model and left every display showing whatever was picked before.
+		d.model = d.baseModel
+		return SlashResult{
+			Output: "Cleared the session model override; reverts to the persona/global default on the next turn.",
+			Model:  &d.baseModel,
+		}
 	}
 	d.model = newModel
 	return SlashResult{

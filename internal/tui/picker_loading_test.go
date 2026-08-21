@@ -282,7 +282,7 @@ func TestEscEscOpensBacktrackPickerImmediately(t *testing.T) {
 	if got, want := m.dialog.list.Height(), backtrackPickerH(40, len(items)); got != want {
 		t.Errorf("populated picker height = %d, want %d", got, want)
 	}
-	if view := ansi.Strip(m.render()); !strings.Contains(view, "fix the bug") {
+	if view := ansi.Strip(m.renderContent()); !strings.Contains(view, "fix the bug") {
 		t.Errorf("expected the fetched turns listed, got:\n%s", view)
 	}
 }

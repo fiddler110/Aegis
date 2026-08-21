@@ -120,6 +120,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		m.thinkEntries = nil
 		m.tools = m.tools[:0]
 		m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
+		m.displayedInputTokens, m.displayedOutputTokens = 0, 0
 		m.inputTokensKnown = false
 		m.cacheReadTokens, m.cacheCreationTokens = 0, 0
 		m.tokensEstimated = false

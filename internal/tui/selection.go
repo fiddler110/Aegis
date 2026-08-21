@@ -49,21 +49,31 @@ func (s selection) normalized() (r1, c1, r2, c2 int) {
 // paneOrigin returns the screen (col,row) of the transcript pane's top-left
 // content cell, translating from absolute terminal coordinates (what
 // tea.Mouse reports) to pane-relative ones. Kept in sync with render()'s
-// layout by construction: one title-bar row, PaddingLeft(1) on the main
-// panel, plus the sidebar's width when it's open and wide enough to show.
+// layout by construction: PaddingLeft(1) on the main panel, nothing else —
+// P74.2 removed the title-bar row (row 0 now) and the sidebar no longer
+// shifts this origin, since it composites as an overlay instead of being
+// joined into the layout. See sidebarOccludes for the overlay's own bounds.
 func (m *model) paneOrigin() (col, row int) {
-	col, row = 1, 1
-	if m.sidebarOpen && m.width >= sidebarMinTermW {
-		col += m.sidebarW + 1 // inner width + right border (P40.1)
-	}
-	return col, row
+	return 1, 0
+}
+
+// sidebarOccludes reports whether screen column x falls under the P74.2
+// sidebar overlay (drawn full-height, 0..sidebarW+1, when open) — the pane
+// underneath it is still there geometrically (the sidebar no longer
+// reserves layout width), but visually covered, so mouse coordinates in
+// that band must not resolve to transcript content.
+func (m *model) sidebarOccludes(x int) bool {
+	return m.sidebarOpen && m.width >= sidebarMinTermW && x < m.sidebarW+1
 }
 
 // toPaneCoord translates absolute mouse coordinates to pane-relative
 // (col,row); ok is false when the point falls outside the transcript pane
-// (over the sidebar, title bar, textarea, terminal pane, or the scrollbar
+// (over the sidebar overlay, textarea, terminal pane, or the scrollbar
 // column to its right).
 func (m *model) toPaneCoord(x, y int) (col, row int, ok bool) {
+	if m.sidebarOccludes(x) {
+		return 0, 0, false
+	}
 	ox, oy := m.paneOrigin()
 	col, row = x-ox, y-oy
 	if col < 0 || row < 0 || col >= m.transcript.Width() || row >= m.transcript.Height() {
@@ -74,9 +84,14 @@ func (m *model) toPaneCoord(x, y int) (col, row int, ok bool) {
 
 // clampPaneCoord is toPaneCoord without the bounds rejection — used while
 // dragging so a selection extends to the nearest visible row/col instead of
-// freezing the instant the pointer crosses the pane edge.
+// freezing the instant the pointer crosses the pane edge. A drag that
+// crosses under the sidebar overlay clamps to its right edge rather than
+// resolving to the (occluded) transcript content beneath it.
 func (m *model) clampPaneCoord(x, y int) (col, row int) {
 	ox, oy := m.paneOrigin()
+	if m.sidebarOccludes(x) {
+		x = ox + m.sidebarW + 1
+	}
 	col = max(0, min(x-ox, m.transcript.Width()-1))
 	row = max(0, min(y-oy, m.transcript.Height()-1))
 	return
@@ -176,7 +191,7 @@ func selectedText(lines []string, r1, c1, r2, c2 int) string {
 // a single click focuses the message under the cursor and arms a drag; a
 // double-click selects the word under the cursor and copies it immediately;
 // a triple-click does the same for the whole line. Clicks outside the pane
-// (sidebar, title bar, textarea, scrollbar) are ignored.
+// (the sidebar overlay, textarea, terminal pane, scrollbar) are ignored.
 func (m *model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 	if msg.Button != tea.MouseLeft {
 		return nil
@@ -302,7 +317,13 @@ func (m model) renderTranscriptContent() string {
 
 	if m.sel.active || m.sel.have {
 		r1, c1, r2, c2 := m.sel.normalized()
-		reverse := lipgloss.NewStyle().Reverse(true)
+		// P74.18: a solid background fill, not SGR-7 Reverse. Reverse swaps
+		// fg/bg per cell, which fragments over chroma-highlighted diffs and
+		// read_file output — every differently-colored token inverts to a
+		// different background. A fill preserves each cell's foreground and
+		// only replaces the background, matching how a real terminal
+		// selection reads.
+		sel := lipgloss.NewStyle().Background(colSelectionBg)
 		for row := max(r1, 0); row <= r2 && row < len(lines); row++ {
 			line := lines[row]
 			plainLen := len([]rune(ansi.Strip(line)))
@@ -321,7 +342,7 @@ func (m model) renderTranscriptContent() string {
 			prefix := ansi.Cut(line, 0, left)
 			mid := ansi.Cut(line, left, right)
 			suffix := ansi.Cut(line, right, plainLen)
-			lines[row] = prefix + reverse.Render(mid) + suffix
+			lines[row] = prefix + sel.Render(mid) + suffix
 		}
 	}
 
@@ -331,13 +352,17 @@ func (m model) renderTranscriptContent() string {
 // renderScrollbar draws a single-column glyph track for the transcript pane,
 // replacing the old title-bar "62% ·" text: a thumb (accent-colored) sized
 // and positioned proportionally to the visible fraction of content, over a
-// dim track — or a blank column when everything fits without scrolling.
+// dim track. P74.2: it carries no information while pinned to the bottom —
+// the normal state — so it renders as a blank column there, the way a GUI
+// overlay scrollbar auto-hides; it only draws once the user has scrolled
+// away (m.followBottom false), or when nothing is scrollable at all.
 func (m model) renderScrollbar() string {
 	h := m.transcript.Height()
 	if h <= 0 {
 		return ""
 	}
 	start, end, ok := m.transcript.ScrollbarThumb()
+	ok = ok && !m.followBottom
 	track := lipgloss.NewStyle().Foreground(colBorder)
 	thumb := lipgloss.NewStyle().Foreground(colAccent)
 

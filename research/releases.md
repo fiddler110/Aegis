@@ -8,7 +8,188 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-19 (second record the same day) — **P72.3 shipped**, filed straight out of
+**Last updated:** 2026-08-20 (sixteenth record the same day) — **P74.14 shipped**, the row Up next
+ranked first once the motion group and the menu lane were both fully closed. `repairOrphanedToolUses`
+(`internal/engine/engine.go`) reported every orphaned tool_use the same way when the caller had no
+started-set record for it: "tool call interrupted; NAME did not run". That wording is correct for a
+call cut off mid-round by a stall/wall-clock/interrupt cancel — it genuinely might have run had the
+round continued — and wrong for a call whose `Input` never parsed as JSON at all, truncated or
+malformed. Nothing about resuming that round would have let it dispatch, so "interrupted" invites the
+model to retry the identical, still-broken call instead of reissuing it with valid arguments. A new
+`interruptedMalformedText` and a `json.Valid(tu.Input)` check, keyed on the block's own `Input` rather
+than on `started` (a call can only be malformed-and-never-started; a call that reached `Execute` did so
+with whatever arguments the tool itself is responsible for validating), gives that case its own message:
+"tool call never dispatched; NAME's arguments were malformed or truncated JSON. Reissue the call with
+valid arguments." The started-but-cut-off and clean-but-never-started branches are unchanged. Record:
+[A dangling call whose arguments never parsed gets its own
+message](#a-dangling-call-whose-arguments-never-parsed-gets-its-own-message-2026-08-20-p7414).
+
+**Last updated (previous):** 2026-08-20 (fifteenth record the same day) — **P74.13 shipped**, the row Up next
+ranked first once the motion group closed out and left it the sole remaining independent row. Three
+concurrent sub-agents rendered as three near-identical grey lines in the sidebar's `AGENTS` section —
+`m.th.tool` styled all of them alike, and nothing else in the UI tied a sidebar line, a `/teammates`
+transcript row, or a status segment back to which agent produced it. A new `agentColor` (a package-level
+FNV-1a hash of the agent id into each `colorScheme`'s fixed 8-entry `agentPalette` — Charmtone hues for
+dark, matching-role hex for light) picks a colour that is stable per id across restarts without threading
+any assignment state. `internal/tui/view.go`'s sidebar `AGENTS` list and `internal/tui/tui.go`'s
+`renderTeammates` (the `/teammates` transcript listing) both render the agent id in that colour now, the
+latter keeping its status-based tag colour (red for failed) so a failure still stands out alongside the
+identity colour. Record: [A running swarm gets a stable colour, not three grey
+lines](#a-running-swarm-gets-a-stable-colour-not-three-grey-lines-2026-08-20-p7413).
+
+**Last updated (previous):** 2026-08-20 (fourteenth record the same day) — **P74.12 shipped**, the row Up next
+ranked first once the menu and harness lanes' first two rows closed out. `renderStats`
+(`internal/tui/view.go`) now prints two new `model` fields, `displayedInputTokens`/
+`displayedOutputTokens`, instead of `inputTokens`/`outputTokens` directly. A new
+`model.easeStatCounters` (`internal/tui/update_tick.go`), called from the same `updateSpinnerTick` that
+already drives `animStep`, moves each displayed counter an eighth of its remaining gap toward the real
+value every tick — large steps when far behind, small ones near convergence, floored at ±1 so it always
+reaches the target rather than stalling short — so the status bar's token count climbs continuously
+instead of jumping in the chunk-sized steps `KindTurnDone` delivers once per turn. Reduced motion
+(P74.10) snaps the displayed counters straight to the true values instead of easing, and the counters
+are snapped again on stream close/error so a finished run's numbers are always exact even if a run ended
+mid-ease. Record: [The token counter jumps instead of
+climbing](#the-token-counter-jumps-instead-of-climbing-2026-08-20-p7412).
+
+**Last updated (previous):** 2026-08-20 (thirteenth record the same day) — **P74.11 shipped**, the row Up next
+ranked first once P74.10 gave it the reduced-motion flag it had to honour. The "working" shimmer's
+highlight color now ramps from `colAccent` toward `colWarning` as the current wait (waiting for the
+first token, or a post-tool-round re-eval) lengthens toward `cost.max_turn_stall`, via a new
+`stallRampColor` (`internal/tui/shimmer.go`) fed by `model.stallElapsed()` and a new `Config.MaxTurnStall`
+wired from `cfg.Cost.MaxTurnStall()` in `internal/cli/root.go`. The ramp is front-loaded and saturates at
+70% of the bound so a stuck run reads as visibly getting stuck well before the 900s abort actually fires,
+rather than looking identical at second 2 and second 400. Record: [Stall becomes a visible ramp, not just
+an abort](#stall-becomes-a-visible-ramp-not-just-an-abort-2026-08-20-p7411).
+
+**Last updated (previous):** 2026-08-20 (twelfth record the same day) — **P74.10 shipped**, the row Up next ranked
+first once the P74 harness/motion lanes were rewritten. A new `Config.ReducedMotion` /
+`tui.reduced_motion` setting (default off) freezes `model.animStep` instead of advancing it on the
+streaming spinner tick, which freezes `shimmerText`, `caretGlyph` and `thinkingPhrase` together (all
+three read `animStep`) and skips the per-tick `updatePendingToolCards`/`refresh()` re-render — the
+"unsubscribe the clock" shape the comparison client uses, rather than rendering a static frame every
+tick. The P2.5 sub-agent roster poll was moved off `animStep` onto its own `model.pollTick` counter so
+it keeps its 20-tick cadence under reduced motion instead of freezing along with the animation. Record:
+[There is no reduced-motion setting → fixed](#there-is-no-reduced-motion-setting-fixed-2026-08-20-p7410).
+
+**Last updated (previous):** 2026-08-20 (eleventh record the same day) — **P74.9's first half shipped**, the row
+Up next ranked first once P74.8 opened the harness lane. `builtin.NormalizeEmptyResult`
+(`internal/tool/builtin/truncate.go`) replaces a legitimately empty, non-error tool result with a named
+placeholder before it reaches the model, wired at the one seam both the sequential and parallel tool-call
+paths share (`Engine.executeTool`, `internal/engine/engine.go`). The argument-shape repair half stays
+filed and deferred to P74.17, unbuilt. Record: [An empty tool result becomes a named
+placeholder](#an-empty-tool-result-becomes-a-named-placeholder-2026-08-20-p749).
+
+**Last updated (previous):** 2026-08-20 (tenth record the same day) — **P74.8 shipped**, the row Up next ranked
+first once the menu lane closed out with P74.7, and the head of the harness lane. A new response-side
+decorator, `provider.WithProseToolCallSalvage` (`internal/provider/prosetoolcall.go`), catches a tool
+call a local model emitted as text instead of a structured `tool_calls` entry — a fenced JSON object, a
+`<tool_call>`/`<function_call>` tag, or a bare JSON object narrated in prose — and turns it into the
+`EventToolUse` the engine actually dispatches on, only when the turn produced no structured tool call at
+all and only when the parsed name matches a tool the request actually sent. Wired into
+`providerfactory.Build` (`internal/providerfactory/factory.go`) behind
+`cfg.Provider.LocalPromptProfile()`, so every cloud turn pays nothing for a failure mode it doesn't have.
+Record: [A tool call written as text becomes a call](#a-tool-call-written-as-text-becomes-a-call-2026-08-20-p748).
+
+**Last updated (previous):** 2026-08-20 (ninth record the same day) — **P74.7 shipped**, the row Up next ranked
+first once P74.5/P74.6 landed, closing out the menu lane. `model.render` (`internal/tui/view.go`) now
+returns `(string, *tea.Cursor)` instead of a plain string: `listDialog.cursorPos` and the new
+`approvalCursorPos` locate the selected row's pointer glyph (`❯` for a picker, `▸` for the approval
+dialog, or the `▎` typed-feedback caret once that dialog's feedback mode is active) inside the
+already-rendered overlay text, and `render` translates that local position into full-frame coordinates
+via a new `overlayOrigin` helper (factored out of `renderOverlay`'s own centering math) before handing
+it to `tea.View.Cursor` in `View()`. The real terminal cursor now sits on whichever row is actually
+focused instead of wherever the composer last left it. Record: [The real terminal cursor lands on the
+focused row](#the-real-terminal-cursor-lands-on-the-focused-row-2026-08-20-p747).
+
+**Last updated (previous):** 2026-08-20 (eighth record the same day) — **P74.5 and P74.6 shipped together**, the
+row Up next ranked first once P74.4 landed, taken in one sitting because P74.6's own filed text said
+to. `configureDialogList`/`aegisListDelegate`/`listDialog.View` (`internal/tui/dialog.go`) drop the
+pickers' three stacked "selected" signals — a brand chip on a solid fill, a rounded primary frame, and
+a bordered-plus-bold focused row — to one: a bold title over a hairline rule, and a single `❯` pointer
+plus a colour shift on the focused row, with no frame and no fill so the terminal's own background is
+the surface (the frame stays for `dialogFrame`'s other two callers, approval and quit-confirm, which
+are actually modal). The same `View` now also renders a dim footer line — `type to filter · ↑↓ move ·
+enter select · esc close`, right-aligning a live `n/m` match count once filtering is active — closing
+the only genuinely undiscoverable interaction the app had. Record: [Pickers drop to one selection cue,
+and a filter hint](#pickers-drop-to-one-selection-cue-and-a-filter-hint-2026-08-20-p745-p746).
+
+**Last updated (previous):** 2026-08-20 (seventh record the same day) — **P74.4 shipped**, the row Up next ranked
+first once P74.3 gave the collapsed line its `⎿` gutter shape. A read-only exploration phase — a run of
+consecutive, successful `read_file`/`grep`/`glob` calls — now folds into one collapsed card
+(`"Searched 3 patterns, read 6 files"`) instead of one card per call, the largest density win left once
+P74.2/P74.3 landed. The grouping rule stays narrow: a call only ever joins a group once its own result
+has confirmed success, never a still-pending sibling, so a genuinely out-of-order parallel round
+under-groups rather than ever claiming a call before it's known to have succeeded; any error, write, or
+execute call breaks the chain. Record: [An exploration phase reads as a narrative, not a wall of
+cards](#an-exploration-phase-reads-as-a-narrative-not-a-wall-of-cards-2026-08-20-p744).
+
+**Last updated (previous):** 2026-08-20 (sixth record the same day) — **P74.3 shipped**, the row Up next ranked
+first once P74.19 landed. A completed tool call used to emit two lines that each led with the tool
+name — `renderToolCall`'s `● read_file  internal/x.go`, then `renderToolResult`'s `✓ read_file → …` —
+which reads as two events rather than one block with an outcome. `renderToolResult`'s header no longer
+repeats the name: it hangs off a `⎿` continuation gutter instead, and a result that would need
+truncating now collapses to a single one-line summary (`N lines  (/tools full to expand)`) rather than
+a chopped body — `/tools full` remains the expand path, unchanged. Results that already fit within the
+active line cap (compact or full) still render through the same specialized paths as before —
+`renderReadFileResult`'s chroma highlighting included — verbatim. Unblocks P74.4. Record: [One tool
+block, not two events](#one-tool-block-not-two-events-2026-08-20-p743).
+
+**Last updated (previous):** 2026-08-20 (fifth record the same day) — **P74.19 shipped**, the row Up next ranked
+first once P74.20 landed and closed out the selection/clipboard group. `tui.mouse: off` releases mouse
+capture in `View()` while leaving `AltScreen` on — the one combination `/scrollback` can't produce,
+since that releases both — so a `tmux`/`kitty` copy-mode workflow gets terminal-native selection without
+giving up resize re-wrap. Off by default, read once from config at startup, no in-session toggle (unlike
+`/scrollback`). Record: [Mouse capture becomes a config choice, not a package
+deal](#mouse-capture-becomes-a-config-choice-not-a-package-deal-2026-08-20-p7419).
+
+**Last updated (previous):** 2026-08-20 (fourth record the same day) — **P74.20 shipped**, the row the Up next
+table ranked first once P74.18 landed. `copyToClipboard` (`internal/tui/view.go`) shelled out to
+`pbcopy`/`xclip`/`xsel`/`wl-copy`/`clip.exe` with no OSC 52 path, so every copy affordance wrote to the
+clipboard of the machine Aegis runs on — the wrong one over SSH, in a container, or in WSL reaching a
+Windows terminal. `copyToClipboardCmd` now emits `tea.SetClipboard` (bubbletea v2's built-in OSC 52
+command) for any payload at or under a 50,000-byte threshold, and falls back to the native tools only
+above it, where OSC 52 risks silent truncation. Record: [OSC 52 becomes the primary clipboard
+path](#osc-52-becomes-the-primary-clipboard-path-2026-08-20-p7420).
+
+**Last updated (previous):** 2026-08-20 (third record the same day) — **P74.18 shipped**, the row the Up next table
+ranked first out of tier order because it lands on the exact capability the P74.2 direction decision
+named important. `selection.go`'s drag-selection overlay used `lipgloss.NewStyle().Reverse(true)` (SGR-7)
+to highlight a selected range — a per-cell fg/bg swap that fragments visibly over chroma-highlighted
+content, since every differently-colored token inverts to a different background. A new `selectionBg`
+role, added to both built-in schemes and derived for every JSON-loaded theme, replaces it: the overlay now
+sets background only and leaves each cell's own foreground untouched, matching how a real terminal's
+native selection reads. Record: [Selection stops fragmenting over chroma
+color](#selection-stops-fragmenting-over-chroma-color-2026-08-20-p7418).
+
+**Last updated (previous):** 2026-08-20 (second record the same day) — **P74.2 shipped**, the TUI chrome removal
+headed by a direction correction recorded the same day: the batch had been filed against public Claude
+Code's document-flow rendering, and the actual internal-staff mode is alt-screen — the architecture
+Aegis already has — so the 4–6 day commit/live rewrite the item was filed as twice shrank to one
+sitting. **Six framed regions become one**: the sidebar now composites over the live chat via
+`renderAnchoredOverlay` instead of being joined into the layout, so opening or closing it no longer
+reflows the transcript pane; the scrollbar column auto-hides while pinned to the bottom (the normal
+state) and only draws once scrolled away; the title bar is gone, its brand mark and connection/model
+badge folded into the status line's existing priority-ordered segment list. Resize re-wrap, `/search`
+and drag-selection all still work — the property the whole alt-screen decision exists to keep.
+`internal/tui/selection.go`'s mouse-coordinate math (`paneOrigin`, `toPaneCoord`, `clampPaneCoord`) was
+updated to match: one fewer row (no title bar), and clicks under the sidebar overlay's screen columns
+no longer resolve to the transcript content now geometrically underneath them. Record: [Six framed
+regions become one](#six-framed-regions-become-one-2026-08-20-p742).
+
+**Last updated (previous):** 2026-08-20 — **P74.1 shipped**, the same day it was filed, and the last Tier 1 gap
+the P74 batch found. A path-scoped `deny grep(secrets/**)` rule was a silent no-op: `subjectFor`'s
+`CapRead` branch only ever read `path`/`file_path`, and `grep` declares neither — its scope is a search
+root, not a named object — so the extracted subject was always the empty string and no pattern matched
+it. `grep`/`glob`/`ls` (and `security_scan`/`latex_build`, `project_knowledge`/`entity_recall`) are now
+classified as bulk/query-scope tools whose call is matched against a rule's pattern by root
+intersection, firing unconditionally when the call names no root at all. Closed by
+`TestRuleGateDenyBlocksPathlessGrep` and `TestSubjectExtractionAgreesWithSchemaForEveryRegisteredTool`
+(`internal/permission`), the second of which is the regression-class guard: for every registered tool,
+if `toolHasSubjectField` says a rule can match it, `subjectFor` must return non-empty for some input
+satisfying its schema. Record: [The grep/bulk-scope permission
+gap](#the-grepbulk-scope-permission-gap-2026-08-20-p741).
+
+**Last updated (previous):** 2026-08-19 (second record the same day) — **P72.3 shipped**, filed straight out of
 P72.1 by a user question about the debate case: two models resident, both needing windows, one model
 again afterwards. The question found a live refusal — with a memory budget set, **a debate whose
 arbiter runs a different model refused to start on every cold start**, because a member that has
@@ -134,6 +315,746 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### A dangling call whose arguments never parsed gets its own message, 2026-08-20 (P74.14)
+
+**Ranked first on the Up next table once the menu lane and the motion group both closed out and left
+the harness lane's remaining rows all parallel.** `repairOrphanedToolUses` fills in synthetic
+`tool_result` blocks for any `tool_use` a round left unresolved — the routine path any of Aegis's own
+cancellation mechanisms take (`MaxTurnStall`, `MaxWallClockPerRun`, a user interrupt, a TUI quit mid-
+stream) since every one of them cancels the run context mid-flight by design. P65.1 already split that
+wording on whether `Engine.startedTools` recorded the call as having reached `Execute`: "may have
+partially completed" for a call that started, "did not run" for one that did not.
+
+The "did not run" half was overloaded. It is the right claim for a call cut off before its round got to
+it — resuming the round would very plausibly have run it. It is the wrong claim for a call whose
+`Input` never parsed as JSON at all: truncated mid-argument by the same cancel, or malformed to begin
+with. Nothing about resuming would have let that call dispatch — no round state was in its way, its
+arguments were. Reporting it as "interrupted; did not run" invites the model to retry the exact same
+call, which fails the same way again; the model needs to be told to reissue it with valid arguments
+instead. On local models, whose streamed tool-call JSON is truncated far more often than a cloud
+model's, this is not a rare case.
+
+**The fix is one more branch in the same three-way switch**, keyed on the block's own `Input` rather
+than on anything computed at the call site: `!json.Valid(tu.Input)` alongside the existing `started`
+lookup. A new `interruptedMalformedText(name)` reads "tool call never dispatched; NAME's arguments were
+malformed or truncated JSON. Reissue the call with valid arguments." — deliberately not calling it
+"interrupted", since it would be false regardless of the interruption. Order matters: `started` is
+checked first, so a call that *did* reach `Execute` before the round was cut off keeps the "may have
+partially completed" wording even if its `Input` looks malformed in isolation — a tool that got as far
+as `Execute` is the tool's own business to have validated, and the runtime's `started` record is
+stronger evidence than a static read of the JSON.
+
+**Existing behaviour is unchanged for both other branches.** The started/not-started split from P65.1
+is untouched, and a clean orphan with no started record still gets the pre-existing "did not run"
+wording — pinned by `TestRepairOrphanUsesNotStartedWordingWithoutARecord`, which now uses valid-JSON
+fixture input specifically so it exercises that branch rather than the new one. A new
+`TestRepairOrphanDistinguishesMalformedFromInterrupted` covers the new branch directly, asserting a
+malformed and a clean orphan in the same round get different wording and that neither message bleeds
+into the other's.
+
+Touches only `internal/engine/engine.go` (`repairOrphanedToolUses`, `interruptedMalformedText`) and
+`internal/engine/orphanrepair_test.go`. `go test ./internal/engine/...` green, including the full P65.1
+suite this builds on.
+
+### A running swarm gets a stable colour, not three grey lines, 2026-08-20 (P74.13)
+
+**Independent of every other row, and the last one left once the motion group closed out.** The
+sidebar's `AGENTS` section (`internal/tui/view.go`) rendered every running teammate through
+`m.th.tool` with the id truncated to eight characters, so a three-agent swarm was three lines of the
+same colour differing only in a hash prefix. Nothing else in the UI tied a sidebar line, a
+`/teammates` transcript row, or a status segment back to which agent produced it.
+
+**A fixed 8-colour palette per `colorScheme`, indexed by hashing the agent id.** `agentPalette
+[8]color.Color` is a new field on `colorScheme` (`internal/tui/colorscheme.go`) — eight Charmtone hues
+for `darkScheme` (purple, blue, green, yellow, red, pink, cyan, bright blue), and eight hex colours
+already used for other light-scheme roles for `lightScheme`, so the light palette stays inside that
+scheme's existing contrast work rather than adding new unvetted hexes. `applyScheme` copies it into a
+package-level `colAgentPalette`, and a new `agentColor(id string) color.Color` hashes the id with
+`hash/fnv`'s FNV-1a and indexes into it:
+
+```go
+func agentColor(id string) color.Color {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return colAgentPalette[h.Sum32()%uint32(len(colAgentPalette))]
+}
+```
+
+Hashing rather than assignment order means the same id renders the same colour across a restart and
+across every render site, with no state to thread through the sidebar, transcript, or status bar.
+
+**Two render sites now use it.** The sidebar `AGENTS` list styles each running teammate's label with
+`lipgloss.NewStyle().Foreground(agentColor(tm.AgentID))` instead of the flat `m.th.tool`.
+`renderTeammates` (`internal/tui/tui.go`, the `/teammates` transcript listing) renders the agent id
+substring in that same colour while keeping the tag's existing status colour (red `✗` for failed, the
+default for done/running) — so a teammate's identity colour is consistent with the sidebar without
+losing the failure signal that colour already carried.
+
+**Tests:** `internal/tui/colorscheme_test.go`'s `TestAgentColorStableAndDistinct` — repeated calls for
+the same id return the same colour, and two different ids land on different palette entries. `go build
+./...` and `go test ./internal/tui/...` both clean.
+
+### The token counter jumps instead of climbing, 2026-08-20 (P74.12)
+
+**The row Up next ranked first once the menu lane and the harness lane's first two rows had all
+shipped**, and the last of the three prerequisites it had (honouring the P74.10 reduced-motion flag) was
+already satisfied the day it was filed. `renderStats` printed `m.inputTokens`/`m.outputTokens` straight
+from the last counter update, and those only change on `KindTurnDone` (`internal/tui/stream.go`) — once
+per model turn, with the full new total — so a multi-turn tool round trip read as the number stuttering
+in chunk-sized jumps rather than climbing.
+
+**`animStep` was already the right clock; the counters just weren't riding it.** Two new `model` fields,
+`displayedInputTokens`/`displayedOutputTokens` (`internal/tui/tui.go`), sit alongside the real
+`inputTokens`/`outputTokens` and are what `renderStats` now formats. `model.easeStatCounters`
+(`internal/tui/update_tick.go`) is called from `updateSpinnerTick` on every streaming tick, independent
+of `followBottom` — cheap to update even when the redraw itself is suppressed, so the counter is already
+caught up by the time the view scrolls back into frame:
+
+```go
+func easeTowards(displayed, target int) int {
+	gap := target - displayed
+	switch {
+	case gap == 0:
+		return displayed
+	case gap > 0:
+		if step := gap / 8; step > 1 {
+			return displayed + step
+		}
+		return displayed + 1
+	default:
+		if step := gap / 8; step < -1 {
+			return displayed + step
+		}
+		return displayed - 1
+	}
+}
+```
+
+An eighth of the gap moves fast when far behind and slows as it converges, and the ±1 floor guarantees it
+always reaches the target in a bounded number of frames rather than stalling asymptotically short of it.
+Reduced motion (P74.10) skips the ease entirely and snaps both counters to the true values every tick, so
+a reduced-motion run still prints the real number immediately as the item required. The counters are also
+snapped directly to the true values in `updateStreamClosed` and `updateErr`
+(`internal/tui/update_stream.go`) and reset to zero alongside `inputTokens`/`outputTokens` at both
+existing reset sites (`internal/tui/tui.go`, `internal/tui/update_slash.go`'s `/clear`), since ticks stop
+firing once `m.streaming` goes false and nothing would otherwise finish an in-flight ease.
+
+**Tests:** `internal/tui/stat_ease_test.go` — a streaming tick moves the displayed counters partway
+toward a large target without reaching it, repeated ticks converge exactly without overshoot, and reduced
+motion snaps both counters to the true values on the very first tick. `go build ./...`,
+`go vet ./internal/tui/...` and `go test ./internal/tui/...` all clean.
+
+### Stall becomes a visible ramp, not just an abort, 2026-08-20 (P74.11)
+
+**The row Up next ranked first once P74.10 shipped**, since P74.11 was gated on the reduced-motion flag
+it added. Between "working" and the 900s `MaxTurnStall` abort the TUI showed exactly one thing — a
+shimmer identical at second 2 and second 400 — which is indistinguishable from a hang on a local model,
+where a 90-second silence during prompt evaluation or post-tool-round re-evaluation is routine.
+
+**The clock already existed per wait phase; only the color was static.** `model.phaseStatus()` already
+distinguishes three states — waiting for the first token (`streamStart`), a post-tool-round re-eval
+(`modelWaitAt`), and actively generating — and a new `model.stallElapsed()` (`internal/tui/tui.go`) reads
+whichever of those two wait clocks is currently running, returning zero once the model is producing
+output: tokens arriving is forward progress, not a stall, so the ramp only ever applies to genuine dead
+air.
+
+**`stallRampColor(elapsed, bound time.Duration) color.Color`** (`internal/tui/shimmer.go`) interpolates
+`colAccent` toward `colWarning` via the same `lipgloss.Blend1D` `shimmerText` already uses, fed by
+`elapsed` from `stallElapsed()` and `bound` from a new `Config.MaxTurnStall` — the same
+`cost.max_turn_stall` value the engine aborts a stalled turn against
+(`cfg.Cost.MaxTurnStall()`, wired through `tui.Run` from `internal/cli/root.go`), so the ramp tracks the
+real bound rather than an invented one. The ramp is deliberately front-loaded (`sqrt(t)`) and saturates
+at 70% of the bound rather than 100%, so a run reads as visibly "getting stuck" well before it would
+actually abort — mirroring the comparison client's continuous spinner-to-red creep rather than a
+threshold flip. A disabled bound (`max_turn_stall: 0`) or zero elapsed leaves the color at `colAccent`,
+unchanged.
+
+Wired at both places the "working" shimmer renders: the transcript tail's phrase
+(`internal/tui/tui.go`, the `case m.firstTokenAt.IsZero()` / `case !m.modelWaitAt.IsZero()` branches) and
+the status line (`internal/tui/view.go:renderInputArea`). Neither call site needed its own clock — both
+already had `m.animStep` for the sweep and now also pass `stallRampColor(m.stallElapsed(),
+m.maxTurnStall)` as the highlight instead of a fixed `colAccent`.
+
+**Tests:** `internal/tui/stall_ramp_test.go` — `stallRampColor` returns `colAccent` unchanged with a
+disabled bound or zero elapsed, moves monotonically as elapsed grows, and holds steady past its 70%
+saturation point rather than overshooting; `stallElapsed` reads the waiting-phase clock, drops to zero
+once `firstTokenAt` is set (generating, no stall signal), and picks back up from `modelWaitAt` during a
+post-tool-round re-eval. `go build ./...`, `go vet ./internal/tui/... ./internal/cli/...` and
+`go test ./internal/tui/... ./internal/cli/...` all clean.
+
+### There is no reduced-motion setting → fixed, 2026-08-20 (P74.10)
+
+**Filed to gate P74.11 and P74.12, taken first as the roadmap directed.** Nothing in `internal/tui` read
+a motion preference: `shimmerText`, `caretGlyph`, the cycling `thinkingPhrase` and every pending tool
+card's shimmer frame all animated unconditionally whenever `m.streaming && m.followBottom`, with no
+config key and no way to turn any of it off short of not using the tool — an accessibility gap (the
+shimmer is a continuous moving-luminance sweep) and a CPU one (`updateSpinnerTick` re-rendered the whole
+tail and every pending card on every ~100ms tick, on a machine that may simultaneously be running local
+inference).
+
+**All four animations share one clock, so freezing it in one place freezes all four.** `shimmerText`,
+`caretGlyph` and `thinkingPhrase` each take `m.animStep` as their frame argument, and
+`updatePendingToolCards` (P21.2) is driven from the same tick. `updateSpinnerTick`
+(`internal/tui/update_tick.go`) already gated the whole block on `m.followBottom` (P3.7); reduced motion
+adds one more gate around the frame advance itself:
+
+```go
+if m.followBottom {
+    m.pollTick++
+    if !m.reducedMotion {
+        m.animStep++
+        m.updatePendingToolCards()
+        m.refresh()
+    }
+    if m.pollTick%20 == 0 {
+        cmds = append(cmds, m.fetchTeammatesQuiet())
+    }
+}
+```
+
+`m.animStep` stops advancing, so `shimmerText` renders one static gradient instead of a sweep,
+`caretGlyph` lands on whichever half of `caretBlinkPeriod` it was last at (frame 0 by construction, since
+`animStep` starts and stays at zero — a solid caret, never blinking), `thinkingPhrase` stops cycling, and
+`updatePendingToolCards`/`refresh()` — the expensive per-tick work, not `m.sp.Update` itself — never run,
+which is where the CPU saving actually comes from. The spinner tick keeps being re-queued regardless (the
+existing "always re-queue so animation resumes on scroll-back" comment), so nothing about scroll-back
+recovery or the tick's own liveness changes.
+
+**One non-animation consumer rode the same counter and had to be split off.** The P2.5 sub-agent roster
+poll fired on `m.animStep%20 == 0`; freezing `animStep` at 0 would have made that condition true on
+*every* tick instead of every twentieth once reduced motion no longer advances it past zero. Given its
+own counter, `m.pollTick`, incremented unconditionally in the same block, so the poll's cadence is
+unaffected by the motion setting.
+
+**Wired the standard way**: `TUIConfig.ReducedMotion` (`internal/config/config.go`, `koanf:"reduced_motion"`,
+default `false` — picked up automatically as `AEGIS_TUI_REDUCED_MOTION` via the existing env layer, no
+bespoke env check needed) → `tui.Config.ReducedMotion` (`internal/cli/root.go`) → `model.reducedMotion`,
+set once in `newModel` the same way `Config.Mouse` sets `mouseOff` (P74.19). Documented in
+[docs/configuration.md](../docs/configuration.md) beside `mouse`.
+
+**Tests:** `TestReducedMotionFreezesAnimStep` / `TestMotionDefaultAdvancesAnimStep` (control case) /
+`TestReducedMotionStillPollsTeammates` / `TestReducedMotionCaretStaysStaticOnce`
+(`internal/tui/reduced_motion_test.go`). `go build ./...` and `go test ./internal/tui/...
+./internal/config/... ./internal/cli/...` are green.
+
+### An empty tool result becomes a named placeholder, 2026-08-20 (P74.9)
+
+**First of P74.9's two repairs, taken alone as filed** — the second (per-model argument-shape repair)
+was explicitly deferred to P74.17 in the same item and does not ship here. A tool that legitimately
+returns nothing — a `grep` with no matches, a `read_file` on an empty file — used to hand the model an
+empty string, indistinguishable from a failed call. Many local models cannot tell the two apart and
+re-issue the call, which reads as a loop and can trip the P52.3 failure breaker or the loop detector for
+a reason that has nothing to do with either.
+
+**`builtin.NormalizeEmptyResult(toolName, content string) string`** (`internal/tool/builtin/truncate.go`,
+beside the P64.3 posture table it belongs with) returns `content` unchanged unless it is empty or
+all-whitespace, in which case it returns a one-sentence placeholder naming the tool and stating plainly
+that an empty result is not necessarily a failure. This is correct for every model — an empty result is
+exactly as ambiguous to a capable model as to a small one, it is just less likely to act on the
+ambiguity — so unlike the argument-shape half it is unconditional, not gated on `LocalProfile`.
+
+**Wired at the one seam every tool call passes through**, `Engine.executeTool`
+(`internal/engine/engine.go`): applied only when `!isErr`, after the existing `err`-to-`isErr` conversion,
+so a real error keeps its own message and only a genuinely empty *success* gets the placeholder. Both
+call paths — `runToolsSequential` and the parallel `toolRound.run` — dispatch through `executeTool`, so
+one change point covers both.
+
+**Does not touch the loop detector**, by construction rather than by a special case: the turn signature
+`loopDetector` compares is built from each surviving call's name and canonicalized *input* only, never
+from result content (see `SignatureTransparent`'s doc in `internal/tool/tool.go`), and
+`toolFailureTracker` counts `IsError`, not an empty string. `NormalizeEmptyResult` is also deterministic —
+the same tool name always produces the same placeholder — so two empty results from the same call are
+exactly as indistinguishable to the signature as two empty results were before this item, which is the
+property the closure condition asked for.
+
+**Tests:** `TestNormalizeEmptyResultReplacesOnlyEmptyContent` and
+`TestNormalizeEmptyResultIsDeterministic` (`internal/tool/builtin/truncate_test.go`) at the function level;
+`TestExecuteToolNormalizesEmptySuccessResult` and `TestExecuteToolLeavesErrorResultsAlone`
+(`internal/engine/engine_test.go`) at the engine seam, the latter confirming an empty *error* result is
+left alone rather than rewritten into the success placeholder. `go build ./...`, `go vet ./...` and
+`go test ./internal/tool/builtin/... ./internal/engine/...` are green.
+
+### A tool call written as text becomes a call, 2026-08-20 (P74.8)
+
+**Head of the harness lane, taken as soon as the menu lane closed.** `internal/provider/openai/openai.go`
+reads `tool_calls` off the wire and nothing else — when a local model answers a tool-enabled turn with a
+fenced JSON object, a tagged block, or a bare `{"name": ..., "arguments": ...}` narrated in prose, the
+turn produces plain text, the engine sees no call, and the loop either stalls or retries blind against a
+model that already answered.
+
+**`provider.WithProseToolCallSalvage`** (`internal/provider/prosetoolcall.go`) is a new decorator beside
+`retry.go` and `numctx.go`, but a mirror-image one: every other decorator in the package forwards events
+as they arrive, because it only needs to look at the request. This one needs the whole assembled reply
+before it can tell a genuine text answer from a mis-emitted call, so it buffers one turn's stream,
+decides, then either replays it completely unchanged or replaces the buffered text with the parsed call
+plus whatever prose survives it. That is a real trade — no live token-by-token display on the turns it
+rewrites — accepted because P74.17's per-model profile mechanism is the intended place to turn this on
+per model; until it exists, the existing local-profile boolean is the only lever there is, so it gates
+construction in `providerfactory.Build` (`internal/providerfactory/factory.go`) and never touches a cloud
+turn.
+
+**Two details carried over from the `deepagents` reading, both load-bearing:**
+
+- **A parsed name must match a tool actually sent on that request** (`req.Tools`, not the tool registry
+  at large). A reply that only mentions `read_file` in a sentence never becomes a call — there's no
+  call-shaped JSON to find, so the scan simply finds nothing.
+- **Surviving prose is never discarded.** The matched call's own JSON span is stripped out of the
+  buffered text; everything else — narration before or after it — is re-emitted as the turn's text
+  content.
+
+**Parsing, in order of how explicit the model was:** a `<tool_call>`/`<function_call>` tag, then a fenced
+` ```json ` block, then a bare JSON object found by walking every `{` in the reply and asking
+`encoding/json`'s streaming decoder whether a balanced object starts there. A candidate's `arguments`
+(also accepted as `parameters`/`input`) is normalized whether the model nested it as an object or encoded
+it as a JSON string — both shapes show up in local-model output — and defaults to `{}` rather than a nil
+`Input` when the field is missing.
+
+**A call that already arrived structured is left completely alone** — the decorator only inspects the
+buffered text at all once it has confirmed no `EventToolUse`/`EventToolUseStart` occurred, so a turn that
+narrates and then makes a real call keeps its narration and its call exactly as the base adapter produced
+them.
+
+**Tests** (`internal/provider/prosetoolcall_test.go`), the closure condition's table test over each
+malformed shape: fenced JSON, the `<tool_call>` tag, a bare object, string-encoded arguments, a
+mention-only reply (the negative case — asserts no call and the original `StopEndTurn`), a call naming a
+tool that wasn't offered on the request (also no call), a real structured call replayed byte-for-byte,
+and a request with no tools at all (never scanned, whatever the text contains). `go build ./...`,
+`go vet ./...` and `go test ./internal/provider/... ./internal/providerfactory/...` are green.
+
+Related but distinct, and not conflated: the qwen3:14b Ollama-template issue drops a call from *history*
+after it was correctly parsed — a different bug with a different fix. This item is the general defence
+for the family of "the call never parsed as structured at all," not that specific one.
+
+### The grep/bulk-scope permission gap, 2026-08-20 (P74.1)
+
+**Filed and shipped the same day, proved against the real gate rather than read off `subjectFor`.** A
+deny rule intended to keep a directory out of the model's context held for `read_file` and was a silent
+no-op for `grep`, which returned matching lines from the same files with no denial and no warning.
+
+`subjectFor` (`internal/permission/rules.go:183`) extracts the string a rule's glob matches against by
+switching on capability. The `CapRead` branch returned `firstNonEmpty(args.Path, args.FilePath)`.
+`grep`'s schema (`internal/tool/builtin/search.go:301`) has neither — it takes `pattern`, `glob` and
+`ignore_case`, and always searches the whole workspace root (`effectiveRoot(ctx, t.root)`) with `glob`
+as the only narrowing — so the extracted subject was always the empty string, `normalizePathLike("")`
+cleaned to `"."`, and no path pattern matched it.
+
+**The safety net missed it for a reason worth recording separately from the fix.**
+`WarnUnmatchableRules` asks `toolHasSubjectField`, which introspects the tool's *declared input schema*
+for any of the six names in `subjectFieldNames`. `grep` declares `pattern`, which is on that list, so
+the check passed — but the `CapRead` branch of `subjectFor` returned before `pattern` was ever
+consulted. **The schema-level check and the extraction-level switch disagreed, and the warning was
+defeated precisely where it was needed.**
+
+**Evidence before the fix.** A throwaway test against `NewRuleGate` with a stub carrying `grep`'s real
+schema and capability: rule `deny grep(secrets/**)`, input `{"pattern":"AWS_SECRET"}` →
+`allowed=true`, `reason=""`, and `WarnUnmatchableRules` emitted nothing.
+
+**The fix classifies each filesystem tool by scope rather than patching the `CapRead` extraction.**
+Adding `glob`/`pattern` to that branch was the smaller change and was rejected as wrong in the general
+case — a `glob` is a filter, not a scope, and a `grep` with no `glob` at all still walks everything.
+Instead, `grep`/`glob`/`ls` are now classified as **bulk**-scope (the path argument is a search root
+and any descendant may surface) as opposed to **exact**-scope (`read_file`, `write_file`, `edit_file`,
+where the call operates on the named path), following the shape `deepagents`' `_fs_interrupt.py` uses.
+A bulk call fires whenever the searched subtree *intersects* a rule's pattern, and unconditionally when
+the call names no root at all — matching what a blast-radius rule means, and reusing the fact that
+Aegis's globs already span path separators (`globToRegexp`). The same shape closed
+`security_scan`/`latex_build` (path-only `CapExecute` tools) and `project_knowledge`/`entity_recall`
+(query-only `CapRead` tools).
+
+**Closure condition, both halves.** `TestRuleGateDenyBlocksPathlessGrep` asserts `deny
+grep(secrets/**)` denies a pathless `grep`. `TestSubjectExtractionAgreesWithSchemaForEveryRegisteredTool`
+asserts the schema/extraction agreement directly — for every registered tool, if `toolHasSubjectField`
+says a rule can match it, `subjectFor` must return non-empty for some input satisfying its schema. The
+second is what stops the regression class rather than the one instance: the next tool with the same
+"scope is a search root, not a named field" shape reintroduces the gap silently unless this test would
+catch it too.
+
+**Tests.** `internal/permission/rules_test.go` and the new `internal/permission/subject_agreement_test.go`.
+`go test ./internal/permission/...` and `go build ./...` are green.
+
+### Six framed regions become one, 2026-08-20 (P74.2)
+
+**Filed as a document-flow rewrite, twice, and corrected the same day to something an order of
+magnitude smaller before it was built.** The comparison client ships *two* rendering modes, and the P74
+batch had been read against the public one; `src/utils/fullscreen.ts:112`'s `USER_TYPE === 'ant'` check
+is what the internal-staff mode runs, and it is alt-screen — the architecture Aegis already has. The
+gap was never the rendering model, it was the chrome and the quality of the in-app implementations. See
+[Decisions that outlive the items that made them](roadmap.md#decisions-that-outlive-the-items-that-made-them)
+for the full correction record, including the two wrong answers that preceded it and why `rawScrollback`
+stays exactly as it was.
+
+`renderChat` used to compose six framed regions: a title bar, a bordered sidebar column, a scrollbar
+glyph column, the transcript viewport, a todo strip, and a rounded-bordered composer over a status line.
+Alt-screen and the bounded viewport stayed — they're what let the app own every cell, which is what
+makes resize re-wrap work. Everything else was the actual target.
+
+**The sidebar became an overlay instead of a layout member.** It used to be joined into `renderChat` via
+`lipgloss.JoinHorizontal`, reflowing and shrinking the transcript pane by `m.sidebarW + 1` columns every
+time it opened. It now composites over the finished frame in `render()` via `renderAnchoredOverlay` —
+the same mechanism P33.11/P33.12 established for the transient panel and the wizard — drawn full-height
+at the screen's left edge, as the lowest overlay layer so every modal dialog still lands on top of it.
+`layout()` no longer reserves any width for it at all; `m.sidebarOpen` already defaulted to Go's zero
+value (`false`), so "off by default" was already true — what changed is that opening it stopped
+perturbing anything underneath.
+
+**The scrollbar column auto-hides.** `renderScrollbar` used to draw a full track/thumb whenever content
+was scrollable, regardless of scroll position. It now also requires `!m.followBottom` — the column
+renders blank while pinned to the bottom (the normal state) and only shows a track once the user has
+actually scrolled away, the way a GUI overlay scrollbar behaves. The column's width stays reserved
+either way, deliberately: making it truly zero-width while hidden would itself perturb transcript
+geometry on every scroll-position change, which is the exact reflow this item exists to remove.
+
+**The title bar is gone; its content folded into the status line.** `renderTitleBar` rendered the brand
+mark and the P28.7 connection/model badge as their own always-visible row. That function is deleted;
+`renderBrandSegment` produces the same content as one more entry in `renderInputArea`'s existing
+priority-ordered, tail-dropping segment list (`joinedWidth`), given the *highest* priority so it's the
+last thing to drop on a narrow terminal — it's the one signal that used to have a dedicated row.
+
+**The mouse-coordinate math needed the same correction, or selection would silently land on the wrong
+cell.** `paneOrigin()` (`internal/tui/selection.go`) used to add one row for the title bar and
+`m.sidebarW + 1` columns whenever the sidebar was open. Both assumptions were now wrong: the title-bar
+row is gone (origin row 0, not 1), and the sidebar no longer shifts the transcript at all, since it
+overlays rather than reflows. But an overlay *occludes* — the transcript pane is still geometrically
+present under it, just not visible — so a click in that band must not resolve to the (hidden) content
+beneath. `toPaneCoord` and `clampPaneCoord` gained a `sidebarOccludes(x)` check: a click under the
+overlay's columns is now treated as outside the pane, and a drag that crosses under it clamps to the
+overlay's right edge instead of the transcript's own left edge.
+
+**`layout()` and `fixedH()` lost the sidebar-width and title-bar-row terms** they used to carry, freeing
+one full row of viewport height (title bar) that the transcript pane now gets back, in addition to the
+sidebar's reclaimed width — the item's own note that "sidebar plus scrollbar plus padding is about 30
+columns of an 80-column terminal, permanently" no longer holds once the sidebar isn't part of that
+budget.
+
+**Explicitly out of scope, and this was the point of the correction:** `tea.Println`, a commit/live
+split, retiring `/search`, and deleting `selection.go`. None of those survive reading the two-mode fact
+instead of the public build's behavior. `rawScrollback` is untouched — the sidebar overlay is
+additionally gated on `!m.rawScrollback`, matching the existing suppression of the scrollbar and
+terminal pane there.
+
+**Closure condition, verified.** A fresh install shows no sidebar, no scrollbar while pinned to the
+bottom, and no title bar; the sidebar overlay opens and closes without perturbing transcript geometry
+(`TestSidebarOverlayDoesNotChangeTranscriptGeometry` asserts `m.transcript.Width()`/`Height()` are
+identical before, during, and after); resize still re-wraps (`TestResizeStillRewrapsAfterChromeRemoval`
+drives real `WindowSizeMsg`es and asserts the pane narrows and widens back); `/search`, drag-selection
+and `ScrollToItem` all still work (existing coverage, re-run green); the scrollbar hides while following
+bottom and shows once scrolled away (`TestScrollbarAutoHidesWhilePinnedToBottom`); the brand/connection
+content survives in the status line with no separate title row
+(`TestTitleBarFoldedIntoStatusLine`); and a click under the sidebar overlay no longer resolves to
+transcript content (`TestSidebarOverlayOccludesPaneMouseCoords`).
+
+**Tests.** New coverage in `internal/tui/chrome_test.go`. `TestPaneOriginAndToPaneCoord` and
+`TestScrollbackModeHidesSidebar` (pre-existing) were updated for the new geometry rather than left
+broken — the former asserts the sidebar overlay leaves the origin unmoved and now occludes instead of
+shifting it; the latter is unaffected by the mechanism change since it already asserted on rendered
+content, not layout math. `go build ./...`, `go vet ./internal/tui/...` and `go test ./internal/tui/...`
+are green.
+
+### One tool block, not two events, 2026-08-20 (P74.3)
+
+**Unblocked the same day P74.2 shipped**, and taken next per the Up next table. A completed tool call
+used to render as two independent transcript lines, both leading with the tool name:
+`renderToolCall` produced `● read_file  internal/x.go`, then `renderToolResult`
+(`internal/tui/toolview.go`) produced `✓ read_file → …`. On a round with a dozen calls that is a dozen
+redundant identifiers, and the pair reads as two events rather than one block with an outcome.
+
+**What changed, concretely.** `renderToolResult`'s header no longer echoes the tool name — the call
+block above it already carries that — and instead renders `{tag} ⎿` as a continuation gutter. The
+single-line branch (short results) drops the name the same way. The multi-line branch keeps its
+existing per-call line cap (`maxBodyLines`, driven by `toolCompact`/`/tools full`) but changes what
+happens when a result would need truncating: instead of a chopped body plus a "▶ N more lines" footer,
+it now collapses to one line — `N lines  (/tools full to expand)` — and `/tools full` (which raises the
+cap past the result's line count) is the unchanged expand path. A result that already fits inside the
+active cap, compact or full, still renders through the same body path as before, `renderReadFileResult`'s
+chroma-highlighted read view included — the specialized renderers were kept working verbatim rather than
+routed through a new summary mechanism, since P16.2/P16.3's diff and highlighting work is what's most
+likely to break on a gutter change.
+
+**What didn't need to change.** `renderToolCardDone` already composed the call block and the result
+into one transcript item (P21.2), and `toolCompact` already existed as the per-session compact/full
+toggle — the harder half of this item was already built; what was missing was the header shape and the
+truncation-vs-collapse decision.
+
+**Tests.** `TestRenderToolResult_HeaderDropsRepeatedName` (new) asserts neither the single-line nor the
+multi-line branch repeats the tool name and that both carry the `⎿` gutter.
+`TestRenderToolResult_CollapsesToSummaryWhenOverCap` (new) asserts a 20-line result under a 10-line cap
+renders as a single collapsed summary line naming `/tools full`, and that raising the cap (the `/tools
+full` state) renders the complete body again. The pre-existing `renderToolResult` tests
+(`TestRenderToolResult_ReadFileUsesPathForHighlighting`, `TestRenderToolResult_SanitizesDangerousSeqs`,
+etc.) all use results short enough to stay under their line cap, so they exercise the unchanged
+full-body path and pass without modification. `go build ./...`, `go vet ./internal/tui/...` and
+`go test ./internal/tui/...` are green. Unblocks P74.4.
+
+### Mouse capture becomes a config choice, not a package deal, 2026-08-20 (P74.19)
+
+**The last row of the selection/clipboard group**, taken once P74.20 closed the SSH case that had been
+this item's strongest justification. What's left is the narrower audience the item was always framed
+for: people who specifically want the terminal, not Aegis, to own click-drag selection — a `tmux`/
+`kitty` copy-mode workflow, mainly.
+
+`View()` (`internal/tui/view.go`) previously derived `tea.MouseMode` from exactly one thing:
+`rawScrollback`. `/scrollback` releasing mouse capture is a side effect of releasing alt-screen and the
+bounded-viewport transcript rendering together — there was no way to release capture on its own. A new
+`tui.mouse: off` config key (`config.TUI.Mouse`, plumbed through `tui.Config.Mouse` to a `model.mouseOff`
+field set once at startup) adds that missing combination: `View()` now sets `MouseModeNone` when
+*either* `rawScrollback` or `mouseOff` is set, independently of `AltScreen`, which stays on when only
+`mouseOff` is set. That's the property `/scrollback` structurally can't offer — resize re-wrap keeps
+working, because the bounded-viewport transcript rendering (the thing that actually defeats native
+scrollback, per P22.6's investigation) never changes.
+
+**Deliberately no in-session toggle.** `rawScrollback` has `/scrollback` because it's a mode swap
+someone might want mid-session; `mouseOff` is read once from config, because the costs (no wheel scroll,
+no click-to-focus, `selection.go`'s drag-to-copy goes idle) are the kind of tradeoff worth deciding once
+per setup rather than per session.
+
+**Settled 2026-08-20, and stays settled:** off by default. The wheel-scroll trade was put to the user
+when P74.20 was scoped and declined in favor of the OSC 52 fix, which solves the SSH clipboard case
+without costing anything. This item is the escape hatch for the narrower audience left after that,
+not a reopening of the default.
+
+**Closure condition, verified.** `TestMouseOffKeepsAltScreenButReleasesCapture`
+(`internal/tui/scrollback_test.go`) confirms `Config{Mouse: "off"}` produces a `View()` with
+`AltScreen == true` and `MouseMode == tea.MouseModeNone`. `TestMouseOffDefaultsOn` confirms an unset
+`Config.Mouse` leaves capture on, matching pre-existing behavior.
+
+**Not done in this pass, and deliberately:** the roadmap item flagged that `Update` (`update_compose.go`)
+forwards only `pgup`/`pgdown` to the transcript pane while the composer holds focus, so `GotoTop`/
+`GotoBottom` and the half-page keys are unreachable by keyboard during typing. Checked against
+`bubbles/v2/textarea`'s own `KeyMap` (`ctrl+u` → delete-before-cursor, `ctrl+d`/`delete` → delete-char-
+forward, `home`/`ctrl+a` → line-start, `end`/`ctrl+e` → line-end) — every other candidate key is already
+claimed by line editing, which is why P21.7 restricted forwarding to `pgup`/`pgdown` in the first place.
+Widening it would silently break typing. `pgup`/`pgdown` already reach every position by repetition, so
+this is left as-is rather than reopening P21.7's key-ownership split.
+
+**Tests.** `internal/tui/scrollback_test.go`. `go build ./...` and `go test ./internal/tui/... ./internal/config/... ./internal/cli/...` are green.
+
+### OSC 52 becomes the primary clipboard path, 2026-08-20 (P74.20)
+
+**Ranked first in Up next once P74.18 shipped** — a silent-wrong-result bug, not a preference, and it
+fixes `/copy` in addition to every mouse-drag copy affordance, which a mouse-capture change (P74.19)
+does nothing for.
+
+`copyToClipboard` (`internal/tui/view.go`) switched on `runtime.GOOS` and shelled out to `pbcopy` on
+darwin, `xclip`/`xsel`/`wl-copy` on linux, and `clip.exe` on windows. Every one of those talks to the
+clipboard of the machine the process is running on. Run Aegis over SSH, in a container, or in WSL
+reaching a Windows terminal, and that machine is not the one at the user's keyboard — the copy silently
+"succeeds" and the text lands somewhere unreachable, or on a headless linux box the tool lookup fails
+outright.
+
+**OSC 52 asks the terminal emulator itself to set the clipboard**, so it crosses SSH, tmux and
+containers by construction, and bubbletea v2 already carries it: `tea.SetClipboard(s)` returns a `Cmd`
+that the framework's own event loop turns into `ansi.SetSystemClipboard` and writes synchronized with
+the next frame (`clipboard.go`, `tea.go:813`) — no new terminal-writing code needed in `internal/tui`.
+`copyToClipboardCmd` now batches that command with a synthetic success `clipboardResultMsg` for any
+payload at or under `maxOSC52Payload` (50,000 raw bytes, chosen so the base64 encoding stays under
+tmux's historic 74,994-byte OSC 52 buffer cap with margin). There is no synchronous way to learn whether
+a terminal honoured the sequence — unlike a read, a set has no ack — so within the limit the command is
+treated as best-effort success, matching how the codebase already treats other one-way OSC writes (the
+window-title sequence in `View()`).
+
+**Above the threshold**, `copyToClipboardCmd` skips OSC 52 entirely and falls back to the original
+native-tool path unchanged, since a sequence that gets silently truncated is worse than one that was
+never sent.
+
+**Kept deliberately separate**: this is a deliberate emission on a trusted, user-initiated path (a drag
+selection or `/copy`, both actions the user took), and must not be confused with
+`termsafe.StripDangerousSeqs`, which strips the same OSC 52 sequence from *untrusted* model/tool output
+(P28.1) so a scanned file or model response can't hijack the clipboard. The two run in opposite
+directions on opposite trust boundaries and stay in their own files.
+
+**Closure condition, verified.** `TestCopyToClipboardCmdUsesOSC52` (`internal/tui/clipboard_osc52_test.go`)
+confirms a payload under the limit returns a batch carrying both a `tea.SetClipboard`-shaped message
+(identified structurally — bubbletea's `setClipboardMsg` is unexported) and a successful
+`clipboardResultMsg`. `TestCopyToClipboardCmdFallsBackAboveOSC52Limit` confirms a payload over the limit
+returns the native-tool `clipboardResultMsg` path instead of a batch.
+
+**Tests.** `internal/tui/clipboard_osc52_test.go`. `go build ./...` and `go test ./internal/tui/...` are
+green.
+
+### Selection stops fragmenting over chroma color, 2026-08-20 (P74.18)
+
+**Filed out of the P74.2 correction, ranked first in Up next despite being Tier 2**, because it lands
+directly on the capability the direction decision just named important, and it is the one outright bug
+in the selection path.
+
+`selection.go:305`'s drag-selection overlay highlighted the selected range with
+`lipgloss.NewStyle().Reverse(true)` — SGR-7, which swaps a cell's foreground and background *as the
+terminal currently has them set*. Over uniform text that reads fine. Over chroma-highlighted content
+(diffs, P16.3; `read_file` output, P16.2) it does not: each token carries its own foreground color with
+no reset in between, so each one inverts to a different background and the selection reads as a ragged
+stripe of mismatched blocks instead of one contiguous region.
+
+**The fix matches what a real terminal's own selection does: replace the background, leave the
+foreground alone.** A `selectionBg` role was added to `colorScheme` (`internal/tui/colorscheme.go`) —
+picked for contrast against each scheme's own `fgBase`, not just eyeballed on dark: the dark scheme
+blends toward `charmtone.Charple` at 0.55 for a bright fill, the light scheme uses a pale
+`#C7D2FE` against its near-black text. JSON-loaded themes (`theme_loader.go`'s `toScheme`) derive theirs
+the same way the existing background tiers are derived, `blend(background, brightMagenta, 0.45)`, so
+every built-in and custom theme gets a value with no per-theme authoring. `renderTranscriptContent`'s
+overlay now builds `lipgloss.NewStyle().Background(colSelectionBg)` instead of `Reverse(true)` and wraps
+the same `ansi.Cut`-extracted selected span — the span's own embedded foreground codes survive untouched
+inside the wrapper, since they only ever set foreground, never reset the background the wrapper opened.
+
+**Left alone, deliberately:** `highlightSearchMatches` (`selection.go:284`), which already uses an
+explicit `colBrandFg`/`colBrandBg` pair rather than `Reverse` — Aegis's search highlighting was already
+the better of the two treatments, and only the selection overlay needed the change.
+
+**Closure condition, verified.** `TestSelectionOverlayUsesBackgroundNotReverse`
+(`internal/tui/selection_test.go`) renders a line with two differently-colored, non-reset chroma tokens
+under an active selection and asserts: no `\x1b[7m` (SGR-7) escape appears anywhere in the output; the
+derived `colSelectionBg` background escape does appear; and both original foreground color codes survive
+inside the selected span.
+
+**Tests.** `internal/tui/selection_test.go`. `go build ./...`, `go vet ./internal/tui/...` and
+`go test ./internal/tui/...` are green.
+
+### An exploration phase reads as a narrative, not a wall of cards, 2026-08-20 (P74.4)
+
+**Unblocked once P74.3 shipped**, and taken next per the Up next table — the largest remaining density
+win in the batch. A read-only exploration phase (`read_file`, `grep`, `glob` back to back) used to emit
+one addressable card per call, unconditionally; a fifteen-call run reads as fifteen near-identical
+lines with the actual decision buried under a log of syscalls.
+
+**The grouping rule stays deliberately narrow.** A call folds into a group only once its own
+`KindToolResult` has actually confirmed success — never at call time, and never for a still-pending
+sibling. It extends the group in progress, or starts a new one with whatever ungrouped successful
+read/search card sits immediately before it, only when that predecessor is still its literal positional
+neighbor in the transcript (`transcriptPane.ItemBefore`, which skips over cards already folded away so a
+group can keep growing past its own hidden members). Any error, any write/execute call, or any other
+transcript item landing in between breaks the chain — the failure mode this item has to avoid is hiding
+something that mattered, not maximizing how much collapses.
+
+**Parallel rounds, decided explicitly rather than assumed.** `engine.runTools` runs read/network calls
+concurrently, so a round's results can resolve out of call order. Grouping never counts a call before its
+own result arrives, which means a round that resolves out of order under-groups rather than
+over-claiming: three concurrent reads whose results land B, C, A merge B+C (C's positional predecessor,
+once resolved, is B) but leave A on its own, since A precedes the group's actual start card rather than
+following it. Fewer calls collapse than a perfectly-ordered round would allow, but nothing is ever shown
+as part of a group before its result is known.
+
+**Mechanics.** No new transcript item is created for a group — the first member's own card (already
+appended, pending, at `KindToolCall` time, same as before) is repurposed in place the moment a second
+member merges into it (`model.foldIntoReadGroup`, `internal/tui/stream.go`), and every later member's own
+card is folded out of view with a new `transcriptPane.HideItem` (`internal/tui/transcript.go`) rather than
+removed — items stay addressable (so `ItemBefore`'s adjacency walk still sees where they sat) but
+contribute nothing to height, byte accounting, or output. The collapsed card
+(`renderToolGroup`, `internal/tui/toolview.go`) shows one line by default — `"Read 2 files"`,
+`"Searched 1 pattern, read 1 file"` — and expands to one line per call, reusing each call's own
+identifying target (path, or pattern plus location), under the same `/tools full` convention P74.3
+already established for an over-cap single result. A call's target descriptor is captured at
+`KindToolCall` time and cached on its `toolCard` (`groupLabel`), because the engine's `KindToolResult`
+does not repeat a call's input — reading it from the result event would have silently produced empty
+labels.
+
+**Left alone, deliberately:** `loadHistory`'s replay of a resumed session's stored messages still renders
+one card per call, ungrouped — it doesn't go through `pendingTools`/`toolCard` at all, and grouping it is
+a separate, easier problem (no streaming, no concurrency) left for later rather than folded in here.
+
+**Tests.** `internal/tui/toolgroup_test.go` (new): two sequential successful reads collapse; an error
+sandwiched between two successes breaks the group and still renders its own error card; a write call in
+between breaks the group; grep+read_file summarize together distinguishing "patterns" from "files"; the
+parallel-round case above renders exactly what the decision above says it should at each step; `/tools
+full` expands a group to one line per call. `go build ./...` and `go test ./internal/tui/...` are green.
+
+### Pickers drop to one selection cue, and a filter hint, 2026-08-20 (P74.5, P74.6)
+
+**Taken together in one sitting, per P74.6's own filed direction** ("same function, same file, and the
+footer's styling depends on whether the frame is still there") — the head of the menu lane, and the
+most direct answer to the standing complaint that Aegis's menus feel like an application rather than a
+terminal list.
+
+**P74.5 — three "selected" signals collapse to one.** `configureDialogList`
+(`internal/tui/dialog.go`) set a brand title chip — `Background(colBrandBg)`, bold, padded — on a solid
+fill; `dialogFrame` wrapped every picker in a rounded primary border; `aegisListDelegate` marked the
+focused row with a left `NormalBorder` bar in `colPrimary` **plus** `colPrimary` foreground **plus**
+bold. Three cues for one fact, and the filled chip was the single most application-shaped element
+anywhere in the UI.
+
+- `configureDialogList`'s title is now plain bold `colPrimary` text with no background, and
+  `TitleBar`'s style draws a `colSeparator` hairline rule along its bottom edge (`Border(...,
+  false,false,true,false)`, width pinned to the list's own) instead of a blank padding row.
+- `aegisListDelegate`'s `SelectedTitle` swaps the `NormalBorder` for a one-off `lipgloss.Border{Left:
+  "❯"}` — the same left-border mechanism that used to draw the `│` bar now draws a pointer glyph
+  instead — and drops `Bold(true)`, leaving the `colPrimary` foreground/border colour as the only cue.
+  `SelectedDesc` is unchanged.
+- `listDialog.View` no longer calls `dialogFrame`: a picker renders as `Padding(0, 1)` over plain text,
+  no border and no `Background(colSurface)` fill, so the terminal's own background is the surface —
+  exactly what the comparison implementation this batch was read against does. `dialogFrame` itself is
+  untouched and still backs its other two callers, `approval.go` and `quitconfirm.go`, which are
+  genuinely modal rather than a transient list already composited over `renderOverlay`'s dimmed
+  transcript (P16.6).
+- The shared-chrome comment at the top of `dialog.go`, which stated the framed/chip styling was
+  deliberate and mirrored Crush, is rewritten rather than deleted: it now says why that decision
+  reversed for pickers (the frame competed with the dim P16.6 already provides for modality) and names
+  the two callers that still keep `dialogFrame`.
+
+**P74.6 — the only genuinely undiscoverable interaction gets one footer line.** `configureDialogList`
+already called `SetShowHelp(false)` and `SetShowStatusBar(false)`, and `newPalette`'s own comment named
+the intent — "Browse mode by default; typing any character activates filtering naturally" — but nothing
+on screen said so: no visible query, no hint that input was accepted, no match count.
+
+`listDialog.View` now appends one dim (`colTextMuted`) line under the list, built by a new `footer`
+method:
+
+- Unfiltered: `type to filter · ↑↓ move · enter select · esc close`.
+- Filtering or filtered: the `type to filter` clause drops out (it's no longer news once the user is
+  already doing it) and a right-aligned `n/m` — `len(VisibleItems())` over `len(Items())` — takes its
+  place, gapped to the list's own width; if the terminal is too narrow for both, the count is dropped
+  rather than truncating either string mid-word.
+
+**Verified by hand**, not just by test: a throwaway visual harness rendered `newPalette` in browse mode
+(hairline rule, `❯ /help`, footer hint, no border) and with `SetFilterState(list.FilterApplied)` after
+`SetFilterText("hel")` (fuzzy-matched rows, footer showing `24/50` right-aligned) before being deleted —
+the initial version of the footer used the full unfiltered hint even while filtering, which measured out
+to a negative gap at the palette's default width and silently dropped the count; the fix was to shorten
+the hint once filtering starts rather than widen the box.
+
+**Tests.** No existing test asserted the removed border/chip/frame styling directly, so
+`go test ./internal/tui/...` (including `TestListDialogSelectAndCancel` and
+`TestRenderOverlayCompositesOverChat`, which check dialog behaviour and title-text presence, not pixel
+styling) passes unchanged. `go build ./...` and `go vet ./...` are clean.
+
+### The real terminal cursor lands on the focused row, 2026-08-20 (P74.7)
+
+**Filed and shipped the same day, the last row of the menu lane** once P74.5/P74.6 closed the other
+two-thirds of it. `View()` (`internal/tui/view.go`) set `AltScreen`, `MouseMode`, `WindowTitle` and
+`ReportFocus` on every `tea.View`, but never `Cursor` — while a picker or the approval dialog was open,
+the hardware cursor stayed wherever the composer had last left it, so keyboard selection read as
+watching a redraw rather than moving through a list. Three things follow from declaring a position
+instead: a screen reader follows it, a terminal emulator that highlights the cursor line agrees with
+the app about where "here" is, and IME composition lands in the right place.
+
+**`model.render` now returns `(string, *tea.Cursor)`.** The shape change is the only non-mechanical
+part, exactly as the item predicted. Two new call sites compute the cursor's *local* position — where
+it sits inside the already-rendered overlay string, before that string is centered on screen:
+
+- `listDialog.cursorPos` (`internal/tui/dialog.go`) and the new `approvalCursorPos`
+  (`internal/tui/approval.go`) both call a shared `findGlyphPos(content, glyph)`, which strips ANSI per
+  line (`ansi.Strip`) and returns the rune column and line index of the first match — column and row are
+  measured in visible cells, not bytes, so styling never throws off the position. `listDialog` searches
+  for `❯`, the same pointer glyph `aegisListDelegate` already draws on the selected row (P74.5); a new
+  `listPointer` constant keeps the two in sync instead of duplicating the literal. The approval dialog
+  searches for `▸`, its own selected-option marker, or — while `feedbackMode` is active — for `▎`, the
+  static caret already rendered at the end of the typed deny-feedback text.
+- `overlayOrigin(fg, width, height)` (`internal/tui/dialog.go`) factors the `(x, y)` centering math back
+  out of `renderOverlay`, which now calls it too instead of duplicating the formula. `render` adds a
+  local cursor position to this origin to get full-frame coordinates, then hands `tea.NewCursor(x, y)`
+  to `View()`, which sets `v.Cursor`.
+
+**Every other overlay branch returns a nil cursor** — help, quit-confirm, the wizard, the security
+config, the transient panel, and the completion popup all have no notion of a focused row, so they were
+left alone rather than given a position that would mean nothing.
+
+**Tests.** `internal/tui/dialog_test.go`: `TestListDialogCursorPosMovesWithSelection` (cursor row moves
+when the selection does) and `TestRenderReturnsDialogCursor` (nil with nothing open, non-nil and
+non-negative once a picker opens). `internal/tui/approval_test.go`:
+`TestApprovalCursorPosTracksSelectionAndFeedbackMode` (cursor tracks the selected option, then moves to
+the feedback caret once `f` is pressed, and `render()` translates it into frame coordinates). Existing
+call sites in the test suite that used to take `m.render()`'s single string return now go through a new
+`m.renderContent()` helper (`internal/tui/view.go`), which discards the cursor — `render()` itself keeps
+the two-value shape `View()` needs. `go build ./...`, `go vet ./internal/tui/...` and
+`go test ./internal/tui/...` are green.
 
 ### A claim owns residency, not just windows, 2026-08-19 (P72.3)
 

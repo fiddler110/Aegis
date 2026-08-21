@@ -2,6 +2,21 @@ package tui
 
 import "testing"
 
+func TestAgentColorStableAndDistinct(t *testing.T) {
+	ids := []string{"agent-alpha", "agent-beta", "agent-gamma"}
+	for _, id := range ids {
+		first := agentColor(id)
+		for i := 0; i < 5; i++ {
+			if got := agentColor(id); got != first {
+				t.Fatalf("agentColor(%q) not stable across calls: %v vs %v", id, got, first)
+			}
+		}
+	}
+	if agentColor(ids[0]) == agentColor(ids[1]) {
+		t.Errorf("expected distinct agent ids to usually get distinct colors, %q and %q collided", ids[0], ids[1])
+	}
+}
+
 func TestIsAutoTheme(t *testing.T) {
 	auto := []string{"", "auto", "AUTO", "  Auto  "}
 	explicit := []string{"dark", "light", "dracula", "gruvbox"}

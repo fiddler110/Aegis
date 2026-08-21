@@ -108,7 +108,7 @@ func TestTranscriptSearchOverlayFlow(t *testing.T) {
 	}
 
 	// The search bar and (highlighted) match text are on screen.
-	view := ansi.Strip(m.render())
+	view := ansi.Strip(m.renderContent())
 	if !strings.Contains(view, "SEARCH") {
 		t.Fatalf("search bar not visible in view:\n%s", view)
 	}

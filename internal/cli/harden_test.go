@@ -27,7 +27,7 @@ func TestHardenAppliesUnsetCaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("harden --yes: %v", err)
 	}
-	if !strings.Contains(out, `"local" -> "auto"`) || !strings.Contains(out, "false -> true") {
+	if !strings.Contains(out, `"os" -> "auto"`) || !strings.Contains(out, "false -> true") {
 		t.Errorf("expected sandbox/security changes reported, got:\n%s", out)
 	}
 

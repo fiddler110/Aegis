@@ -37,6 +37,11 @@ type transcriptItem struct {
 	// fixed cell box and must not be reflowed at an arbitrary pane width.
 	noWrap bool
 
+	// hidden marks an item HideItem folded into a preceding group card
+	// (P74.4): rendered() and height() treat it as empty regardless of raw,
+	// while it stays addressable in items for ItemBefore's adjacency walk.
+	hidden bool
+
 	cacheW      int
 	cacheOut    string
 	cacheHeight int
@@ -51,6 +56,9 @@ func newRawItem(raw string) *transcriptItem { return &transcriptItem{raw: raw, n
 // width hasn't changed since the last call. noWrap items are returned as-is
 // (still cached, since they need no per-width recomputation).
 func (it *transcriptItem) rendered(w int) string {
+	if it.hidden {
+		return ""
+	}
 	if it.noWrap {
 		if !it.cached {
 			it.cacheOut = it.raw
@@ -72,6 +80,9 @@ func (it *transcriptItem) rendered(w int) string {
 // "\n" in its wrapped output), used for scroll bookkeeping without needing to
 // split the string into a line slice.
 func (it *transcriptItem) height(w int) int {
+	if it.hidden {
+		return 0
+	}
 	it.rendered(w)
 	return it.cacheHeight
 }
@@ -218,6 +229,48 @@ func (p *transcriptPane) SetItemRaw(it *transcriptItem, raw string) {
 	it.invalidate()
 	p.invalidateItemsHeight()
 	p.trim()
+}
+
+// HideItem folds it out of the rendered transcript in place (P74.4): used
+// when a resolved tool call's own card merges into a preceding collapsed
+// group card instead of staying visible on its own. it keeps its slot in
+// items (so ItemBefore's adjacency check still sees where it sat) but
+// contributes nothing to height, byte accounting, or output — a no-op if
+// already hidden.
+func (p *transcriptPane) HideItem(it *transcriptItem) {
+	if it.hidden {
+		return
+	}
+	p.rawBytes -= len(it.raw)
+	it.raw = ""
+	it.hidden = true
+	it.invalidate()
+	p.invalidateItemsHeight()
+}
+
+// ItemBefore returns the visible item immediately preceding it in the
+// transcript, skipping any items HideItem folded away, or nil if it is
+// first (or no longer present, e.g. evicted by trim). Used by the P74.4
+// read/search grouping decision to test whether two tool cards are
+// positionally adjacent: a chain of already-hidden group members doesn't
+// break adjacency, so a group keeps growing past its own folded-in cards.
+func (p *transcriptPane) ItemBefore(it *transcriptItem) *transcriptItem {
+	idx := -1
+	for i, x := range p.items {
+		if x == it {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return nil
+	}
+	for i := idx - 1; i >= 0; i-- {
+		if !p.items[i].hidden {
+			return p.items[i]
+		}
+	}
+	return nil
 }
 
 // trim drops the oldest items until the pane is back under budget. The first

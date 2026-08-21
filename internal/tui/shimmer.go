@@ -2,7 +2,9 @@ package tui
 
 import (
 	"image/color"
+	"math"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 )
@@ -43,4 +45,30 @@ func shimmerText(s string, step int, base, hi color.Color) string {
 		b.WriteString(lipgloss.NewStyle().Foreground(ramp[idx]).Bold(true).Render(string(r)))
 	}
 	return b.String()
+}
+
+// stallRampColor (P74.11) is the shimmer's highlight color for a wait of the
+// given length against bound (Config.MaxTurnStall, the same value the engine
+// aborts a stalled turn against): colAccent at zero elapsed, easing toward
+// colWarning as elapsed grows. Between "working" and a hard 900s abort the
+// old shimmer looked identical at second 2 and second 400; this makes the
+// wait itself legible instead of adding a second, separate indicator.
+//
+// The ramp is deliberately front-loaded — sqrt(t) reaches half-warning at a
+// quarter of the way in — and saturates at 70% of bound rather than 100%, so
+// a run reads as visibly "getting stuck" well before it actually aborts,
+// mirroring the comparison client's continuous red-creep. bound <= 0 (the
+// stall bound disabled) or elapsed <= 0 leaves the color at colAccent.
+func stallRampColor(elapsed, bound time.Duration) color.Color {
+	if bound <= 0 || elapsed <= 0 {
+		return colAccent
+	}
+	const saturateAt = 0.7 // fraction of bound where the ramp hits full colWarning
+	t := float64(elapsed) / (float64(bound) * saturateAt)
+	if t > 1 {
+		t = 1
+	}
+	t = math.Sqrt(t)
+	ramp := lipgloss.Blend1D(101, colAccent, colWarning)
+	return ramp[int(t*100)]
 }

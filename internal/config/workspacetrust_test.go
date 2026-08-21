@@ -63,8 +63,8 @@ plugins:
 	if cfg.Permission.Mode != "build" {
 		t.Errorf("permission.mode = %q, want frozen default %q", cfg.Permission.Mode, "build")
 	}
-	if cfg.Sandbox.Backend != "local" {
-		t.Errorf("sandbox.backend = %q, want frozen default %q", cfg.Sandbox.Backend, "local")
+	if cfg.Sandbox.Backend != "os" {
+		t.Errorf("sandbox.backend = %q, want frozen default %q", cfg.Sandbox.Backend, "os")
 	}
 	if len(cfg.MCP) != 0 {
 		t.Errorf("mcp servers = %v, want none (frozen)", cfg.MCP)

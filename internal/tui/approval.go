@@ -334,6 +334,25 @@ func (m model) renderApprovalDialog() string {
 	return dialogFrame(b.String())
 }
 
+// apprPointer and apprCaret are the glyphs approvalCursorPos looks for to
+// place the real terminal cursor (P74.7): the selected option's arrow in the
+// normal view, or the typed-feedback caret in feedbackMode.
+const (
+	apprPointer = "▸"
+	apprCaret   = "▎"
+)
+
+// approvalCursorPos locates the position within content (the already-rendered
+// dialog, as returned by renderApprovalDialog) that the real terminal cursor
+// belongs at — the selected option's arrow, or the end of the typed feedback
+// text while feedbackMode is active.
+func approvalCursorPos(content string, feedbackMode bool) (x, y int, ok bool) {
+	if feedbackMode {
+		return findGlyphPos(content, apprCaret)
+	}
+	return findGlyphPos(content, apprPointer)
+}
+
 // ruleLabel renders the persistent rule an "allow always" choice would write.
 func ruleLabel(tool, pattern string) string {
 	return lipgloss.NewStyle().Foreground(colSuccessMore).Render(
