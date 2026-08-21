@@ -149,6 +149,9 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.
 		// separate decision with a security review attached, and folding it in
 		// here would make it by accident.
 		gate, engineHooks := s.buildGate("build", s.approver(), persona.Persona{})
+		// P65.4: no InitialStartedTools/OnToolStarted/OnToolFinished here — a
+		// debate role is a bounded sub-run of an already-durable parent turn,
+		// not itself a resumable session with a session ID to key a register on.
 		eng, err := engine.New(engine.Options{
 			Adapter:         s.modelAdapter(ctxWin),
 			Tools:           tools,

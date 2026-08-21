@@ -143,6 +143,35 @@ type toolCard struct {
 	// that reliably carries it; the engine's KindToolResult does not repeat
 	// a call's input. Empty for a non-groupable tool.
 	groupLabel string
+
+	// P75.1: per-block expand/collapse state, independent of every other
+	// block and of the session-wide /tools full|compact toggle (which only
+	// sets the starting value for a card whose result hasn't landed yet).
+	// full mirrors !toolCompact at the moment this card's KindToolResult
+	// resolved; result/resultIsErr/resultPath are stashed here because
+	// nothing else keeps them once the card is dropped from pendingTools —
+	// toggleFull needs them to re-render in place. hasResult is false until
+	// a result actually lands (an interrupted/stuck card has nothing to
+	// toggle).
+	full        bool
+	result      string
+	resultIsErr bool
+	resultPath  string
+	hasResult   bool
+}
+
+// blkItem implements toolBlock.
+func (c *toolCard) blkItem() *transcriptItem { return c.blk }
+
+// toggleFull implements toolBlock: flips this card's own expand/collapse
+// state and re-renders its finished result in place (P75.1). A no-op before
+// a result has landed.
+func (c *toolCard) toggleFull(m *model) {
+	if !c.hasResult {
+		return
+	}
+	c.full = !c.full
+	m.transcript.SetItemRaw(c.blk, renderToolCardDone(m.th, c.call, c.name, c.result, c.resultIsErr, m.transcript.Width(), m.toolMaxLinesFor(c.full), c.resultPath))
 }
 
 // toolGroup is the open collapsed card for a run of consecutive, successful
@@ -154,6 +183,32 @@ type toolCard struct {
 type toolGroup struct {
 	blk     *transcriptItem
 	entries []groupEntry
+
+	// full is this group's own P75.1 expand/collapse state, set from
+	// !toolCompact when the group is created (see model.foldIntoReadGroup)
+	// and flipped independently thereafter by toggleFull.
+	full bool
+}
+
+// blkItem implements toolBlock.
+func (g *toolGroup) blkItem() *transcriptItem { return g.blk }
+
+// toggleFull implements toolBlock (P75.1).
+func (g *toolGroup) toggleFull(m *model) {
+	g.full = !g.full
+	m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, g.full))
+}
+
+// toolBlock is one transcript item whose tool-result rendering can be
+// expanded or collapsed independently of every other block (P75.1) —
+// unlike the session-wide /tools full|compact toggle, which only sets the
+// default state a not-yet-resolved block starts from. Implemented by
+// *toolCard (a standalone result) and *toolGroup (a folded read/search
+// summary, which reuses its first member's transcript item — see
+// model.foldIntoReadGroup).
+type toolBlock interface {
+	blkItem() *transcriptItem
+	toggleFull(m *model)
 }
 
 type model struct {
@@ -383,6 +438,19 @@ type model struct {
 	activeReadGroup *toolGroup
 	soloReadCard    *transcriptItem
 	soloReadEntry   groupEntry
+
+	// toolBlocks (P75.1) is every resolved tool result/group in transcript
+	// order, each independently expandable — the registry the keyboard
+	// toggle (toggleLastToolBlock) addresses. A solo card that later
+	// upgrades into a two-member group (foldIntoReadGroup) replaces its own
+	// entry here in place (trackToolBlock) rather than adding a second one,
+	// since both share the same transcript item. A result with no matching
+	// pending card (session replay, or a producer that skips
+	// KindToolCallStart/KindToolCall) is appended to the transcript directly
+	// and never tracked here — out of scope for this first, keyboard-only
+	// slice; mouse click-to-expand's hit-testing pass is the natural place
+	// to widen this if replayed history needs it too.
+	toolBlocks []toolBlock
 
 	// Collapsible thinking blocks (TQ9): each flushed thinking block keeps
 	// both a one-line collapsed and a full expanded rendering; ctrl+o swaps
@@ -1937,6 +2005,34 @@ func (m *model) toggleThinking() {
 	}
 	m.thinkEntries = kept
 	m.refresh()
+}
+
+// toggleLastToolBlock flips the expand/collapse state of the most recently
+// resolved tool result or read/search group (P75.1) — the keyboard path's
+// notion of "the block currently addressed," independent of every other
+// block and of the session-wide /tools full|compact default new results
+// start from. A no-op when nothing has resolved yet.
+func (m *model) toggleLastToolBlock() {
+	if len(m.toolBlocks) == 0 {
+		return
+	}
+	m.toolBlocks[len(m.toolBlocks)-1].toggleFull(m)
+}
+
+// trackToolBlock registers b as a P75.1 keyboard-addressable tool block,
+// replacing any earlier entry for the same transcript item instead of
+// duplicating it — a solo card upgrading into a two-member group
+// (model.foldIntoReadGroup) reuses its own blk, and the group should take
+// over addressing it rather than sit behind a now-stale card entry.
+func (m *model) trackToolBlock(b toolBlock) {
+	blk := b.blkItem()
+	for i, existing := range m.toolBlocks {
+		if existing.blkItem() == blk {
+			m.toolBlocks[i] = b
+			return
+		}
+	}
+	m.toolBlocks = append(m.toolBlocks, b)
 }
 
 // mdRender renders markdown through glamour with trailing newlines normalized

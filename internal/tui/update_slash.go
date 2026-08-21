@@ -128,6 +128,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		m.changedFiles = m.changedFiles[:0]
 		m.teammates = nil
 		m.timelineEntries = m.timelineEntries[:0]
+		m.toolBlocks = nil // P75.1: old entries point at transcript items /clear just dropped
 		m.transcript.Append(buildWelcomeContent(m.cfg, m.workDir, m.th))
 		m.refresh()
 		return m, nil

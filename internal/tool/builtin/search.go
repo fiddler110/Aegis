@@ -87,9 +87,14 @@ func truncNotice(kind string, n int) string {
 //
 // The excludes are generated from skipDir rather than written out twice, so a
 // directory added to one backend's skip set cannot be forgotten in the other.
-func rgArgsCommon() []string {
+func rgArgsCommon() []string { return rgArgsForSkip(skipDirNames) }
+
+// rgArgsForGlob is rgArgsCommon minus the .aegis exclude — see skipDirForGlob.
+func rgArgsForGlob() []string { return rgArgsForSkip(globSkipDirNames) }
+
+func rgArgsForSkip(skip []string) []string {
 	args := []string{"--hidden", "--no-ignore-vcs"}
-	for _, d := range skipDirNames {
+	for _, d := range skip {
 		args = append(args, "-g", "!"+d+"/")
 	}
 	return args
@@ -143,6 +148,9 @@ func resolverPath(r *toolpath.Resolver, key string) string {
 
 func (t *globTool) Name() string                { return "glob" }
 func (t *globTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure read (P65.4) — see readTool.Replay.
+func (t *globTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *globTool) Description() string {
 	return "Find files in the workspace matching a glob pattern (e.g. **/*.go). Returns matching paths."
 }
@@ -176,7 +184,7 @@ func (t *globTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 			return nil
 		}
 		if d.IsDir() {
-			if skipDir(d.Name()) && path != root {
+			if skipDirForGlob(d.Name()) && path != root {
 				return filepath.SkipDir
 			}
 			return nil
@@ -210,7 +218,7 @@ func capGlob(ctx context.Context, root string, matches []string) string {
 // An empty result is a legitimate conclusion (ok=true) — only a failure to run
 // is not.
 func (t *globTool) executeRg(ctx context.Context, rg, root, pattern string) (tool.Result, bool) {
-	args := append([]string{"--files"}, rgArgsCommon()...)
+	args := append([]string{"--files"}, rgArgsForGlob()...)
 	args = append(args, "-g", pattern, "--", ".")
 	out, err := runRg(ctx, rg, root, args...)
 	if err != nil && len(out) == 0 {
@@ -295,6 +303,9 @@ func (t *grepTool) rgPath() string { return resolverPath(t.cmds, toolpath.Ripgre
 
 func (t *grepTool) Name() string                { return "grep" }
 func (t *grepTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure read (P65.4) — see readTool.Replay.
+func (t *grepTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *grepTool) Description() string {
 	return "Search workspace file contents with a regular expression. Returns matching lines as path:line:text."
 }
@@ -480,6 +491,32 @@ func skipDir(name string) bool {
 		}
 	}
 	return false
+}
+
+// globSkipDirNames is skipDirNames minus .aegis — see skipDirForGlob.
+var globSkipDirNames = func() []string {
+	out := make([]string, 0, len(skipDirNames)-1)
+	for _, d := range skipDirNames {
+		if d != ".aegis" {
+			out = append(out, d)
+		}
+	}
+	return out
+}()
+
+// skipDirForGlob is grep's skipDir with .aegis let back in. glob returns
+// filenames only, never file content, so it carries none of the reason grep
+// stays out of .aegis (P64.1's spill/ is deliberately grep-unreachable, and
+// .env holds secrets) — but a skill drive scaffolds its own output under
+// .aegis/security/threat-model/<run>/, and a model that loses that exact path
+// mid-drive had no way back in: glob("**/<name>") reported "no files
+// matched" against a file that plainly existed, and the drive stalled
+// (P38.1 re-test, AiGateway, 2026-08-21). pathsuggest.go's findMatching
+// already draws this same line for the file-not-found hint, filed from an
+// earlier instance of the identical failure (P38.1 re-test, 2026-08-09);
+// glob just hadn't caught up to it.
+func skipDirForGlob(name string) bool {
+	return skipDir(name) && name != ".aegis"
 }
 
 func isBinary(data []byte) bool {

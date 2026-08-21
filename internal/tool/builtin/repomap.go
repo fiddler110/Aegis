@@ -28,6 +28,9 @@ type repomapTool struct{ root string }
 func (t *repomapTool) Name() string                { return "repomap" }
 func (t *repomapTool) Capability() tool.Capability { return tool.CapRead }
 
+// Replay: a pure read (P65.4) — see readTool.Replay.
+func (t *repomapTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
+
 func (t *repomapTool) Description() string {
 	return "Query the repository's structural map (files, top-level symbols, and import/dependency edges) on demand, without reading files or grepping. Actions: \"map\" (the whole map, optionally filtered by a path glob), \"skeleton\" (one file's symbols and imports), \"importers\" (which files import a given file — its blast radius)."
 }

@@ -433,6 +433,23 @@ type Options struct {
 	// gets — calibrates nothing, which is the correct behaviour for a cloud API
 	// that rejects an oversized prompt loudly.
 	SharedContextWindow bool
+	// InitialStartedTools seeds startedTools before the first Run (P65.4) — the
+	// durable half of the P65.1 in-memory record. A caller resuming a session
+	// after a process restart reads these tool_use IDs from a session-scoped
+	// operation register (internal/opregister) and passes them here, so
+	// repairOrphanedToolUses classifies them as "may have run" instead of
+	// falling back to "never started" for want of anything better. Nil/empty
+	// behaves exactly as before.
+	InitialStartedTools []string
+	// OnToolStarted/OnToolFinished mirror the engine's own in-memory
+	// markToolStarted bookkeeping but write through to durable storage when the
+	// caller wants cross-process recovery (P65.4). Called from the same seam as
+	// markToolStarted — OnToolStarted just before a tool's Execute, OnToolFinished
+	// immediately after it returns (success or error alike: any result means the
+	// outcome is no longer unknown). Both nil-checked; leaving them unset costs
+	// nothing and changes nothing about in-memory startedTools tracking.
+	OnToolStarted  func(toolUseID, toolName string, input json.RawMessage)
+	OnToolFinished func(toolUseID string)
 }
 
 // Engine runs the agent loop.
@@ -519,6 +536,12 @@ type Engine struct {
 	// problem (P65.4) and deliberately not this one.
 	startedToolsMu sync.Mutex
 	startedTools   map[string]struct{}
+
+	// onToolStarted/onToolFinished are the durable write-through half of P65.4
+	// (see Options.OnToolStarted/OnToolFinished). Nil in every caller that
+	// doesn't opt in, in which case they cost a nil check.
+	onToolStarted  func(toolUseID, toolName string, input json.RawMessage)
+	onToolFinished func(toolUseID string)
 }
 
 // ErrInterrupted is returned when the run is cancelled via context.
@@ -626,6 +649,13 @@ func New(opts Options) (*Engine, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	var startedTools map[string]struct{}
+	if len(opts.InitialStartedTools) > 0 {
+		startedTools = make(map[string]struct{}, len(opts.InitialStartedTools))
+		for _, id := range opts.InitialStartedTools {
+			startedTools[id] = struct{}{}
+		}
+	}
 	return &Engine{
 		adapter:             opts.Adapter,
 		tools:               opts.Tools,
@@ -662,6 +692,9 @@ func New(opts Options) (*Engine, error) {
 		toolShim:            opts.ToolCallShim,
 		sharedContextWindow: opts.SharedContextWindow,
 		roundResultCap:      opts.RoundResultCap,
+		startedTools:        startedTools,
+		onToolStarted:       opts.OnToolStarted,
+		onToolFinished:      opts.OnToolFinished,
 	}, nil
 }
 
@@ -712,12 +745,14 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	//
 	// P65.1: this runs *before* the per-run reset of startedTools below, and the
 	// order is load-bearing — the orphans being repaired belong to the run that
-	// was interrupted, so the only map that can classify them is that run's.
-	// A nil map (first run of this process, or a session restored from disk)
-	// classifies every orphan as never-started, which is what the pre-P65.1 code
-	// asserted unconditionally; recovering the fact across a process boundary
-	// needs a durable record and is P65.4's problem, not this one.
-	if repaired := repairOrphanedToolUses(conv.Messages, e.startedToolSet()); len(repaired) != len(conv.Messages) {
+	// was interrupted, so the only map that can classify them is that run's —
+	// unless Options.InitialStartedTools seeded it before New() (P65.4), which
+	// is exactly a durable record of a *previous process's* run surviving the
+	// boundary a nil map otherwise loses everything to. A nil/unseeded map
+	// (first run of this process with nothing to resume, or a caller that
+	// didn't opt in) classifies every orphan as never-started, the pre-P65.1
+	// behaviour and still the only honest answer when there is no record.
+	if repaired := repairOrphanedToolUses(conv.Messages, e.startedToolSet(), e.tools); len(repaired) != len(conv.Messages) {
 		e.logger.Info("repaired orphaned tool calls", "added", len(repaired)-len(conv.Messages))
 		conv.Messages = repaired
 		conv.invalidate()
@@ -2251,6 +2286,16 @@ func interruptedMaybeRanText(name string) string {
 		" Verify before assuming its effects did or did not land.", name)
 }
 
+// interruptedMaybeRanSafeText is interruptedMaybeRanText's counterpart for a
+// call tool.EffectiveReplay classifies ReplaySafe (P65.4): the call is known
+// to be harmless to reissue with the same input, so the model doesn't need to
+// go verify anything first — it can just ask again if it still needs the
+// result.
+func interruptedMaybeRanSafeText(name string) string {
+	return fmt.Sprintf("tool call interrupted while running; %s may or may not have completed."+
+		" This call is idempotent — it is safe to simply retry it with the same input if you still need the result.", name)
+}
+
 // repairOrphanedToolUses scans the conversation for tool_use blocks in assistant
 // messages that have no matching tool_result in a subsequent user message, and
 // injects synthetic error results. This prevents providers from rejecting a
@@ -2266,7 +2311,14 @@ func interruptedMaybeRanText(name string) string {
 // ladder then hands the next context whatever this function wrote. An unknown
 // ID is treated as not started, which is the pre-P65.1 behaviour and the only
 // honest answer when there is no record either way.
-func repairOrphanedToolUses(msgs []provider.Message, started map[string]struct{}) []provider.Message {
+//
+// tools, when non-nil, is consulted via tool.EffectiveReplay for every orphan
+// classified "may have run" (P65.4): a ReplaySafe tool gets a synthetic
+// result telling the model it's fine to simply reissue the call, instead of
+// the universally conservative "verify before assuming" wording every tool
+// got before this existed. Nil tools (every caller predating this, and every
+// existing test) keeps that universal wording exactly as it was.
+func repairOrphanedToolUses(msgs []provider.Message, started map[string]struct{}, tools *tool.Registry) []provider.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
@@ -2325,6 +2377,11 @@ func repairOrphanedToolUses(msgs []provider.Message, started map[string]struct{}
 				switch {
 				case ran:
 					text = interruptedMaybeRanText(tu.Name)
+					if tools != nil {
+						if t, ok := tools.Get(tu.Name); ok && tool.EffectiveReplay(t, tu.Input) == tool.ReplaySafe {
+							text = interruptedMaybeRanSafeText(tu.Name)
+						}
+					}
 				case !json.Valid(tu.Input):
 					// P74.14: a call that never reached dispatch and whose
 					// arguments never parsed at all was never going to run,
@@ -2429,7 +2486,17 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	// only orphaned if the whole round is discarded by a cancel, which is the
 	// case this is trying to describe accurately.
 	e.markToolStarted(tu.ID)
+	if e.onToolStarted != nil {
+		e.onToolStarted(tu.ID, tu.Name, tu.Input)
+	}
 	res, err := t.Execute(ctx, tu.Input)
+	// P65.4: the durable record's only job is telling a future process whether
+	// this call's effect began — that question is answered the instant Execute
+	// returns, success or error alike, so this clears before any of the
+	// result-shaping below (which can itself fail without changing the answer).
+	if e.onToolFinished != nil {
+		e.onToolFinished(tu.ID)
+	}
 	content, isErr := res.Content, res.IsError
 	if err != nil {
 		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)

@@ -1,6 +1,7 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-21, after **P74.17** shipped. This document
+**Last updated:** 2026-08-21, after **P75.1** was filed (user follow-up to PXX.1's styling pass, which
+also shipped the same day). This document
 tracks only **open** work and what's next. For
 shipped-feature history, batch origins, pass-by-pass narrative, refutation records and full design
 rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading with a
@@ -11,9 +12,13 @@ adding items.
 
 ## Status
 
-**35 open items: 27 build + 8 verification-only.** The empty-tier state two revisions back lasted one
-day, and the entire fresh P74 pass — twenty items — has now shipped, seventeen of them the same day
-they were filed and **P74.15**/**P74.16**/**P74.17** over the two days after:
+**35 open items: 27 build + 8 verification-only.** **P63.10** (two small TUI message-handling
+asymmetries) shipped 2026-08-21, taken opportunistically while `internal/tui` was open for **P75.1** —
+record in [releases.md](releases.md#p6310-shipped-2026-08-21). **P75.1** (per-block tool-result expand/collapse,
+keyboard then mouse) was filed 2026-08-21, the same day a smaller styling follow-up to **P74.3**
+shipped — see [Tier 3](#open-work--tier-3). Otherwise the entire fresh P74 pass — twenty items — has
+shipped, seventeen of them the same day they were filed and **P74.15**/**P74.16**/**P74.17** over the
+two days after:
 **P74.1** (a permission-rule gap proved against the live gate, not read off a diff), **P74.2**
 (the TUI chrome removal — sidebar to an overlay, auto-hidden scrollbar, title bar folded into the status
 line), **P74.18** (the selection overlay's SGR-7 fragmentation over chroma color, replaced with a
@@ -36,8 +41,8 @@ wording), **P74.15** (HTML comments stripped from injected memory files so a too
 doesn't pay prompt budget every turn), **P74.16** (a context-overflow error clips the batch and retries
 instead of failing the run), and **P74.17** (prose-tool-call salvage and a new argument-shape repair
 both resolve per model via `internal/profile`, instead of the blanket `LocalPromptProfile()` boolean
-P74.8/P74.9 had to gate on). Records in [releases.md](releases.md). Tier 1 and Tier 3 are both empty
-again; Tier 2 has one.
+P74.8/P74.9 had to gate on). Records in [releases.md](releases.md). Tier 1 is empty again; Tier 2 has
+one; Tier 3 picked up **P75.1** the same day.
 
 **The whole P74 batch is now shipped.** P74.17 was deliberately taken last — the table's own note said
 so — so it would carry P74.8's and P74.9's concrete cargo (prose-tool-call salvage's engagement
@@ -153,10 +158,11 @@ is the one thing from the shipped record that constrains future work here.
 - **Tier 3:** 1, P74 — **P74.17**. **P74.16** (the reactive overflow clip-and-retry path) shipped
   2026-08-21, the day it was filed. Empty for two days before P74.2 landed; **P74.4** shipped
   2026-08-20.
-- **Tier 4:** 25 — five from P71 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), six from
-  the P66 review (**P66.17**, **P66.18**, **P66.19**, **P66.20**, **P66.23**, **P66.26**), five from
-  P67 (**P67.10**–**P67.14**), and the nine pre-existing: **P65.4**, **P65.5**, **P64.4**, **P64.5**,
-  **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**, **P63.10**.
+- **Tier 4:** 25 — **P74.21** (filed 2026-08-21), five from P71 (**P71.6**, **P71.7**, **P71.11**,
+  **P71.12**, **P71.13**), six from the P66 review (**P66.17**, **P66.18**, **P66.19**, **P66.20**,
+  **P66.23**, **P66.26**), five from P67 (**P67.10**–**P67.14**), and the eight remaining pre-existing:
+  **P65.4**, **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**.
+  **P63.10** shipped 2026-08-21, taken opportunistically while `internal/tui` was open for **P75.1**.
 - **Verification:** 8. See [Verification Work](#verification-work) for the track's own status line.
 
 Tiers 1-4 are **build work** — every item there requires writing code that doesn't exist yet.
@@ -355,14 +361,13 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
-**Rewritten 2026-08-20, when the P74 batch filled the table the P71–P73 chain had emptied**, and
-trimmed row by row as the batch shipped through **P74.16**, then emptied of every P74 build row on
-**P74.17**, the batch's last one, 2026-08-21. Document order in the Tier sections below is the same
-order as this table, deliberately, so `scripts/roadmap-status.sh` and this ranking agree.
+**Rewritten 2026-08-21**: **P75.1 shipped in full** (keyboard slice, then the mouse click-to-expand
+remainder the same day — see [releases.md](releases.md)), clearing the row it had held at the top.
+That leaves only the parked live-tier row below. Document order in the Tier sections below is the
+same order as this table, deliberately, so `scripts/roadmap-status.sh` and this ranking agree.
 
 **The whole P74 batch — twenty items, P74.1 through P74.20 — has shipped**, P74.17 last, deliberately.
-See [releases.md](releases.md) for every record. The only row left is the one that was never a P74 row
-to begin with.
+See [releases.md](releases.md) for every record.
 
 | #   | Item                                                                                       | Tier / size  | Why now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | --- | ------------------------------------------------------------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -496,7 +501,10 @@ yields less.
 
 ## Open Work — Tier 3
 
-**Status: 0 open.** **P74.17** (per-model harness profiles) shipped 2026-08-21, closing the tier —
+**Status: 0 open.** **P75.1** (per-block tool-result expand/collapse, filed 2026-08-21 the same day
+the styling follow-up below shipped) shipped in full the same day, both slices — record in
+[releases.md](releases.md#p751-shipped-in-full-2026-08-21). **P74.17** (per-model harness profiles)
+shipped 2026-08-21 too, closing the tier out before this —
 record in [releases.md](releases.md#local-model-repair-behaviors-resolve-per-model-instead-of-per-boolean-2026-08-21-p7417).
 **P74.2** (the chrome removal — sidebar to an overlay,
 auto-hidden scrollbar, title bar folded into the status line) shipped the same day, unblocking P74.3,
@@ -542,13 +550,30 @@ exclude required scaffolding) did not ship and is filed separately as **P74.21**
 concrete behavior asking to be registered yet. Full record:
 [releases.md](releases.md#local-model-repair-behaviors-resolve-per-model-instead-of-per-boolean-2026-08-21-p7417).
 
+**A follow-up styling pass shipped 2026-08-21, same day.** P74.3's over-cap summary line
+(`renderToolResult`, `internal/tui/toolview.go`) rendered its whole "N lines (/tools full to expand)"
+text in the tool-tag color; the expand hint is now muted (`th.diffMeta`), matching the "N more lines"
+footers `renderLinesBlock`/`renderReadFileResult` already used. Those two footers also picked up the
+same `│` gutter bar the body above them uses, so the truncation hint reads as a continuation of the
+same indented, grey blockquote-style block instead of a bare indent. No behavior change, no new test
+needed beyond the existing `TestRenderToolResult_CollapsesToSummaryWhenOverCap`, which still passes
+unmodified.
+
+**What the styling pass deliberately didn't touch, and P75.1 then closed the same day: the toggle used
+to be session-wide.** `/tools full` used to flip every collapsed result in the transcript at once, with
+no per-block expand by mouse or keyboard — filed as **P75.1** and shipped in full 2026-08-21, both the
+keyboard slice and the mouse click-to-expand remainder. Full record:
+[releases.md](releases.md#p751-shipped-in-full-2026-08-21).
+
 ## Open Work — Tier 4
 
-**Status: 26 open** — 9 pre-existing (all blocked or explicitly parked, none with a fired trigger),
+**Status: 25 open** — 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
 6 from the P66 review batch, 5 from the P67 external-source reading, 5 from the P71 batch filed
 2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), and one new arrival: **P74.21**,
 filed 2026-08-21 the same day P74.17 shipped without it. **P70.3** shipped 2026-08-18 and has left this
-tier.
+tier. **P63.10** shipped 2026-08-21, taken opportunistically while `internal/tui` was open for
+**P75.1** — record in
+[releases.md](releases.md#p6310-shipped-2026-08-21).
 
 The P66 entries here are **deliberately grouped grab-bags**: each collects the Low-severity residue of
 one review domain. They are filed so no finding is lost, not because any of them should be scheduled.
@@ -966,24 +991,6 @@ pending a concrete multi-tenant need.
 **Re-verified 2026-08-06:** still one shared `lsp.NewManager` at daemon construction. No trigger fired.
 
 Priority: Tier 4 — no trigger, explicitly parked. Do not build speculatively.
-
-### P63.10 — Two small TUI message-handling asymmetries, seen while splitting `Update`
-
-Both pre-existing, found while reading every `Update` case during an unrelated refactor and
-deliberately left in place (fixing a bug inside a no-behavior-change refactor destroys the property
-that made the refactor safe).
-
-1. **The spinner tick chain dies while idle.** `updateSpinnerTick` drops the `tea.Cmd` returned by
-   `m.sp.Update(msg)` when `!m.streaming`; only the streaming branch re-queues. Looks intentional, but
-   the chain is _terminated_ rather than paused, so it depends on something else re-starting it at the
-   next stream — worth confirming that always happens.
-2. **A stale toast expiry can retire a newer toast.** `updateToastExpired` clears `m.activeToast`
-   unconditionally, without checking the expiry identifies the toast currently shown. Two toasts in
-   quick succession cut the second one short by the first one's timer. Fix needs a toast identity to
-   compare before clearing.
-
-Priority: Tier 4 — both cosmetic, neither reachable as a correctness/security problem. No trigger; fix
-opportunistically if either file is open for another reason.
 
 ### P65.4 — Resume is phase-granular, artifact-inferred, and only the drive has it
 

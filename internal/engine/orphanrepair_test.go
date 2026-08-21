@@ -158,7 +158,7 @@ func TestRepairOrphanUsesNotStartedWordingWithoutARecord(t *testing.T) {
 			provider.ToolUseBlock{ID: "tu_1", Name: "shell", Input: json.RawMessage(`{"command":"ls"}`)},
 		}},
 	}
-	got := repairOrphanedToolUses(msgs, nil)
+	got := repairOrphanedToolUses(msgs, nil, nil)
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3", len(got))
 	}
@@ -184,7 +184,7 @@ func TestRepairOrphanDistinguishesMalformedFromInterrupted(t *testing.T) {
 			provider.ToolUseBlock{ID: "tu_clean", Name: "shell", Input: json.RawMessage(`{"command":"ls"}`)},
 		}},
 	}
-	got := repairOrphanedToolUses(msgs, nil)
+	got := repairOrphanedToolUses(msgs, nil, nil)
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3", len(got))
 	}
@@ -259,5 +259,116 @@ func TestMarkToolStartedSkipsGateRefusals(t *testing.T) {
 	}
 	if _, ok := eng.startedToolSet()["tu_unknown"]; ok {
 		t.Error("an unknown-tool call was recorded as started")
+	}
+}
+
+// idempotentReadTool implements tool.ReplayClassifier and reports
+// tool.ReplaySafe unconditionally — a stand-in for the pure-read tools P65.4
+// classifies explicitly (read_file, grep, glob, ...).
+type idempotentReadTool struct{}
+
+func (idempotentReadTool) Name() string                 { return "idempotent_read" }
+func (idempotentReadTool) Description() string          { return "a tool safe to reissue" }
+func (idempotentReadTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (idempotentReadTool) Capability() tool.Capability  { return tool.CapRead }
+func (idempotentReadTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{Content: "read"}, nil
+}
+func (idempotentReadTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
+
+// TestRepairOrphanUsesSafeWordingForReplaySafeTool covers the second half of
+// P65.4: a "may have run" orphan whose tool declares tool.ReplaySafe gets
+// told it's fine to just reissue the call, instead of the universally
+// cautious "verify before assuming" wording every tool got before replay
+// classification existed.
+func TestRepairOrphanUsesSafeWordingForReplaySafeTool(t *testing.T) {
+	reg := tool.NewRegistry()
+	if err := reg.Register(idempotentReadTool{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&neverReachedTool{}); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		{Role: provider.RoleAssistant, Content: []provider.Block{
+			provider.ToolUseBlock{ID: "tu_safe", Name: "idempotent_read", Input: json.RawMessage(`{}`)},
+			provider.ToolUseBlock{ID: "tu_unsafe", Name: "second_write", Input: json.RawMessage(`{}`)},
+		}},
+	}
+	started := map[string]struct{}{"tu_safe": {}, "tu_unsafe": {}}
+	got := repairOrphanedToolUses(msgs, started, reg)
+
+	results := map[string]string{}
+	for _, b := range got[2].Content {
+		tr, ok := b.(provider.ToolResultBlock)
+		if !ok {
+			t.Fatalf("block is not a ToolResultBlock: %#v", b)
+		}
+		results[tr.ToolUseID] = tr.Content
+	}
+
+	if safe := results["tu_safe"]; !strings.Contains(safe, "safe to simply retry") {
+		t.Errorf("ReplaySafe orphan result = %q, want the safe-to-retry wording", safe)
+	}
+	if unsafe := results["tu_unsafe"]; !strings.Contains(unsafe, "Verify before assuming") {
+		t.Errorf("default-classified orphan result = %q, want the conservative wording unchanged", unsafe)
+	}
+	if strings.Contains(results["tu_unsafe"], "safe to simply retry") {
+		t.Errorf("a tool with no ReplayClassifier was treated as replay-safe: %q", results["tu_unsafe"])
+	}
+}
+
+// TestInitialStartedToolsSurvivesAcrossEngineInstances covers P65.4's actual
+// point: a brand-new Engine (no in-process history at all — the shape a fresh
+// daemon process resuming a session from disk has) still classifies an orphan
+// as "may have run" when Options.InitialStartedTools seeds it, rather than
+// falling back to "did not run" the way a truly historyless Engine must.
+// InitialStartedTools stands in for what a caller would read from
+// internal/opregister's durable Pending() before constructing the engine.
+func TestInitialStartedToolsSurvivesAcrossEngineInstances(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+		{Role: provider.RoleAssistant, Content: []provider.Block{
+			provider.ToolUseBlock{ID: "tu_from_dead_process", Name: "shell", Input: json.RawMessage(`{"command":"ls"}`)},
+		}},
+	}
+
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		{{Type: provider.EventTextDelta, Text: "recovered"}, {Type: provider.EventDone, Stop: provider.StopEndTurn}},
+	}}
+	eng, err := New(Options{
+		Adapter:             adapter,
+		Model:               "test",
+		InitialStartedTools: []string{"tu_from_dead_process"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{Messages: msgs}
+	if err := eng.Run(context.Background(), conv, nil); err != nil {
+		t.Fatalf("Run err = %v", err)
+	}
+
+	var found bool
+	for _, msg := range conv.Messages {
+		for _, b := range msg.Content {
+			tr, ok := b.(provider.ToolResultBlock)
+			if !ok || tr.ToolUseID != "tu_from_dead_process" {
+				continue
+			}
+			found = true
+			if !strings.Contains(tr.Content, "may have partially completed") {
+				t.Errorf("seeded orphan result = %q, want the uncertain wording", tr.Content)
+			}
+			if strings.Contains(tr.Content, "did not run") {
+				t.Errorf("seeded orphan wrongly reported as never started: %q", tr.Content)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no synthetic result injected for the seeded orphan")
 	}
 }

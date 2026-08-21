@@ -209,6 +209,44 @@ func TestGrepAnnouncesTruncation(t *testing.T) {
 	}
 }
 
+// TestGlobReachesAegisButGrepDoesNot pins the P38.1 fix: a skill drive
+// scaffolds its own output under .aegis/security/threat-model/<run>/, and a
+// model that loses that exact path had no way back — glob("**/<name>")
+// reported "no files matched" against a file that plainly existed, because
+// .aegis was in skipDirNames for both search tools. glob (filenames only,
+// never content) now excludes .aegis from neither backend's skip set; grep
+// (content search) still does, so .env and P64.1's spill/ stay unreachable
+// by content search exactly as before.
+func TestGlobReachesAegisButGrepDoesNot(t *testing.T) {
+	rg, walk := backendPair(t)
+	root := t.TempDir()
+	runDir := filepath.Join(root, ".aegis", "security", "threat-model", "stride-app-2026-08-21-1347")
+	if err := os.MkdirAll(runDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(runDir, "0.1-architecture.md")
+	if err := os.WriteFile(target, []byte("architecture findable_token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, r := range map[string]*toolpath.Resolver{"ripgrep": rg, "walk": walk} {
+		got := runGlob(t, root, r, "**/0.1-architecture.md")
+		if !strings.Contains(got, "0.1-architecture.md") {
+			t.Errorf("%s: glob did not find the file under .aegis:\n%s", name, got)
+		}
+	}
+	if got, want := runGlob(t, root, rg, "**/0.1-architecture.md"), runGlob(t, root, walk, "**/0.1-architecture.md"); got != want {
+		t.Errorf("glob backends disagree under .aegis:\n rg:   %q\n walk: %q", got, want)
+	}
+
+	for name, r := range map[string]*toolpath.Resolver{"ripgrep": rg, "walk": walk} {
+		got := runGrep(t, root, r, map[string]any{"pattern": "findable_token"})
+		if !strings.Contains(got, "no matches") {
+			t.Errorf("%s: grep now reaches .aegis content:\n%s", name, got)
+		}
+	}
+}
+
 // A resolver with no ripgrep configured must behave exactly like the walker —
 // this is what every other test in the package relies on, since tools built
 // without a resolver must not silently reach for the host's PATH.

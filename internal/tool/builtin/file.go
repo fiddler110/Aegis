@@ -105,6 +105,10 @@ type readTool struct {
 
 func (t *readTool) Name() string                { return "read_file" }
 func (t *readTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure read has no effect to double, so reissuing an interrupted
+// call after the fact is always safe (P65.4).
+func (t *readTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *readTool) Description() string {
 	return "Read a UTF-8 text file from the workspace. Returns the file contents with 1-based line numbers. An unbounded read is capped at the first 1500 lines to bound context; pass offset/limit to page through a longer file or read a specific range."
 }

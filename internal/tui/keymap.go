@@ -35,6 +35,7 @@ type keyMap struct {
 	PaneNarrower     key.Binding
 	PaneWider        key.Binding
 	TranscriptSearch key.Binding
+	ToolBlockToggle  key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -73,6 +74,11 @@ func defaultKeyMap() keyMap {
 		// the universal "find" chord; it is intercepted at the model level ahead
 		// of the composer (which would otherwise treat it as forward-char).
 		TranscriptSearch: key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("ctrl+f", "search transcript")),
+		// P75.1: the keyboard slice of per-block tool-result expand/collapse.
+		// ctrl+up is free (only ctrl+left/right are claimed, for pane
+		// resize) and textarea's own default keymap doesn't touch it, unlike
+		// ctrl+u/ctrl+k/ctrl+a which it binds to line-editing commands.
+		ToolBlockToggle: key.NewBinding(key.WithKeys("ctrl+up"), key.WithHelp("ctrl+↑", "expand/collapse last tool result")),
 	}
 }
 
@@ -105,6 +111,7 @@ func (km *keyMap) bindingsByName() map[string]*key.Binding {
 		"panenarrower":     &km.PaneNarrower,
 		"panewider":        &km.PaneWider,
 		"transcriptsearch": &km.TranscriptSearch,
+		"toolblocktoggle":  &km.ToolBlockToggle,
 	}
 }
 
@@ -201,5 +208,6 @@ func (km keyMap) helpEntries() []keyHelpEntry {
 		{km.PaneNarrower.Help().Key, km.PaneNarrower.Help().Desc},
 		{km.PaneWider.Help().Key, km.PaneWider.Help().Desc},
 		{km.TranscriptSearch.Help().Key, km.TranscriptSearch.Help().Desc},
+		{km.ToolBlockToggle.Help().Key, km.ToolBlockToggle.Help().Desc},
 	}
 }

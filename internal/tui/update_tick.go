@@ -43,9 +43,14 @@ func (m model) updateSpinnerTick(msg spinner.TickMsg) (model, []tea.Cmd) {
 	return m, cmds
 }
 
-// updateToastExpired retires the toast whose lifetime just elapsed.
+// updateToastExpired retires the toast whose lifetime just elapsed. It only
+// clears activeToast if the message names the toast currently shown (P63.10):
+// two toasts in quick succession must not let the first one's timer cut the
+// second one short.
 func (m model) updateToastExpired(msg toastExpiredMsg) model {
-	m.activeToast = nil
+	if m.activeToast == msg.t {
+		m.activeToast = nil
+	}
 	return m
 }
 

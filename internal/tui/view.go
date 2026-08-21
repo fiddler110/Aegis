@@ -563,10 +563,16 @@ func (m model) renderStats() string {
 
 // toolMaxLines returns the effective per-result line cap based on compact mode.
 func (m *model) toolMaxLines() int {
-	if m.toolCompact {
-		return toolMaxLinesCompact
+	return m.toolMaxLinesFor(!m.toolCompact)
+}
+
+// toolMaxLinesFor returns the per-result line cap for one P75.1 block's own
+// expand/collapse state, independent of the session-wide toolCompact default.
+func (m *model) toolMaxLinesFor(full bool) int {
+	if full {
+		return 9999
 	}
-	return 9999
+	return toolMaxLinesCompact
 }
 
 // --- todo strip ---

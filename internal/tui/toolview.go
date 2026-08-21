@@ -15,6 +15,20 @@ import (
 // toolMaxLinesCompact is the default line cap for tool results in compact mode.
 const toolMaxLinesCompact = 10
 
+// toggleIcon is the small disclosure glyph placed at the very start of a
+// toggleable tool-result/group header line — the only place a mouse click
+// toggles it (P75.1: model.toolBlockAt + selection.go's clickedToggleIcon
+// hit-test look for exactly this glyph at column 0/1, not anywhere on the
+// row). expanded reflects the state currently on screen, not the toggle's
+// destination: ▾ ("already open, click to collapse") or ▸ ("click to
+// expand").
+func toggleIcon(th theme, expanded bool) string {
+	if expanded {
+		return th.diffMeta.Render("▾ ")
+	}
+	return th.diffMeta.Render("▸ ")
+}
+
 // Rendering budgets for tool activity in the transcript. These keep large
 // outputs from flooding the scrollback while still showing meaningfully more
 // than a single truncated line.
@@ -121,7 +135,16 @@ func renderToolCardStartCall(th theme, name string) string {
 // independent transcript items (one appended at KindToolCall, one at
 // KindToolResult) becomes one item's two possible renderings.
 func renderToolCardDone(th theme, call, name, result string, isErr bool, width, maxBodyLines int, path string) string {
-	return call + "\n" + renderToolResult(th, name, result, isErr, width, maxBodyLines, path)
+	// P75.1: a trailing "\n" so this satisfies transcriptItem's documented
+	// line-boundary invariant on its own, instead of relying on the next
+	// item's own leading "\n" to supply it (as every other card here still
+	// does for inter-card spacing). Without it, a resolved card that happens
+	// to be the last real item — the common case while a tool round is still
+	// running — merges its last visual row with whatever segment follows
+	// (the streaming status tail has no leading "\n" of its own), which both
+	// misdraws that row and throws off ItemIndexAtY's row-to-item mapping,
+	// the click-to-expand hit-test this card is addressable through.
+	return call + "\n" + renderToolResult(th, name, result, isErr, width, maxBodyLines, path) + "\n"
 }
 
 // renderToolCardStuck renders the terminal state applied to a tool card that
@@ -129,7 +152,9 @@ func renderToolCardDone(th theme, call, name, result string, isErr bool, width, 
 // KindToolResult (turn abort, budget/loop error, or a client-initiated
 // cancel — see tui.go's resolveStuckToolCards, P21.2).
 func renderToolCardStuck(th theme, call string) string {
-	return call + "\n" + th.toolErr.Render("  ⚠ interrupted — run ended before a result arrived")
+	// P75.1: trailing "\n" for the same reason as renderToolCardDone — this
+	// is also a terminal state that can end up as the last real item.
+	return call + "\n" + th.toolErr.Render("  ⚠ interrupted — run ended before a result arrived") + "\n"
 }
 
 // renderToolResult renders a finished tool call as a continuation of the call
@@ -174,19 +199,27 @@ func renderToolResult(th theme, name, result string, isErr bool, width, maxBodyL
 	}
 
 	lineCount := strings.Count(result, "\n") + 1
+	// P75.1: only a result long enough for /tools full|compact to actually
+	// change its display earns the disclosure icon — one that already shows
+	// as a full block under either cap has nothing to toggle.
+	icon := ""
+	if lineCount > toolMaxLinesCompact {
+		icon = toggleIcon(th, lineCount <= maxLines)
+	}
 	if lineCount > maxLines {
-		summary := fmt.Sprintf("%d lines  (/tools full to expand)", lineCount)
-		return style.Render(header) + " " + style.Render(summary)
+		summary := fmt.Sprintf("%d lines", lineCount)
+		hint := th.diffMeta.Render("  (/tools full to expand)")
+		return icon + style.Render(header) + " " + style.Render(summary) + hint
 	}
 
 	if !isErr && name == "read_file" && path != "" {
 		if body, ok := renderReadFileResult(th, path, result, maxLines, width); ok {
-			return strings.TrimRight(style.Render(header)+"\n"+body, "\n")
+			return strings.TrimRight(icon+style.Render(header)+"\n"+body, "\n")
 		}
 	}
 
 	var b strings.Builder
-	b.WriteString(style.Render(header) + "\n")
+	b.WriteString(icon + style.Render(header) + "\n")
 	b.WriteString(renderBlock(th, result, maxLines, width))
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -232,7 +265,7 @@ func renderLinesBlock(th theme, lines []string, maxLines, width int, styleBody b
 		b.WriteString("  " + gutter + body + "\n")
 	}
 	if hidden > 0 {
-		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("▶ %d more lines  (/tools full to expand)", hidden)) + "\n")
+		b.WriteString("  " + gutter + th.diffMeta.Render(fmt.Sprintf("▶ %d more lines  (/tools full to expand)", hidden)) + "\n")
 	}
 	return b.String()
 }
@@ -283,7 +316,8 @@ func renderReadFileResult(th theme, path, result string, maxLines, width int) (s
 		b.WriteString("  " + th.toolGut.Render(fmt.Sprintf("%*s │ ", numW, nums[i])) + truncate(body, bodyW) + "\n")
 	}
 	if hidden > 0 {
-		b.WriteString("  " + th.diffMeta.Render(fmt.Sprintf("▶ %d more lines  (/tools full to expand)", hidden)) + "\n")
+		bar := th.toolGut.Render(fmt.Sprintf("%*s │ ", numW, ""))
+		b.WriteString("  " + bar + th.diffMeta.Render(fmt.Sprintf("▶ %d more lines  (/tools full to expand)", hidden)) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n"), true
 }
@@ -372,15 +406,22 @@ func renderToolGroup(th theme, entries []groupEntry, full bool) string {
 	}
 	summary := strings.Join(parts, ", ")
 	head := th.tool.Render("● " + strings.ToUpper(summary[:1]) + summary[1:])
+	// A group's two states always differ (summary line vs. one line per
+	// call), so — unlike renderToolResult, where a short result has nothing
+	// to toggle — the disclosure icon always shows here.
+	icon := toggleIcon(th, full)
+	// P75.1: both branches end in "\n" for the same reason as
+	// renderToolCardDone — a group card is exactly as likely to be the last
+	// real item while its own tool round is still running.
 	if !full {
-		return head + "  " + th.diffMeta.Render("(/tools full to expand)")
+		return icon + head + "  " + th.diffMeta.Render("(/tools full to expand)") + "\n"
 	}
 	var b strings.Builder
-	b.WriteString(head + "\n")
+	b.WriteString(icon + head + "\n")
 	for _, e := range entries {
 		b.WriteString("  " + th.toolGut.Render("⎿") + " " + th.diffMeta.Render(e.label) + "\n")
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return b.String()
 }
 
 // plural returns "s" unless n is exactly 1.

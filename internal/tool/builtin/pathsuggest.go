@@ -93,8 +93,9 @@ func findMatching(root string, match func(name string) bool, limit int) []string
 		if d.IsDir() {
 			// The search backends' skip set, minus `.aegis`: a skill drive's
 			// output suite lives under `.aegis/`, so skipping it here would
-			// hide precisely the file this hint exists to find.
-			if skipDir(d.Name()) && d.Name() != ".aegis" {
+			// hide precisely the file this hint exists to find. Same rule glob
+			// now applies for the same reason — see skipDirForGlob.
+			if skipDirForGlob(d.Name()) {
 				return fs.SkipDir
 			}
 			return nil

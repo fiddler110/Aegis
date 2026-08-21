@@ -8,7 +8,30 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-21 (nineteenth record, same day as P74.16) — **P74.17 shipped its provider-
+**Last updated:** 2026-08-21 (twenty-first record, same day as P75.1) — **P63.10 shipped**, both of
+its small TUI message-handling asymmetries, taken opportunistically while `internal/tui` was already
+open for P75.1. The spinner-tick half turned out to already be safe on measurement — every path to a
+new stream goes through `updateStreamStarted`, which unconditionally re-arms `m.sp.Tick`, so the
+tick chain never actually stays dead across a turn boundary as the roadmap entry worried it might; no
+code change there, just the measurement recorded so the question doesn't get re-asked. The toast half
+was real: `toastExpiredMsg` now carries the `*toast` its timer was armed for, and
+`updateToastExpired` only clears `m.activeToast` when it still names the currently shown toast, so a
+stale timer from an earlier toast can no longer retire a newer one shown within the same 5s TTL. Full
+record: [P63.10 shipped, 2026-08-21](#p6310-shipped-2026-08-21).
+
+**Last updated (previous):** 2026-08-21 (twentieth record, same day as P74.17) — **P75.1 shipped in full**, both
+the keyboard and mouse slices, closing the item filed as a same-day user follow-up to P74.3's styling
+pass. `toolCard`/`toolGroup` each carry their own expand state now instead of reading one session-wide
+`toolCompact` bool at render time; `Ctrl+↑` flips the last resolved block, and a left click on a small
+▸/▾ disclosure icon in front of the toggleable line flips whichever one was clicked — not the whole
+row — both through the same `model.toolBlocks` registry. The mouse slice needed no new input plumbing —
+`internal/tui` already had a `tea.MouseClickMsg` handler from the earlier text-selection work — and
+along the way fixed a real trailing-newline bug in the tool-card renderers that was corrupting row
+hit-testing (and occasionally the display itself) whenever a resolved card was the
+last transcript item with the streaming status tail right behind it. Full record: [P75.1 shipped in
+full, 2026-08-21](#p751-shipped-in-full-2026-08-21).
+
+**Last updated (previous):** 2026-08-21 (nineteenth record, same day as P74.16) — **P74.17 shipped its provider-
 decorator half** — the row that closed the Up next table. A new `internal/profile` package resolves a
 `Harness{ProseToolCallSalvage, ArgumentShapeRepair bool}` per `Request.Model` (P52.4: the model is a
 property of the request, not the adapter that carries it) instead of the blanket
@@ -396,6 +419,89 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### P63.10 shipped, 2026-08-21
+
+**Both small TUI message-handling asymmetries, taken opportunistically while `internal/tui` was
+already open for P75.1** — the roadmap's own stated condition for this Tier 4 item ("fix
+opportunistically if either file is open for another reason").
+
+1. **The spinner tick chain — measured, and it was already safe.** `updateSpinnerTick`
+   (`internal/tui/update_tick.go`) does drop the `tea.Cmd` from `m.sp.Update(msg)` when
+   `!m.streaming`, exactly as filed — the chain really does terminate rather than pause. But every
+   path that starts a new stream (`sendUserMessage`'s enter/alt+enter/queued-drain callers,
+   `/drive`, slash-message dispatch) routes through `streamStartedMsg`, and
+   `updateStreamStarted` (`internal/tui/update_stream.go`) unconditionally returns
+   `tea.Batch(waitForEvent(m.events), m.sp.Tick)` — re-arming the chain at the one point that
+   matters regardless of which caller got there. No code change; the roadmap entry's own hedge
+   ("worth confirming that always happens") is now confirmed rather than assumed, so a future
+   reader doesn't re-derive this.
+2. **A stale toast expiry could retire a newer toast — real, and fixed.** `toastExpiredMsg` was
+   `struct{}`, carrying no identity, so `updateToastExpired` cleared `m.activeToast`
+   unconditionally on any expiry. Two toasts shown within the 5s TTL (e.g. a clipboard-copy toast
+   immediately followed by a session-switch toast) let the first toast's timer cut the second one
+   short. `toastExpiredMsg` now carries the `*toast` pointer `newToastCmd` armed the timer for
+   (`internal/tui/toast.go`), and `updateToastExpired` only clears `m.activeToast` when it still
+   equals that pointer — a superseded toast's own later expiry is a no-op, and the currently shown
+   toast still clears normally on its own timer.
+
+**Tests:** `TestStaleToastExpiryDoesNotRetireNewerToast` (`internal/tui/toast_test.go`), new.
+`go build ./...`, `go vet ./internal/tui/...`, and `go test ./internal/tui/...` all clean.
+
+### P75.1 shipped in full, 2026-08-21
+
+**Filed and shipped the same day**, user follow-up to PXX.1's truncation-styling pass: `/tools full`/
+`/tools compact` (`internal/tui/update_slash.go`) had been a single session-wide `model.toolCompact`
+bool read once at render time — expanding one over-cap result to check something expanded every other
+collapsed result in the transcript too. `toolCard` and `toolGroup` (`internal/tui/tui.go`) now each
+carry their own `full bool`, seeded from `!toolCompact` when a result resolves (or a group is created
+by P74.4's read/search folding) and flipped independently thereafter; `/tools full`/`/tools compact`
+still only set the default a not-yet-resolved block starts from, matching the pre-existing
+(non-retroactive) behavior `TestReadGroup_ExpandsInFullMode` already pinned. A card also stashes the
+raw result it would otherwise lose to `pendingTools` cleanup (`result`/`resultIsErr`/`resultPath`/
+`hasResult`), needed to re-render on a toggle. `model.toolBlocks` is the ordered registry of resolved
+blocks, addressed two ways: `Ctrl+↑` (`ToolBlockToggle`, `internal/tui/keymap.go`) flips "the last
+resolved block" — the roadmap's own permitted simplification over a full focus/cursor concept, so this
+adds no new navigation UI — and a left click on a resolved card/group's own disclosure icon
+(`model.toolBlockAt`, `internal/tui/selection.go`) flips that specific one, reusing the same
+`toolBlock` interface and registry. A solo card that upgrades into a two-member P74.4 group hands its
+registry entry to the group (`trackToolBlock`) rather than leaving a stale entry the toggle can no
+longer reach.
+
+**The mouse slice needed no new input plumbing — `internal/tui` already had a `tea.MouseClickMsg`
+handler.** The roadmap entry's own text, written the day it was filed, assumed one would need building
+from scratch; by the time the mouse slice was picked up, `selection.go`'s click/drag text selection
+(shipped separately, ahead of this item) had already added `toPaneCoord`, `registerClick`, and
+`transcriptPane.ItemIndexAtY`-based row hit-testing for exactly this purpose. The first pass made the
+whole row clickable; a same-day follow-up narrowed it to a small ▸/▾ disclosure icon
+(`toggleIcon`, `internal/tui/toolview.go`) at the very front of the toggleable line, so a click
+anywhere else on the card still behaves like normal text — the icon only appears when there is
+something to toggle (a group, or a result whose line count actually crosses `toolMaxLinesCompact`;
+a short result shows the same either way and gets no icon). `handleMouseClick`'s single-click branch
+checks the clicked row/column against `clickedToggleIcon` before arming a drag-select: a match toggles
+the tracked `toolBlock` and consumes the click, anything else falls through to focus-and-arm as before.
+Double/triple-click word/line selection is untouched, including inside an expanded card's body.
+
+**Fixed a real, independently-discovered rendering bug along the way, not just a hit-testing one.**
+`renderToolCardDone`/`renderToolCardStuck`/`renderToolGroup` (`internal/tui/toolview.go`) had never
+terminated their output with the trailing `"\n"` `transcriptItem`'s own doc comment documents as a hard
+invariant ("every call site in this package already writes complete lines") — each card's last visual
+line survived only because the *next* item's own leading `"\n"` (added for inter-card spacing) happened
+to supply the missing terminator. That bridging silently broke whenever such a card was the last real
+transcript item with the streaming status tail (`refresh()`'s "processing tool results…"/thinking-phrase
+shimmer) immediately behind it — the tail has no leading `"\n"` of its own — merging the card's last row
+and the tail's first row into one line both on screen and in `transcriptPane.ItemIndexAtY`'s row
+accounting. All three renderers now end in their own `"\n"`, matching the invariant
+`transcriptPane.View()`'s own comment already claimed ("the element after the last counted newline is
+always the empty artifact... drop it") — this was the one case where that claim was false.
+
+**Tests:** `TestToolBlockToggle_ExpandsOneCardIndependentOfSessionDefault`,
+`TestToolBlockToggle_UpgradedGroupStaysAddressable`, `TestMouseClickTogglesToolBlock`,
+`TestMouseClickOffIconDoesNotToggle`, `TestMouseClickElsewhereStillArmsSelection`
+(`internal/tui/toolblock_test.go`). The full existing suite (`go test ./internal/tui/...`) stayed green
+through both the trailing-newline fix and the icon-scoping follow-up, confirming no other renderer
+depended on the old missing-newline bridging and no existing test assumed the whole-row click target.
+`go build ./...` and `go vet ./internal/tui/...` clean.
 
 ### Local-model repair behaviors resolve per model instead of per boolean, 2026-08-21 (P74.17)
 

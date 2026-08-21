@@ -39,6 +39,7 @@ import (
 	"github.com/fiddler110/aegis/internal/memory"
 	"github.com/fiddler110/aegis/internal/modelcaps"
 	"github.com/fiddler110/aegis/internal/notify"
+	"github.com/fiddler110/aegis/internal/opregister"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/plugins"
@@ -76,6 +77,12 @@ type Server struct {
 	cronSched   *cron.Scheduler
 	cronCancel  context.CancelFunc
 	checkpoints *checkpoint.Store
+	// opRegister is the durable P65.4 record of tool calls that started and
+	// haven't finished — the cross-process half of the engine's in-memory
+	// startedTools (P65.1). Consulted per turn in newEngine so a session
+	// resumed after a daemon restart classifies an orphaned tool_use as "may
+	// have run" instead of unconditionally "never started".
+	opRegister  *opregister.Store
 	fileTracker *filetracker.Tracker
 	toolCalling *toolcallprobe.Gate // P34.2: per-model tool-calling verdict cache
 	// modelCaps is the P53.5 on-disk capability cache shared by the adapter
@@ -626,6 +633,13 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 	store.SetCheckpointCleaner(checkpointStore)
 
+	// Operation register shares the session database connection too (P65.4).
+	opRegisterStore, err := opregister.NewStore(store.DB())
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		store.Close()
@@ -827,6 +841,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	s.tasks = taskMgr
 	s.cronSched = cronSched
 	s.checkpoints = checkpointStore
+	s.opRegister = opRegisterStore
 	s.fileTracker = ft
 	s.sandbox = sb
 	s.sandboxFallback = sandboxFallback
@@ -1252,6 +1267,10 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		// also means the teammate inherits the parent's preloaded persona
 		// tools and activated skill tools, instead of working from a different
 		// tool set for reasons nobody chose.
+		// P65.4: no InitialStartedTools/OnToolStarted/OnToolFinished here — a
+		// spawned sub-agent has no durable session of its own to key a register
+		// on (internal/swarm confirmed: a crashed teammate's goroutine leaves no
+		// record today regardless), and is explicitly out of scope for this pass.
 		eng, err := engine.New(engine.Options{
 			Adapter:   s.modelAdapter(spawnWin),
 			Tools:     s.subAgentToolRegistry(cfg.ParentSessionID),

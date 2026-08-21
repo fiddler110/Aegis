@@ -79,6 +79,47 @@ func EffectiveCapability(t Tool, input json.RawMessage) Capability {
 	return t.Capability()
 }
 
+// ReplayClass says whether re-issuing a tool call with the same input, after
+// its outcome went unrecorded (P65.4 — an interrupted call the runtime cannot
+// confirm completed), is safe.
+type ReplayClass int
+
+const (
+	// ReplayNever is the default for any tool that does not implement
+	// ReplayClassifier: an external, non-idempotent, or otherwise ambiguous
+	// effect (a commit, a PR, a spawned sub-agent, an arbitrary shell/script
+	// call) where re-running on top of an unknown prior outcome can double an
+	// effect that already landed. Fail-closed — the safe direction when a
+	// call's outcome truly is unknown.
+	ReplayNever ReplayClass = iota
+	// ReplaySafe marks a call whose repetition with identical input is known
+	// to be harmless — a pure read, or a write genuinely idempotent regardless
+	// of how many times it runs.
+	ReplaySafe
+)
+
+// ReplayClassifier is an optional Tool extension for a tool that can say
+// whether a specific call is safe to reissue after an interruption left its
+// outcome unrecorded (P65.4). Most tools don't need it: EffectiveReplay
+// defaults every non-implementer to ReplayNever, which was already the only
+// answer repairOrphanedToolUses could give before this existed. It exists as
+// a per-call interface, mirroring CapabilityOverrider, because a tool's
+// replay-safety can depend on the input the same way shell's capability
+// does — a read-only shell command is safe to reissue, a `git commit` behind
+// the same tool name is not.
+type ReplayClassifier interface {
+	Replay(input json.RawMessage) ReplayClass
+}
+
+// EffectiveReplay returns the replay class for a specific call: ReplayNever
+// unless t implements ReplayClassifier and reports otherwise for this input.
+func EffectiveReplay(t Tool, input json.RawMessage) ReplayClass {
+	if c, ok := t.(ReplayClassifier); ok {
+		return c.Replay(input)
+	}
+	return ReplayNever
+}
+
 // PollExempter is an optional Tool extension for a tool whose repeated calls
 // are legitimately expected while waiting on external state (P53.2). The
 // engine's loop detector flags a model that issues the same tool calls turn

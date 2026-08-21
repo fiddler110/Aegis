@@ -46,7 +46,7 @@ func (a *numCtxRecorder) request() provider.Request {
 // returning the model newEngine resolved for the turn.
 func runOneTurn(t *testing.T, s *Server, p persona.Persona) string {
 	t.Helper()
-	eng, model, err := s.newEngine("build", permission.AutoApprove{}, nil, p, false, nil, nil, "", t.TempDir(), "hello", nil, time.Time{})
+	eng, model, err := s.newEngine("test-session", "build", permission.AutoApprove{}, nil, p, false, nil, nil, "", t.TempDir(), "hello", nil, time.Time{})
 	if err != nil {
 		t.Fatalf("newEngine: %v", err)
 	}

@@ -52,6 +52,10 @@ type fetchTool struct {
 
 func (t *fetchTool) Name() string                { return "web_fetch" }
 func (t *fetchTool) Capability() tool.Capability { return tool.CapNetwork }
+
+// Replay: re-fetching a URL is a read of external state, not a mutation of
+// it — safe to reissue (P65.4).
+func (t *fetchTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *fetchTool) Description() string {
 	return "Fetch a URL over HTTP(S) and return its content as readable text (HTML is converted to text)."
 }
@@ -272,6 +276,10 @@ type searchTool struct {
 
 func (t *searchTool) Name() string                { return "web_search" }
 func (t *searchTool) Capability() tool.Capability { return tool.CapNetwork }
+
+// Replay: re-issuing a search is a read of external state, not a mutation of
+// it — safe to reissue (P65.4).
+func (t *searchTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *searchTool) Description() string {
 	return "Search the web and return a list of result titles, URLs, and snippets."
 }

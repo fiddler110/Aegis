@@ -15,6 +15,9 @@ type lsTool struct{ root string }
 
 func (t *lsTool) Name() string                { return "ls" }
 func (t *lsTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure read (P65.4) — see readTool.Replay.
+func (t *lsTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *lsTool) Description() string {
 	return "List workspace directory contents as an indented tree. Skips .git, node_modules, vendor, and other generated directories."
 }

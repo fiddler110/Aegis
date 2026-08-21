@@ -36,6 +36,9 @@ type projectKnowledgeTool struct {
 
 func (t *projectKnowledgeTool) Name() string                { return "project_knowledge" }
 func (t *projectKnowledgeTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure read (P65.4) — see readTool.Replay.
+func (t *projectKnowledgeTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *projectKnowledgeTool) Description() string {
 	return "Search the project knowledge base — an FTS5 index of README files, documentation, and code comments. Use before reading individual files to quickly locate relevant context."
 }

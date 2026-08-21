@@ -76,6 +76,9 @@ type definitionTool struct {
 
 func (t *definitionTool) Name() string                { return "definition" }
 func (t *definitionTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure LSP read (P65.4) — see readTool.Replay.
+func (t *definitionTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *definitionTool) Description() string {
 	return "Go to the definition of the symbol at a position (file, 1-based line and col) using the LSP server. Returns the defining location(s)."
 }
@@ -114,6 +117,9 @@ type hoverTool struct {
 
 func (t *hoverTool) Name() string                { return "hover" }
 func (t *hoverTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure LSP read (P65.4) — see readTool.Replay.
+func (t *hoverTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *hoverTool) Description() string {
 	return "Get hover documentation (type signature, doc comment) for the symbol at a position (file, 1-based line and col) using the LSP server."
 }
@@ -152,6 +158,9 @@ type documentSymbolsTool struct {
 
 func (t *documentSymbolsTool) Name() string                { return "document_symbols" }
 func (t *documentSymbolsTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure LSP read (P65.4) — see readTool.Replay.
+func (t *documentSymbolsTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *documentSymbolsTool) Description() string {
 	return "List the symbols (functions, types, methods, variables) declared in a file using the LSP server."
 }
@@ -188,6 +197,9 @@ type workspaceSymbolsTool struct {
 
 func (t *workspaceSymbolsTool) Name() string                { return "workspace_symbols" }
 func (t *workspaceSymbolsTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure LSP read (P65.4) — see readTool.Replay.
+func (t *workspaceSymbolsTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *workspaceSymbolsTool) Description() string {
 	return "Search the whole workspace for symbols by name (fuzzy) using the LSP server. Provide a query and a path to any file whose language server should handle it."
 }
@@ -225,6 +237,9 @@ type callHierarchyTool struct {
 
 func (t *callHierarchyTool) Name() string                { return "call_hierarchy" }
 func (t *callHierarchyTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure LSP read (P65.4) — see readTool.Replay.
+func (t *callHierarchyTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *callHierarchyTool) Description() string {
 	return "Find the callers of the function/method at a position (file, 1-based line and col) using the LSP call-hierarchy protocol."
 }
@@ -263,6 +278,9 @@ type diagnosticsTool struct {
 
 func (t *diagnosticsTool) Name() string                { return "diagnostics" }
 func (t *diagnosticsTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure LSP read (P65.4) — see readTool.Replay.
+func (t *diagnosticsTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *diagnosticsTool) Description() string {
 	return "Get LSP diagnostics (errors, warnings) for a file. " +
 		"Requires an LSP server configured for the file's language."
@@ -321,6 +339,9 @@ type referencesTool struct {
 
 func (t *referencesTool) Name() string                { return "references" }
 func (t *referencesTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure LSP read (P65.4) — see readTool.Replay.
+func (t *referencesTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *referencesTool) Description() string {
 	return "Find all references to a symbol at a given position in a file using the LSP server. " +
 		"Returns a list of locations (file:line:col)."

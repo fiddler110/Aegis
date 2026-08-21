@@ -113,6 +113,8 @@ A streaming run reports its phase: `◐ waiting for first token` until the model
 | `Esc` `Esc` | With nothing running and the input box empty: open the backtrack picker to return to an earlier turn |
 | `Ctrl+C` | Cancel the current run, or quit if nothing is running |
 | `Ctrl+O` | Expand/collapse a collapsed thinking block |
+| `Ctrl+↑` | Expand/collapse the most recently finished tool result or read/search group, independent of `/tools full`/`/tools compact` |
+| Click | Click the small ▸/▾ icon in front of a finished tool result or read/search group's own line to expand/collapse just that one, in place — clicking elsewhere on the card still selects text as usual |
 | `/` | Open slash-command completion popup |
 | `@` | Open workspace file/reference completion |
 | `Ctrl+K` | Open command palette |
@@ -266,8 +268,8 @@ Type `/` to open the command completion popup and browse available commands.
 | `/model <model-id>` | Switch this session's model mid-session (persisted as a per-session override; must belong to the currently configured provider) |
 | `/model default` | Clear the session model override, reverting to the persona/global default |
 | `/status` | Show daemon health, sandbox backend, and cost caps/spend (session + cross-session daily) |
-| `/tools compact` | Set tool-output display to 10 lines max |
-| `/tools full` | Show complete tool output (no line cap) |
+| `/tools compact` | Set tool-output display to 10 lines max (the default for new results) |
+| `/tools full` | Show complete tool output (no line cap) by default for new results |
 | `/sidebar` | Toggle the left sidebar on/off (also `Ctrl+B`) |
 | `/scrollback [on\|off]` | Toggle raw scrollback mode: plain, unclipped transcript text with the terminal's alt-screen and mouse capture released, so your terminal's own scrollback/selection/search work natively (see [Raw Scrollback Mode](#raw-scrollback-mode)) |
 | `/theme [name]` | Switch the color scheme live (no restart); built in: dark, light, catppuccin, dracula, gruvbox, tokyonight — or a custom `<name>.json` in `.aegis/themes/`/`~/.aegis/themes/`; no args shows the current theme |

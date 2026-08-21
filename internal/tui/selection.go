@@ -187,11 +187,52 @@ func selectedText(lines []string, r1, c1, r2, c2 int) string {
 	return strings.Join(out, "\n")
 }
 
+// toolBlockAt returns the toolBlock tracked for a transcript item, or nil if
+// it isn't a resolved tool card/group (pending, replayed, or not a tool
+// block at all) — the mouse-click half of P75.1's per-block toggle, sharing
+// the same model.toolBlocks registry the keyboard path
+// (toggleLastToolBlock) already addresses by "last resolved block".
+func (m *model) toolBlockAt(it *transcriptItem) toolBlock {
+	if it == nil {
+		return nil
+	}
+	for _, b := range m.toolBlocks {
+		if b.blkItem() == it {
+			return b
+		}
+	}
+	return nil
+}
+
+// toolToggleIconCols is the clickable width of a toggleIcon glyph
+// (internal/tui/toolview.go): the glyph cell itself plus its trailing space.
+const toolToggleIconCols = 2
+
+// clickedToggleIcon reports whether pane-relative col falls on line's own
+// disclosure icon — the narrow click target toggleIcon renders at the very
+// start of a toggleable tool-result/group header, rather than the whole row
+// being clickable. line is one row of VisibleLines() (still ANSI-styled).
+func clickedToggleIcon(line string, col int) bool {
+	if col < 0 || col >= toolToggleIconCols {
+		return false
+	}
+	plain := ansi.Strip(line)
+	if plain == "" {
+		return false
+	}
+	r := []rune(plain)[0]
+	return r == '▸' || r == '▾'
+}
+
 // handleMouseClick processes a mouse button press over the transcript pane:
-// a single click focuses the message under the cursor and arms a drag; a
-// double-click selects the word under the cursor and copies it immediately;
-// a triple-click does the same for the whole line. Clicks outside the pane
-// (the sidebar overlay, textarea, terminal pane, scrollbar) are ignored.
+// a single click on a resolved tool result/read-group's own disclosure icon
+// (toggleIcon, internal/tui/toolview.go — not anywhere else on the row)
+// toggles its expand/collapse state in place (P75.1) and consumes the click
+// rather than arming a drag-select; a single click anywhere else focuses the
+// message under the cursor and arms a drag; a double-click selects the word
+// under the cursor and copies it immediately; a triple-click does the same
+// for the whole line. Clicks outside the pane (the sidebar overlay,
+// textarea, terminal pane, scrollbar) are ignored.
 func (m *model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 	if msg.Button != tea.MouseLeft {
 		return nil
@@ -201,8 +242,21 @@ func (m *model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 		return nil
 	}
 	count := m.registerClick(col, row)
-	if idx, _ := m.transcript.ItemIndexAtY(row); idx >= 0 {
+	idx, _ := m.transcript.ItemIndexAtY(row)
+	if idx >= 0 {
 		m.focusedIdx = idx
+	}
+
+	if count == 1 {
+		lines := m.transcript.VisibleLines()
+		if row < len(lines) && clickedToggleIcon(lines[row], col) {
+			if blk := m.toolBlockAt(m.transcript.segmentAt(idx)); blk != nil {
+				blk.toggleFull(m)
+				m.sel.active, m.sel.have = false, false
+				m.refresh()
+				return nil
+			}
+		}
 	}
 
 	switch count {

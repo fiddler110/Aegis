@@ -72,6 +72,15 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		}
 	}
 
+	// P75.1: expand/collapse the most recently resolved tool result or
+	// read/search group in place, independent of the session-wide
+	// /tools full|compact toggle.
+	if key.Matches(msg, m.keys.ToolBlockToggle) {
+		m.toggleLastToolBlock()
+		m.refresh()
+		return m, nil, true
+	}
+
 	// P40.1: resize the sidebar when it has focus (terminal-focused resize
 	// is handled in handleTerminalKey). A no-op when the sidebar is closed
 	// or too narrow to show — the keys then fall through harmlessly.

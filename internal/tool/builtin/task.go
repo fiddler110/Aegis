@@ -90,6 +90,9 @@ type taskListTool struct{ mgr *task.Manager }
 
 func (t *taskListTool) Name() string                { return "task_list" }
 func (t *taskListTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure read (P65.4) — see readTool.Replay.
+func (t *taskListTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *taskListTool) Description() string {
 	return "List background jobs (newest first) with their id, kind, state, and title."
 }
@@ -117,6 +120,9 @@ type taskGetTool struct{ mgr *task.Manager }
 
 func (t *taskGetTool) Name() string                { return "task_get" }
 func (t *taskGetTool) Capability() tool.Capability { return tool.CapRead }
+
+// Replay: a pure read (P65.4) — see readTool.Replay.
+func (t *taskGetTool) Replay(json.RawMessage) tool.ReplayClass { return tool.ReplaySafe }
 func (t *taskGetTool) Description() string {
 	return "Get a background job's status and a tail of its output by task id. " +
 		"Use task_output for the full output."

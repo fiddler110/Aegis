@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/fiddler110/aegis/internal/cost"
@@ -230,7 +231,7 @@ func (s *Server) modelAdapter(ctxWin int) provider.Adapter {
 // priorMessages (the session's history *before* this turn's message is
 // appended) feed P9.4 task routing — see turnModel/routeModel in routing.go
 // — and are ignored entirely unless routing is opted into.
-func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir, userText string, priorMessages []provider.Message, lastActivity time.Time) (*engine.Engine, string, error) {
+func (s *Server) newEngine(sessionID, mode string, approver permission.Approver, steerCh <-chan string, p persona.Persona, guardEnabled bool, tracker *cost.Tracker, tools *tool.Registry, modelOverride, workdir, userText string, priorMessages []provider.Message, lastActivity time.Time) (*engine.Engine, string, error) {
 	if s.adapter == nil {
 		return nil, "", s.providerUnconfiguredErr()
 	}
@@ -273,6 +274,38 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 	if tracker == nil {
 		tracker = cost.NewTracker()
 	}
+
+	// P65.4: seed the engine's in-memory started-tool record from the durable
+	// register — the calls a *previous* process started and never finished,
+	// which is exactly what a daemon restart mid-turn leaves behind. A lookup
+	// error is treated as "nothing pending" (the same conservative default a
+	// nil map has always meant) rather than blocking the turn on a store
+	// hiccup. s.opRegister is nil only in tests built without full server
+	// wiring, in which case durable tracking is simply off, as before P65.4.
+	var initialStarted []string
+	var onToolStarted func(toolUseID, toolName string, input json.RawMessage)
+	var onToolFinished func(toolUseID string)
+	if s.opRegister != nil && sessionID != "" {
+		if pending, err := s.opRegister.Pending(context.Background(), sessionID); err != nil {
+			s.logger.Warn("opregister: pending lookup failed; resuming with no durable record", "session", sessionID, "err", err)
+		} else {
+			for _, pc := range pending {
+				initialStarted = append(initialStarted, pc.ToolUseID)
+			}
+		}
+		reg := s.opRegister
+		onToolStarted = func(toolUseID, toolName string, input json.RawMessage) {
+			if err := reg.MarkStarted(context.Background(), sessionID, toolUseID, toolName, input); err != nil {
+				s.logger.Warn("opregister: mark started failed", "session", sessionID, "tool_use_id", toolUseID, "err", err)
+			}
+		}
+		onToolFinished = func(toolUseID string) {
+			if err := reg.MarkFinished(context.Background(), sessionID, toolUseID); err != nil {
+				s.logger.Warn("opregister: mark finished failed", "session", sessionID, "tool_use_id", toolUseID, "err", err)
+			}
+		}
+	}
+
 	opts := engine.Options{
 		Adapter: s.modelAdapter(ctxWin),
 		Tools:   tools,
@@ -312,6 +345,9 @@ func (s *Server) newEngine(mode string, approver permission.Approver, steerCh <-
 		Logger:              s.logger,
 		Workdir:             workdir,
 		ExtraRoots:          s.workspaceRootsFor(workdir),
+		InitialStartedTools: initialStarted,
+		OnToolStarted:       onToolStarted,
+		OnToolFinished:      onToolFinished,
 	}
 	// P66.13/ARCH-06: the run bounds come from one shared reading of config, so
 	// a new one reaches the CLI paths too instead of being set here and

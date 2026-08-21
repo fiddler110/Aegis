@@ -183,7 +183,14 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 		if card != nil {
 			if !m.foldIntoReadGroup(card, ev) {
-				m.transcript.SetItemRaw(card.blk, renderToolCardDone(m.th, card.call, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path))
+				// P75.1: stash the result and this card's own expand state
+				// (starting from the session default) so a later keyboard
+				// toggle can re-render it without the raw result the card
+				// would otherwise lose the moment pendingTools drops it.
+				card.result, card.resultIsErr, card.resultPath, card.hasResult = ev.ToolResult, ev.ToolIsError, path, true
+				card.full = !m.toolCompact
+				m.transcript.SetItemRaw(card.blk, renderToolCardDone(m.th, card.call, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLinesFor(card.full), path))
+				m.trackToolBlock(card)
 			}
 		} else {
 			// No matching pending card (e.g. a result event replayed or
@@ -538,15 +545,20 @@ func (m *model) foldIntoReadGroup(card *toolCard, ev api.Event) bool {
 	if g := m.activeReadGroup; g != nil && prev == g.blk {
 		g.entries = append(g.entries, entry)
 		m.transcript.HideItem(card.blk)
-		m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, !m.toolCompact))
+		// P75.1: an already-open group keeps whatever expand state a
+		// keyboard toggle left it in — extending it must not reset that.
+		m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, g.full))
 		return true
 	}
 	if m.soloReadCard != nil && prev == m.soloReadCard {
-		g := &toolGroup{blk: m.soloReadCard, entries: []groupEntry{m.soloReadEntry, entry}}
+		g := &toolGroup{blk: m.soloReadCard, entries: []groupEntry{m.soloReadEntry, entry}, full: !m.toolCompact}
 		m.activeReadGroup = g
 		m.soloReadCard = nil
 		m.transcript.HideItem(card.blk)
-		m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, !m.toolCompact))
+		m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, g.full))
+		// P75.1: the group takes over addressing this transcript item from
+		// the solo card that used to occupy it alone.
+		m.trackToolBlock(g)
 		return true
 	}
 	m.soloReadCard = card.blk
