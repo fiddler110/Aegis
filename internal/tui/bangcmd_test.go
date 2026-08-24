@@ -10,18 +10,18 @@ import (
 
 // TestBangShellCommandPicksPlatformShell locks in that the `!<command>`
 // passthrough (execBangCmd, P30.3) never hardcodes a POSIX "sh" — it must
-// branch on runtime.GOOS the same way internal/sandbox.shellCommand and
-// internal/security.shellInvocation do, since a native Windows host has no
-// guarantee of "sh" on PATH.
+// branch on runtime.GOOS the same way sandbox.ShellCommand does (the shared
+// implementation execBangCmd now calls directly, P77.3), since a native
+// Windows host has no guarantee of "sh" on PATH.
 func TestBangShellCommandPicksPlatformShell(t *testing.T) {
 	const command = `echo hello && echo world`
-	shell, args := bangShellCommand(command)
+	shell, args := sandbox.ShellCommand(command)
 
 	if strings.TrimSpace(shell) == "" {
-		t.Fatal("bangShellCommand returned an empty shell binary")
+		t.Fatal("sandbox.ShellCommand returned an empty shell binary")
 	}
 	if len(args) == 0 {
-		t.Fatal("bangShellCommand returned no args")
+		t.Fatal("sandbox.ShellCommand returned no args")
 	}
 
 	if runtime.GOOS == "windows" {
@@ -54,7 +54,7 @@ func TestBangShellCommandPicksPlatformShell(t *testing.T) {
 	}
 
 	// The command must appear as exactly one, unmodified argv element,
-	// matching the property asserted for shellInvocation in
+	// matching the property asserted for sandbox.ShellCommand in
 	// internal/security/install_test.go.
 	last := args[len(args)-1]
 	if last != command {
@@ -69,8 +69,8 @@ func TestBangShellCommandNotHardcodedSh(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("this regression only manifests on Windows")
 	}
-	shell, _ := bangShellCommand("echo hi")
+	shell, _ := sandbox.ShellCommand("echo hi")
 	if shell == "sh" {
-		t.Fatalf("bangShellCommand returned hardcoded %q on Windows, want a Windows shell (pwsh/powershell)", shell)
+		t.Fatalf("sandbox.ShellCommand returned hardcoded %q on Windows, want a Windows shell (pwsh/powershell)", shell)
 	}
 }

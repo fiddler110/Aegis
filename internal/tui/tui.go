@@ -6,15 +6,12 @@ package tui
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +21,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
@@ -114,101 +110,88 @@ const (
 	maxToolHistory = 8
 )
 
-// toolEntry tracks one tool call for the sidebar activity panel.
-type toolEntry struct {
-	name   string
-	status string // "pending" | "ok" | "err"
+// streamPhase (P77.2) groups the current run's streaming-phase state: when
+// the run began, when the model's first output landed, how many output bytes
+// it has produced so far, and when the most recent post-tool-round model
+// re-invocation started. It feeds phaseStatus (the status-line phase word)
+// and stallElapsed (the P74.11 stall-ramp color) and is reset at the start of
+// every run (model.beginStream) and zeroed at turn end.
+type streamPhase struct {
+	// streamStart is when the current stream began; zero when idle.
+	streamStart time.Time
+
+	// firstTokenAt is when the current run's first model output landed; zero
+	// while the run is still in its waiting phase (P33.4). outBytes
+	// accumulates the run's model output bytes — text and reasoning both —
+	// across the whole run rather than reading liveText, which flushLiveText
+	// resets at every tool round and at turn end.
+	firstTokenAt time.Time
+	outBytes     int
+
+	// modelWaitAt is when the current tool round's last result landed and the
+	// model was re-invoked with the enlarged prompt — i.e. the start of a
+	// post-tool-round model wait (P33.19). Zero while a tool is still running
+	// (that is not a model wait) and once the model resumes producing output.
+	// It exists because firstTokenAt only marks the *first* wait of a run; on
+	// every round after the first the model re-evaluates a now-larger prompt
+	// (10-60s of prompt eval on a local model) with firstTokenAt long since
+	// set, so without this the status line reads "generating…" through dead
+	// air. Set only when pendingTools drains to empty, the one moment the TUI
+	// can tell "tool finished, model re-evaluating" from "tool still running".
+	modelWaitAt time.Time
 }
 
-// toolCard is the in-place-updating transcript item for one tool call
-// (P21.2): appended once at KindToolCall in a pending state, then the same
-// item (blk) is mutated via transcriptPane.SetItemRaw to its ok/err
-// rendering when the matching KindToolResult arrives — replacing the old
-// two-independent-static-blocks approach. call is the pre-rendered call
-// block (renderToolCall / renderEditDiff / renderShellCall / etc.),
-// computed once and reused for both the pending state (redrawn every
-// animation tick — see renderToolCardPending) and the final combined
-// render, so neither pays for re-running a diff computation.
-// P33.3 adds one earlier state: a card appended at KindToolCallStart, whose
-// call block is only the tool's name until the KindToolCall carrying the
-// finished arguments reconciles it in place (awaitingCall).
-type toolCard struct {
-	blk          *transcriptItem
-	name         string
-	call         string
-	awaitingCall bool
+// toolState (P77.2) groups the in-flight and resolved tool-call tracking
+// state: one addressable transcript-card handle per in-flight call, the
+// P74.4 read/search grouping machinery, and the P75.1 registry of
+// independently expandable resolved results.
+type toolState struct {
+	// pendingReadPaths maps a pending tool call's card key (see pendingTools)
+	// to the read_file path awaiting its KindToolResult, used to
+	// chroma-highlight the result body by file extension (P16.2). Keyed by
+	// card key (P21.2) rather than a same-name FIFO queue so concurrent
+	// read_file calls (engine.runTools runs read tools concurrently) can't
+	// cross-attribute paths if their results arrive out of call order.
+	pendingReadPaths map[string]string
 
-	// groupLabel is the P74.4 short target descriptor (groupEntryLabel),
-	// computed once at KindToolCall time from ev.ToolInput — the only event
-	// that reliably carries it; the engine's KindToolResult does not repeat
-	// a call's input. Empty for a non-groupable tool.
-	groupLabel string
+	// pendingTools holds one addressable transcript-card handle per
+	// in-flight tool call (P21.2), keyed by tool_use ID (api.Event.ToolID)
+	// so concurrent calls each own their own card. pendingToolOrder tracks
+	// insertion order for the fallback path (an event with no ToolID —
+	// tests, or a producer that predates it — falls back to the oldest
+	// pending card with a matching tool name, the pre-P21.2 FIFO behavior).
+	// pendingToolSeq synthesizes a unique key for a call whose event has no
+	// ToolID, so two such calls never collide on the same map slot.
+	pendingTools     map[string]*toolCard
+	pendingToolOrder []string
+	pendingToolSeq   int
 
-	// P75.1: per-block expand/collapse state, independent of every other
-	// block and of the session-wide /tools full|compact toggle (which only
-	// sets the starting value for a card whose result hasn't landed yet).
-	// full mirrors !toolCompact at the moment this card's KindToolResult
-	// resolved; result/resultIsErr/resultPath are stashed here because
-	// nothing else keeps them once the card is dropped from pendingTools —
-	// toggleFull needs them to re-render in place. hasResult is false until
-	// a result actually lands (an interrupted/stuck card has nothing to
-	// toggle).
-	full        bool
-	result      string
-	resultIsErr bool
-	resultPath  string
-	hasResult   bool
-}
+	// activeReadGroup is the open P74.4 collapsed card that the next
+	// resolving read_file/grep/glob success can extend, or nil when nothing
+	// is currently extendable. soloReadCard/soloReadEntry remember the most
+	// recently finalized *ungrouped* successful read/search card so the very
+	// next resolving groupable call can detect it is positionally adjacent
+	// (transcriptPane.ItemBefore) and promote both into a new two-member
+	// group. See model.foldIntoReadGroup (stream.go) for the merge rule and
+	// why plain pointer-identity adjacency is enough to keep a genuinely
+	// out-of-order parallel-round result from ever joining a group its
+	// result hasn't actually confirmed yet.
+	activeReadGroup *toolGroup
+	soloReadCard    *transcriptItem
+	soloReadEntry   groupEntry
 
-// blkItem implements toolBlock.
-func (c *toolCard) blkItem() *transcriptItem { return c.blk }
-
-// toggleFull implements toolBlock: flips this card's own expand/collapse
-// state and re-renders its finished result in place (P75.1). A no-op before
-// a result has landed.
-func (c *toolCard) toggleFull(m *model) {
-	if !c.hasResult {
-		return
-	}
-	c.full = !c.full
-	m.transcript.SetItemRaw(c.blk, renderToolCardDone(m.th, c.call, c.name, c.result, c.resultIsErr, m.transcript.Width(), m.toolMaxLinesFor(c.full), c.resultPath))
-}
-
-// toolGroup is the open collapsed card for a run of consecutive, successful
-// read_file/grep/glob calls (P74.4) — model.activeReadGroup's live state.
-// blk is an existing tool card's transcript item, repurposed as the group's
-// one visible slot the moment a second member merges into it; no extra
-// transcript item is ever created for the group itself (see
-// model.foldIntoReadGroup in stream.go).
-type toolGroup struct {
-	blk     *transcriptItem
-	entries []groupEntry
-
-	// full is this group's own P75.1 expand/collapse state, set from
-	// !toolCompact when the group is created (see model.foldIntoReadGroup)
-	// and flipped independently thereafter by toggleFull.
-	full bool
-}
-
-// blkItem implements toolBlock.
-func (g *toolGroup) blkItem() *transcriptItem { return g.blk }
-
-// toggleFull implements toolBlock (P75.1).
-func (g *toolGroup) toggleFull(m *model) {
-	g.full = !g.full
-	m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, g.full))
-}
-
-// toolBlock is one transcript item whose tool-result rendering can be
-// expanded or collapsed independently of every other block (P75.1) —
-// unlike the session-wide /tools full|compact toggle, which only sets the
-// default state a not-yet-resolved block starts from. Implemented by
-// *toolCard (a standalone result) and *toolGroup (a folded read/search
-// summary, which reuses its first member's transcript item — see
-// model.foldIntoReadGroup).
-type toolBlock interface {
-	blkItem() *transcriptItem
-	toggleFull(m *model)
+	// toolBlocks (P75.1) is every resolved tool result/group in transcript
+	// order, each independently expandable — the registry the keyboard
+	// toggle (toggleLastToolBlock) addresses. A solo card that later
+	// upgrades into a two-member group (foldIntoReadGroup) replaces its own
+	// entry here in place (trackToolBlock) rather than adding a second one,
+	// since both share the same transcript item. A result with no matching
+	// pending card (session replay, or a producer that skips
+	// KindToolCallStart/KindToolCall) is appended to the transcript directly
+	// and never tracked here — out of scope for this first, keyboard-only
+	// slice; mouse click-to-expand's hit-testing pass is the natural place
+	// to widen this if replayed history needs it too.
+	toolBlocks []toolBlock
 }
 
 type model struct {
@@ -277,31 +260,14 @@ type model struct {
 	connReachable bool  // provider reachable per Server.probeProviderReachability
 	connLatencyMS int64 // last measured latency in ms; 0 when unmeasured (cloud provider)
 
-	streamStart time.Time // when the current stream began; zero when idle
-	thinkStart  time.Time // when extended thinking began this turn; zero when idle
-	turnCount   int       // conversation turns sent; guards turn separator logic
-	animStep    int       // frame counter for the streaming "working" shimmer
-	humorMode   bool      // when true, D&D phrases replace plain "thinking…"
+	thinkStart time.Time // when extended thinking began this turn; zero when idle
+	turnCount  int       // conversation turns sent; guards turn separator logic
+	animStep   int       // frame counter for the streaming "working" shimmer
+	humorMode  bool      // when true, D&D phrases replace plain "thinking…"
 
-	// firstTokenAt is when the current run's first model output landed; zero
-	// while the run is still in its waiting phase (P33.4). outBytes accumulates
-	// the run's model output bytes — text and reasoning both — across the whole
-	// run rather than reading liveText, which flushLiveText resets at every tool
-	// round and at turn end.
-	firstTokenAt time.Time
-	outBytes     int
-
-	// modelWaitAt is when the current tool round's last result landed and the
-	// model was re-invoked with the enlarged prompt — i.e. the start of a
-	// post-tool-round model wait (P33.19). Zero while a tool is still running
-	// (that is not a model wait) and once the model resumes producing output.
-	// It exists because firstTokenAt only marks the *first* wait of a run; on
-	// every round after the first the model re-evaluates a now-larger prompt
-	// (10-60s of prompt eval on a local model) with firstTokenAt long since
-	// set, so without this the status line reads "generating…" through dead
-	// air. Set only when pendingTools drains to empty, the one moment the TUI
-	// can tell "tool finished, model re-evaluating" from "tool still running".
-	modelWaitAt time.Time
+	// phase (P77.2) groups the current run's streaming-phase state — see
+	// streamPhase's own doc comment.
+	phase streamPhase
 
 	// followBottom tracks whether the viewport should auto-scroll to the newest
 	// content. It is true while the user is parked at the bottom and false once
@@ -405,52 +371,9 @@ type model struct {
 	todoItems       []todoStripItem
 	pendingTodoText string // captured from todo_add call input, matched to result
 
-	// pendingReadPaths maps a pending tool call's card key (see pendingTools)
-	// to the read_file path awaiting its KindToolResult, used to
-	// chroma-highlight the result body by file extension (P16.2). Keyed by
-	// card key (P21.2) rather than a same-name FIFO queue so concurrent
-	// read_file calls (engine.runTools runs read tools concurrently) can't
-	// cross-attribute paths if their results arrive out of call order.
-	pendingReadPaths map[string]string
-
-	// pendingTools holds one addressable transcript-card handle per
-	// in-flight tool call (P21.2), keyed by tool_use ID (api.Event.ToolID)
-	// so concurrent calls each own their own card. pendingToolOrder tracks
-	// insertion order for the fallback path (an event with no ToolID —
-	// tests, or a producer that predates it — falls back to the oldest
-	// pending card with a matching tool name, the pre-P21.2 FIFO behavior).
-	// pendingToolSeq synthesizes a unique key for a call whose event has no
-	// ToolID, so two such calls never collide on the same map slot.
-	pendingTools     map[string]*toolCard
-	pendingToolOrder []string
-	pendingToolSeq   int
-
-	// activeReadGroup is the open P74.4 collapsed card that the next
-	// resolving read_file/grep/glob success can extend, or nil when nothing
-	// is currently extendable. soloReadCard/soloReadEntry remember the most
-	// recently finalized *ungrouped* successful read/search card so the very
-	// next resolving groupable call can detect it is positionally adjacent
-	// (transcriptPane.ItemBefore) and promote both into a new two-member
-	// group. See model.foldIntoReadGroup (stream.go) for the merge rule and
-	// why plain pointer-identity adjacency is enough to keep a genuinely
-	// out-of-order parallel-round result from ever joining a group its
-	// result hasn't actually confirmed yet.
-	activeReadGroup *toolGroup
-	soloReadCard    *transcriptItem
-	soloReadEntry   groupEntry
-
-	// toolBlocks (P75.1) is every resolved tool result/group in transcript
-	// order, each independently expandable — the registry the keyboard
-	// toggle (toggleLastToolBlock) addresses. A solo card that later
-	// upgrades into a two-member group (foldIntoReadGroup) replaces its own
-	// entry here in place (trackToolBlock) rather than adding a second one,
-	// since both share the same transcript item. A result with no matching
-	// pending card (session replay, or a producer that skips
-	// KindToolCallStart/KindToolCall) is appended to the transcript directly
-	// and never tracked here — out of scope for this first, keyboard-only
-	// slice; mouse click-to-expand's hit-testing pass is the natural place
-	// to widen this if replayed history needs it too.
-	toolBlocks []toolBlock
+	// toolState (P77.2) groups the in-flight/resolved tool-call tracking
+	// state — see toolState's own doc comment.
+	toolState toolState
 
 	// Collapsible thinking blocks (TQ9): each flushed thinking block keeps
 	// both a one-line collapsed and a full expanded rendering; ctrl+o swaps
@@ -558,33 +481,6 @@ type todoStripItem struct {
 	status string // "pending" | "in_progress" | "done"
 }
 
-// clipboardResultMsg carries the result of an async clipboard write.
-type clipboardResultMsg struct{ err error }
-
-// pasteImageResultMsg carries the result of reading an image off the OS
-// clipboard (P16.8). ok is false with a nil err when the clipboard simply
-// held no image.
-type pasteImageResultMsg struct {
-	path string
-	ok   bool
-	err  error
-}
-
-// pasteClipboardImageCmd returns a tea.Cmd that reads an image from the OS
-// clipboard into a temp file.
-func pasteClipboardImageCmd() tea.Cmd {
-	return func() tea.Msg {
-		path, ok, err := pasteClipboardImage()
-		return pasteImageResultMsg{path: path, ok: ok, err: err}
-	}
-}
-
-// ollamaWarmedMsg reports the outcome of an async pre-warm attempt (P33.10).
-// It carries no UI state — the warm-up is a latency optimization the user
-// never sees directly — so the Update handler ignores it; the type exists only
-// because a tea.Cmd must return a tea.Msg.
-type ollamaWarmedMsg struct{}
-
 // maybeWarmOllamaCmd returns a tea.Cmd that pre-warms the Ollama model when it
 // makes sense to (P33.10 lever 2), or nil when it doesn't. It is a no-op —
 // returns nil — unless the provider is Ollama (OllamaBaseURL set), a concrete
@@ -603,145 +499,6 @@ func (m *model) maybeWarmOllamaCmd() tea.Cmd {
 		ollamainfo.WarmIfUnloaded(ctx, base, model)
 		return ollamaWarmedMsg{}
 	}
-}
-
-type slashResultMsg SlashResult
-type editorDoneMsg struct {
-	content string
-	err     error
-}
-
-// --- messages ---
-
-type streamStartedMsg struct {
-	ch     <-chan api.Event
-	cancel context.CancelFunc
-}
-type eventMsg api.Event
-
-// batchEventMsg carries one or more streamed events drained together by
-// waitForEvent (P21.1). Collapsing a burst of token deltas into a single
-// Update — and therefore a single markdown re-render — keeps render cost
-// bounded by frame rate rather than token rate. closed is set when the event
-// channel closed during the same drain, so the batch and the stream-teardown
-// are delivered in one cycle instead of an extra round-trip.
-type batchEventMsg struct {
-	events []api.Event
-	closed bool
-}
-
-type streamClosedMsg struct{}
-type errMsg struct{ err error }
-
-// steerFailedMsg reports a failed steer POST (P33.15 #2). Unlike errMsg —
-// which represents an error that ends (or prevents the start of) the main
-// stream — a steer POST failing doesn't mean the run itself died: the SSE
-// stream this steer was meant to interrupt may well still be live. Routing
-// it through its own message type instead of errMsg lets the two be handled
-// differently: errMsg tears the whole run's UI state down, steerFailedMsg
-// only resolves the one steer attempt that failed.
-type steerFailedMsg struct {
-	text   string
-	origin steerOrigin
-	err    error
-}
-
-// steerOrigin tags a pendingSteers entry with who authored the steer text,
-// so the KindSteerUnconsumed requeue path (P33.15 #3) can tell a user-typed
-// steer — safe to requeue as the next user turn — from a system-authored one
-// (currently just approval.go's denial-feedback steer) that would be
-// misattributed to the user if sent the same way.
-type steerOrigin int
-
-const (
-	steerOriginUser steerOrigin = iota
-	steerOriginDenialFeedback
-)
-
-// pendingSteerEntry is one entry in model.pendingSteers.
-type pendingSteerEntry struct {
-	text   string
-	origin steerOrigin
-}
-
-// bangMsg carries the result of a ! shell command (P2.2).
-type bangMsg struct {
-	cmd    string
-	output string
-	code   int
-}
-
-// shellFailure captures a failed command run outside the model's automatic
-// view, for the P13.3.1 "diagnose" action (see model.lastFailure).
-type shellFailure struct {
-	source  string // "!" or "terminal", for the synthesized prompt
-	command string
-	output  string
-	code    int
-}
-
-// teammatesUpdateMsg is a silent subagent poll result (P2.5).
-type teammatesUpdateMsg struct{ items []api.Teammate }
-
-type teammatesMsg struct {
-	items []api.Teammate
-	err   error
-}
-type sessionsLoadedMsg struct {
-	items []api.SessionMeta
-	err   error
-}
-type sessionSwitchedMsg struct {
-	sess *session.Session
-	err  error
-}
-
-// backtrackTargetsMsg carries the P22.3 Esc-Esc picker's candidate list: one
-// entry per checkpoint on the current session, paired with that turn's
-// verbatim original user message (see fetchBacktrackTargets).
-type backtrackTargetsMsg struct {
-	items []backtrackItem
-	err   error
-}
-
-// forkedMsg reports the result of forking the current session (P22.3),
-// whether triggered by /fork or by picking an entry from the Esc-Esc
-// backtrack picker. prefill, when non-empty, is set on the new session's
-// input box so the user can edit the original message before resending —
-// only the backtrack-picker path populates it; /fork n leaves it empty and
-// just switches sessions.
-type forkedMsg struct {
-	sess    *session.Session
-	title   string
-	prefill string
-	err     error
-}
-
-// statusInfoMsg carries the daemon /status payload; fetched at startup (and
-// after runs while the value can still improve) for the effective context
-// window driving the usage bar (P23.1), and periodically (P28.7, see
-// statusTickMsg) for the connection/model-health indicator.
-type statusInfoMsg struct {
-	info api.StatusInfo
-	err  error
-}
-
-// statusRefreshInterval is how often the TUI re-polls GET /status for the
-// P28.7 connection/model-health indicator. Cheap enough to poll this often —
-// the daemon-side probe (probeProviderReachability) is a 2s-timeout local
-// call for Ollama, or a config-only check for a cloud provider — and frequent
-// enough that a dropped connection shows up quickly without user action.
-const statusRefreshInterval = 20 * time.Second
-
-// statusTickMsg fires statusRefreshInterval after the previous one to
-// re-fetch /status in the background (P28.7), independent of the
-// after-a-run refresh statusInfoMsg's handler already does for the context
-// window.
-type statusTickMsg struct{}
-
-// statusTickCmd schedules the next periodic /status refresh.
-func statusTickCmd() tea.Cmd {
-	return tea.Tick(statusRefreshInterval, func(time.Time) tea.Msg { return statusTickMsg{} })
 }
 
 func newModel(cfg Config) model {
@@ -871,49 +628,47 @@ func (m model) fetchStatusInfo() tea.Cmd {
 
 // --- commands ---
 
+// fetchCmd is the shared shape behind the package's simple single-call tea.Cmd
+// constructors (P77.4): open a context.WithTimeout, make one client call, wrap
+// the result in a message. Only the calls that are genuinely a single round
+// trip use this — fetchBacktrackTargets/forkAndSwitchCmd (a second dependent
+// call plus branching) and startStream/startDrive (context.WithCancel, not a
+// timeout, since the returned cancel keeps the stream alive) don't fit the
+// shape and stay literal.
+func fetchCmd[T any](timeout time.Duration, fn func(context.Context) (T, error), wrap func(T, error) tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		v, err := fn(ctx)
+		return wrap(v, err)
+	}
+}
+
 func (m model) fetchTeammates() tea.Cmd {
 	cl := m.cfg.Client
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		items, err := cl.Teammates(ctx)
+	return fetchCmd(5*time.Second, cl.Teammates, func(items []api.Teammate, err error) tea.Msg {
 		return teammatesMsg{items: items, err: err}
-	}
+	})
 }
 
 // fetchTeammatesQuiet polls sub-agent status silently during streaming (P2.5).
 func (m model) fetchTeammatesQuiet() tea.Cmd {
 	cl := m.cfg.Client
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		items, err := cl.Teammates(ctx)
+	return fetchCmd(3*time.Second, cl.Teammates, func(items []api.Teammate, err error) tea.Msg {
 		if err != nil {
 			return nil
 		}
 		return teammatesUpdateMsg{items: items}
-	}
+	})
 }
 
 // execBangCmd runs a ! shell command and returns its output (P2.2).
-// bangShellCommand picks the shell binary and argv used to run a `!<command>`
-// passthrough, mirroring internal/sandbox.shellCommand and
-// internal/security.shellInvocation: PowerShell (preferring "pwsh" via
-// sandbox.WindowsShellBinary) on Windows, where a POSIX "sh" is not
-// guaranteed to be on PATH, and "/bin/sh -c" elsewhere.
-func bangShellCommand(cmd string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return sandbox.WindowsShellBinary(), []string{"-NoProfile", "-NonInteractive", "-Command", cmd}
-	}
-	return "/bin/sh", []string{"-c", cmd}
-}
-
 func (m model) execBangCmd(cmd string) tea.Cmd {
 	workDir := m.workDir
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		shell, args := bangShellCommand(cmd)
+		shell, args := sandbox.ShellCommand(cmd)
 		c := exec.CommandContext(ctx, shell, args...) //nolint:gosec
 		c.Dir = workDir
 		out, err := c.CombinedOutput()
@@ -950,22 +705,18 @@ func (m model) awaitingPicker(kind dialogKind) bool {
 
 func (m model) fetchSessions() tea.Cmd {
 	cl := m.cfg.Client
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		items, err := cl.ListSessions(ctx)
+	return fetchCmd(5*time.Second, cl.ListSessions, func(items []api.SessionMeta, err error) tea.Msg {
 		return sessionsLoadedMsg{items: items, err: err}
-	}
+	})
 }
 
 func (m model) switchSessionCmd(id string) tea.Cmd {
 	cl := m.cfg.Client
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		sess, err := cl.GetSession(ctx, id)
+	return fetchCmd(5*time.Second, func(ctx context.Context) (*session.Session, error) {
+		return cl.GetSession(ctx, id)
+	}, func(sess *session.Session, err error) tea.Msg {
 		return sessionSwitchedMsg{sess: sess, err: err}
-	}
+	})
 }
 
 // userMessageText extracts the concatenated text blocks of msgs[idx] if it is
@@ -1094,141 +845,6 @@ func (m model) startDrive(req api.DriveRequest) tea.Cmd {
 	}
 }
 
-// imageRefRe matches @image:<path> tokens. The path is either double-quoted
-// (may contain spaces — what pasted Windows/macOS paths often look like) or a
-// bare whitespace-free token.
-var imageRefRe = regexp.MustCompile(`@image:(?:"([^"]+)"|(\S+))`)
-
-// extractImageRefs pulls @image:<path> tokens out of the submitted text and
-// resolves each path (expanding ~ and making it absolute relative to workDir)
-// into an image attachment. The remaining text is returned with those tokens
-// removed. Paths containing spaces must be double-quoted (the paste handler
-// quotes them automatically, TQ9).
-func extractImageRefs(text, workDir string) (clean string, images []api.ImageInput) {
-	clean = imageRefRe.ReplaceAllStringFunc(text, func(tok string) string {
-		sub := imageRefRe.FindStringSubmatch(tok)
-		path := sub[1]
-		if path == "" {
-			path = sub[2]
-		}
-		images = append(images, api.ImageInput{Path: resolveAttachPath(path, workDir)})
-		return ""
-	})
-	if len(images) == 0 {
-		return text, nil
-	}
-	// Tidy the holes the removed tokens left, preserving intentional newlines.
-	lines := strings.Split(clean, "\n")
-	for i, ln := range lines {
-		lines[i] = strings.Join(strings.Fields(ln), " ")
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n")), images
-}
-
-// imageExts are the file extensions the paste handler recognizes as images.
-var imageExts = map[string]bool{
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".bmp": true,
-}
-
-// looksLikeImagePath reports whether pasted text is a single-line path to an
-// image file (TQ9): no newlines, an image extension, and no leftover quotes.
-func looksLikeImagePath(s string) bool {
-	if s == "" || strings.ContainsAny(s, "\n\r\"") {
-		return false
-	}
-	return imageExts[strings.ToLower(filepath.Ext(s))]
-}
-
-// attachTokenFor builds the @image: token for a pasted path, quoting it when
-// it contains spaces so extractImageRefs can recover it intact.
-func attachTokenFor(path string) string {
-	if strings.ContainsAny(path, " \t") {
-		return `@image:"` + path + `" `
-	}
-	return "@image:" + path + " "
-}
-
-// resolveAttachPath expands a leading ~ and resolves relative paths against the
-// workspace directory so the daemon receives an absolute path it can read.
-func resolveAttachPath(path, workDir string) string {
-	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil {
-			path = filepath.Join(home, path[1:])
-		}
-	}
-	if filepath.IsAbs(path) {
-		return filepath.Clean(path)
-	}
-	if workDir != "" {
-		return filepath.Join(workDir, path)
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return path
-	}
-	return abs
-}
-
-// shellRefDefaultLines is how many trailing lines of the terminal pane's most
-// recent output an unqualified "@shell" token injects (P13.3.2).
-const shellRefDefaultLines = 50
-
-// shellRefRe matches "@shell" and "@shell:N" tokens (N = line count). \b
-// anchors the end so it doesn't fire inside a longer word like "@shellac".
-var shellRefRe = regexp.MustCompile(`@shell(?::(\d+))?\b`)
-
-// extractShellRefs resolves @shell / @shell:N tokens in text into the last N
-// lines of the embedded terminal pane's most recent command + output,
-// splicing the resolved text in place of each token (unlike @image:, this is
-// a textual injection, not an attachment). A missing terminal run never
-// fails submission — it substitutes a short placeholder instead.
-func extractShellRefs(text string, term termPane) string {
-	if !shellRefRe.MatchString(text) {
-		return text
-	}
-	return shellRefRe.ReplaceAllStringFunc(text, func(tok string) string {
-		n := shellRefDefaultLines
-		if sub := shellRefRe.FindStringSubmatch(tok); sub[1] != "" {
-			if v, err := strconv.Atoi(sub[1]); err == nil && v > 0 {
-				n = v
-			}
-		}
-		return shellRefText(term, n)
-	})
-}
-
-// shellRefText renders the resolved text for a single @shell token, mirroring
-// the phrasing of the P13.3.1 diagnose-on-failure prompt (tui.go
-// diagnoseLastFailureCmd) so the model sees a consistent framing for
-// terminal-pane activity it didn't run as a tool call.
-func shellRefText(term termPane, n int) string {
-	if term.lastCmd == "" {
-		return "(no terminal output yet)"
-	}
-	out := lastNLines(term.lastOutput, n)
-	status := "succeeded"
-	if term.lastFailed {
-		status = fmt.Sprintf("failed with exit code %d", term.lastExitCode)
-	}
-	return fmt.Sprintf(
-		"The following command (run in the terminal pane, not a tool call) %s:\n\n```\n%s\n```\n\nOutput (last %d lines):\n```\n%s\n```",
-		status, term.lastCmd, n, out)
-}
-
-// lastNLines returns the trailing n newline-delimited lines of s (fewer if s
-// has less), with any trailing blank line from a final "\n" trimmed first.
-func lastNLines(s string, n int) string {
-	s = strings.TrimRight(s, "\n")
-	if s == "" {
-		return ""
-	}
-	lines := strings.Split(s, "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	return strings.Join(lines, "\n")
-}
-
 // setQueueMode switches the textarea between normal input and queue mode.
 // In queue mode the placeholder and border colour signal that Enter holds the
 // draft back as the next user turn instead of sending it now; injecting into
@@ -1298,9 +914,9 @@ const (
 // phaseStatus is the status word for the run's current phase.
 func (m model) phaseStatus() string {
 	switch {
-	case m.firstTokenAt.IsZero():
+	case m.phase.firstTokenAt.IsZero():
 		return statusWaiting
-	case !m.modelWaitAt.IsZero():
+	case !m.phase.modelWaitAt.IsZero():
 		return statusReeval
 	default:
 		return statusGenerating
@@ -1314,13 +930,13 @@ func (m model) phaseStatus() string {
 // ramp exists to flag the *absence* of that progress. Feeds stallRampColor.
 func (m model) stallElapsed() time.Duration {
 	switch {
-	case m.firstTokenAt.IsZero():
-		if m.streamStart.IsZero() {
+	case m.phase.firstTokenAt.IsZero():
+		if m.phase.streamStart.IsZero() {
 			return 0
 		}
-		return time.Since(m.streamStart)
-	case !m.modelWaitAt.IsZero():
-		return time.Since(m.modelWaitAt)
+		return time.Since(m.phase.streamStart)
+	case !m.phase.modelWaitAt.IsZero():
+		return time.Since(m.phase.modelWaitAt)
 	default:
 		return 0
 	}
@@ -1335,10 +951,10 @@ func (m *model) beginStream() {
 	// starting now loads the model itself, but it may have unloaded again by the
 	// time the user composes their next turn.
 	m.warmPinged = false
-	m.streamStart = time.Time{}
-	m.firstTokenAt = time.Time{}
-	m.modelWaitAt = time.Time{}
-	m.outBytes = 0
+	m.phase.streamStart = time.Time{}
+	m.phase.firstTokenAt = time.Time{}
+	m.phase.modelWaitAt = time.Time{}
+	m.phase.outBytes = 0
 	m.status = statusWaiting
 	// P33.17: the previous turn's inputTokens is now stale for this turn's
 	// prompt size — streamStats() must hide the ↑ segment rather than quote it
@@ -1352,18 +968,18 @@ func (m *model) beginStream() {
 // claims the run is still waiting while P33.3's provisional "preparing <tool>…"
 // card is on screen saying otherwise.
 func (m *model) markModelOutput(n int) {
-	if m.firstTokenAt.IsZero() {
-		m.firstTokenAt = time.Now()
+	if m.phase.firstTokenAt.IsZero() {
+		m.phase.firstTokenAt = time.Now()
 		m.status = statusGenerating
 	}
 	// The model has resumed producing output, so any post-tool-round wait
 	// (P33.19) has ended — clear it unconditionally, since a later round sets
 	// it afresh from its own last tool result.
-	if !m.modelWaitAt.IsZero() {
-		m.modelWaitAt = time.Time{}
+	if !m.phase.modelWaitAt.IsZero() {
+		m.phase.modelWaitAt = time.Time{}
 		m.status = statusGenerating
 	}
-	m.outBytes += n
+	m.phase.outBytes += n
 }
 
 // streamStats snapshots the in-flight run's throughput for the status line.
@@ -1388,15 +1004,15 @@ func (m model) streamStats() streamStats {
 	if m.inputTokensKnown {
 		st.inputToks = m.inputTokens
 	}
-	if !m.streamStart.IsZero() {
-		st.elapsedSecs = int(time.Since(m.streamStart).Seconds())
+	if !m.phase.streamStart.IsZero() {
+		st.elapsedSecs = int(time.Since(m.phase.streamStart).Seconds())
 	}
-	st.outputToks = m.outBytes / bytesPerTokenEstimate
+	st.outputToks = m.phase.outBytes / bytesPerTokenEstimate
 	// Rate over the generation window only. The wait for the first token runs
 	// to a minute on a cold local model; averaging it in would report a
 	// throughput the model never ran at.
-	if !m.firstTokenAt.IsZero() && st.outputToks > 0 {
-		if secs := time.Since(m.firstTokenAt).Seconds(); secs >= 1 {
+	if !m.phase.firstTokenAt.IsZero() && st.outputToks > 0 {
+		if secs := time.Since(m.phase.firstTokenAt).Seconds(); secs >= 1 {
 			st.tokPerSec = float64(st.outputToks) / secs
 		}
 	}
@@ -1846,17 +1462,17 @@ func (m *model) refresh() {
 		// the honest line is the wait itself and how long it has run.
 		var phrase, hint string
 		switch {
-		case m.firstTokenAt.IsZero():
+		case m.phase.firstTokenAt.IsZero():
 			phrase = statusWaiting
 			hint = formatStreamHint(m.streamStats())
-		case !m.modelWaitAt.IsZero():
+		case !m.phase.modelWaitAt.IsZero():
 			// P33.19: post-tool-round wait — the round's tools have returned and
 			// the model is re-evaluating the enlarged prompt, no output yet. Like
 			// the first-token wait this is honest dead air, not a flavor phrase;
 			// its clock runs from the last tool result (modelWaitAt), so it times
 			// this wait rather than the whole turn.
 			phrase = statusReeval
-			if secs := int(time.Since(m.modelWaitAt).Seconds()); secs > 0 {
+			if secs := int(time.Since(m.phase.modelWaitAt).Seconds()); secs > 0 {
 				hint = fmt.Sprintf(" · %ds", secs)
 			}
 		default:
@@ -2013,10 +1629,10 @@ func (m *model) toggleThinking() {
 // block and of the session-wide /tools full|compact default new results
 // start from. A no-op when nothing has resolved yet.
 func (m *model) toggleLastToolBlock() {
-	if len(m.toolBlocks) == 0 {
+	if len(m.toolState.toolBlocks) == 0 {
 		return
 	}
-	m.toolBlocks[len(m.toolBlocks)-1].toggleFull(m)
+	m.toolState.toolBlocks[len(m.toolState.toolBlocks)-1].toggleFull(m)
 }
 
 // trackToolBlock registers b as a P75.1 keyboard-addressable tool block,
@@ -2026,13 +1642,13 @@ func (m *model) toggleLastToolBlock() {
 // over addressing it rather than sit behind a now-stale card entry.
 func (m *model) trackToolBlock(b toolBlock) {
 	blk := b.blkItem()
-	for i, existing := range m.toolBlocks {
+	for i, existing := range m.toolState.toolBlocks {
 		if existing.blkItem() == blk {
-			m.toolBlocks[i] = b
+			m.toolState.toolBlocks[i] = b
 			return
 		}
 	}
-	m.toolBlocks = append(m.toolBlocks, b)
+	m.toolState.toolBlocks = append(m.toolState.toolBlocks, b)
 }
 
 // mdRender renders markdown through glamour with trailing newlines normalized
@@ -2098,211 +1714,6 @@ func (m *model) toggleTerminal() {
 		m.termFocused = true
 		m.ta.Blur()
 		m.refresh()
-	}
-}
-
-// handleTerminalKey processes a key event when the terminal pane has focus.
-// Printable characters append to the command line; named keys perform
-// actions (run, cancel, history, etc.). Returns an optional tea.Cmd.
-func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
-	k := msg.String()
-
-	// When a command is running, only ctrl+c (interrupt) is active.
-	if m.term.running {
-		if k == "ctrl+c" && m.termRun != nil {
-			m.termRun.cancel()
-		}
-		m.refresh()
-		return nil
-	}
-
-	// P13.3.1: diagnose the terminal pane's last failed command, if any.
-	if m.term.lastFailed && key.Matches(msg, m.keys.Diagnose) {
-		return m.diagnoseLastFailureCmd()
-	}
-
-	// P40.1: resize the terminal pane while it has focus.
-	if key.Matches(msg, m.keys.PaneNarrower) {
-		m.resizePane(-paneResizeStep)
-		return nil
-	}
-	if key.Matches(msg, m.keys.PaneWider) {
-		m.resizePane(paneResizeStep)
-		return nil
-	}
-
-	switch k {
-	case "esc":
-		m.termFocused = false
-		m.ta.Focus()
-
-	case "ctrl+c":
-		m.term.input = ""
-
-	case "enter":
-		cmd := strings.TrimSpace(m.term.input)
-		if cmd == "" {
-			break
-		}
-		m.term.history = append(m.term.history, cmd)
-		m.term.histIdx = -1
-		m.term.draft = ""
-		m.term.input = ""
-		m.term.appendText("❯ " + cmd + "\n")
-		if m.term.handleCD(cmd) {
-			break
-		}
-		m.term.beginRun(cmd)
-		run, execCmd := execTermCmd(m.term.workDir, cmd)
-		m.termRun = run
-		m.refresh()
-		return execCmd
-
-	case "up":
-		m.term.historyPrev()
-
-	case "down":
-		m.term.historyNext()
-
-	case "backspace":
-		r := []rune(m.term.input)
-		if len(r) > 0 {
-			m.term.input = string(r[:len(r)-1])
-		}
-
-	case "ctrl+u":
-		m.term.input = ""
-
-	case "ctrl+l":
-		m.term.buf.Reset()
-		m.term.refreshVP()
-
-	case "pgup", "pgdown":
-		m.term.vp, _ = m.term.vp.Update(msg)
-
-	default:
-		// Append any single printable rune to the command line.
-		if runes := []rune(k); len(runes) == 1 {
-			m.term.input += k
-		}
-	}
-
-	m.refresh()
-	return nil
-}
-
-// applySwitchedSession swaps the active session, resetting per-session UI state
-// and replaying the loaded transcript.
-func (m *model) applySwitchedSession(sess *session.Session) {
-	m.cfg.SessionID = sess.ID
-	m.cfg.Mode = sess.Mode
-	m.slash.SetSession(sess.ID, sess.Mode, sess.Model)
-	// The status bar/sidebar model badge (m.cfg.Model) otherwise keeps
-	// showing whatever session this replaced was on — SetSession above
-	// already resolved sess.Model against the TUI's boot-time default, so
-	// mirror that here the same way a successful "/model" does via
-	// SlashResult.Model (P14.7's own display-sync mechanism, applied to a
-	// session switch instead of a switch within one).
-	m.cfg.Model = m.slash.EffectiveModel()
-
-	m.transcript.Reset()
-	m.lastAnswerBlock = nil
-	m.thinkEntries = nil
-	m.tools = m.tools[:0]
-	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
-	m.displayedInputTokens, m.displayedOutputTokens = 0, 0
-	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
-	m.tokensEstimated = false
-	m.turnCount = 0
-	m.changedFiles = nil
-	m.teammates = nil
-	m.timelineEntries = nil
-	m.pendingReadPaths = nil
-	m.pendingTools = nil
-	m.pendingToolOrder = nil
-	m.activeReadGroup = nil
-	m.soloReadCard = nil
-	m.streaming = false
-	m.status = "ready"
-	m.lastFailure = nil
-
-	m.transcript.Append(buildWelcomeContent(m.cfg, m.workDir, m.th))
-	m.loadHistory(sess.Messages)
-	m.followBottom = true
-}
-
-// loadHistory replays stored conversation messages into the transcript so a
-// resumed session shows its prior turns (user text, assistant prose, and tool
-// activity) using the same rendering as a live run.
-func (m *model) loadHistory(msgs []provider.Message) {
-	toolNames := map[string]string{} // tool_use ID → name, for labelling results
-	toolPaths := map[string]string{} // tool_use ID → path, for read_file highlighting (P16.2)
-	for _, msg := range msgs {
-		switch msg.Role {
-		case provider.RoleUser:
-			var text string
-			var results []provider.ToolResultBlock
-			var imageBlocks []provider.ImageBlock
-			for _, b := range msg.Content {
-				switch v := b.(type) {
-				case provider.TextBlock:
-					text += v.Text
-				case provider.ToolResultBlock:
-					results = append(results, v)
-				case provider.ImageBlock:
-					imageBlocks = append(imageBlocks, v)
-				}
-			}
-			if len(results) == 0 {
-				if len(imageBlocks) > 0 {
-					suffix := ""
-					if len(imageBlocks) != 1 {
-						suffix = "s"
-					}
-					note := fmt.Sprintf("🖼 %d image%s", len(imageBlocks), suffix)
-					if text != "" {
-						text += "  " + note
-					} else {
-						text = "(" + note + ")"
-					}
-				}
-				if text != "" {
-					m.appendUser(text, m.renderImageThumbnailsFromBlocks(imageBlocks))
-				}
-			}
-			for _, r := range results {
-				name := toolNames[r.ToolUseID]
-				if name == "" {
-					name = "tool"
-				}
-				m.transcript.Append(renderToolResult(m.th, name, r.Content, r.IsError, m.transcript.Width(), m.toolMaxLines(), toolPaths[r.ToolUseID]) + "\n")
-			}
-		case provider.RoleAssistant:
-			for _, b := range msg.Content {
-				switch v := b.(type) {
-				case provider.ThinkingBlock:
-					if t := strings.TrimSpace(v.Text); t != "" {
-						m.appendThinkingBlock(t, 0) // duration unknown for replayed turns
-					}
-				case provider.TextBlock:
-					if v.Text != "" {
-						m.liveText.WriteString(v.Text)
-						m.flushLiveText()
-					}
-				case provider.ToolUseBlock:
-					toolNames[v.ID] = v.Name
-					if v.Name == "read_file" {
-						var inp struct {
-							Path string `json:"path"`
-						}
-						if json.Unmarshal(v.Input, &inp) == nil {
-							toolPaths[v.ID] = inp.Path
-						}
-					}
-					m.transcript.Append("\n" + renderToolCall(m.th, v.Name, v.Input, m.transcript.Width()) + "\n")
-				}
-			}
-		}
 	}
 }
 
@@ -2444,71 +1855,6 @@ func defaultEditor() string {
 	return "vi"
 }
 
-// --- welcome content ---
-
-func buildWelcomeContent(cfg Config, workDir string, th theme) string {
-	username := getUsername()
-	shortCWD := shortenPath(workDir)
-
-	info := []string{
-		"",
-		th.titleMeta.Render("AI agent harness"),
-		"",
-		"Welcome back, " + th.welcomeName.Render(username) + "!",
-		"",
-		th.welcomeKey.Render("Model  ") + th.welcomeVal.Render(cfg.Model),
-		th.welcomeKey.Render("Mode   ") + th.welcomeVal.Render(cfg.Mode),
-		th.welcomeKey.Render("Dir    ") + th.cwdStyle.Render(shortCWD),
-		"",
-	}
-
-	shield := renderAegisLogo()
-	var b strings.Builder
-	b.WriteString("\n")
-	for i, shieldLine := range shield {
-		b.WriteString(shieldLine)
-		b.WriteString("  ")
-		if i < len(info) {
-			b.WriteString(info[i])
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(th.welcomeKey.Render("  ") +
-		th.welcomeName.Render("/help") + th.welcomeKey.Render(" commands · ") +
-		th.welcomeName.Render("ctrl+k") + th.welcomeKey.Render(" palette · ") +
-		th.welcomeName.Render("shift+tab") + th.welcomeKey.Render(" mode"))
-	b.WriteString("\n\n")
-	return b.String()
-}
-
-func getUsername() string {
-	if u := os.Getenv("USERNAME"); u != "" {
-		return u
-	}
-	if u := os.Getenv("USER"); u != "" {
-		return u
-	}
-	return "there"
-}
-
-func shortenPath(path string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return path
-	}
-	// Windows paths are case-insensitive; compare lowercased to avoid misses.
-	homeCmp, pathCmp := home, path
-	if runtime.GOOS == "windows" {
-		homeCmp = strings.ToLower(home)
-		pathCmp = strings.ToLower(path)
-	}
-	if strings.HasPrefix(pathCmp, homeCmp) {
-		return "~" + path[len(home):]
-	}
-	return path
-}
-
 // --- helpers ---
 
 func newGlamourRenderer(width int) *glamour.TermRenderer {
@@ -2519,13 +1865,6 @@ func newGlamourRenderer(width int) *glamour.TermRenderer {
 		glamour.WithWordWrap(width),
 	)
 	return r
-}
-
-func wrap(s string, width int) string {
-	if width <= 0 {
-		return s
-	}
-	return lipgloss.NewStyle().Width(width).Render(s)
 }
 
 // contextWindowSize returns the context window the usage bar divides by: the
@@ -2539,74 +1878,4 @@ func (m model) contextWindowSize() int {
 		return m.srvCtxWin
 	}
 	return contextWindowFor(m.cfg.Model)
-}
-
-// contextWindowFor returns an approximate context-window size (in tokens) for a
-// model, used to render the usage indicator. Values are conservative defaults
-// matched on common model-name fragments; unknown models fall back to 128k.
-func contextWindowFor(model string) int {
-	m := strings.ToLower(model)
-	switch {
-	case strings.Contains(m, "gemini"):
-		return 1_000_000
-	case strings.Contains(m, "claude"), strings.Contains(m, "o1"), strings.Contains(m, "o3"):
-		return 200_000
-	case strings.Contains(m, "gpt-4.1"):
-		return 1_000_000
-	case strings.Contains(m, "gpt-4o"), strings.Contains(m, "gpt-4"), strings.Contains(m, "llama"), strings.Contains(m, "qwen"):
-		return 128_000
-	default:
-		return 128_000
-	}
-}
-
-// renderContextBar renders a compact usage meter for the context window:
-// a filled/empty bar plus a percentage, coloured green→amber→red as it fills.
-func renderContextBar(used, total, width int) string {
-	if total <= 0 {
-		total = 128_000
-	}
-	frac := float64(used) / float64(total)
-	if frac > 1 {
-		frac = 1
-	}
-	barW := max(width-5, 4) // leave room for " 99%"
-	filled := int(frac*float64(barW) + 0.5)
-
-	col := colSuccess
-	switch {
-	case frac >= 0.9:
-		col = colDanger
-	case frac >= 0.7:
-		col = colWarning
-	}
-	bar := lipgloss.NewStyle().Foreground(col).Render(strings.Repeat("▰", filled)) +
-		lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("▱", barW-filled))
-	pct := lipgloss.NewStyle().Foreground(colTextMuted).Render(fmt.Sprintf(" %d%%", int(frac*100+0.5)))
-	return bar + pct
-}
-
-func short(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
-}
-
-// truncate shortens s to a display width of n cells, appending an ellipsis when
-// it overflows. It is width- and rune-aware (and ANSI-aware), so it never slices
-// a multi-byte rune in half or miscounts wide glyphs — important because these
-// strings feed straight into lipgloss layout.
-func truncate(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if ansi.StringWidth(s) <= n {
-		return s
-	}
-	return ansi.Truncate(s, n, "…")
-}
-
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
 }

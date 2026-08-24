@@ -31,9 +31,14 @@ type ExecOpts struct {
 	Timeout time.Duration // per-command timeout (0 = no timeout beyond ctx)
 }
 
-// shellCommand returns the platform shell binary and argument list for running
-// a command string.
-func shellCommand(command string) (string, []string) {
+// ShellCommand returns the platform shell binary and argument list for
+// running a command string through: PowerShell (preferring "pwsh" via
+// WindowsShellBinary) on Windows, where a POSIX "sh" is not guaranteed to be
+// on PATH, and "/bin/sh -c" elsewhere. Exported so every package that shells
+// out a passthrough command (internal/tui's `!` command, internal/security's
+// guided installer, internal/hooks' hook commands) shares one implementation
+// instead of re-deriving it (P77.3).
+func ShellCommand(command string) (string, []string) {
 	if runtime.GOOS == "windows" {
 		return WindowsShellBinary(), []string{"-NoProfile", "-NonInteractive", "-Command", command}
 	}

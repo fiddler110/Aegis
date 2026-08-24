@@ -15,7 +15,7 @@ import (
 func (m model) updateStreamStarted(msg streamStartedMsg) (tea.Model, tea.Cmd) {
 	m.events = msg.ch
 	m.cancel = msg.cancel
-	m.streamStart = time.Now()
+	m.phase.streamStart = time.Now()
 	m.backtrackArmed = false
 	m.interrupted = false
 	m.setQueueMode(true)

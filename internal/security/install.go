@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"runtime"
 	"sort"
 	"strings"
 
@@ -99,15 +98,6 @@ func AvailabilityNote(name, reason string) string {
 	)
 }
 
-// shellInvocation returns the platform shell binary and args to run command
-// through, mirroring the shell tool's own invocation convention.
-func shellInvocation(command string) (string, []string) {
-	if runtime.GOOS == "windows" {
-		return sandbox.WindowsShellBinary(), []string{"-NoProfile", "-NonInteractive", "-Command", command}
-	}
-	return "/bin/sh", []string{"-c", command}
-}
-
 // NoGuidedInstallReason builds the explanatory error shown when
 // InstallCommand has nothing to offer for name on this OS — shared by
 // RunGuidedInstall and the `aegis security install` CLI so the wording (and
@@ -156,7 +146,7 @@ func RunGuidedInstall(ctx context.Context, name string, out io.Writer) error {
 	if !ok {
 		return fmt.Errorf("%s", NoGuidedInstallReason(name))
 	}
-	shell, args := shellInvocation(command)
+	shell, args := sandbox.ShellCommand(command)
 	c := exec.CommandContext(ctx, shell, args...)
 	c.Stdout = out
 	c.Stderr = out

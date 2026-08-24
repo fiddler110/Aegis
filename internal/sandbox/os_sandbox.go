@@ -127,7 +127,7 @@ func (o *OSBackend) dir(opts ExecOpts) string {
 
 // wrap builds the argv that runs the shell command inside the OS sandbox.
 func (o *OSBackend) wrap(command string, opts ExecOpts) (string, []string) {
-	shell, shellArgs := shellCommand(command)
+	shell, shellArgs := ShellCommand(command)
 	dir := o.dir(opts)
 	// extraRoot extends write/read confinement to a session's own Workdir
 	// when it differs from the daemon's own workspace (P25.9): dir already

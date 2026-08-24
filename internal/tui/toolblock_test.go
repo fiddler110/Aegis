@@ -62,7 +62,7 @@ func TestToolBlockToggle_ExpandsOneCardIndependentOfSessionDefault(t *testing.T)
 	}
 
 	// Toggling again collapses the first card back.
-	m.toolBlocks[0].toggleFull(&m)
+	m.toolState.toolBlocks[0].toggleFull(&m)
 	m.refresh()
 	got = plainView(m)
 	if strings.Count(got, "/tools full to expand") != 2 {
@@ -91,11 +91,11 @@ func TestToolBlockToggle_UpgradedGroupStaysAddressable(t *testing.T) {
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "read_file", ToolID: "tu_2", ToolResult: "package b\n"})
 	m.refresh()
 
-	if len(m.toolBlocks) != 1 {
-		t.Fatalf("expected the pair to collapse into exactly one addressable block, got %d", len(m.toolBlocks))
+	if len(m.toolState.toolBlocks) != 1 {
+		t.Fatalf("expected the pair to collapse into exactly one addressable block, got %d", len(m.toolState.toolBlocks))
 	}
-	if _, isGroup := m.toolBlocks[0].(*toolGroup); !isGroup {
-		t.Fatalf("expected the addressable block to be the upgraded group, got %T", m.toolBlocks[0])
+	if _, isGroup := m.toolState.toolBlocks[0].(*toolGroup); !isGroup {
+		t.Fatalf("expected the addressable block to be the upgraded group, got %T", m.toolState.toolBlocks[0])
 	}
 
 	collapsed := plainView(m)
@@ -157,7 +157,7 @@ func TestMouseClickTogglesToolBlock(t *testing.T) {
 	if strings.Contains(got, "/tools full to expand") {
 		t.Fatalf("expected the click to expand the card in place, got:\n%s", got)
 	}
-	if len(m.toolBlocks) != 1 || !m.toolBlocks[0].(*toolCard).full {
+	if len(m.toolState.toolBlocks) != 1 || !m.toolState.toolBlocks[0].(*toolCard).full {
 		t.Fatalf("expected the clicked card's own full state to flip")
 	}
 
@@ -215,7 +215,7 @@ func TestMouseClickOffIconDoesNotToggle(t *testing.T) {
 	if strings.Count(plainView(m), "/tools full to expand") != 1 {
 		t.Fatalf("expected a click off the disclosure icon to leave the card collapsed, got:\n%s", plainView(m))
 	}
-	if m.toolBlocks[0].(*toolCard).full {
+	if m.toolState.toolBlocks[0].(*toolCard).full {
 		t.Fatalf("expected a click off the icon to not toggle the card's full state")
 	}
 }

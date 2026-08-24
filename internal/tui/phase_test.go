@@ -25,7 +25,7 @@ func phaseModel(t *testing.T, sinceStart time.Duration) model {
 	// the opposite case: inputTokens set but inputTokensKnown still false.
 	m.inputTokens = 4200
 	m.inputTokensKnown = true
-	m.streamStart = time.Now().Add(-sinceStart)
+	m.phase.streamStart = time.Now().Add(-sinceStart)
 	m.refresh()
 	return m
 }
@@ -53,7 +53,7 @@ func TestStreamPhaseSplitAtFirstToken(t *testing.T) {
 	if m.status != statusGenerating {
 		t.Fatalf("status = %q, want %q once the first token arrived", m.status, statusGenerating)
 	}
-	if m.firstTokenAt.IsZero() {
+	if m.phase.firstTokenAt.IsZero() {
 		t.Error("expected the first token to have started the generation clock")
 	}
 	if got := plainView(m); strings.Contains(got, statusWaiting) {
@@ -106,7 +106,7 @@ func TestStreamHintStaysVisibleDuringGeneration(t *testing.T) {
 	m := phaseModel(t, 25*time.Second)
 
 	m.applyEvent(api.Event{Kind: api.KindText, Text: strings.Repeat("streamed answer text. ", 80)})
-	m.firstTokenAt = time.Now().Add(-20 * time.Second) // backdate the generation window
+	m.phase.firstTokenAt = time.Now().Add(-20 * time.Second) // backdate the generation window
 	m.refresh()
 
 	got := plainView(m)
@@ -129,8 +129,8 @@ func TestStreamHintStaysVisibleDuringGeneration(t *testing.T) {
 // rate the model never ran at.
 func TestStreamStatsRateExcludesTheWait(t *testing.T) {
 	m := phaseModel(t, 60*time.Second)
-	m.outBytes = 4000
-	m.firstTokenAt = time.Now().Add(-10 * time.Second)
+	m.phase.outBytes = 4000
+	m.phase.firstTokenAt = time.Now().Add(-10 * time.Second)
 
 	st := m.streamStats()
 	if st.outputToks != 1000 {
@@ -162,7 +162,7 @@ func TestStreamHintHidesStaleInputTokensAtNewTurn(t *testing.T) {
 
 	// A second turn starts sending before any usage event for it has arrived.
 	m.beginStream()
-	m.streamStart = time.Now().Add(-5 * time.Second)
+	m.phase.streamStart = time.Now().Add(-5 * time.Second)
 	m.refresh()
 
 	if st := m.streamStats(); st.inputToks != 0 {

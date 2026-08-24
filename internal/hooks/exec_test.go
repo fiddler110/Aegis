@@ -7,13 +7,16 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // vetoCommand returns a shell command that writes msg to stderr and exits 2,
-// in whatever the platform's default hook shell (see shellCommand in exec.go)
-// actually understands: PowerShell's `1>&2` redirection operator is "reserved
-// for future use" and refuses to parse, so this can't be one POSIX-only
-// string shared across platforms the way it was before P30.2.
+// in whatever the platform's default hook shell (see sandbox.ShellCommand,
+// called from exec.go) actually understands: PowerShell's `1>&2` redirection
+// operator is "reserved for future use" and refuses to parse, so this can't
+// be one POSIX-only string shared across platforms the way it was before
+// P30.2.
 func vetoCommand(msg string) string {
 	if runtime.GOOS == "windows" {
 		return "[Console]::Error.WriteLine('" + msg + "'); exit 2"
@@ -70,16 +73,16 @@ func TestNewExecNilWhenEmpty(t *testing.T) {
 // TestShellCommandPlatformBranch is the P30.2 regression: on Windows hook
 // commands must run through pwsh/powershell (there is no POSIX `sh` on a
 // native Windows host), everywhere else through /bin/sh -c, matching the
-// convention established by sandbox.shellCommand and security.shellInvocation.
+// shared sandbox.ShellCommand convention (P77.3).
 func TestShellCommandPlatformBranch(t *testing.T) {
 	const command = `echo hello; exit 0`
-	shell, args := shellCommand(command)
+	shell, args := sandbox.ShellCommand(command)
 
 	if strings.TrimSpace(shell) == "" {
-		t.Fatal("shellCommand returned an empty shell binary")
+		t.Fatal("sandbox.ShellCommand returned an empty shell binary")
 	}
 	if len(args) == 0 {
-		t.Fatal("shellCommand returned no args")
+		t.Fatal("sandbox.ShellCommand returned no args")
 	}
 	last := args[len(args)-1]
 	if last != command {

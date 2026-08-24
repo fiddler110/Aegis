@@ -190,13 +190,13 @@ func selectedText(lines []string, r1, c1, r2, c2 int) string {
 // toolBlockAt returns the toolBlock tracked for a transcript item, or nil if
 // it isn't a resolved tool card/group (pending, replayed, or not a tool
 // block at all) — the mouse-click half of P75.1's per-block toggle, sharing
-// the same model.toolBlocks registry the keyboard path
+// the same model.toolState.toolBlocks registry the keyboard path
 // (toggleLastToolBlock) already addresses by "last resolved block".
 func (m *model) toolBlockAt(it *transcriptItem) toolBlock {
 	if it == nil {
 		return nil
 	}
-	for _, b := range m.toolBlocks {
+	for _, b := range m.toolState.toolBlocks {
 		if b.blkItem() == it {
 			return b
 		}

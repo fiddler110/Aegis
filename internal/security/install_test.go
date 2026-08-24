@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 func TestInstallCommandKnownTool(t *testing.T) {
@@ -267,21 +269,23 @@ func TestInstallCommandsHaveNoInterpolationMarkers(t *testing.T) {
 	}
 }
 
-// TestShellInvocationKeepsCommandAsSingleArgvElement proves shellInvocation
-// never tokenizes/re-splits command — it always appears as exactly one,
-// byte-for-byte unmodified element of the returned argv slice, regardless of
-// embedded shell metacharacters. This is the property that makes "command is
-// always a hardcoded literal" sufficient to rule out injection: nothing
-// downstream of InstallCommand re-parses the string against attacker/config
-// input, so there is no second place a concatenation bug could sneak in.
+// TestShellInvocationKeepsCommandAsSingleArgvElement proves
+// sandbox.ShellCommand (used by InstallCommand via shell.RunCommand's
+// invocation convention) never tokenizes/re-splits command — it always
+// appears as exactly one, byte-for-byte unmodified element of the returned
+// argv slice, regardless of embedded shell metacharacters. This is the
+// property that makes "command is always a hardcoded literal" sufficient to
+// rule out injection: nothing downstream of InstallCommand re-parses the
+// string against attacker/config input, so there is no second place a
+// concatenation bug could sneak in.
 func TestShellInvocationKeepsCommandAsSingleArgvElement(t *testing.T) {
 	const command = `echo hello; echo "word1 word2" && echo $(danger) | echo`
-	shell, args := shellInvocation(command)
+	shell, args := sandbox.ShellCommand(command)
 	if strings.TrimSpace(shell) == "" {
-		t.Fatal("shellInvocation returned an empty shell binary")
+		t.Fatal("sandbox.ShellCommand returned an empty shell binary")
 	}
 	if len(args) == 0 {
-		t.Fatal("shellInvocation returned no args")
+		t.Fatal("sandbox.ShellCommand returned no args")
 	}
 	last := args[len(args)-1]
 	if last != command {

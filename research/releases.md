@@ -8,7 +8,54 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-21 (twenty-first record, same day as P75.1) — **P63.10 shipped**, both of
+**Last updated:** 2026-08-24 (twenty-fourth record) — **P77.4 shipped**, closing out the last open
+item from the `internal/tui/tui.go` cleanup pass (P77.2/P77.3/P77.5 shipped earlier the same day).
+A new `fetchCmd[T any](timeout, fn, wrap) tea.Cmd` generic now backs the four command constructors
+that really were a single-call round trip — `fetchTeammates`, `fetchTeammatesQuiet`, `fetchSessions`,
+`switchSessionCmd` — collapsing each to a two/three-line body. `fetchBacktrackTargets`/
+`forkAndSwitchCmd` (a second dependent call plus branching) and `startStream`/`startDrive`
+(`context.WithCancel`, since the returned cancel must keep the stream alive rather than just bound a
+timeout) don't fit the shape and were deliberately left as literal functions — the earlier review's
+own caution about forcing every one of the seven through a shared generic held up once the code was
+actually in front of us. Full record: [P77.4 shipped, 2026-08-24](#p774-shipped-2026-08-24).
+
+**Last updated (previous):** 2026-08-24 (twenty-third record) — **P77.2 and P77.3 shipped**, the two
+remaining non-cosmetic items from the `internal/tui/tui.go` cleanup pass (P77.5 shipped earlier the
+same session; P77.4 reviewed and left parked at the time — see the P77.4 record above for why it was
+later revisited and shipped). P77.2: `model`'s tool-tracking fields
+(`pendingTools`/`pendingToolOrder`/`pendingToolSeq`/`toolBlocks`/`activeReadGroup`/`soloReadCard`/
+`soloReadEntry`/`pendingReadPaths`) now live on a named `toolState` sub-struct, and the streaming-phase
+fields (`streamStart`/`firstTokenAt`/`outBytes`/`modelWaitAt`) on a named `streamPhase` sub-struct —
+done as two separate incremental steps (`streamPhase` first, `toolState` second), each verified green
+before starting the next, exactly the caution the roadmap entry called for given call sites spread
+across a dozen+ files. P77.3: `sandbox.shellCommand` is now exported as `sandbox.ShellCommand`, and
+`internal/tui`'s `bangShellCommand`, `internal/security`'s `shellInvocation`, and (found during the
+work — a fourth copy the original filing didn't name) `internal/hooks`' own `shellCommand` all deleted
+in favor of calling it directly. Full record: [P77.2 and P77.3 shipped,
+2026-08-24](#p772-and-p773-shipped-2026-08-24).
+
+**Last updated (previous):** 2026-08-22 (twenty-second record) — **P68.1 shipped: the live tier can now run a
+measurement it can read back.** Filed 2026-08-16 from running the live tier rather than reading it —
+four verification closure conditions (**LLM-03**, **LLM-10**, **ARCH-04**, **P65.2**'s prompt half)
+were scheduled against `TestLiveWorkflow` but were facts about what the *engine* decided, invisible on
+the SSE stream the tier actually watches. Two fixes: `newLiveWorkflowDaemonTweaked` now keeps its
+throwaway data dir (and logs it, plus the session id, at every `CreateSession` call site in
+`live_workflow_test.go`) when `AEGIS_EVAL_KEEP_DATA_DIR` is set, instead of always deleting
+`sessions.db` on cleanup; and `trace.TurnTrace` gained `CalibrationSamples` (populated every turn from
+`compactionGuard.calibrationSamples()`) plus `trace.Compaction.SummaryText` and
+`trace.ToolCall.ErrorText` (both bounded — 4000 and 2000 chars respectively — mirroring the existing
+`boundReason` pattern for guard verdicts), so a compaction's actual summary text and a failing tool
+call's actual error body now survive in the session store instead of living only in a notice/count on
+the stream. `aegis sessions trace <id>` prints both in full under the table, and `calib=N` in the
+`WHY` column. Closure was live-verified on this machine against `aegis-qwen35-9b:16k`: ran
+`TestLiveWorkflow/FixSeededBug` with `AEGIS_EVAL_KEEP_DATA_DIR=1`, pointed a daemon at the kept data
+dir via `AEGIS_DATA_DIR`, and confirmed `aegis sessions trace <id>` printed the real compaction summary
+(the `<read-files>`/`<modified-files>` skeleton intact), a real tool-error traceback, and a rising
+`calib=1..5` across turns — exactly the evidence LLM-03/LLM-10/ARCH-04/P65.2 need, still unjudged but
+now judgeable whenever the parked live-tier row is next picked up. Full record:
+[P68.1 shipped, 2026-08-22](#p681-shipped-2026-08-22).
+
+**Last updated (previous):** 2026-08-21 (twenty-first record, same day as P75.1) — **P63.10 shipped**, both of
 its small TUI message-handling asymmetries, taken opportunistically while `internal/tui` was already
 open for P75.1. The spinner-tick half turned out to already be safe on measurement — every path to a
 new stream goes through `updateStreamStarted`, which unconditionally re-arms `m.sp.Tick`, so the
@@ -419,6 +466,188 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### P77.4 shipped, 2026-08-24
+
+**Filed 2026-08-24 out of the same `internal/tui/tui.go` cleanup pass as P77.2/P77.3/P77.5** (see
+`tui_refactor.md`), reviewed the same session against its own promotion criteria and initially left
+parked — no eighth near-identical constructor had appeared and no cross-constructor bug had
+surfaced. The user then asked for it directly, judging the cleanup worth doing on its own merits
+rather than waiting for a promotion trigger.
+
+`fetchTeammates`, `fetchSessions`, and `switchSessionCmd` (`internal/tui/tui.go`) were a genuine
+match for the shape the roadmap entry proposed — one `context.WithTimeout`, one client call, one
+wrap into a message — so a new generic,
+
+```go
+func fetchCmd[T any](timeout time.Duration, fn func(context.Context) (T, error), wrap func(T, error) tea.Msg) tea.Cmd
+```
+
+now backs all three, plus `fetchTeammatesQuiet` (same shape, with a `wrap` that swallows the error and
+returns `nil` instead of a message). Each collapsed from a five-line `func() tea.Msg { ctx, cancel :=
+...; defer cancel(); ...}` body to a two/three-line call — e.g. `switchSessionCmd` now reads:
+
+```go
+func (m model) switchSessionCmd(id string) tea.Cmd {
+	cl := m.cfg.Client
+	return fetchCmd(5*time.Second, func(ctx context.Context) (*session.Session, error) {
+		return cl.GetSession(ctx, id)
+	}, func(sess *session.Session, err error) tea.Msg {
+		return sessionSwitchedMsg{sess: sess, err: err}
+	})
+}
+```
+
+**`fetchBacktrackTargets`/`forkAndSwitchCmd` and `startStream`/`startDrive` deliberately stayed
+literal**, confirming the earlier review's own caution: the first pair makes a second, dependent
+client call with real branching between the two (not a single round trip); the second pair opens a
+`context.WithCancel`, not a timeout — the returned cancel has to keep the stream alive, and
+`startDrive`'s cancel additionally wraps a server-side stop-run call before it. Forcing any of the
+four through `fetchCmd` would have meant threading extra parameters through the generic for behavior
+only one caller needs, which is exactly the indirection-over-readability tradeoff the original filing
+warned against. Three of the seven originally-named constructors collapsed; four stayed as they were,
+by design.
+
+`session` needed adding back to `tui.go`'s import block — `switchSessionCmd`'s new inline closure
+signature (`func(ctx context.Context) (*session.Session, error)`) names the type directly, where the
+old literal body only used it via `sessionSwitchedMsg` (which had itself moved to `messages.go` under
+P77.5, taking the import with it).
+
+**Tests:** full repo `go build ./...`, `go vet ./...`, `go test -count=1 ./...` (all non-live tiers),
+and `gofmt -l` all clean.
+
+### P77.2 and P77.3 shipped, 2026-08-24
+
+**Both filed 2026-08-24 out of the same `internal/tui/tui.go` cleanup pass** (see `tui_refactor.md`),
+picked up the same session at the user's request to work through the whole P77.2–P77.5 batch.
+P77.5 (grouping the scattered `*Msg` type declarations into a new `messages.go`) shipped first as pure
+code motion. That leaves this record for the two remaining items shipped that same sitting:
+
+**P77.2 — `model`'s tool-tracking and streaming-phase fields grouped into named sub-structs.** Done as
+two separate incremental steps, each independently verified (`go build ./...`, `go vet`, `go test
+-count=1 ./internal/tui/...`) before starting the next, since every field here is read from a dozen+
+files across the package (`update*.go`, `view.go`, `stream.go`, `streaming.go`, several `*_test.go`):
+1. `streamPhase` (smaller, done first): `streamStart`, `firstTokenAt`, `outBytes`, `modelWaitAt` — the
+   fields `phaseStatus` and `stallElapsed` read to derive the status-line phase word and the P74.11
+   stall-ramp color. `model` now carries one `phase streamPhase` field; every read/write site across
+   `tui.go`, `view.go`, `stream.go`, `update_stream.go`, `phase_test.go`, `stall_ramp_test.go` updated
+   (`m.streamStart` → `m.phase.streamStart`, etc.).
+2. `toolState` (done second, larger): `pendingTools`, `pendingToolOrder`, `pendingToolSeq`,
+   `toolBlocks`, `activeReadGroup`, `soloReadCard`, `soloReadEntry`, `pendingReadPaths` — the P21.2
+   in-flight tool-card tracking, P74.4 read/search grouping, and P75.1 expand-state registry. All eight
+   fields (the roadmap entry's core five plus three closely-related ones the same files reference)
+   moved onto one `toolState toolState` field; call sites across `tui.go`, `selection.go`, `stream.go`,
+   `toolcard.go`, `update_session.go`, `update_slash.go`, `toolblock_test.go`, `toolcard_test.go`
+   updated the same way.
+
+Neither step changed the top-level Elm `model` type itself, matching the roadmap entry's explicit
+scope — `CodeReview.md`'s prior QUAL-05 WONTFIX on the shape of `model` as a whole stands unchanged.
+Every doc comment moved verbatim with its field.
+
+**P77.3 — one shared shell-selection implementation.** `sandbox.shellCommand` exported as
+`sandbox.ShellCommand`; `internal/security`'s `shellInvocation` and `internal/tui`'s `bangShellCommand`
+deleted, their one call site each now calling `sandbox.ShellCommand` directly. Reading all four
+implementations first turned up a **fourth** copy the original P77.3 filing didn't name —
+`internal/hooks`' own `shellCommand` (used by `pre_tool_use`/`post_tool_use`/etc. hook commands) — byte
+identical to the other three, so it was deleted and consolidated too. All four were confirmed truly
+equivalent (same Windows/POSIX branch, same PowerShell flags, same argv shape) before unifying, per
+the roadmap entry's own "stop and report a discrepancy rather than force a merge" instruction — no
+discrepancy was found. `internal/security/install_test.go`, `internal/tui/bangcmd_test.go`, and
+`internal/hooks/exec_test.go` updated to call `sandbox.ShellCommand` in place of the deleted functions;
+unused `runtime` imports dropped from `internal/security/install.go` and `internal/hooks/exec.go`.
+
+**Tests:** full repo `go build ./...`, `go vet ./...`, and `go test ./...` (all non-live tiers) run
+clean after every step — both the incremental sub-struct moves and the shell-command consolidation.
+`gofmt -l` clean on every touched file.
+
+### P68.1 shipped, 2026-08-22
+
+**Filed 2026-08-16 from running the live tier rather than from reading it.** Four open verification
+conditions — **LLM-03**, **LLM-10**, **ARCH-04** and **P65.2**'s prompt half — were all scheduled
+against `TestLiveWorkflow`, and none of them was observable there: the tier watches the daemon's SSE
+stream, and every one of those four is a fact about what the *engine* decided, living in `TurnTrace`
+and the session store instead.
+
+Two concrete gaps, fixed together:
+
+1. **The evidence was deleted at the end of every run.** `newLiveWorkflowDaemonTweaked`
+   (`internal/eval/live_workflow_test.go`) builds each subtest's daemon over a throwaway
+   `os.MkdirTemp` data dir and always removed it in `t.Cleanup`, so `sessions.db` — and with it the
+   P66.11 turn trace — went with it. Now gated on `AEGIS_EVAL_KEEP_DATA_DIR`: set (to anything
+   non-empty) and the dir survives, logged by path; every `CreateSession` call site in the file also
+   now logs the session id, so a kept run's `go test -v` output names both halves of what
+   `aegis sessions trace <id>` (via `AEGIS_DATA_DIR=<kept dir>`) needs.
+2. **A compaction's summary text and a tool error's body never left the engine at all.** The trace
+   recorded *that* compaction fired and *that* a tool call failed, never the text — a compaction
+   notice logged a before/after message count, and a failing tool result was logged only as a
+   character count. `trace.Compaction` gained `SummaryText` (`internal/trace/trace.go`), populated in
+   `internal/engine/compact.go` at all three call sites that produce a summarizing outcome (the LLM
+   summarizer, and the two deterministic-fallback paths) by lifting the text `Compact`/`FallbackCompact`
+   already write as the first message's `TextBlock`. `trace.ToolCall` gained `ErrorText`, populated at
+   all three error sites in `internal/engine/toolround.go` (abandoned call, recovered panic, normal
+   failure). Both are bounded (`boundSummary`/`boundToolError`, 4000/2000 chars) the same way
+   `boundReason` already bounds a guard verdict, on the same reasoning: the trace is not the place to
+   discover an unbounded local-model ramble the hard way.
+
+**Not fixed by widening the SSE stream** — a summary and a tool-error body are per-turn engine state,
+and the trace was already the right home for them; what was missing was that it recorded the event but
+not the text, and that the eval tier threw the database holding it away.
+
+**A third, smaller gap surfaced while fixing the first two and was closed the same way:** the
+token-estimate calibration sample count (`tokenest.Calibrator.Scale`'s second return) was only ever
+`slog.Debug`-logged, never traced. `trace.TurnTrace` gained `CalibrationSamples`, populated every turn
+(not gated on whether compaction fired, unlike `Compaction`) via a new
+`compactionGuard.calibrationSamples()` accessor.
+
+**`aegis sessions trace <id>` (`internal/cli/sessions.go`)** now prints `calib=N` in the `WHY` column
+whenever a turn has accumulated samples, and — after the table — the full text of every turn's
+compaction summary and every failing tool call's error body.
+
+**Closure condition:** a `TestLiveWorkflow` run whose log names a session id that survives the test,
+and `aegis sessions trace <id>` on it showing the compaction summary text, the calibration sample
+count and each turn's stop reason. **Live-verified on this machine**, not just built: ran
+`AEGIS_EVAL_MODEL=aegis-qwen35-9b:16k AEGIS_EVAL_KEEP_DATA_DIR=1 go test -tags live_workflow -count=1
+./internal/eval/... -run 'TestLiveWorkflow$/FixSeededBug' -v`, pointed a daemon at the kept data dir
+(`AEGIS_DATA_DIR=<kept dir> AEGIS_SERVER_TLS_ENABLED=false aegis serve`), and ran `aegis sessions trace
+<logged id>` against it. Output showed 5 turns with `calib=1` through `calib=5`, a real compaction
+summary (`<read-files>`/`<modified-files>` tags intact) under turn 5, and a real Python traceback under
+turn 1's failing `shell` call — exactly the shape the closure condition names. The four verification
+items this unblocks (LLM-03, LLM-10, ARCH-04, P65.2) are not themselves judged by this change; they now
+have real evidence to judge against whenever the parked live-tier row is next picked up.
+
+**Tests:** `go build ./...`, `go vet ./...`, `go test ./...` all clean; `go build -tags live_workflow
+./...` clean. No new unit test — the change is to a build-tag-gated live harness and a CLI printer, and
+its own closure condition *is* a live run, recorded above rather than pinned as a fast test.
+
+### The inline-truncation request closes out, 2026-08-23 (PXX.1)
+
+**Filed as an un-numbered user request** ("I'd like to revisit how text within the Aegis TUI is
+truncated... it feels very blackbox"), sitting in the Tier 3 section of `roadmap.md` without a
+`Priority:` line — the one open item that broke the document's own "every open item is a numbered
+heading with a Priority line" rule. Closed out on review rather than carried forward, because reading
+its own body against the shipped record shows every concrete ask already answered:
+
+- **"Truncation is too limiting to review commands"** — **P74.3** turned an over-cap tool result into
+  a one-line summary with an explicit `/tools full`-to-expand hint (rather than a silently chopped
+  body), and **P75.1** then made that expand per-block (keyboard and mouse click), replacing the
+  original session-wide toggle. A user can now see any single result in full without losing every
+  other block's collapsed state.
+- **"Doesn't stream output well / no insight into status"** — **P74.11**'s stall shimmer ramps toward
+  `colWarning` as a wait lengthens, and **P74.12** eases the token counter instead of jumping in
+  chunks — both land status information continuously during a turn rather than only at its end.
+- **"Feels very blackbox... about a command or request in action"** — **P74.2**'s chrome removal and
+  **P74.4**'s read/search grouping make the transcript itself denser and more legible during a run,
+  and **P74.16**'s overflow clip-and-retry stops a long tool-heavy turn from silently failing instead
+  of visibly recovering.
+
+**What is not covered by any of the above, and is real:** nothing shipped exposes the model's actual
+reasoning/thinking content before it acts — the request's own words ("insight about the status of a
+command... some of the thinking that is taking place by the model as it reasons"). The shipped work
+answers "is Aegis doing something and how far along is it," not "what is the model about to do and
+why." That narrower thread is real, unaddressed, and worth its own tracked item — filed as **P77.1**
+in `roadmap.md`'s Tier 4, since surfacing raw reasoning content is a design question (which providers
+even return it, whether to render it live vs. collapsed, cost on providers that bill thinking tokens)
+rather than a continuation of the P74 UI-polish work.
 
 ### P63.10 shipped, 2026-08-21
 

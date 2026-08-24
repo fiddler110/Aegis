@@ -1,8 +1,24 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-21, after **P75.1** was filed (user follow-up to PXX.1's styling pass, which
-also shipped the same day). This document
-tracks only **open** work and what's next. For
+**Last updated:** 2026-08-24 — **P77.4** shipped (a `fetchCmd[T]` generic now backs the four
+`tui.go` command constructors that were a genuine single-call round trip — `fetchTeammates`,
+`fetchTeammatesQuiet`, `fetchSessions`, `switchSessionCmd` — closing out the last open item from the
+`internal/tui/tui.go` cleanup pass; **P77.2**, **P77.3**, and **P77.5** shipped earlier the same day).
+`fetchBacktrackTargets`/`forkAndSwitchCmd` (multi-step, branching) and `startStream`/`startDrive`
+(`context.WithCancel`, not a timeout) stayed literal — forcing those through the generic would have
+cost more in accommodating parameters than it saved. Full record:
+[releases.md](releases.md#p774-shipped-2026-08-24).
+
+**Last updated (previous):** 2026-08-23 — **P76.1**'s two sessions (the scoped, read-only audit of `internal/tui`
+and `internal/security` filed 2026-08-21) both ran this sitting and closed, each with one survivor:
+**P76.2** (Tier 2 — a TUI quit path that doesn't cancel a running interactive-terminal command) and
+**P76.3** (Tier 3 — a hostile repo can plant its own security-scan baseline to hide its own findings,
+needs a design decision). Earlier the same day: the un-numbered PXX.1 request closed out (its concrete
+asks were already shipped; its one unaddressed thread — visibility into the model's reasoning —
+refiled as **P77.1**, Tier 4), and **P68.3** compressed to a pointer now that its full record lives in
+[releases.md](releases.md), matching how **P68.2** was already handled. Before it: 2026-08-22, after
+**P68.1** shipped (the live tier can now run a measurement it can read back — closing Tier 2 out).
+This document tracks only **open** work and what's next. For
 shipped-feature history, batch origins, pass-by-pass narrative, refutation records and full design
 rationale, see [releases.md](releases.md). Every open item is a `### P<n>.<m>` heading with a
 `Priority:` line in its body — `scripts/roadmap-status.sh` parses exactly that shape, so keep it when
@@ -12,181 +28,53 @@ adding items.
 
 ## Status
 
-**35 open items: 27 build + 8 verification-only.** **P63.10** (two small TUI message-handling
-asymmetries) shipped 2026-08-21, taken opportunistically while `internal/tui` was open for **P75.1** —
-record in [releases.md](releases.md#p6310-shipped-2026-08-21). **P75.1** (per-block tool-result expand/collapse,
-keyboard then mouse) was filed 2026-08-21, the same day a smaller styling follow-up to **P74.3**
-shipped — see [Tier 3](#open-work--tier-3). Otherwise the entire fresh P74 pass — twenty items — has
-shipped, seventeen of them the same day they were filed and **P74.15**/**P74.16**/**P74.17** over the
-two days after:
-**P74.1** (a permission-rule gap proved against the live gate, not read off a diff), **P74.2**
-(the TUI chrome removal — sidebar to an overlay, auto-hidden scrollbar, title bar folded into the status
-line), **P74.18** (the selection overlay's SGR-7 fragmentation over chroma color, replaced with a
-background-only fill), **P74.20** (OSC 52 made the primary clipboard path, so `/copy` and drag-select
-work over SSH), **P74.19** (`tui.mouse: off` releases mouse capture without releasing alt-screen),
-**P74.3** (a completed tool call collapses to one block, not two events that both announce the tool
-name), **P74.4** (a run of consecutive successful reads/searches folds into one collapsed card),
-**P74.5** (a picker's selection chrome drops from three stacked cues to one), **P74.6** (a dim
-footer names the filter interaction and shows a live match count), **P74.7** (the real terminal
-cursor now lands on the focused row of a picker or the approval dialog), **P74.8** (a tool call a
-local model wrote as prose is salvaged into a real call), **P74.9** (first half — an empty tool
-result becomes a named placeholder), **P74.10** (`tui.reduced_motion` freezes the shimmer/caret/
-thinking-phrase/pending-card animations at one frame), **P74.11** (the "working" shimmer ramps
-toward `colWarning` as a wait lengthens toward `MaxTurnStall`, instead of looking the same at second 2
-and second 400), **P74.12** (the status bar's token counter eases toward the real value instead of
-jumping in chunk-sized steps each time a turn's usage lands), **P74.13** (a running sub-agent gets a
-stable, hashed colour instead of reading as the same grey line as every other teammate), and **P74.14**
-(a dangling tool call whose arguments never parsed gets its own message instead of the "interrupted"
-wording), **P74.15** (HTML comments stripped from injected memory files so a tool-managed marker
-doesn't pay prompt budget every turn), **P74.16** (a context-overflow error clips the batch and retries
-instead of failing the run), and **P74.17** (prose-tool-call salvage and a new argument-shape repair
-both resolve per model via `internal/profile`, instead of the blanket `LocalPromptProfile()` boolean
-P74.8/P74.9 had to gate on). Records in [releases.md](releases.md). Tier 1 is empty again; Tier 2 has
-one; Tier 3 picked up **P75.1** the same day.
-
-**The whole P74 batch is now shipped.** P74.17 was deliberately taken last — the table's own note said
-so — so it would carry P74.8's and P74.9's concrete cargo (prose-tool-call salvage's engagement
-condition, and P74.9's deferred argument-shape repair) into the mechanism rather than being built as an
-empty abstraction ahead of anything needing it. It shipped the provider-decorator half of the roadmap
-entry's fuller sketch — a `profile.Harness` resolved per `Request.Model`, carrying the two repair flags
-that had cargo — and left the tool-registration half (a `PromptSuffix`/`ToolDescriptionOverrides`/
-`DeferredTools`-carrying `Harness` generalizing `builtin.Options.LocalProfile` itself) explicitly
-unbuilt, filed on its own as **P74.21** in [Tier 4](#open-work--tier-4): real, but with no cargo of its
-own yet, the same reason P74.17 itself waited. See
-[releases.md](releases.md#local-model-repair-behaviors-resolve-per-model-instead-of-per-boolean-2026-08-21-p7417)
-for the scoping note in full.
-
-Tier 4 remains what it was — 25 entries each filed with a reason not to schedule them, and not a queue
-to promote from.
+**36 open items: 28 build + 8 verification-only.** Tier 1: 0. Tier 2: 1 (**P76.2**, filed 2026-08-23,
+survivor of P76.1 Session B). Tier 3: 2 (**P76.1**, filed 2026-08-21, both sessions now done — see its
+entry; **P76.3**, filed 2026-08-23, survivor of P76.1 Session A). Tier 4: 25. Verification: 8.
 
 **Shipped history lives in [releases.md](releases.md), not here.** This document tracks only open
-work; a completed item's full record — what it was, what building it found, and what was measured to
-close it — moves there. The most recent sittings, newest first:
+work and current counts; a completed item's full record — what it was, what building it found, and
+what was measured to close it — moves there the day it ships. Most recent sittings, newest first,
+each a pointer only: **2026-08-21** — **P63.10**, **P75.1**, and the last three of the P74 batch
+(**P74.15**–**P74.17**), closing it out entirely (twenty items, P74.1–P74.20). **2026-08-20** —
+seventeen more of the P74 batch, filed and shipped the same day. **2026-08-19** — fourteen items
+across three sittings (**P71.1–P71.5/P71.9/P71.10**, **P72.1–P72.3**, **P73.1–P73.2**), several
+filed by the live verification of the item before them. **2026-08-18 and earlier** — **P70.1–P70.4**,
+**P66.13–P66.15**, **P67.6–P67.9**, **P69.1/P69.5/P69.6**, and the rest of the P66 review batch. Full
+records, mechanisms and measurements for every one of these are in
+[releases.md](releases.md#latest-changes).
 
-- **2026-08-21** — **P74.16** (a context-overflow error now clips the trailing tool-result batch in
-  place and retries the turn, instead of failing the whole run), closing out Tier 3 alongside **P74.15**
-  (HTML comments stripped from injected memory files, freeing prompt budget against the test-enforced
-  local ceiling and making tool-managed markers viable), which shipped earlier the same day and took
-  the harness lane's fourth row.
-- **2026-08-20** — **P74.1** (a path-scoped deny rule can never match `grep`), **P74.2** (the TUI
-  chrome removal), **P74.18** (the selection overlay's SGR-7 fragmentation over chroma color),
-  **P74.20** (OSC 52 made the primary clipboard path), **P74.19** (`tui.mouse: off`), **P74.3**
-  (one tool block, not two events), **P74.4** (an exploration phase collapses to a narrative, not a
-  wall of cards), **P74.5** (a picker's selection chrome drops to one cue), **P74.6** (a filter
-  hint and match count), **P74.7** (the real terminal cursor lands on the focused row), **P74.8**
-  (a tool call written as prose is salvaged into a real call), **P74.9**'s first half (an empty tool
-  result becomes a named placeholder), **P74.10** (a `tui.reduced_motion` setting), **P74.11** (the
-  stall shimmer ramps toward `colWarning`), **P74.12** (the status bar's token counter eases toward
-  the real value instead of jumping), **P74.13** (a running sub-agent's colour is now stable and
-  hashed from its id), and **P74.14** (a malformed dangling tool call is now told apart from an
-  interrupted one), all seventeen shipped the same day they were filed. P74.1 was proved
-  against the real gate; P74.2 corrected its own filed scope from a 4–6 day document-flow rewrite to a
-  one-sitting chrome removal before being built — see [Decisions that outlive the items that made
-  them](#decisions-that-outlive-the-items-that-made-them); P74.18 replaced `Reverse(true)` with a new
-  `selectionBg` scheme role so a selection reads as one region over chroma-highlighted text instead of a
-  ragged per-token stripe; P74.20 gave `copyToClipboardCmd` an OSC 52 path via bubbletea's built-in
-  `tea.SetClipboard`, so copy no longer silently targets the wrong machine over SSH; P74.19 gave
-  `View()` a `tui.mouse: off` config key that releases mouse capture while keeping alt-screen, closing
-  out the selection/clipboard group; P74.3 dropped the repeated tool name from `renderToolResult`'s
-  header in favor of a `⎿` continuation gutter, and made a result that would need truncating collapse to
-  a one-line summary (`/tools full` as the expand path) instead of a chopped body, unblocking P74.4;
-  P74.4 folds a run of consecutive, successful `read_file`/`grep`/`glob` calls into one collapsed card,
-  merging a call only once its own result has confirmed success so an out-of-order parallel round
-  under-groups rather than ever claiming an unconfirmed call; P74.5 replaced the pickers' title chip,
-  rounded frame and bordered-plus-bold selected row with a bold title over a hairline rule and a single
-  `❯` pointer, and P74.6 gave the same `listDialog.View` a dim footer naming the filter interaction and
-  right-aligning a live `n/m` match count once filtering is active — taken together in one sitting, as
-  the item that filed P74.6 said to; P74.7 threaded a declared cursor position out of `listDialog.View`
-  and the approval dialog up through `model.render` (now returning `(string, *tea.Cursor)`) to
-  `tea.View.Cursor`, closing out the menu lane; P74.8 added
-  `provider.WithProseToolCallSalvage`, a response-side decorator that buffers a turn's stream and, only
-  when no structured tool call arrived at all, parses a fenced/tagged/bare JSON call out of the text and
-  emits it as a real `EventToolUse`, gated on `cfg.Provider.LocalPromptProfile()` in
-  `providerfactory.Build` so no cloud turn pays for it, opening the harness lane; P74.9's first half
-  added `builtin.NormalizeEmptyResult` (`internal/tool/builtin/truncate.go`) and wired it into the one
-  seam every tool call passes through (`Engine.executeTool`), so a legitimately empty result reaches the
-  model as a named placeholder rather than an empty string a local model reads as a failure — the
-  argument-shape repair half stays filed and deferred to P74.17; P74.10 froze `animStep` behind a new
-  `reducedMotion` flag, which stops `shimmerText`/`caretGlyph`/`thinkingPhrase`/`updatePendingToolCards`
-  from advancing while leaving the P2.5 sub-agent poll on its own `pollTick` counter so its cadence
-  survives the freeze, unblocking P74.11 and P74.12; P74.11 added `stallRampColor`
-  (`internal/tui/shimmer.go`), blending `colAccent` toward `colWarning` as `model.stallElapsed()` grows
-  toward a new `Config.MaxTurnStall` (wired from `cfg.Cost.MaxTurnStall()`), front-loaded and saturating
-  at 70% of the bound so a stall reads as visibly underway well before the 900s abort fires; P74.12 added
-  `model.easeStatCounters` (`internal/tui/update_tick.go`), moving new `displayedInputTokens`/
-  `displayedOutputTokens` fields an eighth of their remaining gap toward the real counters on every
-  streaming tick so `renderStats` climbs smoothly instead of jumping once per `KindTurnDone`, snapping
-  immediately under reduced motion and on stream close; P74.13 added `agentColor`, a per-`colorScheme`
-  8-entry palette hashed from the agent id, so a running sub-agent renders in the same colour in the
-  sidebar `AGENTS` list and the `/teammates` transcript listing, closing out the motion group entirely;
-  P74.14 added `interruptedMalformedText` and a `json.Valid(tu.Input)` check to
-  `repairOrphanedToolUses`, so an orphaned tool call whose arguments never parsed as JSON is told apart
-  from one merely cut off mid-round, taking the harness lane's third row.
-- **2026-08-19** — **P72.3** (a resident-set claim now owns its models' residency, not just their
-  windows), **P72.1** (the serving context window is solved from a stated VRAM budget at startup:
-  `16000 → 82944` measured on this machine), **P73.2**, **P73.1**, **P71.8**, and the eight-item
-  web-research batch **P71.1/P71.2/P71.3/P71.4/P71.5/P71.9/P71.10** plus **P72.2**. Fourteen items in
-  three sittings, most of them filed and shipped the same day — the first time in this document's
-  history that a filed batch and its build have landed together, and twice over the day an item was
-  filed _by_ the live verification of the item before it (P73.1 out of P71.8, P73.2 out of P73.1,
-  P72.3 out of P72.1).
-- **2026-08-18** — **P70.4**, **P70.1**, **P70.2**, **P70.3**, and **P66.15**/**P67.6**/**P67.7**/
-  **P67.8**/**P67.9**.
-- **2026-08-17 and earlier** — **P69.1**/**P69.5**/**P69.6**, **P66.13**, the P66 review batch, and
-  the rest.
-
-**Every shipped item above was closed against a live-verified test or a live probe run on this
-machine, recorded in its release entry.** None of it is asserted from reading a diff. That standard
-is the one thing from the shipped record that constrains future work here.
-
-- **Tier 1:** 0 — **P74.1** (a path-scoped deny rule can never match `grep`) shipped 2026-08-20, the
-  same day it was filed, proved against the real gate. Empty again as of that shipment; before P74.1 it
-  was empty for one day, since **P71.1**/**P71.10** shipped 2026-08-19. An item enters here only as a
-  real, currently-exploitable gap that is small and unblocked.
-- **Tier 2:** 1 — **P68.1** (the instrumentation gap the live tier found), deliberately off the
-  ranked list because it travels with the parked live-tier row. **P74.7** (menus), **P74.8**
-  (prose-tool-call salvage, the first half of local-model tool-call repair), **P74.9**'s first half
-  (empty-result normalization), **P74.10** (reduced motion), **P74.11** (the stall shimmer ramp),
-  **P74.12** (the eased token counter), **P74.13** (the stable per-agent colour), **P74.14** (the
-  malformed-call message), and **P74.15** (stripping HTML comments from injected memory files) have
-  all shipped — the first eight on 2026-08-20, P74.15 on 2026-08-21. P74.7 closed out the menu lane,
-  P74.8 opened the harness lane, P74.9's second half (argument-shape repair) folds into P74.17 rather
-  than staying its own row, P74.10 unblocked P74.11/P74.12, P74.11 shipped right behind it, P74.12
-  shipped right after that, P74.13, independent of every other row, shipped right after that, closing
-  out the motion group entirely, P74.14, also independent, shipped right after it, taking the harness
-  lane's third row, and P74.15, also independent, shipped the next day, leaving this tier only P68.1.
-- **Tier 3:** 1, P74 — **P74.17**. **P74.16** (the reactive overflow clip-and-retry path) shipped
-  2026-08-21, the day it was filed. Empty for two days before P74.2 landed; **P74.4** shipped
-  2026-08-20.
-- **Tier 4:** 25 — **P74.21** (filed 2026-08-21), five from P71 (**P71.6**, **P71.7**, **P71.11**,
-  **P71.12**, **P71.13**), six from the P66 review (**P66.17**, **P66.18**, **P66.19**, **P66.20**,
-  **P66.23**, **P66.26**), five from P67 (**P67.10**–**P67.14**), and the eight remaining pre-existing:
-  **P65.4**, **P65.5**, **P64.4**, **P64.5**, **P61.7** (remainder), **P60.3**, **P52.14**, **P25.9**.
-  **P63.10** shipped 2026-08-21, taken opportunistically while `internal/tui` was open for **P75.1**.
-- **Verification:** 8. See [Verification Work](#verification-work) for the track's own status line.
+**Every shipped item was closed against a live-verified test or a live probe run on this machine,
+recorded in its release entry — never asserted from reading a diff.** That standard constrains future
+work here.
 
 Tiers 1-4 are **build work** — every item there requires writing code that doesn't exist yet.
 **Verification work** is its own track, not a tier: every item in it is code that is _already
 written_, sitting behind one gate — a live-model run producing evidence the item's closure
 condition names. Mixing the two under one tiering scheme was misleading a reader into treating
-"go run a test" and "go design and build a feature" as the same kind of next action.
+"go run a test" and "go design and build a feature" as the same kind of next action. See
+[Verification Work](#verification-work) for that track's own status.
 
 **Everything left in the verification track is blocked on something other than a model server**,
 which is why parking it costs little. P38.1 needs permission to launch an unattended auto-approving
 agent; P62.9 needs a _better task_ rather than more runs of the current one; LLM-03, LLM-10, ARCH-04
-and P65.2 all need a session trace from a run whose data dir survives, which is **P68.1**. Only
-P62.8 is still purely waiting on hardware.
+and P65.2 all need a session trace from a run whose data dir survives — **P68.1** shipped that
+2026-08-22 (live-verified against `TestLiveWorkflow`/`aegis-qwen35-9b:16k`: the kept data dir's
+`sessions.db` outlived the test process and `aegis sessions trace <id>` printed the compaction
+summary text, the calibration sample count and each turn's stop reason), so those four now have
+readable evidence to judge whenever the parked live-tier row is next picked up — nobody has yet.
+Only P62.8 is still purely waiting on hardware.
 
 **No Tier 4 build item currently has a fired trigger** (re-verified 2026-08-15: `sandbox.backend`
 still defaults to `"local"`, `lsp.Manager` is still one shared daemon singleton, both TUI
-asymmetries in P63.10 are still present as described) — see each entry's **Promote when** for what
-would change that. Two of them, **P71.6** (response caching) and **P71.11** (window-derived budgets),
-were held pending phasing — "setting them first fits a constant to a regime about to change" — and
-that regime changed when P71.8 landed; the reason they were parked no longer applies, so re-check
-them rather than assuming Tier 4 still fits. **P71.12** is the opposite case: a filed _negative_
-measurement (main-content extraction is worth 3–12% per page, because the existing converter already
-takes 66 KB of HTML down to 11 KB of text), recorded so nobody re-derives it. Explicitly do not
-schedule.
+asymmetries in P63.10 are still present as described — that one item has since shipped) — see each
+entry's **Promote when** for what would change that. Two of them, **P71.6** (response caching) and
+**P71.11** (window-derived budgets), were held pending phasing — "setting them first fits a constant
+to a regime about to change" — and that regime changed when P71.8 landed; the reason they were
+parked no longer applies, so re-check them rather than assuming Tier 4 still fits. **P71.12** is the
+opposite case: a filed _negative_ measurement (main-content extraction is worth 3–12% per page,
+because the existing converter already takes 66 KB of HTML down to 11 KB of text), recorded so
+nobody re-derives it. Explicitly do not schedule.
 
 **P66.26** (PERF-02) is the one refiled sub-item still open, and it stays Tier 4: a Low-severity
 durability trade on the one database holding checkpoints, the cost ledger and traces, with P66.9
@@ -361,29 +249,31 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
-**Rewritten 2026-08-21**: **P75.1 shipped in full** (keyboard slice, then the mouse click-to-expand
-remainder the same day — see [releases.md](releases.md)), clearing the row it had held at the top.
-That leaves only the parked live-tier row below. Document order in the Tier sections below is the
-same order as this table, deliberately, so `scripts/roadmap-status.sh` and this ranking agree.
+**Updated 2026-08-23**: **P76.1**'s both sessions have now run and closed, read-only, no code changes.
+Session B (`internal/tui`) found one survivor, **P76.2** (Tier 2 — S). Session A (`internal/security`)
+found one survivor, **P76.3** (Tier 3 — needs a trust-gate-or-disclosure design decision before code).
+**P76.1** itself is done and demoted off this table — its remaining value is as a pointer to the
+closure record, not open work. Document order in the Tier sections below is the same order as this
+table, deliberately, so `scripts/roadmap-status.sh` and this ranking agree.
 
 **The whole P74 batch — twenty items, P74.1 through P74.20 — has shipped**, P74.17 last, deliberately.
 See [releases.md](releases.md) for every record.
 
 | #   | Item                                                                                       | Tier / size  | Why now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | --- | ------------------------------------------------------------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — _parked by choice, 2026-08-16_ | Verification | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** need a surviving data dir and `aegis sessions trace <id>`, which is **P68.1**. Take P68.1 first whenever this row is picked back up, or the sitting produces the same unreadable evidence again. |
+| 1   | **P76.2** — quit doesn't cancel a running interactive-terminal command | Tier 2 — S | Filed 2026-08-23, survivor of P76.1 Session B. Mechanical fix, no dependency — three quit paths need one line each. |
+| 2   | **P76.3** — a hostile repo can plant its own security-scan baseline to hide its own findings | Tier 3 | Filed 2026-08-23, survivor of P76.1 Session A. Real and currently exploitable against the exact adversarial case the `--network none` scanner subsystem defends against, but needs a trust-gate-or-disclosure design decision, not a one-line fix. |
+| 3   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — _parked by choice, 2026-08-16_ | Verification | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** now have what they needed — a surviving data dir and `aegis sessions trace <id>`, shipped as **P68.1** (2026-08-22) — so whenever this row is next picked up, the next sitting can actually judge them instead of reproducing the same unreadable evidence. |
 
-**One item is deliberately off this list: P68.1** (Tier 2, S). It is what the live-tier row needs before
-it is worth re-running — the eval tier deletes the database holding the trace its own closure
-conditions are written against. It travels with that row, so it is off the list while the row is
-parked.
-
-**A second item is deliberately off this list for a different reason: P74.21** (Tier 4, filed
-2026-08-21). It is the half of P74.17's own roadmap entry that did not ship with it — see
+**Two items are deliberately off this list, both Tier 4 with no fired trigger.** **P74.21** (filed
+2026-08-21) is the half of P74.17's own roadmap entry that did not ship with it — see
 [P74.17's Tier 3 record](#p7417--the-entire-local-model-story-is-one-boolean) for what shipped and what
 didn't. It sits in Tier 4 rather than here because, exactly like P74.17 before it shipped, it has no
 concrete cargo yet: nothing in the tree today needs a per-model prompt suffix or tool-description
-override, only the flag-shaped repair behaviors P74.17 already covers. Promote it once something does.
+override, only the flag-shaped repair behaviors P74.17 already covers. **P77.1** (filed 2026-08-23, out
+of closing PXX.1) is the same shape one layer up: real, but needs a design decision (which providers
+return reasoning content, live vs. collapsed, cost disclosure) before it needs a line of code. Promote
+either once something concrete asks for it.
 
 **Sizes are estimates from reading, not from building, and the batch had a known bias.** The P71
 record is the caution: several of its rows were smaller than filed and one was larger. P74.17 itself
@@ -392,9 +282,8 @@ provider-decorator mechanism rather than the full tool-registration generalizati
 — the build found the real shape, same as the note here warned it would.
 
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in _document_
-order. It still cannot see the cross-tier ranking, and cannot see that **P68.1** is deliberately off
-the list. Use it for repo state and for the parse; use this table
-for what to take.
+order. It still cannot see the cross-tier ranking. Use it for repo state and for the parse; use this
+table for what to take.
 
 ---
 
@@ -415,8 +304,9 @@ small and has no dependency. Nothing is currently open here.
 
 ## Open Work — Tier 2
 
-**Status: 1 open — P68.1**, which stays deliberately off the ranked list because it travels with the
-parked live-tier row. Everything else this tier held has shipped, most recently **P74.15** (HTML
+**Status: 0 open.** **P68.1** (the live tier can now run a measurement it can read back) shipped
+2026-08-22 — record in [releases.md](releases.md). Before it, this tier's most recent shipment was
+**P74.15** (HTML
 comments stripped from injected memory files) on 2026-08-21, right after **P74.14** (a malformed
 dangling call gets its own message instead of the interrupted wording), right after **P74.13** (the
 stable per-agent colour), right after **P74.12** (the eased token counter),
@@ -431,12 +321,8 @@ as directed, **P74.19** (the mouse-capture escape hatch), **P74.20** (the OSC 52
 **P71.9**, **P72.2**, **P72.3** and **P73.2** on 2026-08-19, and **P66.25**/**P67.2**–**P67.5** before
 them. Records in [releases.md](releases.md).
 
-**Document order below is P68.1 alone now** — it is the only entry this tier holds, parked with the
-live-tier row it travels with. The note this tier has carried since 2026-08-19 still holds for whatever
-lands here next: a new Tier 2 entry comes from a review pass or a fired trigger, not from what is
-already filed.
-
-**Two sub-lanes remain, and they do not block each other.** The selection/clipboard group and the
+**Two sub-lanes from the 2026-08-19/20 batch are the rest of this tier's recent history, and they did
+not block each other.** The selection/clipboard group and the
 whole menu lane are both fully shipped (**P74.19**, **P74.20**, **P74.18** — see
 [releases.md](releases.md#mouse-capture-becomes-a-config-choice-not-a-package-deal-2026-08-20-p7419);
 **P74.5**, **P74.6**, **P74.7** — see
@@ -458,50 +344,39 @@ stable per-agent colour) have all shipped (see
 [releases.md](releases.md#a-running-swarm-gets-a-stable-colour-not-three-grey-lines-2026-08-20-p7413)).
 **P74.15** (stripping HTML comments from injected memory files) shipped 2026-08-21 — see
 [releases.md](releases.md#injected-memory-files-stop-paying-for-their-own-authoring-notes-2026-08-21-p7415).
-Only **P68.1** remains in this tier.
+**P68.1** (the live tier can now run a measurement it can read back) shipped 2026-08-22, closing this
+tier out — record in [releases.md](releases.md).
 
-### P68.1 — The live tier can run a measurement it cannot read back
+**P76.2** (filed 2026-08-23, first survivor of **P76.1** Session B) is now open in this tier — see
+below.
 
-**Filed 2026-08-16, from running the live tier rather than from reading it.** Four open verification
-conditions — **LLM-03**, **LLM-10**, **ARCH-04** and **P65.2**'s prompt half — were all scheduled
-against `TestLiveWorkflow`, and none of them is observable there. The tier reports what came over the
-SSE stream; every one of those four is a fact about what the _engine_ decided, which lives in
-`TurnTrace` and the session store.
+### P76.2 — Quit doesn't cancel a running interactive-terminal command
 
-Two concrete gaps, both small:
+**Filed 2026-08-23, out of P76.1 Session B** (the read-only `internal/tui` audit). `Run()`'s doc
+comment at `internal/tui/tui.go:90-98` claims every quit path cancels the in-flight request's context.
+That's true for `m.cancel` (the model-turn context) but not for `m.termRun.cancel` — the context behind
+a command running in the interactive terminal pane (`ctrl+t`, `internal/tui/terminal.go:38-82`). None
+of the three quit paths (`update_key.go:158-170`, `update_overlay.go:152-157`,
+`update_slash.go:25-28`) touch it.
 
-- **The evidence is deleted at the end of the run.** `newLiveWorkflowDaemonTweaked` builds each
-  daemon over a throwaway `os.MkdirTemp` data dir and removes it on cleanup, so `sessions.db` — and
-  with it the P66.11 turn trace that _is_ LLM-02's and ARCH-04's closure condition restated as a
-  struct — goes with it. Every run this sitting made is unreadable after the fact. The fix is an
-  env-gated keep (`AEGIS_EVAL_KEEP_DATA_DIR`) plus the session id in the log line, so a run can be
-  followed with `aegis sessions trace <id>`.
-- **Some of it never leaves the engine at all.** A compaction emits a notice saying it happened and
-  how many messages it folded; the _summary text_ is never an event. So P65.2 — does a local model
-  fill the fixed skeleton without losing what terse bullets kept — cannot be judged from a live run
-  no matter how many times compaction fires. Same for a tool error's text, which the tier logs only
-  as a character count, and which is exactly what P62.9 wanted to read when `edit_section` failed.
+**Effect:** if a shell command is running in the terminal pane when the user quits — ctrl+c-to-quit,
+confirming quit with "y", or `/quit`/`/exit` — the `execTermCmd` goroutine and the child process behind
+it (via `sandbox.NewLocalBackend().ExecStreaming`) are never cancelled. They're orphaned past `p.Run()`
+returning: a resource leak on exit, not a data-loss or security issue, and only reachable while
+`termOpen` with a command actually running.
 
-**Do not fix the second one by widening the SSE stream.** A summary and a tool-error body are
-per-turn engine state, and the stream is what a UI renders; the trace is already the right home and
-already has a reader. What is missing is that the trace records the compaction _event_ but not the
-text it produced, and that the eval tier throws away the database holding it.
+**Fix is mechanical, not a design question** — add `if m.termRun != nil { m.termRun.cancel() }` (or
+equivalent) to each of the three quit paths, matching what `m.cancel` already does there, and update
+the `Run()` doc comment's claim to match once it's actually true again.
 
-**Closure condition:** a `TestLiveWorkflow` run whose log names a session id that survives the test,
-and `aegis sessions trace <id>` on it showing the compaction summary text, the calibration sample
-count and each turn's stop reason. That single change is what unblocks four verification items;
-until it exists, re-running the tier produces the same evidence it produced today.
-
-Priority: Tier 2 — S. No dependency. **Deliberately off the "Up next" list**, because it travels with
-row #6 and that row is parked: its whole value is making the next live sitting readable. If that
-sitting is ever scheduled, this comes first — a tier that cannot be read back costs the same and
-yields less.
+Priority: Tier 2 — S, no dependency, self-contained.
 
 ---
 
 ## Open Work — Tier 3
 
-**Status: 0 open.** **P75.1** (per-block tool-result expand/collapse, filed 2026-08-21 the same day
+**Status: 2 open — P76.1 (both sessions done, entry kept as a pointer), P76.3 (its Session A
+survivor).** **P75.1** (per-block tool-result expand/collapse, filed 2026-08-21 the same day
 the styling follow-up below shipped) shipped in full the same day, both slices — record in
 [releases.md](releases.md#p751-shipped-in-full-2026-08-21). **P74.17** (per-model harness profiles)
 shipped 2026-08-21 too, closing the tier out before this —
@@ -524,55 +399,134 @@ is blocked by, other work. **P72.1 is the worked example of the "sequence-depend
 here rather than being built the day it was filed because it needed a cold-start policy decided, not
 a wire, and the resolution was to put four design questions to the user before writing anything.
 
-### PXX.1 -> User doesn't like the inline truncation done by Aegis and would like to see the full output from command and other lines of text.
+### P76.1 — Audit the codebase's unread 26%: `internal/tui` and `internal/security`
 
-I'd like to revisit how text within the Aegis TUI is truncated as it's very limiting for a user to review the commands being run. Additionally when the model is working on something, it shows generating but it doesn't really stream the output well except in chunks or give insight to the user about the status of a command or request in action. It feels very blackbox that things are being done where a user might appreciate seeing some of the thinking that is taking place by the model as it reasons through the resquestbefore output and actions are taken.
+**Filed 2026-08-21**, from reconciling a generic sprawl/hot-path/security refactor-audit prompt
+(`research/CodeRefreactorPrompt.md`) against what already exists. Most of what that prompt asks for
+is not open work — it's already-answered work. `CodeReview.md` (2026-08-15) ran a six-specialist
+audit against exactly its three axes — sprawl (QUAL-01…15), hot paths (PERF-01…09), security
+(SEC-01…14, VULN-01…12, ARCH-01…13) — through adversarial debate and arbitration, a rigor level a
+fresh single-pass audit won't match. Most of the high-value findings are already shipped (QUAL-01/02/
+03/06, ARCH-05/06, the P66 Tier-1 exploitable set, SEC-01's `.env` gate, VULN-11's flag-parity class),
+and the rest is already triaged into Tier 4 with a stated reason (**P66.17**, **P66.23**, **P66.26**,
+the QUAL-04/05/07/08/09 grab-bag) or explicitly WONTFIX'd (QUAL-05 — the TUI "god struct" is just the
+Bubbletea Elm-architecture model, downgraded to Info absent a concrete bug). Re-running that prompt's
+Phase 1 across the whole tree would mostly reproduce `CodeReview.md`.
 
-**P74.2, P74.3 and P74.4 (the chrome removal, the tool-block gutter, and the read/search grouping) all
-shipped 2026-08-20** — records in [releases.md](releases.md). **P74.16** (the reactive
-clip-and-retry path on a context-overflow error) shipped 2026-08-21, the day it was filed —
-`provider.IsContextOverflowError` was already there and already well-tested (`internal/drive` uses it
-for its own whole-conversation reset), so the "check first whether the overflow error is even
-distinguishable" caveat below turned out to already be answered; the new work was
-`clipOverflowBatch` (`internal/engine/overflowclip.go`), wired into `engine.Run`'s per-turn error
-handling. Record: [A context overflow now clips and retries instead of failing the
-run](releases.md#a-context-overflow-now-clips-and-retries-instead-of-failing-the-run-2026-08-21-p7416).
+**What it doesn't reproduce: `CodeReview.md`'s own Section 10.4 names the one gap it left standing.**
+`internal/tui` and `internal/security` together are **26% of production Go** and were "still
+substantially unread" by the six-specialist pass — the review's stated remaining exposure, not this
+item's own guess. `internal/tui` is also the single largest package (16,080 LOC / 56 files) and has
+had 20+ items shipped into it in the past week (the whole P74 batch plus P75.1) with no structural
+pass behind any of them.
 
-**P74.17 — the entire local-model story is one boolean — shipped 2026-08-21, closing this tier.** It
-built `internal/profile.Harness`/`Resolver`, resolved per `Request.Model`, and used it to move
-prose-tool-call salvage (P74.8) and a newly-built argument-shape repair (P74.9's deferred second half)
-off the blanket `LocalPromptProfile()` boolean they'd been gated on. It deliberately shipped only that
-provider-decorator half of the fuller sketch below — the tool-registration half
-(`builtin.Options.LocalProfile` generalized into the same per-model `Harness`, carrying `PromptSuffix`,
-`ToolDescriptionOverrides` and `DeferredTools`, plus the runtime rejection for a profile that tries to
-exclude required scaffolding) did not ship and is filed separately as **P74.21** in
-[Tier 4](#open-work--tier-4), because — like P74.17 itself before P74.8/P74.9 gave it cargo — it has no
-concrete behavior asking to be registered yet. Full record:
-[releases.md](releases.md#local-model-repair-behaviors-resolve-per-model-instead-of-per-boolean-2026-08-21-p7417).
+**Plan — deliberately multi-session, one phase per sitting, mirroring why the original review used
+six separate specialist tracks instead of one:**
 
-**A follow-up styling pass shipped 2026-08-21, same day.** P74.3's over-cap summary line
-(`renderToolResult`, `internal/tui/toolview.go`) rendered its whole "N lines (/tools full to expand)"
-text in the tool-tag color; the expand hint is now muted (`th.diffMeta`), matching the "N more lines"
-footers `renderLinesBlock`/`renderReadFileResult` already used. Those two footers also picked up the
-same `│` gutter bar the body above them uses, so the truncation hint reads as a continuation of the
-same indented, grey blockquote-style block instead of a bare indent. No behavior change, no new test
-needed beyond the existing `TestRenderToolResult_CollapsesToSummaryWhenOverCap`, which still passes
-unmodified.
+- **Session A — `internal/security` only.** Read-only, no code changes (the original prompt's own
+  "AUDIT and STRUCTURAL BLUEPRINT, do not change files" constraint carries over — it's the right
+  discipline regardless of which prompt asked for it). Before writing up any candidate finding, check
+  it against `CodeReview.md`'s SEC-*/VULN-*/ARCH-* sections and against `releases.md` — if it's already
+  there and shipped, or already parked in Tier 4 with a reason, it is not new work. Output: a short
+  findings addendum, each item cited `file:line`, each marked CONFIRMED (traced and, where security-
+  relevant, executed — see how VULN-01/02/11 were verified) or SUSPECTED, matching the existing
+  review's own discipline rather than inventing a new one.
+- **Session B — `internal/tui` only.** Same read-only rule, same cross-check requirement — in
+  particular against QUAL-05 (already WONTFIX'd; don't re-litigate it) and against [Decisions that
+  outlive the items that made them](#decisions-that-outlive-the-items-that-made-them), which records
+  two rendering-mode decisions this package's owner already made deliberately.
+- **Session C+ — file survivors as real roadmap entries.** Whatever passes the Session A/B cross-check
+  becomes its own `P76.2`, `P76.3`, ... with its own Priority line and tier, sized by the existing
+  [Tiering Criteria](#tiering-criteria) — not a blanket "Phase A wave" imposed ahead of knowing what
+  the findings are.
+- **Validation, every session:** `go build ./...`, `go vet ./...`, `go test -race ./...`, plus
+  `staticcheck ./...` and `govulncheck ./...` — both already ran clean as of `CodeReview.md` Section
+  10; re-run to catch drift since 2026-08-15, not to re-derive that baseline from scratch.
 
-**What the styling pass deliberately didn't touch, and P75.1 then closed the same day: the toggle used
-to be session-wide.** `/tools full` used to flip every collapsed result in the transcript at once, with
-no per-block expand by mouse or keyboard — filed as **P75.1** and shipped in full 2026-08-21, both the
-keyboard slice and the mouse click-to-expand remainder. Full record:
-[releases.md](releases.md#p751-shipped-in-full-2026-08-21).
+**Do not** re-audit packages `CodeReview.md` already covered in depth (`internal/engine`,
+`internal/provider`, `internal/permission`, `internal/session`, `internal/tool/builtin`) without a
+reason narrower than "general audit" — those already carry a debated, arbitrated finding set and a
+live shipped-fix record; re-reading them from a generic prompt is exactly the duplicate work this
+item exists to avoid.
+
+**Both sessions ran 2026-08-23; the audit is closed.** Session B (`internal/tui`) found one survivor:
+a resource leak where none of the three quit paths cancel `m.termRun`, so a command running in the
+interactive terminal pane (`ctrl+t`) outlives `p.Run()` returning. Filed as **P76.2**, Tier 2.
+Everything else in `internal/tui` checked clean — no other goroutine/channel issues, no contradiction
+of the alt-screen/app-owned-frame or app-owned-selection decisions, QUAL-05 correctly left alone.
+
+Session A (`internal/security`) found one survivor: `applyBaseline` (`security.go:397-424`,
+`baseline.go`) reads `.aegis/security-baseline.yaml` straight from the *scan target* directory with no
+workspace-trust gate, and the report surfaces suppressions only as a bare count — never which rule/CVE/
+location was hidden. A hostile repository — exactly the threat model the `--network none` scanner
+design defends against — can ship a baseline that pre-suppresses the finding for its own planted
+vulnerability, and nothing distinguishes an operator-authored baseline from a repo-planted one. Needs a
+trust-gate-or-disclosure design decision, not a one-line fix. Filed as **P76.3**, Tier 3. Everything
+else in `internal/security` checked clean — network isolation is consistently correct and test-pinned
+(including the gosec warm/analyze split's fatal-on-warm-failure invariant, actually enforced in code,
+not just documented), no injection surface in `install.go`/`recon.go`'s argv construction, `RedactText`'s
+fail-open posture confirmed as the deliberate P24.12/FIND-09 design. VULN-06 (already Tier 4/P66.23),
+the XML recursion sweep, and nmap/nuclei flag-injection defenses were all correctly excluded as
+already-covered.
+
+**P76.1 itself is done** — both sessions complete, survivors filed as their own entries above/below.
+This item's remaining value is as a pointer for anyone asking "has `internal/tui`/`internal/security`
+had a structural pass" — yes, 2026-08-23, see `releases.md` for the closure record and **P76.2**/
+**P76.3** for what it found.
+
+Priority: Tier 3 — L, multi-session by design. No dependency, but Session A and B should not be
+collapsed into one sitting — the prompt budget discipline `CLAUDE.md` documents elsewhere is the same
+reason the original six-specialist review didn't run as one pass either.
+
+### P76.3 — A hostile repo can plant its own security-scan baseline to hide its own findings
+
+**Filed 2026-08-23, out of P76.1 Session A** (the read-only `internal/security` audit). `applyBaseline`
+(`internal/security/security.go:397-424`, `internal/security/baseline.go`) reads
+`.aegis/security-baseline.yaml` straight from the scan **target** directory, with no workspace-trust
+gate. `Report.Format()` (`security.go:541-542`) then surfaces every suppression as a bare count —
+`"Suppressed by baseline: N"` — never the rule ID, CVE, severity, or location of what was hidden.
+
+**Why this matters here specifically:** the whole scanner subsystem is built around one threat model —
+`gosec.go`'s own comments call out "an exfiltration path out of a hostile repo," which is why
+multiscanner runs `--network none` with the workspace mounted. A baseline file is a gap in that same
+model: a hostile or untrusted repository can ship a `.aegis/security-baseline.yaml` that pre-suppresses
+the CVE/SAST finding for a vulnerability it planted itself. The operator, or a model reviewing the scan
+output, sees what looks like a clean report plus an easy-to-miss count line — with no way to tell what
+was suppressed without manually opening the baseline YAML. Nothing today distinguishes an
+operator-authored baseline (legitimate: "we've triaged this and accept the risk") from a
+repo-planted one (the exact thing the scanner exists to catch).
+
+**Needs a design decision before code, not a one-line fix** — the two candidate directions don't have
+to be exclusive:
+- Gate baseline application on `config.WorkspaceTrusted`/`TrustWorkspace` (see `internal/workspacetrust`
+  and the `CLAUDE.md` note on how that question must be asked), the same way `.aegis/.env` is already a
+  documented, deliberate hole gated on trust rather than an oversight.
+- Always list suppressed findings' identity (rule/CVE/severity/location) in the report regardless of
+  trust — a baseline that can silently hide *what* it hid is the sharper problem even before trust
+  enters into it.
+
+Priority: Tier 3 — real, currently exploitable against the exact adversarial case the subsystem is
+designed to defend, but not small-effort/no-dependency (disqualifying Tier 1) and not a one-line fix
+(disqualifying Tier 2) — the report-disclosure half and the trust-gate half both need scoping first.
+
+**The un-numbered inline-truncation/blackbox request closed out 2026-08-23.** Everything it asked for
+was already shipped by the time it was reviewed — P74.2/P74.3/P74.4 (chrome removal, collapse-with-
+expand, read/search grouping), P74.11/P74.12 (the stall ramp and eased token counter), P74.16 (overflow
+clip-and-retry), and P75.1 (per-block expand). One thread it named — visibility into the model's actual
+reasoning before it acts — is not covered by any of those and is real; it's filed on its own as
+**P77.1** below, since it's a design question rather than a continuation of that UI-polish work. Full
+closure record: [releases.md](releases.md#the-inline-truncation-request-closes-out-2026-08-23-pxx1).
 
 ## Open Work — Tier 4
 
-**Status: 25 open** — 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
+**Status: 26 open** — 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
 6 from the P66 review batch, 5 from the P67 external-source reading, 5 from the P71 batch filed
-2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), and one new arrival: **P74.21**,
-filed 2026-08-21 the same day P74.17 shipped without it. **P70.3** shipped 2026-08-18 and has left this
-tier. **P63.10** shipped 2026-08-21, taken opportunistically while `internal/tui` was open for
-**P75.1** — record in
+2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), **P74.21** (filed 2026-08-21
+the same day P74.17 shipped without it), and **P77.1** (filed 2026-08-23, out of closing PXX.1).
+**P77.2**, **P77.3**, **P77.4**, and **P77.5** (filed the same day, same batch) all shipped
+2026-08-24 — see [releases.md](releases.md#p774-shipped-2026-08-24). **P70.3**
+shipped 2026-08-18 and has left this tier. **P63.10** shipped 2026-08-21, taken opportunistically while
+`internal/tui` was open for **P75.1** — record in
 [releases.md](releases.md#p6310-shipped-2026-08-21).
 
 The P66 entries here are **deliberately grouped grab-bags**: each collects the Low-severity residue of
@@ -623,6 +577,36 @@ trained on. P74.17 waited for exactly this kind of cargo (P74.8/P74.9) before it
 this is the same wait, one layer up.
 
 Priority: Tier 4 — M. No fired trigger yet.
+
+### P77.1 — Nothing shows the model's reasoning before it acts
+
+**Filed 2026-08-23, out of closing PXX.1** (an un-numbered user request about TUI truncation and
+"blackbox" turns — see [its closure record](releases.md#the-inline-truncation-request-closes-out-2026-08-23-pxx1)
+for what it asked and what P74.2/P74.3/P74.4/P74.11/P74.12/P74.16/P75.1 already answered). One thread
+survived every shipped fix: none of them surface the model's own reasoning — a provider's thinking/
+reasoning content, when it returns any — before or while the model acts. What shipped answers "is
+Aegis doing something and how far along," not "what is the model about to do and why."
+
+**Why this needs design before it needs code, not the reverse:**
+
+- **Not every backend returns it.** `tokenest.Message` already has to account for `ThinkingBlock`
+  existing at all (P66.17 / LLM-07 names the gap in the token estimate); a TUI affordance built only
+  against one provider's shape would be the same kind of narrow fix.
+- **Some providers meter it.** Reasoning/thinking tokens are billed on at least one cloud provider
+  today. A live-streamed "here's what the model is thinking" panel has a real cost implication a user
+  should be told about, not a free view into something already paid for.
+- **Live vs. collapsed is a real design choice, not a default.** Raw chain-of-thought is often long,
+  repetitive and not meant to be read verbatim — the existing `thinkingPhrase` status flavor text
+  (P74.10's reduced-motion work already touches this path) is a deliberately compressed stand-in, not
+  a first draft of the real thing. Streaming it in full could as easily make the transcript feel more
+  blackbox as less, if it reads as noise.
+
+**Promote when:** a user reports specifically wanting the reasoning content itself (not status/
+progress, which P74.11/P74.12 already cover), or when a provider adapter already carries
+`ThinkingBlock` data through to a point the TUI could render it cheaply.
+
+Priority: Tier 4 — M. No fired trigger yet; needs a design decision (which providers, live vs.
+collapsed, cost disclosure) before it needs a line of TUI code.
 
 ### P71.6 — Nothing memoizes a fetch or a search within a session
 
@@ -1175,8 +1159,11 @@ Priority: Tier 4 — no concrete trigger, XS. A comment, not a feature.
 
 ## Verification Work
 
-**Status: 8 open** (**P68.4**, **P68.5** and **P68.6** filed 2026-08-17; **P68.2** filed _and closed_ 2026-08-17 — it ran the same day and its record is
-below; **P65.3** closed 2026-08-16, its record is in [releases.md](releases.md)). Every
+**Status: 8 open** (**P68.4**, **P68.5** and **P68.6** filed 2026-08-17; **P68.2** and **P68.3** both
+filed _and closed_ 2026-08-17, their records moved to
+[releases.md](releases.md#the-template-that-ate-the-tool-calls-2026-08-17) and
+[releases.md](releases.md#the-tiers-task-was-a-boolean-2026-08-17-p683) respectively;
+**P65.3** closed 2026-08-16, its record is likewise in [releases.md](releases.md)). Every
 item here has its code already written and merged — nothing below is a design or implementation task.
 Each is closed by running a live-model harness and recording the result the item's closure condition
 names, not by writing more code. They are **not tiered**: tiering answers "how urgent is this build,"
@@ -1185,91 +1172,22 @@ and there is no build left to prioritize.
 **The 2026-08-16 sitting changed how these should be scheduled.** They were listed as four items
 sharing one harness plus P62.8 waiting on hardware. After running it: the shared-harness premise
 holds only for what the tier can _observe_, and four closure conditions (LLM-03, LLM-10, ARCH-04 and
-P65.2) turned out not to be observable there at all — they need **P68.1** first. P38.1 needs a
-permission rather than a schedule slot, and P62.9 needs a better task rather than more runs. **This
-whole track is parked at the one remaining row of [Up next](#up-next) by choice**;
+P65.2) turned out not to be observable there at all — they needed **P68.1** first, which shipped
+2026-08-22 (a session id that survives the test, plus `aegis sessions trace <id>` now printing the
+compaction summary text, the calibration sample count and each turn's stop reason). Those four are
+now observable whenever the next live sitting runs; nobody has judged them against real evidence yet.
+P38.1 needs a permission rather than a schedule slot, and P62.9 needs a better task rather than more
+runs. **This whole track is parked at the one remaining row of [Up next](#up-next) by choice**;
 what is written below each item is what the run established, so a future sitting starts from evidence
 rather than from the pre-run plan.
 
-### P68.2 — The stock Qwen3 chat template deletes tool calls from history, and it confounded two sittings
-
-**Filed 2026-08-17. The mitigation shipped the same day; what is open is what it changes on the
-tier.** Ollama renders history server-side from the model's own chat template, and Qwen3's stock
-**Go text/template** writes the assistant turn as:
-
-```
-{{ if .Content }}{{ .Content }}{{ else if .ToolCalls }}<tool_call>…{{ end }}
-```
-
-Content and tool calls are **mutually exclusive branches**. `translate` in
-`internal/provider/ollama` sets both fields on any turn where the model narrated before calling —
-which a thinking model does most turns — so **the call is silently deleted from the rendered
-history** and the model then sees a `<tool_response>` for a call it has no record of making.
-
-**Measured on `qwen3:14b-32k`**, temperature 0, history = prose + `read_file{path:"srv/etc/config.txt"}`
-
-- result, then asked which path it read:
-
-| arm                                                   | correct                              |
-| ----------------------------------------------------- | ------------------------------------ |
-| as captured (prose + call)                            | **0/3** — answered `/etc/config.txt` |
-| prose withheld                                        | **3/3**                              |
-| prose kept, template's `else if` split into two `if`s | **3/3**                              |
-| `aegis-qwen35-9b:32k` (ships a **Jinja** template)    | **3/3**                              |
-
-Two things follow. First, **this is most of the "the 9b is just better" impression**: the 9b's Jinja
-template renders prose _and_ the call, so it was never losing arguments the 14b was losing. Second,
-it **confounds every multi-turn measurement taken on an affected model** — `qwen2.5-coder:1.5b`, the
-model behind P52.16's `toolResultEcho` numbers, is affected too, and P62.9's two 14b failures on
-2026-08-16 (one rewrote `temps.py` and reported a confidently wrong average) are exactly the shape a
-model shows when it cannot see what it just did.
-
-**Shipped 2026-08-17:** `ollamainfo.TemplateDropsToolCalls` reads the template from `/api/show` and
-detects the `else if … .ToolCalls` shape; the adapter asks once per model, persists the verdict in
-`internal/modelcaps`, warns, and withholds the prose so the call survives. Detector verified live:
-`qwen3:14b-32k` and `qwen2.5-coder:1.5b` flagged, `aegis-qwen35-9b:32k` and `gemma4:12b` clear.
-**Splitting the turn into two messages was tried first and does not work** — Ollama coalesces
-adjacent same-role messages before templating, so the pair arrives as the same message and is
-dropped identically (0/3, unchanged).
-
-**Both closure conditions ran the same day, n=6 per arm, and the answer is "the task still cannot
-resolve this".** `TestLiveWorkflow/FixSeededBug`, same fixture, three arms:
-
-| arm                                             | passed  | tool calls per run (median) |
-| ----------------------------------------------- | ------- | --------------------------- |
-| unmitigated (pre-fix `317c388`, stock template) | **0/6** | 1, 1, 4, 1, 1, 1 (**1**)    |
-| mitigation active (prose withheld)              | **1/6** | 2, 1, 3, 1, 2, 2 (**2**)    |
-| template-corrected model (`qwen3:14b-32k-fix`)  | **2/6** | 9, 3, 39, 1, 1, 4 (**3.5**) |
-
-**0/6 against 2/6 is not a significant difference** (Fisher's exact, p ≈ 0.45), and no claim of one is
-made. Three things are nonetheless worth carrying:
-
-- The control arm is now **properly characterised** rather than anecdotal: **0/6 today, 0/8 including
-  2026-08-16**, and in five of six runs it ran the script, read the traceback, and **stopped after a
-  single `shell` call**. That is a much stronger version of P62.9's own finding.
-- The **failure shape moves** with the fix even where the pass rate does not: median tool calls per
-  run 1 → 2 → 3.5 across the three arms. The corrected arms engage; the unmitigated one gives up.
-- Both corrected arms produced passes; the unmitigated arm produced none in 8 runs. Directionally
-  consistent with the probe, **not independent confirmation of it**.
-
-**The template defect itself does not depend on any of this.** It is settled by the history-fidelity
-probe (0/3 → 3/3 → 3/3, deterministic, one variable flipped), which is a mechanism-level measurement
-and the evidence the shipped fix rests on. This item's end-to-end half is the weaker instrument, and
-it behaved like one.
-
-**What this leaves open** is no longer P68.2's original question but P62.9's: the task needs
-replacing before any arm-versus-arm comparison on it means anything. **P68.2 is closed as a
-measurement** — recorded here and in [releases.md](releases.md), with the tuning procedure written up
-in [docs/local-model-tuning.md](../docs/local-model-tuning.md). **What it hands to P62.9** is a
-6-run control arm and a concrete reason the 2026-08-16 failures were not purely competence.
-
-**Still unretracted, and now the more interesting thread:** P52.16's `toolResultEcho` measurement was
-taken on `qwen2.5-coder:1.5b`, which the detector flags as affected. That experiment measured
-tool-result correlation through a template that was deleting the calls being correlated. Re-running
-it is cheap (it is a 40-trial probe, not a workflow tier) and is the one re-run this sitting did not
-do.
-
-Priority: Verification — the remaining work is P62.9's task replacement, not another run of this.
+**P68.2 — The stock Qwen3 chat template deletes tool calls from history — filed and closed
+2026-08-17.** Full record, measurements and the shipped detector (`ollamainfo.TemplateDropsToolCalls`)
+are in [releases.md](releases.md#the-template-that-ate-the-tool-calls-2026-08-17). Kept here only
+because it still hands something to open work: it's why **P62.9** needs a task replacement rather than
+another run of the same one (a 6-run control arm and a concrete reason the 2026-08-16 failures weren't
+purely competence), and why **P52.16**'s `toolResultEcho` measurement — taken on the affected
+`qwen2.5-coder:1.5b` — is worth a cheap re-run nobody has done yet.
 
 ### P66.22 — The LLM-tier findings are all estimates; one live run converts them to measurements
 
@@ -1411,58 +1329,13 @@ Priority: Verification — every load-bearing harness fix the re-tests have root
 closeable once a live built-in drive is confirmed to reach a verify-clean suite unattended, in one
 invocation, on a local model. No code work remains; it is live-run tracking.
 
-### P68.3 — The tier's task was a boolean, so it could not rank anything
-
-**Filed and shipped 2026-08-17, out of P68.2's underpowered re-run.** P68.2 ran three arms at n=6 and
-returned p ≈ 0.45. The diagnosis is not that six runs is too few — it is that
-`TestLiveWorkflow/FixSeededBug` is **pass/fail, so a run yields one bit**, and no n a live tier can
-afford rescues an instrument that coarse. Three structural defects, all measured rather than argued:
-
-1. **One bit per run.** Six runs, six bits.
-2. **It bottoms out.** Five of six control runs scored zero by _giving up after a single tool call_.
-   A task most runs score zero on cannot rank two models, let alone two configurations.
-3. **No cross-turn dependency.** Its ideal path is three tool calls, so a model never carries a fact
-   from an early turn to a late one — which is exactly the failure P68.2 found in the wild. **The
-   tier's discriminating task was structurally blind to the defect the tier had just caught.**
-
-**Shipped: `TriageTask`** (`internal/eval/triagetask.go`), a graded security-triage task scored out
-of 12 — five discovery points, 2 precision, 2 integrity, 2 remediation, 1 no-regression. Nine
-pure-stdlib Python files (no pytest, no pip: a missing dependency and a weak model must not produce
-the same red), five planted issues spanning trivial-to-cross-file, and one file clean on purpose.
-Grading is entirely mechanical — parse a JSON report, run a suite, hash the protected files — because
-an LLM judge would put a second model's variance _inside_ the instrument.
-
-`SeededBugTask` is **kept and relabelled as the tier's control**: small, unambiguous, and a harness
-that fails it is failing at driving a model rather than at a hard problem. The two answer different
-questions and the tier now runs both.
-
-**Measured the same day, n=3 per model:**
-
-| model                       | scores    | mean          |
-| --------------------------- | --------- | ------------- |
-| `aegis-qwen35-9b:32k`       | 9, 11, 12 | **10.7 / 12** |
-| `qwen3:14b-32k` (mitigated) | 3, 2, 3   | **2.7 / 12**  |
-
-Complete separation at n=3 (exact Mann-Whitney, p = 0.10 two-sided — the floor for this n), against
-the old task's p ≈ 0.45 at n=6. **This is the closure condition P62.9 has been asking for**: a task
-whose result means something at a single-digit n.
-
-The 14b's failure is also now _specific_ rather than a bare red: it **never wrote `findings.json` in
-any of three runs** despite greping extensively. That is a reporting-step failure, not a
-tool-reachability one, and it is the kind of thing the old task could not have said.
-
-**The first live run found a defect in the grader**, which is recorded because it is the argument for
-running a new instrument before trusting it: a run that left the project unable to import collapsed
-all three run-dependent criteria onto one truncated `Traceback (most recent call last):` — a rubric
-printing the same non-diagnosis three times. Breaking the code is now charged **once**, to
-`no_regression`, with the actual exception named; discovery is explicitly unaffected, so a broken
-build cannot erase a correct audit. Pinned by
-`TestTriageBrokenProjectIsChargedOnceAndDiagnosed`.
-
-**What is open:** nothing in this item. What it hands onward is a usable instrument — the arm-versus-arm
-comparisons P68.2 could not make (mitigation on/off, template corrected/stock, and the sampling
-parameters `docs/local-model-tuning.md` currently recommends on judgement alone) are now runnable at
-an n a sitting can afford.
+**P68.3 — The tier's task was a boolean, so it could not rank anything — filed and shipped
+2026-08-17.** Full record, the grading rubric and the measured separation
+(`aegis-qwen35-9b:32k` 10.7/12 vs `qwen3:14b-32k` 2.7/12, complete at n=3) are in
+[releases.md](releases.md#the-tiers-task-was-a-boolean-2026-08-17-p683). Kept here only because later
+items build on it: it shipped `TriageTask` (`internal/eval/triagetask.go`) as the tier's ranking
+instrument, kept `SeededBugTask` as the control, and is the closure condition **P62.9** and **P68.4**
+both cite.
 
 ### P68.4 — The triage rubric's measuring band sits below the strongest local model
 
@@ -1555,10 +1428,10 @@ without re-pulling `qwen3:14b` — worth knowing before someone plans a sitting 
 behaviour is recorded in enough detail above to be recognised if it recurs on another model, and
 whether it is Qwen3-specific or general is itself now an open question.
 
-**What would close it:** read one such run's trace (which needs **P68.1** — the tier deletes its data
-dir) and establish whether the model ever attempted a write tool and failed, or never selected one.
-Those are an Aegis problem and a model problem respectively, and the run as recorded cannot tell them
-apart.
+**What would close it:** read one such run's trace — **P68.1** (shipped 2026-08-22) means a future run's
+data dir can now survive and be read with `aegis sessions trace <id>` — and establish whether the
+model ever attempted a write tool and failed, or never selected one. Those are an Aegis problem and a
+model problem respectively, and the run as recorded cannot tell them apart.
 
 ### P62.9 — The exposed-schema half of the base prompt: five editing tools and three prose blocks
 

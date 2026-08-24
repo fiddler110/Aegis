@@ -94,11 +94,11 @@ func TestToolCard_ConcurrentCallsUpdateIndependently(t *testing.T) {
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_a", ToolInput: inputA})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_b", ToolInput: inputB})
 
-	if len(m.pendingTools) != 2 {
-		t.Fatalf("expected two independently-tracked pending cards, got %d", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 2 {
+		t.Fatalf("expected two independently-tracked pending cards, got %d", len(m.toolState.pendingTools))
 	}
-	cardA, okA := m.pendingTools["tu_a"]
-	cardB, okB := m.pendingTools["tu_b"]
+	cardA, okA := m.toolState.pendingTools["tu_a"]
+	cardB, okB := m.toolState.pendingTools["tu_b"]
 	if !okA || !okB {
 		t.Fatalf("expected both tool IDs to have their own card, got tu_a=%v tu_b=%v", okA, okB)
 	}
@@ -108,10 +108,10 @@ func TestToolCard_ConcurrentCallsUpdateIndependently(t *testing.T) {
 
 	// Resolve out of call order: B's result arrives first.
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "read_file", ToolID: "tu_b", ToolResult: "package b\n"})
-	if _, stillPending := m.pendingTools["tu_b"]; stillPending {
+	if _, stillPending := m.toolState.pendingTools["tu_b"]; stillPending {
 		t.Fatal("expected tu_b to be resolved and removed from pendingTools")
 	}
-	if _, stillPending := m.pendingTools["tu_a"]; !stillPending {
+	if _, stillPending := m.toolState.pendingTools["tu_a"]; !stillPending {
 		t.Fatal("expected tu_a to remain pending; resolving tu_b must not affect it")
 	}
 	m.refresh()
@@ -124,8 +124,8 @@ func TestToolCard_ConcurrentCallsUpdateIndependently(t *testing.T) {
 	}
 
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "read_file", ToolID: "tu_a", ToolResult: "package a\n"})
-	if len(m.pendingTools) != 0 {
-		t.Fatalf("expected no pending cards left after both results arrived, got %d", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 0 {
+		t.Fatalf("expected no pending cards left after both results arrived, got %d", len(m.toolState.pendingTools))
 	}
 	m.refresh()
 	final := plainView(m)
@@ -150,15 +150,15 @@ func TestToolCard_TurnErrorResolvesStuckPendingCard(t *testing.T) {
 
 	toolInput, _ := json.Marshal(map[string]string{"path": "main.go"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_stuck", ToolInput: toolInput})
-	if len(m.pendingTools) != 1 {
-		t.Fatalf("expected one pending card before the error, got %d", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 1 {
+		t.Fatalf("expected one pending card before the error, got %d", len(m.toolState.pendingTools))
 	}
 	beforeLen := m.transcript.Len()
 
 	m.applyEvent(api.Event{Kind: api.KindError, Error: "engine: aborting suspected loop"})
 
-	if len(m.pendingTools) != 0 {
-		t.Fatalf("expected the stuck card to be resolved and cleared after a turn error, got %d still pending", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 0 {
+		t.Fatalf("expected the stuck card to be resolved and cleared after a turn error, got %d still pending", len(m.toolState.pendingTools))
 	}
 	// KindError itself appends one new item (the "error: ..." banner); the
 	// stuck card must be resolved in place, not via a second appended item,
@@ -189,14 +189,14 @@ func TestToolCard_StreamClosedResolvesStuckPendingCard(t *testing.T) {
 
 	toolInput, _ := json.Marshal(map[string]string{"command": "sleep 10"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "shell", ToolID: "tu_cancelled", ToolInput: toolInput})
-	if len(m.pendingTools) != 1 {
-		t.Fatalf("expected one pending card before cancellation, got %d", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 1 {
+		t.Fatalf("expected one pending card before cancellation, got %d", len(m.toolState.pendingTools))
 	}
 
 	m = driveUpdate(t, m, streamClosedMsg{})
 
-	if len(m.pendingTools) != 0 {
-		t.Fatalf("expected streamClosedMsg to resolve the stuck card, got %d still pending", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 0 {
+		t.Fatalf("expected streamClosedMsg to resolve the stuck card, got %d still pending", len(m.toolState.pendingTools))
 	}
 	got := plainView(m)
 	if strings.Contains(got, "running") {
@@ -227,8 +227,8 @@ func TestToolCard_StartShowsCardWhileArgumentsStream(t *testing.T) {
 	if !strings.Contains(got, "preparing") {
 		t.Fatalf("expected the provisional card to show it is still being prepared, got:\n%s", got)
 	}
-	if len(m.pendingTools) != 1 {
-		t.Fatalf("expected the start event to track one pending card, got %d", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 1 {
+		t.Fatalf("expected the start event to track one pending card, got %d", len(m.toolState.pendingTools))
 	}
 	// The arguments aren't known yet, so nothing may claim the call ran or
 	// enter the tool-history strip — KindToolCall still owns both.
@@ -251,7 +251,7 @@ func TestToolCard_StartReconcilesInPlaceWithoutDuplicating(t *testing.T) {
 
 	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file", ToolID: "tu_1"})
 	afterStart := m.transcript.Len()
-	card := m.pendingTools["tu_1"]
+	card := m.toolState.pendingTools["tu_1"]
 	if card == nil {
 		t.Fatal("expected the start event to register a card under its tool_use ID")
 	}
@@ -261,8 +261,8 @@ func TestToolCard_StartReconcilesInPlaceWithoutDuplicating(t *testing.T) {
 	if got := m.transcript.Len(); got != afterStart {
 		t.Fatalf("expected the call to reuse the started card (same item count); after start=%d after call=%d", afterStart, got)
 	}
-	if len(m.pendingTools) != 1 || m.pendingTools["tu_1"] != card {
-		t.Fatalf("expected the same card still tracked under tu_1, got %v", m.pendingTools)
+	if len(m.toolState.pendingTools) != 1 || m.toolState.pendingTools["tu_1"] != card {
+		t.Fatalf("expected the same card still tracked under tu_1, got %v", m.toolState.pendingTools)
 	}
 	m.refresh()
 	got := plainView(m)
@@ -278,8 +278,8 @@ func TestToolCard_StartReconcilesInPlaceWithoutDuplicating(t *testing.T) {
 
 	// The result must still resolve the same card in place.
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "read_file", ToolID: "tu_1", ToolResult: "package main\n"})
-	if len(m.pendingTools) != 0 {
-		t.Fatalf("expected the reconciled card resolved by its result, got %d still pending", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 0 {
+		t.Fatalf("expected the reconciled card resolved by its result, got %d still pending", len(m.toolState.pendingTools))
 	}
 	if got := m.transcript.Len(); got != afterStart {
 		t.Fatalf("expected the result to update the same item in place; want %d items, got %d", afterStart, got)
@@ -310,13 +310,13 @@ func TestToolCard_StartWithLateToolIDReconcilesAndRekeys(t *testing.T) {
 	if got := m.transcript.Len(); got != afterStart {
 		t.Fatalf("expected the ID-less started card reused; after start=%d after call=%d", afterStart, got)
 	}
-	if _, ok := m.pendingTools["tu_late"]; !ok {
-		t.Fatalf("expected the card re-keyed to the late-arriving tool_use ID, got %v", m.pendingTools)
+	if _, ok := m.toolState.pendingTools["tu_late"]; !ok {
+		t.Fatalf("expected the card re-keyed to the late-arriving tool_use ID, got %v", m.toolState.pendingTools)
 	}
 
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "read_file", ToolID: "tu_late", ToolResult: "package main\n"})
-	if len(m.pendingTools) != 0 {
-		t.Fatalf("expected the re-keyed card resolved by its result, got %d still pending", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 0 {
+		t.Fatalf("expected the re-keyed card resolved by its result, got %d still pending", len(m.toolState.pendingTools))
 	}
 	if got := m.transcript.Len(); got != afterStart {
 		t.Fatalf("expected no orphan block appended for the result; want %d items, got %d", afterStart, got)
@@ -339,14 +339,14 @@ func TestToolCard_ConcurrentStartsTrackedSeparately(t *testing.T) {
 
 	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file", ToolID: "tu_a"})
 	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file", ToolID: "tu_a"})
-	if len(m.pendingTools) != 1 {
-		t.Fatalf("expected a repeated tool_use ID to be ignored, got %d cards", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 1 {
+		t.Fatalf("expected a repeated tool_use ID to be ignored, got %d cards", len(m.toolState.pendingTools))
 	}
 
 	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file"})
 	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "read_file"})
-	if len(m.pendingTools) != 3 {
-		t.Fatalf("expected two ID-less starts to own separate cards, got %d total", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 3 {
+		t.Fatalf("expected two ID-less starts to own separate cards, got %d total", len(m.toolState.pendingTools))
 	}
 }
 
@@ -362,14 +362,14 @@ func TestToolCard_StartResolvedAsStuckOnCancel(t *testing.T) {
 	m.followBottom = true
 
 	m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: "shell", ToolID: "tu_cancelled"})
-	if len(m.pendingTools) != 1 {
-		t.Fatalf("expected one provisional card before cancellation, got %d", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 1 {
+		t.Fatalf("expected one provisional card before cancellation, got %d", len(m.toolState.pendingTools))
 	}
 
 	m = driveUpdate(t, m, streamClosedMsg{})
 
-	if len(m.pendingTools) != 0 {
-		t.Fatalf("expected streamClosedMsg to resolve the provisional card, got %d still pending", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 0 {
+		t.Fatalf("expected streamClosedMsg to resolve the provisional card, got %d still pending", len(m.toolState.pendingTools))
 	}
 	got := plainView(m)
 	if strings.Contains(got, "preparing") {
@@ -394,8 +394,8 @@ func TestToolCard_StartResolvedAsStuckOnError(t *testing.T) {
 
 	m.applyEvent(api.Event{Kind: api.KindError, Error: "engine: context canceled"})
 
-	if len(m.pendingTools) != 0 {
-		t.Fatalf("expected the provisional card resolved after the error, got %d still pending", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 0 {
+		t.Fatalf("expected the provisional card resolved after the error, got %d still pending", len(m.toolState.pendingTools))
 	}
 	if got := m.transcript.Len(); got != beforeLen+1 {
 		t.Fatalf("expected the card resolved in place (only the error banner appended); before=%d after=%d", beforeLen, got)
@@ -422,8 +422,8 @@ func TestToolCard_NoStartEventStillRendersOneCard(t *testing.T) {
 
 	toolInput, _ := json.Marshal(map[string]string{"path": "main.go"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_1", ToolInput: toolInput})
-	if len(m.pendingTools) != 1 {
-		t.Fatalf("expected one card for an unannounced call, got %d", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 1 {
+		t.Fatalf("expected one card for an unannounced call, got %d", len(m.toolState.pendingTools))
 	}
 	m.refresh()
 	got := plainView(m)
@@ -452,8 +452,8 @@ func TestToolCard_NoToolIDFallsBackToFIFO(t *testing.T) {
 	if got := m.transcript.Len(); got != beforeLen {
 		t.Fatalf("expected the ID-less result to still resolve the card in place; before=%d after=%d", beforeLen, got)
 	}
-	if len(m.pendingTools) != 0 {
-		t.Fatalf("expected the ID-less card resolved via FIFO fallback, got %d still pending", len(m.pendingTools))
+	if len(m.toolState.pendingTools) != 0 {
+		t.Fatalf("expected the ID-less card resolved via FIFO fallback, got %d still pending", len(m.toolState.pendingTools))
 	}
 	m.refresh()
 	got := plainView(m)

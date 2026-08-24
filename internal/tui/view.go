@@ -273,13 +273,13 @@ func (m model) renderSidebar(h int) string {
 	add(m.renderConnDetail()) // P28.7: reachable/unreachable + latency at a glance
 	add("")
 
-	if m.streaming && !m.streamStart.IsZero() {
-		if m.firstTokenAt.IsZero() {
+	if m.streaming && !m.phase.streamStart.IsZero() {
+		if m.phase.firstTokenAt.IsZero() {
 			section("WAITING")
 		} else {
 			section("GENERATING")
 		}
-		secs := int(time.Since(m.streamStart).Seconds())
+		secs := int(time.Since(m.phase.streamStart).Seconds())
 		add(m.th.elapsedDim.Render(fmt.Sprintf("%ds elapsed", secs)))
 		add("")
 	}

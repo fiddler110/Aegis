@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -330,4 +331,94 @@ func (tp termPane) view(th theme, focused bool, diagnoseKey string) string {
 		BorderForeground(borderFg).
 		PaddingLeft(1).
 		Render(content)
+}
+
+// handleTerminalKey processes a key event when the terminal pane has focus.
+// Printable characters append to the command line; named keys perform
+// actions (run, cancel, history, etc.). Returns an optional tea.Cmd.
+func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
+	k := msg.String()
+
+	// When a command is running, only ctrl+c (interrupt) is active.
+	if m.term.running {
+		if k == "ctrl+c" && m.termRun != nil {
+			m.termRun.cancel()
+		}
+		m.refresh()
+		return nil
+	}
+
+	// P13.3.1: diagnose the terminal pane's last failed command, if any.
+	if m.term.lastFailed && key.Matches(msg, m.keys.Diagnose) {
+		return m.diagnoseLastFailureCmd()
+	}
+
+	// P40.1: resize the terminal pane while it has focus.
+	if key.Matches(msg, m.keys.PaneNarrower) {
+		m.resizePane(-paneResizeStep)
+		return nil
+	}
+	if key.Matches(msg, m.keys.PaneWider) {
+		m.resizePane(paneResizeStep)
+		return nil
+	}
+
+	switch k {
+	case "esc":
+		m.termFocused = false
+		m.ta.Focus()
+
+	case "ctrl+c":
+		m.term.input = ""
+
+	case "enter":
+		cmd := strings.TrimSpace(m.term.input)
+		if cmd == "" {
+			break
+		}
+		m.term.history = append(m.term.history, cmd)
+		m.term.histIdx = -1
+		m.term.draft = ""
+		m.term.input = ""
+		m.term.appendText("❯ " + cmd + "\n")
+		if m.term.handleCD(cmd) {
+			break
+		}
+		m.term.beginRun(cmd)
+		run, execCmd := execTermCmd(m.term.workDir, cmd)
+		m.termRun = run
+		m.refresh()
+		return execCmd
+
+	case "up":
+		m.term.historyPrev()
+
+	case "down":
+		m.term.historyNext()
+
+	case "backspace":
+		r := []rune(m.term.input)
+		if len(r) > 0 {
+			m.term.input = string(r[:len(r)-1])
+		}
+
+	case "ctrl+u":
+		m.term.input = ""
+
+	case "ctrl+l":
+		m.term.buf.Reset()
+		m.term.refreshVP()
+
+	case "pgup", "pgdown":
+		m.term.vp, _ = m.term.vp.Update(msg)
+
+	default:
+		// Append any single printable rune to the command line.
+		if runes := []rune(k); len(runes) == 1 {
+			m.term.input += k
+		}
+	}
+
+	m.refresh()
+	return nil
 }

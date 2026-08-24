@@ -47,7 +47,7 @@ func (l *LocalBackend) Exec(ctx context.Context, command string, opts ExecOpts) 
 	runCtx, cancel := execWithTimeout(ctx, opts)
 	defer cancel()
 
-	name, args := shellCommand(command)
+	name, args := ShellCommand(command)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = opts.Dir
 	cmd.Env = filteredEnv(os.Environ(), l.stripEnv)
@@ -84,7 +84,7 @@ func (l *LocalBackend) ExecStreaming(ctx context.Context, command string, opts E
 	runCtx, cancel := execWithTimeout(ctx, opts)
 	defer cancel()
 
-	name, args := shellCommand(command)
+	name, args := ShellCommand(command)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = opts.Dir
 	cmd.Env = filteredEnv(os.Environ(), l.stripEnv)
