@@ -12,6 +12,19 @@ import (
 	"github.com/fiddler110/aegis/internal/trace"
 )
 
+// maxTraceToolError bounds the tool-error body kept in a trace (P68.1). Before
+// this the SSE stream logged only a character count for a failing call, so
+// P62.9's edit_section failure — and anything like it — was unreadable once
+// the run ended, even on a daemon whose data survived.
+const maxTraceToolError = 2000
+
+func boundToolError(s string) string {
+	if len(s) <= maxTraceToolError {
+		return s
+	}
+	return s[:maxTraceToolError] + "…"
+}
+
 // P67.7. This file is `runTools` restructured so the scheduler can be fed one
 // call at a time, as that call's block completes in the stream, instead of being
 // handed a finished slice after the whole model turn has drained.
@@ -200,7 +213,7 @@ func (r *toolRound) abandon(s *toolSlot) {
 		return
 	}
 	content := siblingCancelledText(s.tu.Name, r.roundFailure())
-	s.trace = trace.ToolCall{Name: s.tu.Name, IsError: true}
+	s.trace = trace.ToolCall{Name: s.tu.Name, IsError: true, ErrorText: boundToolError(content)}
 	r.safeEmit(Event{Kind: KindToolCall, ToolName: s.tu.Name, ToolID: s.tu.ID, ToolInput: s.tu.Input})
 	r.safeEmit(Event{Kind: KindToolResult, ToolName: s.tu.Name, ToolID: s.tu.ID, ToolResult: content, ToolIsError: true})
 	s.result = provider.ToolResultBlock{ToolUseID: s.tu.ID, Content: content, IsError: true}
@@ -221,7 +234,7 @@ func (r *toolRound) run(s *toolSlot) {
 		if rec := recover(); rec != nil {
 			r.e.logger.Error("recovered panic in tool call", "tool", s.tu.Name, "panic", rec, "stack", string(debug.Stack()))
 			content := fmt.Sprintf("tool %q panicked: %v", s.tu.Name, rec)
-			s.trace = trace.ToolCall{Name: s.tu.Name, IsError: true}
+			s.trace = trace.ToolCall{Name: s.tu.Name, IsError: true, ErrorText: boundToolError(content)}
 			r.safeEmit(Event{Kind: KindToolResult, ToolName: s.tu.Name, ToolID: s.tu.ID, ToolResult: content, ToolIsError: true})
 			s.result = provider.ToolResultBlock{ToolUseID: s.tu.ID, Content: content, IsError: true}
 		}
@@ -308,6 +321,9 @@ func (r *toolRound) run(s *toolSlot) {
 		content = content + "\n\n" + siblingCancelledSuffix(r.roundFailure())
 	}
 	s.trace = trace.ToolCall{Name: s.tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr}
+	if isErr {
+		s.trace.ErrorText = boundToolError(content)
+	}
 	r.safeEmit(Event{Kind: KindToolResult, ToolName: s.tu.Name, ToolID: s.tu.ID, ToolResult: content, ToolIsError: isErr})
 	s.result = provider.ToolResultBlock{ToolUseID: s.tu.ID, Content: content, IsError: isErr}
 	// Which failures qualify (P67.4). A read that fails is a normal negative

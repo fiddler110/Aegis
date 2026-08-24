@@ -58,7 +58,12 @@ const bigRepoMapCapBytes = 4000
 //	go test -tags live_workflow ./internal/eval/... -run TestLiveWorkflow -v
 //
 // AEGIS_EVAL_BASE_URL/AEGIS_EVAL_MODEL override the target server/model (same
-// convention as live_test.go).
+// convention as live_test.go). AEGIS_EVAL_KEEP_DATA_DIR (P68.1), set to
+// anything non-empty, keeps each subtest's throwaway data dir instead of
+// deleting it on cleanup — the -v log names both the dir and the session id,
+// so the run can be read back afterward with:
+//
+//	AEGIS_DATA_DIR=<logged dir> aegis sessions trace <logged id>
 func TestLiveWorkflow(t *testing.T) {
 	pythonExe := findPython(t)
 
@@ -114,6 +119,7 @@ func TestLiveWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
+		t.Logf("session id: %s", meta.ID)
 		guardOff := false
 		events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
 			Text:         task.Prompt(pythonExe),
@@ -237,6 +243,7 @@ func TestLiveWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
+		t.Logf("session id: %s", meta.ID)
 		guardOff := false
 		events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
 			Text:         triage.Prompt(pythonExe),
@@ -275,6 +282,7 @@ func TestLiveWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateSession: %v", err)
 		}
+		t.Logf("session id: %s", meta.ID)
 		guardOn := true
 		events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
 			Text:         task.Prompt(pythonExe),
@@ -363,6 +371,7 @@ func TestLiveWorkflow(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateSession: %v", err)
 			}
+			t.Logf("session id: %s", meta.ID)
 			events, err := cl.PostMessage(ctx, meta.ID, trivialPrompt)
 			if err != nil {
 				t.Fatalf("PostMessage: %v", err)
@@ -585,11 +594,22 @@ func newLiveWorkflowDaemonTweaked(t *testing.T, baseURL, model, promptProfile st
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if rmErr := os.RemoveAll(dataDir); rmErr != nil {
-			t.Logf("cleanup: could not remove data dir %s: %v", dataDir, rmErr)
-		}
-	})
+	// P68.1: this data dir holds sessions.db, and with it the P66.11 turn trace
+	// that is LLM-03/LLM-10/ARCH-04/P65.2's closure condition restated as a
+	// struct. The default best-effort cleanup below discards it at the end of
+	// every run, so a sitting has no way to read back what it just measured.
+	// AEGIS_EVAL_KEEP_DATA_DIR opts a run out of that: set (to anything
+	// non-empty) and the dir survives, logged here so `aegis sessions trace
+	// <id>` (via AEGIS_DATA_DIR=<this dir>) can read it after the test exits.
+	if os.Getenv("AEGIS_EVAL_KEEP_DATA_DIR") != "" {
+		t.Logf("data dir kept (AEGIS_EVAL_KEEP_DATA_DIR set): %s", dataDir)
+	} else {
+		t.Cleanup(func() {
+			if rmErr := os.RemoveAll(dataDir); rmErr != nil {
+				t.Logf("cleanup: could not remove data dir %s: %v", dataDir, rmErr)
+			}
+		})
+	}
 
 	cfg := &config.Config{
 		DataDir: dataDir,
@@ -1042,6 +1062,7 @@ func TestLiveWorkflowCompactionPrefixCacheGate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: CreateSession: %v", name, err)
 		}
+		t.Logf("%s: session id: %s", name, meta.ID)
 		guardOff := false
 		events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
 			Text:         compactionPrompt(),
@@ -1249,6 +1270,7 @@ func TestLiveWorkflowForcedContextOverflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	t.Logf("session id: %s", meta.ID)
 	if win, src := servedContextWindow(t, cl); win != forcedOverflowNumCtx {
 		t.Logf("WARNING daemon resolved context window %d (from %s), not the pinned %d",
 			win, src, forcedOverflowNumCtx)

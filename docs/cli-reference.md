@@ -297,7 +297,7 @@ aegis sessions export abc12345 --format md
 aegis sessions trace <id>
 ```
 
-Print the per-turn trace: turn index, model, input/output/cache tokens, per-turn cost, tool calls with durations, wall time, and a `WHY` column carrying the stop reason, compaction event, guard verdict and correctives for that turn (P66.11). Shows session totals at the end. Useful for auditing or profiling a run, and for answering why a run took the number of turns it did.
+Print the per-turn trace: turn index, model, input/output/cache tokens, per-turn cost, tool calls with durations, wall time, and a `WHY` column carrying the stop reason, compaction event, guard verdict, correctives and calibration sample count for that turn (P66.11). Shows session totals at the end, followed by the full text of any compaction summary and any failing tool call's error body (P68.1). Useful for auditing or profiling a run, and for answering why a run took the number of turns it did.
 
 ### `aegis sessions delete`
 

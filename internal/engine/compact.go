@@ -691,6 +691,7 @@ func (g *compactionGuard) beforeTurn(ctx context.Context, conv *Conversation, em
 		Trigger:         trigger,
 		ColdCleared:     g.coldClearedThisTurn,
 		ColdFreedTokens: g.coldFreedThisTurn,
+		SummaryText:     oc.summaryText,
 	}
 	if !oc.applied && !g.fullWarned && pct >= 95 {
 		g.fullWarned = true
@@ -734,6 +735,19 @@ func (g *compactionGuard) event() *trace.Compaction {
 		return nil
 	}
 	return g.lastEvent
+}
+
+// calibrationSamples reports how many calibration samples the token-estimate
+// correction has accumulated as of this turn (P68.1). Unlike Compaction, this
+// is worth reading on every turn regardless of whether compaction fired: it is
+// the answer to "is the estimate this run planned against still uncorrected",
+// which a live run's SSE stream never surfaced at all.
+func (g *compactionGuard) calibrationSamples() int {
+	if g == nil {
+		return 0
+	}
+	_, samples := g.calib.Scale()
+	return samples
 }
 
 // suppressed reports whether the P62.7 minimum-yield rule is currently holding
@@ -871,6 +885,38 @@ type compactOutcome struct {
 	yieldKnown  bool
 	summarized  bool
 	freedTokens int
+	// summaryText is the text of the summary message a summarization actually
+	// produced (LLM or deterministic-fallback), bounded by boundSummary. Set
+	// only alongside summarized=true.
+	summaryText string
+}
+
+// maxTraceSummary bounds the compaction summary text kept in a trace. A
+// summary is meant to be terse by construction (P65.2's own closure
+// condition), but the trace is not the place to find that out the hard way
+// against an unbounded local-model ramble.
+const maxTraceSummary = 4000
+
+func boundSummary(s string) string {
+	if len(s) <= maxTraceSummary {
+		return s
+	}
+	return s[:maxTraceSummary] + "…"
+}
+
+// firstMessageText returns the text of msgs[0]'s first TextBlock, or "" if
+// there isn't one. Compact/FallbackCompact both prepend the summary/fallback
+// note as exactly this shape, so it is the one place that needs to know it.
+func firstMessageText(msgs []provider.Message) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	for _, b := range msgs[0].Content {
+		if tb, ok := b.(provider.TextBlock); ok {
+			return tb.Text
+		}
+	}
+	return ""
 }
 
 // compact performs one compaction attempt for a turn already known to be over
@@ -898,7 +944,7 @@ func (g *compactionGuard) compact(ctx context.Context, conv *Conversation, emit 
 		// A deterministic fallback drops whole messages, so it is never the
 		// low-yield case this file's minimum-yield rule is about — reported as a
 		// summarization for that purpose.
-		return compactOutcome{applied: true, yieldKnown: true, summarized: true}
+		return compactOutcome{applied: true, yieldKnown: true, summarized: true, summaryText: boundSummary(firstMessageText(out))}
 	}
 
 	var (
@@ -927,7 +973,11 @@ func (g *compactionGuard) compact(ctx context.Context, conv *Conversation, emit 
 	conv.Messages = out
 	conv.invalidate()
 	g.failures = 0
-	return compactOutcome{applied: true, yieldKnown: yieldKnown, summarized: summarized, freedTokens: freed}
+	oc := compactOutcome{applied: true, yieldKnown: yieldKnown, summarized: summarized, freedTokens: freed}
+	if summarized {
+		oc.summaryText = boundSummary(firstMessageText(out))
+	}
+	return oc
 }
 
 // summarizerFailed records one LLM-summarizer failure and applies the P28.4
@@ -966,7 +1016,7 @@ func (g *compactionGuard) summarizerFailed(err error, conv *Conversation, emit E
 	g.failures = 0
 	// Whole messages dropped, as in the latched-off path above: never the
 	// low-yield case.
-	return compactOutcome{applied: true, yieldKnown: true, summarized: true}
+	return compactOutcome{applied: true, yieldKnown: true, summarized: true, summaryText: boundSummary(firstMessageText(out))}
 }
 
 // fallback runs the Compactor's deterministic pass, or reports no change when

@@ -194,7 +194,26 @@ func newSessionsTraceCmd() *cobra.Command {
 			}
 			fmt.Fprintf(tw, "\t\t\t\t\t\t\t\n")
 			fmt.Fprintf(tw, "TOTAL\t%d turns\t%d\t%d\t$%.4f\t\t\t\n", len(sess.Traces), totIn, totOut, totCost)
-			return tw.Flush()
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+
+			// P68.1: the table's WHY column only names *that* compaction fired or a
+			// tool call failed — the text itself (a summary or an error body) is
+			// what LLM-03/LLM-10/ARCH-04/P65.2 actually need to judge, and until
+			// this the only home for it was the daemon's SSE stream, gone the moment
+			// the run ended.
+			for i, t := range sess.Traces {
+				if c := t.Compaction; c != nil && c.SummaryText != "" {
+					fmt.Fprintf(out, "\n--- turn %d compaction summary ---\n%s\n", i+1, c.SummaryText)
+				}
+				for _, tc := range t.ToolCalls {
+					if tc.IsError && tc.ErrorText != "" {
+						fmt.Fprintf(out, "\n--- turn %d tool error (%s) ---\n%s\n", i+1, tc.Name, tc.ErrorText)
+					}
+				}
+			}
+			return nil
 		},
 	}
 }
@@ -246,6 +265,9 @@ func formatWhy(t trace.TurnTrace) string {
 	}
 	if len(t.Correctives) > 0 {
 		parts = append(parts, strings.Join(t.Correctives, "+"))
+	}
+	if t.CalibrationSamples > 0 {
+		parts = append(parts, fmt.Sprintf("calib=%d", t.CalibrationSamples))
 	}
 	if len(parts) == 0 {
 		return "-"

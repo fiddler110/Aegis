@@ -1016,6 +1016,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		// P66.11/GAP-01: what compaction did at the top of *this* turn, which the
 		// guard computed and dropped. Nil unless something happened.
 		tr.Compaction = compact.event()
+		tr.CalibrationSamples = compact.calibrationSamples()
 
 		// P2.6: If we suppressed tools but the model hallucinated tool calls,
 		// discard them so the turn is treated as a final text answer.

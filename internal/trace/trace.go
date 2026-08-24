@@ -16,6 +16,12 @@ type ToolCall struct {
 	Name       string `json:"name"`
 	DurationMS int64  `json:"duration_ms"`
 	IsError    bool   `json:"is_error,omitempty"`
+	// ErrorText is the tool result body when IsError is true, bounded (see
+	// engine.boundToolError). Before P68.1 the trace carried only IsError and
+	// the SSE stream logged just a character count, so a failing tool call —
+	// P62.9's edit_section failure among them — was unreadable after the run
+	// ended even though the daemon that produced it survived.
+	ErrorText string `json:"error_text,omitempty"`
 }
 
 // Compaction records what proactive compaction did at the start of a turn, or
@@ -46,6 +52,15 @@ type Compaction struct {
 	// question LLM-02's closure condition is written as.
 	ColdCleared     int `json:"cold_cleared,omitempty"`
 	ColdFreedTokens int `json:"cold_freed_tokens,omitempty"`
+
+	// SummaryText is the text of the summary message a summarizing compaction
+	// actually produced (LLM or deterministic-fallback), bounded (see
+	// engine.boundSummary). Set only when Summarized is true. Before P68.1 the
+	// trace recorded that a compaction happened and how many messages it
+	// folded, but never the summary itself — the one thing P65.2 (does a local
+	// model fill the fixed skeleton without losing what terse bullets kept)
+	// needs to judge.
+	SummaryText string `json:"summary_text,omitempty"`
 }
 
 // Guard records the output guard's verdict on a turn's final answer
@@ -105,7 +120,14 @@ type TurnTrace struct {
 	// the engine's own corrective machinery is why a long local-model run has
 	// turns nobody asked for, and until now the only trace of it was a notice
 	// event that nothing persisted.
-	Correctives []string  `json:"correctives,omitempty"`
-	WallMS      int64     `json:"wall_ms"` // wall time for the turn (model call + tools)
-	StartedAt   time.Time `json:"started_at"`
+	Correctives []string `json:"correctives,omitempty"`
+	// CalibrationSamples is how many samples the token-estimate correction has
+	// accumulated as of this turn (P68.1). Present on every turn a shared
+	// context window makes calibration meaningful, unlike Compaction, which is
+	// nil on a turn that stayed under the trigger — "is the estimate this run
+	// planned against still uncorrected" is a question worth asking on any
+	// turn, not only one where compaction fired.
+	CalibrationSamples int       `json:"calibration_samples,omitempty"`
+	WallMS             int64     `json:"wall_ms"` // wall time for the turn (model call + tools)
+	StartedAt          time.Time `json:"started_at"`
 }

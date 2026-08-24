@@ -229,9 +229,11 @@ Total                  16135   1447    9100   $0.034                            
 
 Useful for auditing run costs, profiling slow turns, and verifying cache behavior.
 
-**The `WHY` column (P66.11 / GAP-01).** A trace used to record what a turn *cost* and nothing about why it happened, so a run that took 40 turns looked the same as one that took 8. Each record now also carries the provider's stop reason, the compaction event (whether it fired, whether the summarizer ran, how many tokens it freed, and the estimate/trigger it decided on), the output guard's verdict, the correctives the engine injected, and a run id tying one request's turns together. `WHY` renders the interesting ones — `max_tokens`, `compacted 91→9 msgs`, `guard fail→retry`, `zero_tool` — and the full record is in the JSON export.
+**The `WHY` column (P66.11 / GAP-01).** A trace used to record what a turn *cost* and nothing about why it happened, so a run that took 40 turns looked the same as one that took 8. Each record now also carries the provider's stop reason, the compaction event (whether it fired, whether the summarizer ran, how many tokens it freed, and the estimate/trigger it decided on), the output guard's verdict, the correctives the engine injected, a run id tying one request's turns together, and how many token-estimate calibration samples the run has accumulated as of that turn. `WHY` renders the interesting ones — `max_tokens`, `compacted 91→9 msgs`, `guard fail→retry`, `zero_tool`, `calib=3` — and the full record is in the JSON export.
 
 The run id matters because a session accumulates the traces of every request made in it; without it, a turn cannot be attributed to the request that produced it.
+
+**Compaction summary text and tool-error bodies (P68.1).** Before this, the trace recorded only *that* a summarizing compaction fired and *that* a tool call failed — the summary text and the error body themselves lived only in the daemon's SSE stream, gone the moment the run ended. `aegis sessions trace <id>` now prints each turn's compaction summary and any failing tool call's error body in full underneath the table, so a run's evidence survives it.
 
 ---
 
