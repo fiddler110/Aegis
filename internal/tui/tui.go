@@ -85,8 +85,10 @@ func Run(cfg Config) error {
 
 	// The daemon client's job ends with the TUI: this is the last consumer
 	// of the bearer token before the CLI process exits, so scrub it here
-	// (FIND-33/P24.21). Every quit path in this package cancels its
-	// in-flight request's context before triggering tea.Quit, so by the
+	// (FIND-33/P24.21). Every quit path in this package cancels both the
+	// in-flight request's context (m.cancel) and any running interactive-
+	// terminal command's context (m.termRun.cancel, P76.2) before triggering
+	// tea.Quit, so by the
 	// time p.Run() returns no goroutine should still be reading the token —
 	// but bubbletea does not guarantee a dispatched Cmd goroutine has fully
 	// unwound by then, so treat this as best-effort, not a hard guarantee

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 func discardLogger() *slog.Logger {
@@ -13,11 +14,16 @@ func discardLogger() *slog.Logger {
 }
 
 // TestSelectSandboxFallsBackToLocal verifies the default (non-strict)
-// behavior: an unavailable container runtime falls back to the unsandboxed
-// local backend and reports the fallback so callers can surface it (P7.4).
+// behavior: an unavailable container runtime cascades to the OS backend
+// (seatbelt/bwrap) before giving up to unsandboxed local, and reports the
+// fallback either way so callers can surface it (P7.4). Which tier it lands
+// on is host-dependent — this machine may or may not have an OS sandbox
+// mechanism — so the expectation is derived from the same NewOSBackend call
+// SelectSandbox itself makes, rather than assumed.
 func TestSelectSandboxFallsBackToLocal(t *testing.T) {
+	dir := t.TempDir()
 	cfg := config.SandboxConfig{Backend: "container", Runtime: "bogus-runtime-does-not-exist"}
-	sb, fallback, reason, err := SelectSandbox(cfg, t.TempDir(), discardLogger())
+	sb, fallback, reason, err := SelectSandbox(cfg, dir, discardLogger())
 	if err != nil {
 		t.Fatalf("selectSandbox: unexpected error: %v", err)
 	}
@@ -27,8 +33,15 @@ func TestSelectSandboxFallsBackToLocal(t *testing.T) {
 	if reason == "" {
 		t.Error("expected a non-empty fallback reason")
 	}
-	if sb == nil || sb.Name() != "local" {
-		t.Errorf("expected local backend, got %v", sb)
+
+	if _, oerr := sandbox.NewOSBackend(dir, cfg.Network, cfg.StripEnv, cfg.OSExtraReadPaths); oerr == nil {
+		if sb == nil || sb.Name() != "os" {
+			t.Errorf("expected cascade to the os backend on a host with OS sandboxing available, got %v", sb)
+		}
+	} else {
+		if sb == nil || sb.Name() != "local" {
+			t.Errorf("expected local backend when OS sandboxing is also unavailable, got %v", sb)
+		}
 	}
 }
 

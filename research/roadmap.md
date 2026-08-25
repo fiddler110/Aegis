@@ -1,6 +1,20 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-24 — **P77.4** shipped (a `fetchCmd[T]` generic now backs the four
+**Last updated:** 2026-08-25 — **P77.1** shipped. It was parked Tier 4 pending "a user reports
+specifically wanting the reasoning content itself" — the user did, directly. Investigating found the
+roadmap entry's own premise stale: `provider.ThinkingBlock`/`EventThinkingDelta` and the TUI's live
+dim-text-then-collapsible-block rendering (`ctrl+o` to expand) already existed end to end for both
+Anthropic and Ollama/OpenAI-compat adapters — the entry's "nothing shows reasoning" was true only in
+the sense that every path was opt-in and undiscoverable. The user chose the narrowest fix: native
+Ollama's `provider.think` now defaults to `true` instead of `false` (`internal/providerfactory/factory.go`),
+since local reasoning is unbilled (unlike Anthropic's thinking budget, left opt-in) and a model that
+rejects the parameter already has a graceful one-shot-400-then-latch fallback (P38.5). Live-verified
+against this machine's own Ollama server with the config default unset: `aegis-qwen35-9b:16k` streamed
+real `EventThinkingDelta` content, while `aegis-phi4-reasoning:16k`/`phi4-mini-reasoning:3.8b` 400'd
+("does not support thinking") and were absorbed by the existing retry/latch path. Full record:
+[releases.md](releases.md#p771-shipped-2026-08-25).
+
+**Last updated (previous):** 2026-08-24 — **P77.4** shipped (a `fetchCmd[T]` generic now backs the four
 `tui.go` command constructors that were a genuine single-call round trip — `fetchTeammates`,
 `fetchTeammatesQuiet`, `fetchSessions`, `switchSessionCmd` — closing out the last open item from the
 `internal/tui/tui.go` cleanup pass; **P77.2**, **P77.3**, and **P77.5** shipped earlier the same day).
@@ -265,15 +279,14 @@ See [releases.md](releases.md) for every record.
 | 2   | **P76.3** — a hostile repo can plant its own security-scan baseline to hide its own findings | Tier 3 | Filed 2026-08-23, survivor of P76.1 Session A. Real and currently exploitable against the exact adversarial case the `--network none` scanner subsystem defends against, but needs a trust-gate-or-disclosure design decision, not a one-line fix. |
 | 3   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2) — _parked by choice, 2026-08-16_ | Verification | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** now have what they needed — a surviving data dir and `aegis sessions trace <id>`, shipped as **P68.1** (2026-08-22) — so whenever this row is next picked up, the next sitting can actually judge them instead of reproducing the same unreadable evidence. |
 
-**Two items are deliberately off this list, both Tier 4 with no fired trigger.** **P74.21** (filed
+**One item is deliberately off this list, Tier 4 with no fired trigger.** **P74.21** (filed
 2026-08-21) is the half of P74.17's own roadmap entry that did not ship with it — see
 [P74.17's Tier 3 record](#p7417--the-entire-local-model-story-is-one-boolean) for what shipped and what
 didn't. It sits in Tier 4 rather than here because, exactly like P74.17 before it shipped, it has no
 concrete cargo yet: nothing in the tree today needs a per-model prompt suffix or tool-description
-override, only the flag-shaped repair behaviors P74.17 already covers. **P77.1** (filed 2026-08-23, out
-of closing PXX.1) is the same shape one layer up: real, but needs a design decision (which providers
-return reasoning content, live vs. collapsed, cost disclosure) before it needs a line of code. Promote
-either once something concrete asks for it.
+override, only the flag-shaped repair behaviors P74.17 already covers. Promote once something concrete
+asks for it. **P77.1** was this item's neighbor here until 2026-08-25, when the user gave it exactly the
+concrete cargo it was waiting on — see [its shipped record](releases.md#p771-shipped-2026-08-25).
 
 **Sizes are estimates from reading, not from building, and the batch had a known bias.** The P71
 record is the caution: several of its rows were smaller than filed and one was larger. P74.17 itself
@@ -514,17 +527,18 @@ was already shipped by the time it was reviewed — P74.2/P74.3/P74.4 (chrome re
 expand, read/search grouping), P74.11/P74.12 (the stall ramp and eased token counter), P74.16 (overflow
 clip-and-retry), and P75.1 (per-block expand). One thread it named — visibility into the model's actual
 reasoning before it acts — is not covered by any of those and is real; it's filed on its own as
-**P77.1** below, since it's a design question rather than a continuation of that UI-polish work. Full
-closure record: [releases.md](releases.md#the-inline-truncation-request-closes-out-2026-08-23-pxx1).
+**P77.1**, since it's a design question rather than a continuation of that UI-polish work — shipped
+2026-08-25, see [its record](releases.md#p771-shipped-2026-08-25). Full closure record for this
+request: [releases.md](releases.md#the-inline-truncation-request-closes-out-2026-08-23-pxx1).
 
 ## Open Work — Tier 4
 
-**Status: 26 open** — 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
+**Status: 25 open** — 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
 6 from the P66 review batch, 5 from the P67 external-source reading, 5 from the P71 batch filed
-2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), **P74.21** (filed 2026-08-21
-the same day P74.17 shipped without it), and **P77.1** (filed 2026-08-23, out of closing PXX.1).
-**P77.2**, **P77.3**, **P77.4**, and **P77.5** (filed the same day, same batch) all shipped
-2026-08-24 — see [releases.md](releases.md#p774-shipped-2026-08-24). **P70.3**
+2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), and **P74.21** (filed 2026-08-21
+the same day P74.17 shipped without it). **P77.2**, **P77.3**, **P77.4**, and **P77.5** (filed the same
+day, same batch) all shipped 2026-08-24 — see [releases.md](releases.md#p774-shipped-2026-08-24).
+**P77.1** shipped 2026-08-25 — see [releases.md](releases.md#p771-shipped-2026-08-25). **P70.3**
 shipped 2026-08-18 and has left this tier. **P63.10** shipped 2026-08-21, taken opportunistically while
 `internal/tui` was open for **P75.1** — record in
 [releases.md](releases.md#p6310-shipped-2026-08-21).
@@ -577,36 +591,6 @@ trained on. P74.17 waited for exactly this kind of cargo (P74.8/P74.9) before it
 this is the same wait, one layer up.
 
 Priority: Tier 4 — M. No fired trigger yet.
-
-### P77.1 — Nothing shows the model's reasoning before it acts
-
-**Filed 2026-08-23, out of closing PXX.1** (an un-numbered user request about TUI truncation and
-"blackbox" turns — see [its closure record](releases.md#the-inline-truncation-request-closes-out-2026-08-23-pxx1)
-for what it asked and what P74.2/P74.3/P74.4/P74.11/P74.12/P74.16/P75.1 already answered). One thread
-survived every shipped fix: none of them surface the model's own reasoning — a provider's thinking/
-reasoning content, when it returns any — before or while the model acts. What shipped answers "is
-Aegis doing something and how far along," not "what is the model about to do and why."
-
-**Why this needs design before it needs code, not the reverse:**
-
-- **Not every backend returns it.** `tokenest.Message` already has to account for `ThinkingBlock`
-  existing at all (P66.17 / LLM-07 names the gap in the token estimate); a TUI affordance built only
-  against one provider's shape would be the same kind of narrow fix.
-- **Some providers meter it.** Reasoning/thinking tokens are billed on at least one cloud provider
-  today. A live-streamed "here's what the model is thinking" panel has a real cost implication a user
-  should be told about, not a free view into something already paid for.
-- **Live vs. collapsed is a real design choice, not a default.** Raw chain-of-thought is often long,
-  repetitive and not meant to be read verbatim — the existing `thinkingPhrase` status flavor text
-  (P74.10's reduced-motion work already touches this path) is a deliberately compressed stand-in, not
-  a first draft of the real thing. Streaming it in full could as easily make the transcript feel more
-  blackbox as less, if it reads as noise.
-
-**Promote when:** a user reports specifically wanting the reasoning content itself (not status/
-progress, which P74.11/P74.12 already cover), or when a provider adapter already carries
-`ThinkingBlock` data through to a point the TUI could render it cheaply.
-
-Priority: Tier 4 — M. No fired trigger yet; needs a design decision (which providers, live vs.
-collapsed, cost disclosure) before it needs a line of TUI code.
 
 ### P71.6 — Nothing memoizes a fetch or a search within a session
 
@@ -832,22 +816,49 @@ Priority: Tier 4 — no trigger. QUAL-04 is the only one with a security-adjacen
 ### P66.19 — Capability gaps with no fired trigger
 
 Assessed against what a mature coding agent needs, and honestly reported as absent rather than
-planned: no log rotation and no size cap, with a _text_ handler despite the "structured logging"
-claim (GAP-02); LSP is seven read-only tools with no rename and no code action, and diagnostics have
-exactly one caller so nothing feeds back after an edit (GAP-03); git support stops short of branching
-and `internal/worktree` exposes no tool at all (GAP-04); no OS-level sandbox on Windows, conspicuous
-because the rest of the Windows story is handled well (GAP-05); the MCP server side lags the mature
-client (GAP-07); no test-runner feedback loop as a first-class concept (GAP-08); structured outputs
-are wired but used at exactly one call site (GAP-09).
+planned. The user chose to act on a prioritized subset (2026-08-25) rather than wait for a trigger;
+**GAP-02, GAP-03, GAP-08, and GAP-09 have shipped** (see below). GAP-05 was spun out to its own
+future item, **P77.6**, rather than attempted in this pass. **GAP-04** (git support stops short of
+branching, `internal/worktree` exposes no tool at all) and **GAP-07** (the MCP server side lags the
+mature client — no `resources/*`, `prompts/*`, `sampling/*`, or `notifications/*`) remain open,
+unpromoted.
 
-**GAP-03 and GAP-08 are the same missing idea** — nothing closes the loop after an edit — and are the
-pair most worth taking together if this tier is ever opened. GAP-02 is the cheapest and the only one
-with an operational failure mode (an unbounded log file).
+- ~~GAP-02: no log rotation and no size cap~~ — `internal/logging` now rotates `aegis.log` at a
+  configurable size (`log.max_size_mb`/`log.max_backups`, default 20MB/5 backups).
+- ~~GAP-03: diagnostics have exactly one caller, nothing feeds back after an edit~~ — `write_file`,
+  `edit_file`, `multi_edit`, `edit_section`, and `fill_marker` now fold LSP diagnostics for the
+  changed file into their own result when a server is configured for it (`appendLSPFeedback`,
+  `internal/tool/builtin/lsp.go`).
+- ~~GAP-08: no test-runner feedback loop as a first-class concept~~ — a new deferred `run_tests`
+  tool (`internal/tool/builtin/tests.go`) auto-detects the project's test command and parses
+  go/pytest/jest/cargo summary output into structured pass/fail counts and failing test names.
+- ~~GAP-09: structured outputs wired but used at exactly one call site~~ — `guard.LLMGuard`
+  (`internal/guard/guard.go`) is now a second use of `provider.Request.Format`: it asks for (and,
+  on a backend that honors Format, is constrained to) a `{"verdict":...}` JSON reply, tried first
+  and falling through unchanged to the pre-existing text-heuristic `parseVerdict` on anything else —
+  additive, not a rewrite of the tuned local-model parsing.
 
-**Promote when:** a user hits one. GAP-06 (resume across daemon death) is **not** here — it is the
-pre-existing P65.4 and stays as filed.
+Priority: Tier 4 for the two remaining items (GAP-04, GAP-07) — no triggers. Do not build
+speculatively.
 
-Priority: Tier 4 — no triggers. Do not build speculatively.
+### P77.6 — No OS-level process sandbox on Windows (GAP-05, spun out of P66.19)
+
+`internal/sandbox`'s OS-level (no container runtime) backend covers darwin (`sandbox-exec`/seatbelt)
+and linux (`bwrap`) in `detectOSSandbox()` (`internal/sandbox/os_sandbox.go`) — there is no
+`case "windows"`. A Windows host without podman/docker/WSL installed falls all the way through to
+`LocalBackend`: commands run directly on the host with no filesystem or network confinement at all,
+the one platform where `sandbox.go`'s backend-selection order has nothing OS-level to fall back to.
+Conspicuous because the rest of the Windows story (PowerShell shell tool, path handling, CI) is
+otherwise handled well.
+
+**Recommended direction, from the user (2026-08-25):** a Job Object (resource/kill-on-close
+containment) plus a restricted access token (drop admin/write privileges outside the workspace) —
+native Windows primitives, no new external dependency. AppContainer (the same primitive UWP apps
+use) is stronger but was explicitly set aside as higher-complexity for a general-purpose CLI
+subprocess model; revisit only if the Job Object + restricted token approach proves insufficient in
+practice.
+
+Priority: Tier 3/4 — down the road, not speculative-build-now. No code changes yet.
 
 ### P66.20 — Efficiency residue
 
@@ -939,11 +950,20 @@ pre-turn state while leaving the environment in post-turn state, and the user is
 undone. If a session owns a persistent container (P60.2, shipped 2026-08-05), a checkpoint could be a
 container snapshot/commit instead, making rewind honest about installed packages and process state.
 
-**Re-verified 2026-08-06:** `sandbox.backend` still defaults to `"local"`, so this only helps sessions
-using the container backend, which is not the default.
+**Re-verified 2026-08-06:** the note here previously said `sandbox.backend` "still defaults to
+`local`" — that was stale even then; the actual default at the time was `"os"` (P4.7), not `local`.
+Either way, `"os"` isn't `"container"`, so the promote condition was unmet.
 
-**Promote when:** the container backend is a realistic default for real sessions, or a user reports a
-rewind that restored files into an environment that no longer matched them.
+**Update 2026-08-25:** `sandbox.backend`'s default is now `"container"`, cascading to `"os"` and then
+`"local"` when no container runtime is available (`SelectSandbox`, internal/server/server.go). A host
+with Docker/Podman running now gets the container backend by default. This satisfies the first half of
+the promote condition below — the container backend is now the default a session lands on wherever
+Docker/Podman is actually present — but the container-commit checkpoint mechanism itself (the actual
+fix this item describes) has not been built yet.
+
+**Promote when:** someone builds the container-commit checkpoint mechanism now that the default flip
+has landed, or a user reports a rewind that restored files into an environment that no longer matched
+them.
 
 Priority: Tier 4 — no longer blocked, but speculative until someone is actually rewinding inside a
 container.

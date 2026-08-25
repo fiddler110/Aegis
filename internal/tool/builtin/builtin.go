@@ -196,10 +196,10 @@ func Register(reg *tool.Registry, opts Options) error {
 	// meta-tools (skill, tool_search) that unlock the rest.
 	tools := []tool.Tool{
 		&readTool{root: root, tracker: ft},
-		&writeTool{root: root, tracker: ft},
-		&fillMarkerTool{root: root, tracker: ft},
-		&editSectionTool{root: root, tracker: ft},
-		&multieditTool{root: root, tracker: ft},
+		&writeTool{root: root, tracker: ft, lsp: opts.LSP},
+		&fillMarkerTool{root: root, tracker: ft, lsp: opts.LSP},
+		&editSectionTool{root: root, tracker: ft, lsp: opts.LSP},
+		&multieditTool{root: root, tracker: ft, lsp: opts.LSP},
 		&lsTool{root: root},
 		&globTool{root: root, cmds: opts.Commands},
 		&grepTool{root: root, cmds: opts.Commands},
@@ -256,9 +256,9 @@ func Register(reg *tool.Registry, opts Options) error {
 	// drive phase that names it in ph.tools gets it loaded for that phase (see
 	// tool.Registry.ScopeExposed). The default profile is untouched.
 	if opts.LocalProfile {
-		deferred = append(deferred, &editTool{root: root, tracker: ft})
+		deferred = append(deferred, &editTool{root: root, tracker: ft, lsp: opts.LSP})
 	} else {
-		tools = append(tools, &editTool{root: root, tracker: ft})
+		tools = append(tools, &editTool{root: root, tracker: ft, lsp: opts.LSP})
 	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}
@@ -273,6 +273,7 @@ func Register(reg *tool.Registry, opts Options) error {
 	if opts.LSP != nil {
 		deferred = append(deferred, LSPTools(opts.LSP, root)...)
 	}
+	deferred = append(deferred, newTestRunnerTool(root, opts.ShellTimeoutSec, opts.Sandbox))
 	if opts.TodoList != nil {
 		tools = append(tools, TodoTools(opts.TodoList)...)
 	}

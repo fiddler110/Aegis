@@ -166,6 +166,9 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		if m.cancel != nil {
 			m.cancel()
 		}
+		if m.termRun != nil {
+			m.termRun.cancel()
+		}
 		saveStash(m.stashPath, m.ta.Value())
 		return m, tea.Quit, true
 	case "ctrl+b":

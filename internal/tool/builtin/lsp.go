@@ -67,6 +67,64 @@ func formatSymbols(root string, syms []lsp.Symbol) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
+// maxLSPFeedbackDiagnostics caps how many diagnostic lines appendLSPFeedback
+// folds into a write/edit tool's result — enough to act on, not so much it
+// dominates the response the way a full diagnostics-tool call would.
+const maxLSPFeedbackDiagnostics = 5
+
+// appendLSPFeedback closes the GAP-03 loop: a write/edit tool calls this
+// right before returning success so the model sees real compiler/linter
+// feedback on the file it just changed, in the same turn, without needing to
+// know a `diagnostics` tool exists (LSP tools are registered deferred
+// unconditionally — see builtin.go — and a tool must never name a deferred
+// tool in its own output).
+//
+// Silent on anything short of a genuine diagnostics result: no LSP manager,
+// no server configured for this file's language, or a transport error all
+// return content unchanged. A write must never fail, or get noisier, because
+// LSP isn't configured for that language.
+func appendLSPFeedback(ctx context.Context, mgr *lsp.Manager, root, abs, relPath, content string) string {
+	if mgr == nil {
+		return content
+	}
+	client := mgr.ClientForFile(abs)
+	if client == nil {
+		return content
+	}
+	fileContent, err := os.ReadFile(abs)
+	if err != nil {
+		return content
+	}
+	uri := lsp.FileURIFromPath(abs)
+	_ = client.DidOpen(ctx, uri, string(fileContent), 1)
+	diags, err := client.Diagnostics(ctx, uri, string(fileContent), 1)
+	if err != nil || len(diags) == 0 {
+		return content
+	}
+	var sb strings.Builder
+	sb.WriteString(content)
+	sb.WriteString("\n\n[lsp diagnostics for ")
+	sb.WriteString(relPath)
+	sb.WriteString("]\n")
+	shown := diags
+	more := 0
+	if len(shown) > maxLSPFeedbackDiagnostics {
+		more = len(shown) - maxLSPFeedbackDiagnostics
+		shown = shown[:maxLSPFeedbackDiagnostics]
+	}
+	for _, d := range shown {
+		fmt.Fprintf(&sb, "  %s:%d:%d [%s] %s", relPath, d.Line, d.Col, d.Severity, d.Message)
+		if d.Source != "" {
+			fmt.Fprintf(&sb, " (%s)", d.Source)
+		}
+		sb.WriteString("\n")
+	}
+	if more > 0 {
+		fmt.Fprintf(&sb, "  (%d more)\n", more)
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
 // --- definition ---
 
 type definitionTool struct {

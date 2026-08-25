@@ -175,7 +175,11 @@ provider:
     X-Tenant-ID: "your-tenant"
 
   # Extended thinking.
-  # null/~ = provider default (Anthropic disables by default; local varies)
+  # null/~ = provider default: Anthropic disables by default (thinking is
+  #          billed as extra tokens); native Ollama (P77.1) enables by
+  #          default (local reasoning is free, and a model that doesn't
+  #          support `think` just 400s once and is remembered — see
+  #          model_capabilities below); openai-compat targets stay off.
   # true   = enable (Anthropic extended thinking; local reasoning models)
   # false  = disable explicitly
   think: ~
@@ -391,14 +395,15 @@ permission:
   # auto_approve_exec: true combined with an unsandboxed *local* backend means
   # every model-issued shell command runs on the host with no approval and no
   # isolation — the daemon refuses to start with that combination unless this
-  # is explicitly set to true. The default sandbox.backend is "os" (P4.7
-  # OS-level isolation, no container runtime needed), which is not this
-  # combination on a host that can serve it; it falls back to local — and so
-  # can trigger this refusal — wherever it can't (every current Windows host,
-  # any macOS/Linux box missing seatbelt/bwrap). Configure a real sandbox
-  # (sandbox.backend: container, or confirm "os" is actually active via
-  # `aegis sandbox status`) instead of setting this unless the daemon itself
-  # is already running inside an isolated environment (e.g. a CI container).
+  # is explicitly set to true. The default sandbox.backend is "container"
+  # (Docker/Podman), which is not this combination on a host that can serve
+  # it; it cascades to "os" (seatbelt/bwrap) and then falls back to local —
+  # and so can trigger this refusal — only where neither is available (every
+  # current Windows host, any macOS/Linux box missing both Docker and
+  # seatbelt/bwrap). Configure a real sandbox (confirm "container" or "os" is
+  # actually active via `aegis sandbox status`) instead of setting this
+  # unless the daemon itself is already running inside an isolated
+  # environment (e.g. a CI container).
   allow_unsandboxed_auto_exec: false
 
   # Fine-grained allow/deny rules evaluated before the mode gate.
@@ -609,6 +614,14 @@ server:
 # ── Logging ───────────────────────────────────────────────────────────────────
 # debug | info | warn | error
 log_level: info
+
+log:
+  # aegis.log is rotated to aegis.log.1 once it reaches this size. <= 0
+  # disables rotation (unbounded append, the pre-existing behavior).
+  max_size_mb: 20
+  # How many rotated files (aegis.log.1, .2, ...) to keep before the oldest
+  # is deleted.
+  max_backups: 5
 
 
 # ── TUI ───────────────────────────────────────────────────────────────────────
@@ -918,15 +931,15 @@ embeddings:
 
 # ── Shell sandbox ─────────────────────────────────────────────────────────────
 sandbox:
-  # "local"     — run directly on the host; no isolation at all (P27.14/FIND-04:
-  #               approval prompts and env-var stripping are the only
-  #               compensating controls — a shell tool call can still read/
-  #               write/exfiltrate anything the daemon's own user account can).
+  # "container" — run inside a container (Docker/Podman). This is the default
+  #               (both the built-in fallback used when no config file sets
+  #               this key at all, and what `aegis --first-init` writes into a
+  #               fresh global config). If no container runtime is available,
+  #               falls back to "os" below; if that's unavailable too, falls
+  #               back further to "local" with a startup WARN — see the
+  #               cascade note further down.
   # "os"        — OS-level isolation: seatbelt on macOS, bwrap/Landlock on Linux; no
-  #               container needed. `aegis --first-init`'s generated config defaults
-  #               new installs to this (falls back to "local" with a startup WARN
-  #               if unavailable, e.g. bubblewrap not installed on Linux, or on
-  #               Windows where neither mechanism exists).
+  #               container needed.
   #               Confines WRITES, network (if configured below), and READS (P27.18/FIND-19) to
   #               the workspace plus a built-in toolchain allowlist (system dirs, ~/go, ~/.cargo,
   #               ~/.npm, etc. — see os_extra_read_paths below); anything not on that allowlist,
@@ -935,8 +948,21 @@ sandbox:
   #               filesystem at all — a toolchain dir that happens to also hold a stray credential
   #               file would still be readable. See docs/security_scan.md before relying on this
   #               for genuinely untrusted code.
-  # "container" — run inside a container (requires runtime)
-  # "auto"      — detect available runtimes and pick the best one
+  # "local"     — run directly on the host; no isolation at all (P27.14/FIND-04:
+  #               approval prompts and env-var stripping are the only
+  #               compensating controls — a shell tool call can still read/
+  #               write/exfiltrate anything the daemon's own user account can).
+  # "auto"      — detect available runtimes and pick the best one; same
+  #               container → os → local cascade as "container" on failure.
+  #
+  # "container"/"auto" cascade on failure rather than jumping straight to
+  # "local": no Docker/Podman falls back to "os" (seatbelt/bwrap) first, so a
+  # macOS/Linux host without a container runtime running still gets OS-level
+  # isolation instead of silently losing it. Only a host with neither (every
+  # current Windows box, or a macOS/Linux box missing both Docker and
+  # seatbelt/bwrap) lands on unsandboxed "local", with a startup WARN either
+  # way. sandbox.strict below turns any step of that cascade into a hard
+  # startup error instead of a silent fallback.
   #
   # A container runtime name (docker, podman, wsl/wslc, apple) is also
   # accepted here directly and is rewritten to backend: container + the
@@ -944,12 +970,7 @@ sandbox:
   # canonical spelling. Any other value fails the daemon at startup with an
   # error naming the offending value, rather than silently running
   # unsandboxed (which is what happened before P25.2).
-  #
-  # NOTE: shown here as "os" because that's what `aegis --first-init` writes
-  # into a fresh global config. If this key is absent entirely (no config
-  # file, or a config file that doesn't set it), the built-in default is
-  # "local", not "os".
-  backend: os
+  backend: container
 
   # Force a specific runtime when backend=container or backend=auto:
   # docker | podman | wslc | container (Apple Containers, macOS)
@@ -1507,7 +1528,7 @@ change before you accept them, and `aegis doctor` reports a frozen workspace.
 
 **A project may set these without trust** — they grant no capability:
 
-`log_level` · `default_persona` · `personas` · `skills` · `repomap` ·
+`log_level` · `log` · `default_persona` · `personas` · `skills` · `repomap` ·
 `compaction` · `output_guard` · `tui` · `swarm` · `tools` · `cost` ·
 and, under `provider:`, the model and tuning knobs — `model`, `small_model`,
 `max_tokens`, `max_retries`, `max_iterations`, `loop_threshold`,

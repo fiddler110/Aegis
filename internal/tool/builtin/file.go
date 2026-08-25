@@ -13,6 +13,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/filetracker"
+	"github.com/fiddler110/aegis/internal/lsp"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -281,6 +282,7 @@ func splitLinesKeepFinal(data []byte, atEOF bool) (advance int, token []byte, er
 type writeTool struct {
 	root    string
 	tracker *filetracker.Tracker
+	lsp     *lsp.Manager
 }
 
 func (t *writeTool) Name() string                { return "write_file" }
@@ -357,7 +359,9 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		t.tracker.RecordOverwrite(abs)
 		t.tracker.RecordAgentWrite(abs, oldContent, args.Content)
 	}
-	return tool.Result{Content: fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)}, nil
+	result := fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)
+	result = appendLSPFeedback(ctx, t.lsp, t.root, abs, args.Path, result)
+	return tool.Result{Content: result}, nil
 }
 
 // --- edit ---
@@ -437,6 +441,7 @@ func applyReplacement(content, oldStr, newStr string, replaceAll bool, display s
 type editTool struct {
 	root    string
 	tracker *filetracker.Tracker
+	lsp     *lsp.Manager
 }
 
 func (t *editTool) Name() string                { return "edit_file" }
@@ -485,7 +490,9 @@ func (t *editTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		t.tracker.RecordWrite(abs)
 		t.tracker.RecordAgentWrite(abs, content, updated)
 	}
-	return tool.Result{Content: fmt.Sprintf("edited %s (%d replacement(s))", args.Path, n)}, nil
+	result := fmt.Sprintf("edited %s (%d replacement(s))", args.Path, n)
+	result = appendLSPFeedback(ctx, t.lsp, t.root, abs, args.Path, result)
+	return tool.Result{Content: result}, nil
 }
 
 // invalidPathChar returns a human description of the first character in p that

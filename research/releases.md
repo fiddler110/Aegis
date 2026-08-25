@@ -8,7 +8,31 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-24 (twenty-fourth record) — **P77.4 shipped**, closing out the last open
+**Last updated:** 2026-08-25 (twenty-fifth record) — **P77.1 shipped: local reasoning is now on by
+default.** Filed 2026-08-23 as a Tier 4 item needing "a user report specifically wanting the reasoning
+content itself" before it needed code — the user asked directly. Investigating first found the item's
+own premise out of date: `provider.ThinkingBlock`/`EventThinkingDelta` were already wired through both
+the Anthropic and Ollama/OpenAI-compat adapters, and `internal/tui` already rendered them live (dim
+text above the answer) and as a collapsible transcript block (`✻ thought for Ns`, `ctrl+o` to expand)
+— none of that needed building. The actual gap was that every path was opt-in, buried behind
+`provider.think`/`reasoning_effort` config a user would have to already know exists. Scoped to the
+narrowest safe fix: native Ollama's `provider.think` default flips from `false` to `true`
+(`internal/providerfactory/factory.go`, `buildOne`'s `"ollama"` case) — local reasoning carries no
+per-token billing (unlike Anthropic's thinking budget, deliberately left opt-in — see the roadmap
+entry's original cost-disclosure concern), and a model that rejects the `think` parameter already gets
+a graceful one-shot-400-then-latch fallback via the adapter's existing `thinkRejected` machinery
+(P38.5), so the downside of defaulting it on is at most one harmless failed request per unsupported
+model per process. `provider.think: false` still opts out explicitly (`TestBuildOne_OllamaThinkExplicitFalseWins`).
+Anthropic and openai-compat targets are unchanged. Two new tests
+(`TestBuildOne_OllamaThinkDefaultsOn`, `TestBuildOne_OllamaThinkExplicitFalseWins`) pin the default and
+the override against a fake `/api/chat` server. Live-verified against this machine's real Ollama
+server with `provider.think` left unset: `aegis-qwen35-9b:16k` streamed genuine `EventThinkingDelta`
+content end to end, while `aegis-phi4-reasoning:16k` and `phi4-mini-reasoning:3.8b` both 400'd
+("does not support thinking") and were silently absorbed by the retry/latch path — proving the
+fallback on the exact models this machine has, not just in a mock. Full record: [P77.1 shipped,
+2026-08-25](#p771-shipped-2026-08-25).
+
+**Last updated (previous):** 2026-08-24 (twenty-fourth record) — **P77.4 shipped**, closing out the last open
 item from the `internal/tui/tui.go` cleanup pass (P77.2/P77.3/P77.5 shipped earlier the same day).
 A new `fetchCmd[T any](timeout, fn, wrap) tea.Cmd` generic now backs the four command constructors
 that really were a single-call round trip — `fetchTeammates`, `fetchTeammatesQuiet`, `fetchSessions`,
@@ -466,6 +490,55 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### P77.1 shipped, 2026-08-25
+
+**Filed 2026-08-23** out of closing the un-numbered PXX.1 request (TUI truncation/"blackbox" turns),
+as a Tier 4 item parked on "a user reports specifically wanting the reasoning content itself." The
+user did, directly: "Implement P77.1."
+
+**The roadmap entry's own premise was stale before any code was written.** Reading it named three
+open design questions — which providers return reasoning content, live vs. collapsed, cost disclosure
+— as blockers on writing any TUI code at all. Reading the actual tree instead of the roadmap entry
+found all three already answered:
+
+- `provider.ThinkingBlock` / `EventThinkingDelta` already flow through both the Anthropic adapter
+  (`internal/provider/anthropic/anthropic.go`) and the OpenAI-compatible adapter, which already covers
+  Ollama's native `thinking`/`reasoning` fields and DeepSeek-R1's `reasoning_content`
+  (`internal/provider/openai/openai.go:640-693`).
+- `internal/tui/stream.go` and `tui.go` already render it live — dim "✻ thinking" text streamed above
+  the answer (`tui.go:1436-1439`) — and flush it into a collapsible transcript block on answer/tool-call
+  start (`flushThinking`/`appendThinkingBlock`, `tui.go:1551-1598`): "✻ thought for Ns", `ctrl+o` to
+  expand to the full text (the `TQ9` mechanism).
+- `provider.think` / `reasoning_effort` config already exists, and Anthropic's thinking budget is
+  already gated on explicit opt-in specifically because it's billed — the cost-disclosure concern the
+  roadmap entry raised was already the reason that path defaults off.
+
+So none of that needed building. Asked back to the user what "the actual gap" was given all of the
+above already existed, the answer was: it's all real, but every path is opt-in behind config a user
+would have to already know to set — not a rendering gap, a discoverability one. A follow-up question
+narrowed further: default it on for local/free models (Ollama), leave Anthropic/OpenAI opt-in since
+those carry real per-token billing the roadmap entry's cost-disclosure concern was actually about.
+
+**What shipped:** `internal/providerfactory/factory.go`'s `buildOne`, `"ollama"` case — the unset
+(`nil`) default for `provider.think` flips from `false` to `true`. Reasoning is local and unbilled, so
+"show it when the model produces it" is the honest default; a model that rejects the parameter isn't a
+new failure mode — the adapter already has a one-shot-400-then-latch fallback for exactly this
+(`thinkRejected`, P38.5), so the downside is at most one harmless failed request per unsupported model
+per process, not a repeat one. `provider.think: false` still opts out explicitly. Anthropic (billed)
+and openai-compat targets (no retry/latch safety net) are unchanged.
+
+**Verification.** Two new mock-server tests in `internal/providerfactory/factory_test.go` pin both
+halves: `TestBuildOne_OllamaThinkDefaultsOn` asserts `think: true` reaches `/api/chat` when config
+leaves it unset; `TestBuildOne_OllamaThinkExplicitFalseWins` asserts an explicit `false` still wins.
+Both green, alongside the full `internal/providerfactory`, `internal/provider/...`, `internal/cli`, and
+`internal/config` suites. Then live-verified against this machine's real Ollama server (not a mock):
+with `provider.think` left unset, `buildOne("ollama", ...)` streaming a real turn against
+`aegis-qwen35-9b:16k` produced genuine `EventThinkingDelta` events end to end — the exact model this
+change targets actually reasons through the new default path. The same check against
+`aegis-phi4-reasoning:16k` and `phi4-mini-reasoning:3.8b` (this machine's other two local models) hit
+the "does not support thinking" 400 both are known to return, and the retry/latch path absorbed it
+silently — the fallback proven on the real models it needs to cover, not just a synthetic case.
 
 ### P77.4 shipped, 2026-08-24
 

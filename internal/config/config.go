@@ -35,6 +35,7 @@ import (
 type Config struct {
 	DataDir     string            `koanf:"data_dir"`
 	LogLevel    string            `koanf:"log_level"`
+	Log         LogConfig         `koanf:"log"`
 	Provider    ProviderConfig    `koanf:"provider"`
 	Server      ServerConfig      `koanf:"server"`
 	Permission  PermissionConfig  `koanf:"permission"`
@@ -332,7 +333,7 @@ type AdditionalRoot struct {
 
 // SandboxConfig configures command execution isolation.
 type SandboxConfig struct {
-	Backend  string   `koanf:"backend"`  // "os" (default; P4.7 OS-level isolation, falls back to "local"), "container", or "auto" (detect & pick)
+	Backend  string   `koanf:"backend"`  // "container" (default; Docker/Podman, cascades to "os" then "local"), "os" (P4.7 OS-level isolation), "auto" (detect & pick a runtime), or "local"
 	Runtime  string   `koanf:"runtime"`  // forced runtime when backend=container: "docker", "podman", "wslc", "container" (Apple); empty = auto-detect
 	Priority []string `koanf:"priority"` // auto-detect order, e.g. ["wslc","docker","podman"]; empty = OS default
 	Image    string   `koanf:"image"`    // container image (default "ubuntu:22.04")
@@ -1668,6 +1669,20 @@ type DiagramConfig struct {
 	KrokiURL string `koanf:"kroki_url"` // Kroki endpoint for multi-format rendering
 }
 
+// LogConfig bounds the harness log file's growth (GAP-02). A missing/zero
+// MaxSizeMB disables rotation entirely — logging.Options preserves today's
+// unbounded-append behavior in that case — but the defaults below always
+// supply a positive value, so rotation is on unless a user deliberately
+// unsets it.
+type LogConfig struct {
+	// MaxSizeMB is the size aegis.log may reach before it is rotated to
+	// aegis.log.1 and a fresh file is started. <= 0 disables rotation.
+	MaxSizeMB int `koanf:"max_size_mb"`
+	// MaxBackups is how many rotated files (aegis.log.1, .2, ...) are kept;
+	// the oldest is deleted once this is exceeded.
+	MaxBackups int `koanf:"max_backups"`
+}
+
 const (
 	// EnvPrefix is the environment-variable prefix for overrides.
 	EnvPrefix = "AEGIS_"
@@ -1678,6 +1693,8 @@ func defaults() map[string]any {
 	return map[string]any{
 		"data_dir":                defaultDataDir(),
 		"log_level":               "info",
+		"log.max_size_mb":         20,
+		"log.max_backups":         5,
 		"provider.default":        "anthropic",
 		"provider.model":          "claude-opus-4-8",
 		"provider.max_tokens":     32768,
@@ -1736,16 +1753,20 @@ func defaults() map[string]any {
 		// one time-shaped signal that needs no operator judgement.
 		"cost.max_turn_stall": DefaultMaxTurnStallSec,
 		"swarm.backend":       "in_process",
-		// "os" (P4.7 OS-level isolation, no container runtime needed) rather
-		// than the unsandboxed "local", so a daemon started before any config
-		// file exists — the truest zero-setup path, ahead of even
-		// --first-init's template writing this same value explicitly — isn't
-		// silently unconfined. SelectSandbox falls back to "local" with a
-		// startup WARN (never a hard failure, sandbox.strict aside) wherever
-		// "os" has nothing to attach to — every current Windows host, and any
-		// macOS/Linux box missing seatbelt/bwrap — so this changes nothing
-		// there and only tightens the platforms that can actually use it.
-		"sandbox.backend": "os",
+		// "container" (Docker/Podman) rather than the unsandboxed "local", so a
+		// daemon started before any config file exists — the truest zero-setup
+		// path, ahead of even --first-init's template writing this same value
+		// explicitly — isn't silently unconfined. SelectSandbox cascades on
+		// failure: no container runtime falls back to "os" (P4.7 OS-level
+		// isolation via seatbelt/bwrap, no container runtime needed) before
+		// giving up to unsandboxed "local" with a startup WARN (never a hard
+		// failure, sandbox.strict aside). A host with Docker/Podman running
+		// gets the container backend; a macOS/Linux host without one still
+		// gets OS-level isolation exactly as it did when "os" was the bare
+		// default; only a host with neither (every current Windows box, or a
+		// macOS/Linux box missing both Docker and seatbelt/bwrap) lands on
+		// local, same as before.
+		"sandbox.backend": "container",
 		"sandbox.image":   "ubuntu:22.04",
 		"sandbox.network": false,
 		// P60.1: conservative per-container caps. Sized to let ordinary
@@ -2287,6 +2308,15 @@ func (c *Config) OpenModelCaps() *modelcaps.Store {
 // LogPath returns the path to the harness log file.
 func (c *Config) LogPath() string {
 	return filepath.Join(c.DataDir, "aegis.log")
+}
+
+// LogMaxSizeBytes returns c.Log.MaxSizeMB in bytes, for logging.Options.
+// MaxSizeBytes (GAP-02). <= 0 means rotation is disabled.
+func (c *Config) LogMaxSizeBytes() int64 {
+	if c.Log.MaxSizeMB <= 0 {
+		return 0
+	}
+	return int64(c.Log.MaxSizeMB) * 1024 * 1024
 }
 
 // AuthTokenPath returns the path to the daemon auth token file.

@@ -24,6 +24,9 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		if m.cancel != nil {
 			m.cancel()
 		}
+		if m.termRun != nil {
+			m.termRun.cancel()
+		}
 		saveStash(m.stashPath, m.ta.Value())
 		return m, tea.Quit
 	}

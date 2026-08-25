@@ -40,8 +40,10 @@ func newACPCmd() *cobra.Command {
 			// Logs must never touch stdout, which carries the ACP protocol. Write
 			// only to the log file (ToStderr stays false).
 			logger, closer, err := logging.New(logging.Options{
-				Level: cfg.LogLevel,
-				Path:  cfg.LogPath(),
+				Level:        cfg.LogLevel,
+				Path:         cfg.LogPath(),
+				MaxSizeBytes: cfg.LogMaxSizeBytes(),
+				MaxBackups:   cfg.Log.MaxBackups,
 			})
 			if err != nil {
 				return err

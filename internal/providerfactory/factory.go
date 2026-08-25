@@ -239,11 +239,17 @@ func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bo
 		// no API key, and unlocks per-request num_ctx, keep_alive, and real
 		// token/load telemetry the compat path can't offer. A lingering "/v1"
 		// suffix from an older config is stripped by ollama.WithBaseURL.
-		// Thinking is disabled by default to prevent reasoning preambles in
-		// non-thinking tasks.
-		falseVal := false
+		// Thinking defaults on (P77.1): local reasoning is free (no per-token
+		// billing, unlike Anthropic's thinking budget above), and the TUI
+		// already renders it as a collapsible block — so the honest default is
+		// "show it when the model produces it." A model that doesn't support
+		// `think` 400s once, and the P38.5 retry/latch machinery in the ollama
+		// adapter (thinkRejected) omits the field for it from then on, so this
+		// costs at most one failed request per unsupported model per process,
+		// never a repeat one. Set `provider.think: false` to opt back out.
+		trueVal := true
 		if think == nil {
-			think = &falseVal // suppress Ollama thinking unless explicitly enabled
+			think = &trueVal
 		}
 		opts := []ollama.Option{
 			ollama.WithBaseURL(baseURL),

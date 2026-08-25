@@ -102,8 +102,8 @@ func TestNewWarnsLocalSandboxBuildMode(t *testing.T) {
 	if !strings.Contains(out, "sandbox backend is 'local'") {
 		t.Errorf("expected a local-sandbox recommendation warning in build mode, got:\n%s", out)
 	}
-	if !strings.Contains(out, "sandbox.backend: os") {
-		t.Errorf("expected the warning to name sandbox.backend: os as a fix, got:\n%s", out)
+	if !strings.Contains(out, "sandbox.backend: container") {
+		t.Errorf("expected the warning to name sandbox.backend: container as a fix, got:\n%s", out)
 	}
 }
 

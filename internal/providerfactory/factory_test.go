@@ -259,6 +259,82 @@ func TestBuildOne_OllamaKeepAliveExplicitWins(t *testing.T) {
 	}
 }
 
+// TestBuildOne_OllamaThinkDefaultsOn is the P77.1 wiring check: native Ollama
+// requests `think` by default so a reasoning-capable local model's output
+// reaches the TUI's collapsible thinking block without the user hand-editing
+// config.yaml — local reasoning is unbilled, unlike the Anthropic thinking
+// budget, and a model that rejects the parameter just 400s once (the ollama
+// adapter's own thinkRejected latch handles the retry).
+func TestBuildOne_OllamaThinkDefaultsOn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Think *bool `json:"think"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Think == nil || !*body.Think {
+			t.Errorf("think = %v, want true when config leaves it unset", body.Think)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	a, err := buildOne("ollama", "", srv.URL, nil, nil, "", 0, 0, "", 0, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+}
+
+// TestBuildOne_OllamaThinkExplicitFalseWins is the opt-out half of the same
+// contract: an explicit `provider.think: false` must still suppress the
+// parameter even though the default (above) is now on.
+func TestBuildOne_OllamaThinkExplicitFalseWins(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Think *bool `json:"think"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Think == nil || *body.Think {
+			t.Errorf("think = %v, want explicit false", body.Think)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	falseVal := false
+	a, err := buildOne("ollama", "", srv.URL, nil, &falseVal, "", 0, 0, "", 0, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("buildOne: %v", err)
+	}
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+}
+
 // TestBuild_AdmissionBoundsLocalNotCloud is the P59.9 wiring check: the queue
 // depth is resolved per backend, so an unconfigured local primary is bounded by
 // default and an unconfigured cloud primary is not.

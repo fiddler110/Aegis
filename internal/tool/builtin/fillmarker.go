@@ -9,6 +9,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/filetracker"
+	"github.com/fiddler110/aegis/internal/lsp"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -39,6 +40,7 @@ var pendingMarkerRe = regexp.MustCompile(`<!--\s*PENDING\s*(?::\s*([^>]*?)\s*)?-
 type fillMarkerTool struct {
 	root    string
 	tracker *filetracker.Tracker
+	lsp     *lsp.Manager
 }
 
 func (t *fillMarkerTool) Name() string                { return "fill_marker" }
@@ -153,9 +155,12 @@ func (t *fillMarkerTool) Execute(ctx context.Context, input json.RawMessage) (to
 	remaining := findPendingMarkers(updated)
 	msg := fmt.Sprintf("filled marker %d in %s.", sel+1, args.Path)
 	if len(remaining) == 0 {
-		return tool.Result{Content: msg + " No markers remain in this file."}, nil
+		msg += " No markers remain in this file."
+	} else {
+		msg += " Indices have shifted — " + describeMarkers(args.Path, updated, remaining)
 	}
-	return tool.Result{Content: msg + " Indices have shifted — " + describeMarkers(args.Path, updated, remaining)}, nil
+	msg = appendLSPFeedback(ctx, t.lsp, t.root, abs, args.Path, msg)
+	return tool.Result{Content: msg}, nil
 }
 
 // selectMarker resolves index/key to a position, returning a caller-facing

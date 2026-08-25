@@ -48,8 +48,10 @@ func newMCPServeCmd() *cobra.Command {
 
 			// Logs must never touch stdout, which carries the MCP protocol frames.
 			logger, closer, err := logging.New(logging.Options{
-				Level: cfg.LogLevel,
-				Path:  cfg.LogPath(),
+				Level:        cfg.LogLevel,
+				Path:         cfg.LogPath(),
+				MaxSizeBytes: cfg.LogMaxSizeBytes(),
+				MaxBackups:   cfg.Log.MaxBackups,
 			})
 			if err != nil {
 				return err

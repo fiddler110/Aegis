@@ -923,7 +923,7 @@ func doctorSandboxCheck(cfg *config.Config) doctorCheck {
 		return doctorCheck{
 			Name: name, Severity: doctorWarn,
 			Detail: detail + " — no isolation, commands run directly on the host",
-			Fix:    "consider sandbox.backend: os (macOS/Linux, no container runtime needed) or container for isolation of shell/execute tool calls",
+			Fix:    "consider sandbox.backend: container (default, needs Docker/Podman) or os (macOS/Linux, no container runtime needed) for isolation of shell/execute tool calls",
 		}
 	}
 	return doctorCheck{Name: name, Severity: doctorPass, Detail: detail}

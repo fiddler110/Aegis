@@ -27,16 +27,19 @@ func TestHardenAppliesUnsetCaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("harden --yes: %v", err)
 	}
-	if !strings.Contains(out, `"os" -> "auto"`) || !strings.Contains(out, "false -> true") {
-		t.Errorf("expected sandbox/security changes reported, got:\n%s", out)
+	// The default sandbox.backend is now "container", which harden already
+	// treats as hardened (a specific runtime was pinned) — only security
+	// changes on a fresh config.
+	if !strings.Contains(out, `already "container"`) || !strings.Contains(out, "false -> true") {
+		t.Errorf("expected sandbox already hardened and security changed, got:\n%s", out)
 	}
 
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if cfg.Sandbox.Backend != "auto" {
-		t.Errorf("sandbox.backend = %q, want auto", cfg.Sandbox.Backend)
+	if cfg.Sandbox.Backend != "container" {
+		t.Errorf("sandbox.backend = %q, want container (unchanged, already hardened)", cfg.Sandbox.Backend)
 	}
 	if !cfg.Security.EgressThenWrite {
 		t.Error("security.egress_then_write not set")
@@ -106,8 +109,11 @@ func TestHardenAbortsWithoutConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if cfg.Sandbox.Backend == "auto" {
-		t.Error("sandbox.backend changed despite declined confirmation")
+	// sandbox.backend defaults to "container" already, so it's not a useful
+	// signal here (harden wouldn't change it either way) — check the other
+	// axis harden touches on a fresh config instead.
+	if cfg.Security.EgressThenWrite {
+		t.Error("security.egress_then_write changed despite declined confirmation")
 	}
 }
 

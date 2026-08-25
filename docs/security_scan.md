@@ -1103,7 +1103,7 @@ enforced egress isolation.
 
 ### Fallback-to-local warning
 
-If `sandbox.backend` is `container` or `os` but the runtime can't be initialized (e.g. the Docker daemon isn't running), the daemon falls back to the unsandboxed local backend rather than refusing to start. This is a silent security downgrade if you don't notice it, so:
+If `sandbox.backend` is `os` but the OS sandbox mechanism can't be initialized (e.g. no seatbelt/bwrap on this host), the daemon falls back to the unsandboxed local backend rather than refusing to start. If `sandbox.backend` is `container` (the default) or `auto` and no runtime can be initialized (e.g. the Docker daemon isn't running), it cascades to the `os` backend first and only falls all the way to local if that's unavailable too. Either way this is a silent security downgrade if you don't notice it, so:
 
 - It's always logged at `WARN`.
 - It's reported by `/healthz` (`sandbox_fallback`/`sandbox_fallback_reason`), and the TUI/CLI print a warning banner before entering a session when it's active.

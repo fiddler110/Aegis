@@ -325,6 +325,8 @@ func startEmbeddedDaemon(cfg *config.Config) (stop func(), err error) {
 		Level: cfg.LogLevel,
 		Path:  cfg.LogPath(),
 		// ToStderr intentionally false — keep daemon logs out of the TUI.
+		MaxSizeBytes: cfg.LogMaxSizeBytes(),
+		MaxBackups:   cfg.Log.MaxBackups,
 	})
 	if err != nil {
 		stopOllama()

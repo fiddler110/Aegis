@@ -35,9 +35,11 @@ func newServeCmd() *cobra.Command {
 			}
 
 			logger, closer, err := logging.New(logging.Options{
-				Level:    cfg.LogLevel,
-				Path:     cfg.LogPath(),
-				ToStderr: foreground,
+				Level:        cfg.LogLevel,
+				Path:         cfg.LogPath(),
+				ToStderr:     foreground,
+				MaxSizeBytes: cfg.LogMaxSizeBytes(),
+				MaxBackups:   cfg.Log.MaxBackups,
 			})
 			if err != nil {
 				return err

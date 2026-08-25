@@ -171,6 +171,7 @@ var configTrustPolicy = map[string]trustPolicy{
 	// grants no capability, reaches no host binary, and opens no egress the
 	// operator has not already configured.
 	"log_level":       projectSettable,
+	"log":             projectSettable, // rotation size/backup count only, no capability grant
 	"default_persona": projectSettable, // which built-in prompt a repo starts with
 	"personas":        projectSettable, // per-persona model choice only
 	"skills":          projectSettable, // enables Aegis's own embedded skills; project skill *files* are gated by trust elsewhere

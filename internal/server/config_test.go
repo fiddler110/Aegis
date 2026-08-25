@@ -123,8 +123,8 @@ func TestConfigSandboxGetReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConfigSandbox: %v", err)
 	}
-	if resp.Backend != "os" {
-		t.Errorf("Backend = %q, want default %q", resp.Backend, "os")
+	if resp.Backend != "container" {
+		t.Errorf("Backend = %q, want default %q", resp.Backend, "container")
 	}
 	if resp.Scope != "global" {
 		t.Errorf("Scope = %q, want %q", resp.Scope, "global")
@@ -517,8 +517,11 @@ func TestConfigHardenPreviewDoesNotWrite(t *testing.T) {
 	if resp.Applied {
 		t.Error("Applied should be false without Confirm")
 	}
-	if !resp.SandboxChanged || resp.SandboxBackend != "auto" {
-		t.Errorf("expected a preview transition to auto, got %+v", resp)
+	// The default sandbox.backend is now "container", which harden already
+	// treats as hardened (a specific runtime was pinned), so a fresh config
+	// has nothing to change here — only cost/security move.
+	if resp.SandboxChanged || resp.SandboxBackend != "container" {
+		t.Errorf("expected sandbox.backend to stay container (already hardened), got %+v", resp)
 	}
 	if _, err := os.Stat(config.GlobalConfigPath()); !os.IsNotExist(err) {
 		t.Errorf("preview must not write a config file, stat err = %v", err)
@@ -537,8 +540,10 @@ func TestConfigHardenAppliesUnsetCaps(t *testing.T) {
 	if !resp.Applied {
 		t.Error("Applied should be true with Confirm")
 	}
-	if !resp.SandboxChanged || resp.SandboxBackend != "auto" {
-		t.Errorf("expected sandbox change to auto, got %+v", resp)
+	// See TestConfigHardenPreviewDoesNotWrite: the default is already
+	// "container", which harden treats as already hardened.
+	if resp.SandboxChanged || resp.SandboxBackend != "container" {
+		t.Errorf("expected sandbox.backend to stay container (already hardened), got %+v", resp)
 	}
 	if !resp.SecurityChanged {
 		t.Error("expected security.egress_then_write to change")
@@ -551,8 +556,8 @@ func TestConfigHardenAppliesUnsetCaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if cfg.Sandbox.Backend != "auto" {
-		t.Errorf("cfg.Sandbox.Backend = %q, want auto", cfg.Sandbox.Backend)
+	if cfg.Sandbox.Backend != "container" {
+		t.Errorf("cfg.Sandbox.Backend = %q, want container (unchanged, already hardened)", cfg.Sandbox.Backend)
 	}
 	if !cfg.Security.EgressThenWrite {
 		t.Error("cfg.Security.EgressThenWrite not persisted")

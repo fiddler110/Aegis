@@ -131,3 +131,91 @@ func TestNewInvalidPathErrors(t *testing.T) {
 		t.Fatal("expected an error for an unwritable path")
 	}
 }
+
+// TestRotatingWriterRotatesOnSize verifies a write that would push the file
+// past MaxSizeBytes rotates first (GAP-02): the prior content lands in
+// aegis.log.1 and the new write starts a fresh, short file.
+func TestRotatingWriterRotatesOnSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aegis.log")
+	w, err := newRotatingWriter(path, 10, 3)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
+	defer w.Close()
+
+	if _, err := w.Write([]byte("0123456789")); err != nil { // exactly at cap, no rotation yet
+		t.Fatalf("Write 1: %v", err)
+	}
+	if _, err := w.Write([]byte("next")); err != nil { // pushes past cap, rotates first
+		t.Fatalf("Write 2: %v", err)
+	}
+
+	live, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile live: %v", err)
+	}
+	if string(live) != "next" {
+		t.Errorf("live file = %q, want %q", live, "next")
+	}
+	backup, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("ReadFile backup: %v", err)
+	}
+	if string(backup) != "0123456789" {
+		t.Errorf("backup file = %q, want %q", backup, "0123456789")
+	}
+}
+
+// TestRotatingWriterDropsOldestBackup verifies MaxBackups is enforced: once
+// the backup chain is full, the oldest generation is discarded on the next
+// rotation rather than growing without bound.
+func TestRotatingWriterDropsOldestBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aegis.log")
+	w, err := newRotatingWriter(path, 5, 2)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
+	defer w.Close()
+
+	// Each write is under the cap alone but forces a rotation against the
+	// previous one, so four writes produce three rotations.
+	for _, chunk := range []string{"aaaaa", "bbbbb", "ccccc", "ddddd"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatalf("Write(%q): %v", chunk, err)
+		}
+	}
+
+	live, _ := os.ReadFile(path)
+	b1, _ := os.ReadFile(path + ".1")
+	b2, _ := os.ReadFile(path + ".2")
+	if string(live) != "ddddd" {
+		t.Errorf("live = %q, want %q", live, "ddddd")
+	}
+	if string(b1) != "ccccc" {
+		t.Errorf(".1 = %q, want %q", b1, "ccccc")
+	}
+	if string(b2) != "bbbbb" {
+		t.Errorf(".2 = %q, want %q", b2, "bbbbb")
+	}
+	if _, err := os.Stat(path + ".3"); !os.IsNotExist(err) {
+		t.Errorf("expected no .3 backup (MaxBackups=2), got err=%v", err)
+	}
+}
+
+// TestNewWithRotationDisabledByDefault verifies MaxSizeBytes <= 0 (the zero
+// value) preserves the pre-GAP-02 unbounded-append behavior, so an existing
+// caller that doesn't opt in sees no change.
+func TestNewWithRotationDisabledByDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aegis.log")
+	logger, closer, err := New(Options{Path: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logger.Info(strings.Repeat("x", 100))
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Errorf("expected no rotation without MaxSizeBytes, got err=%v", err)
+	}
+}

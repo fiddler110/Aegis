@@ -777,7 +777,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			// sharper mode-specific warnings below cover auto/auto_approve_exec;
 			// this persistent one covers the default build-mode case too,
 			// which had no startup signal at all before this.
-			logger.Warn("sandbox backend is 'local' (unconfined): approved shell/execute tool calls run directly on the host with no filesystem/network isolation; consider sandbox.backend: os (macOS/Linux, no container runtime needed) or container for real isolation")
+			logger.Warn("sandbox backend is 'local' (unconfined): approved shell/execute tool calls run directly on the host with no filesystem/network isolation; consider sandbox.backend: container (default, needs Docker/Podman) or os (macOS/Linux, no container runtime needed) for real isolation")
 		}
 		if cfg.Permission.Mode == string(permission.ModeAuto) || cfg.Permission.AutoApproveExec {
 			// auto mode / auto_approve_exec + an unsandboxed backend means every
@@ -1013,9 +1013,18 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 }
 
 // SelectSandbox picks the command-execution backend per cfg.Backend:
-// "container" forces a runtime (or auto-detects one); "auto" detects and
-// picks the best available; "os" uses OS-level isolation without a container
-// runtime; "" or "local" runs commands directly on the host by design.
+// "container" (the default) forces a runtime (or auto-detects one); "auto"
+// detects and picks the best available; "os" uses OS-level isolation without
+// a container runtime; "" or "local" runs commands directly on the host by
+// design.
+//
+// "container"/"auto" cascade on failure: no container runtime falls back to
+// the "os" backend (seatbelt/bwrap) before giving up to unsandboxed local,
+// so a host without Docker/Podman running still gets OS-level isolation
+// where available, rather than silently losing it just because container is
+// now the default. cfg.Strict opts out of the whole cascade, not just the
+// last step — it means "I asked for container, tell me if it isn't there"
+// rather than "quietly substitute something else".
 //
 // A fallback to the unsandboxed local backend is a silent security downgrade
 // for an operator who believes sandboxing is active (P7.4): it is always
@@ -1056,9 +1065,21 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 			if cfg.Strict {
 				return nil, false, "", fmt.Errorf("sandbox: no container runtime available for backend %q and sandbox.strict is set: %w", cfg.Backend, cerr)
 			}
-			logger.Warn("sandbox: no container runtime available, falling back to local",
-				"backend", cfg.Backend, "err", cerr)
-			reason = fmt.Sprintf("configured sandbox backend %q unavailable (%v) — running unsandboxed on the host", cfg.Backend, cerr)
+			// Cascade to OS-level isolation before giving up to unsandboxed
+			// local: container is the default, but most hosts don't have
+			// Docker/Podman running, and falling straight to local would be a
+			// silent security downgrade for every macOS/Linux box that has
+			// seatbelt/bwrap available. Mirrors the "os" case below.
+			osb, oerr := sandbox.NewOSBackend(cwd, cfg.Network, cfg.StripEnv, cfg.OSExtraReadPaths)
+			if oerr == nil {
+				logger.Warn("sandbox: no container runtime available, falling back to OS-level sandboxing",
+					"backend", cfg.Backend, "mechanism", osb.Name(), "err", cerr)
+				reason = fmt.Sprintf("configured sandbox backend %q unavailable (%v) — falling back to OS-level sandboxing (%s)", cfg.Backend, cerr, osb.Name())
+				return osb, true, reason, nil
+			}
+			logger.Warn("sandbox: no container runtime available and OS sandbox unavailable, falling back to local",
+				"backend", cfg.Backend, "container_err", cerr, "os_err", oerr)
+			reason = fmt.Sprintf("configured sandbox backend %q unavailable (%v); OS sandbox also unavailable (%v) — running unsandboxed on the host", cfg.Backend, cerr, oerr)
 			return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), true, reason, nil
 		}
 		logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Image)

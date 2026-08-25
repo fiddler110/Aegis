@@ -2,6 +2,7 @@ package guard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -78,6 +79,67 @@ func TestLLMGuardPassFail(t *testing.T) {
 	if ok, reason, status := weird(context.Background(), Input{Text: "answer"}); ok || reason == "" || status != StatusFailed {
 		t.Errorf("unparseable verdict should fail closed with a reason and StatusFailed, got ok=%v reason=%q status=%q", ok, reason, status)
 	}
+}
+
+// TestLLMGuardJSONVerdict verifies GAP-09's JSON-first parse path: a reply in
+// the {"verdict":...} shape verdictFormat requests is read directly, without
+// falling through to parseVerdict's text heuristics.
+func TestLLMGuardJSONVerdict(t *testing.T) {
+	pass := LLMGuard(fakeAdapter{reply: `{"verdict":"PASS"}`}, "m", "rubric")
+	if ok, _, status := pass(context.Background(), Input{Text: "answer"}); !ok || status != StatusPassed {
+		t.Errorf("JSON PASS should pass, got ok=%v status=%q", ok, status)
+	}
+	fail := LLMGuard(fakeAdapter{reply: `{"verdict":"FAIL","reason":"missing citations"}`}, "m", "rubric")
+	if ok, reason, status := fail(context.Background(), Input{Text: "answer"}); ok || reason != "missing citations" || status != StatusFailed {
+		t.Errorf("JSON FAIL should fail with reason, got ok=%v reason=%q status=%q", ok, reason, status)
+	}
+	// A fenced JSON reply is tolerated the same way SchemaGuard tolerates one.
+	fenced := LLMGuard(fakeAdapter{reply: "```json\n{\"verdict\":\"PASS\"}\n```"}, "m", "rubric")
+	if ok, _, status := fenced(context.Background(), Input{Text: "answer"}); !ok || status != StatusPassed {
+		t.Errorf("fenced JSON PASS should pass, got ok=%v status=%q", ok, status)
+	}
+}
+
+// TestLLMGuardSetsRequestFormat verifies the Request sent to the adapter
+// carries verdictFormat (P59.8's constrained-decoding hint) — the mechanism
+// this is meant to exercise a second time, not just a text-prompt change.
+func TestLLMGuardSetsRequestFormat(t *testing.T) {
+	var gotFormat json.RawMessage
+	capture := formatCapturingAdapter{got: &gotFormat, reply: "PASS"}
+	g := LLMGuard(capture, "m", "rubric")
+	if ok, _, _ := g(context.Background(), Input{Text: "answer"}); !ok {
+		t.Fatal("expected PASS")
+	}
+	if string(gotFormat) != string(verdictFormat) {
+		t.Errorf("Request.Format = %s, want %s", gotFormat, verdictFormat)
+	}
+}
+
+// TestLLMGuardTextFallbackUnaffectedByFormat verifies a backend that ignores
+// Format entirely (every non-Ollama adapter) sees byte-for-byte the same
+// behavior as before Format was added: a plain-text PASS/FAIL reply still
+// parses via the untouched parseVerdict heuristics.
+func TestLLMGuardTextFallbackUnaffectedByFormat(t *testing.T) {
+	g := LLMGuard(fakeAdapter{reply: "**PASS**"}, "m", "rubric")
+	if ok, _, status := g(context.Background(), Input{Text: "answer"}); !ok || status != StatusPassed {
+		t.Errorf("markdown-emphasized PASS should still pass via text fallback, got ok=%v status=%q", ok, status)
+	}
+}
+
+// formatCapturingAdapter records the Format field of the request it receives.
+type formatCapturingAdapter struct {
+	got   *json.RawMessage
+	reply string
+}
+
+func (f formatCapturingAdapter) Name() string { return "format-capturing" }
+func (f formatCapturingAdapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	*f.got = req.Format
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: f.reply}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn}
+	close(ch)
+	return ch, nil
 }
 
 // TestLLMGuardTransportErrorFailsOpen verifies the fail-open exception is

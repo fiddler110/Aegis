@@ -13,6 +13,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/filetracker"
+	"github.com/fiddler110/aegis/internal/lsp"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -27,6 +28,7 @@ import (
 type multieditTool struct {
 	root    string
 	tracker *filetracker.Tracker
+	lsp     *lsp.Manager
 }
 
 func (t *multieditTool) Name() string                { return "multi_edit" }
@@ -158,8 +160,12 @@ func (t *multieditTool) Execute(ctx context.Context, input json.RawMessage) (too
 	if len(names) == 0 {
 		return tool.Result{Content: "no files changed (every edit was a no-op)"}, nil
 	}
-	return tool.Result{Content: fmt.Sprintf("applied %d edit(s) across %d file(s): %s",
-		len(args.Edits), len(written), strings.Join(names, ", "))}, nil
+	result := fmt.Sprintf("applied %d edit(s) across %d file(s): %s",
+		len(args.Edits), len(written), strings.Join(names, ", "))
+	for _, st := range written {
+		result = appendLSPFeedback(ctx, t.lsp, t.root, st.abs, st.rel, result)
+	}
+	return tool.Result{Content: result}, nil
 }
 
 // loadFile prepares the working copy for abs. A missing file is an error unless

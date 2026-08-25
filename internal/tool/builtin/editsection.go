@@ -9,6 +9,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/checkpoint"
 	"github.com/fiddler110/aegis/internal/filetracker"
+	"github.com/fiddler110/aegis/internal/lsp"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -38,6 +39,7 @@ var headingRe = regexp.MustCompile(`(?m)^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$`)
 type editSectionTool struct {
 	root    string
 	tracker *filetracker.Tracker
+	lsp     *lsp.Manager
 }
 
 func (t *editSectionTool) Name() string                { return "edit_section" }
@@ -290,7 +292,9 @@ func (t *editSectionTool) Execute(ctx context.Context, input json.RawMessage) (t
 	if args.Mode == "append" {
 		verb = "extended"
 	}
-	return tool.Result{Content: fmt.Sprintf("%s the %q section of %s (%d bytes)", verb, sec.text, args.Path, len(body))}, nil
+	result := fmt.Sprintf("%s the %q section of %s (%d bytes)", verb, sec.text, args.Path, len(body))
+	result = appendLSPFeedback(ctx, t.lsp, t.root, abs, args.Path, result)
+	return tool.Result{Content: result}, nil
 }
 
 // tableRowRe matches a markdown table row: a line whose first non-space
@@ -393,5 +397,7 @@ func (t *editSectionTool) createSection(ctx context.Context, abs, display, conte
 		t.tracker.RecordWrite(abs)
 		t.tracker.RecordAgentWrite(abs, content, updated)
 	}
-	return tool.Result{Content: fmt.Sprintf("created section %q in %s (%d bytes)", heading, display, len(block))}, nil
+	result := fmt.Sprintf("created section %q in %s (%d bytes)", heading, display, len(block))
+	result = appendLSPFeedback(ctx, t.lsp, t.root, abs, display, result)
+	return tool.Result{Content: result}, nil
 }

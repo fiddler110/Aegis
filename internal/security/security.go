@@ -539,7 +539,13 @@ func (r Report) Format() string {
 		fmt.Fprintf(&b, "Baseline error (no suppressions applied): %s\n", r.BaselineError)
 	}
 	if len(r.Suppressed) > 0 {
+		// P76.3: name every suppressed finding, not just a count — a baseline
+		// (which can come from an untrusted scan target, not just the
+		// operator) must never be able to hide *what* it hid.
 		fmt.Fprintf(&b, "Suppressed by baseline: %d\n", len(r.Suppressed))
+		for _, f := range r.Suppressed {
+			fmt.Fprintf(&b, "  [%s] %s — %s\n    %s (%s)\n", f.Severity, f.Tool, f.Title, f.Location, f.RuleID)
+		}
 	}
 	for _, e := range r.ExpiredSuppressions {
 		fmt.Fprintf(&b, "Baseline entry %s\n", e)

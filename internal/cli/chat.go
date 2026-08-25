@@ -460,9 +460,11 @@ func openChatLog(cfg *config.Config) (*slog.Logger, func(), error) {
 	}
 	debugToStderr := strings.EqualFold(strings.TrimSpace(cfg.LogLevel), "debug")
 	logger, logCloser, err := logging.New(logging.Options{
-		Level:    cfg.LogLevel,
-		Path:     cfg.LogPath(),
-		ToStderr: debugToStderr,
+		Level:        cfg.LogLevel,
+		Path:         cfg.LogPath(),
+		ToStderr:     debugToStderr,
+		MaxSizeBytes: cfg.LogMaxSizeBytes(),
+		MaxBackups:   cfg.Log.MaxBackups,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("init logger: %w", err)

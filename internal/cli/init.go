@@ -570,21 +570,24 @@ swarm:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Shell execution sandbox
 # ─────────────────────────────────────────────────────────────────────────────
-# Defaults to "os": OS-level isolation (macOS seatbelt / Linux bubblewrap) with
-# no container runtime needed. Falls back to unsandboxed "local" with a
-# startup warning if unavailable on this host (e.g. bubblewrap isn't
-# installed, or on Windows, which has neither mechanism) — set backend: local
-# below to silence that warning once you've made the unsandboxed choice
-# intentionally (P27.14/FIND-04).
+# Defaults to "container": isolate each command in Docker/Podman. If no
+# container runtime is available, falls back to "os" (macOS seatbelt / Linux
+# bubblewrap, no container runtime needed); if that's unavailable too (every
+# current Windows host, or a macOS/Linux box missing both), falls back further
+# to unsandboxed "local" with a startup warning — set backend: local below to
+# silence that warning once you've made the unsandboxed choice intentionally
+# (P27.14/FIND-04).
 
 sandbox:
-  backend: os                # "os"        = OS-level isolation, no container needed
+  backend: container          # "container" = isolate each command in a chosen runtime
+                             #               (Docker/Podman; falls back to os, then
+                             #               local, if unavailable)
+                             # "os"        = OS-level isolation, no container needed
                              #               (seatbelt/macOS, bwrap/Linux; falls back
                              #               to local if unavailable)
                              # "local"     = run commands directly on the host, unconfined
-                             # "container" = isolate each command in a chosen runtime
                              # "auto"      = detect & use the best available runtime,
-                             #               falling back to local if none is found
+                             #               same fallback cascade as "container"
   # runtime: ""              # Force a runtime when backend=container:
                              #   docker | podman | wslc (Windows WSL containers) | container (Apple)
                              #   Empty = auto-detect.
