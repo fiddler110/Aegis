@@ -12,6 +12,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/provider/sse"
+	"github.com/fiddler110/aegis/internal/tokenest"
 )
 
 func TestTranslateImage(t *testing.T) {
@@ -1075,8 +1076,8 @@ func TestStreamClampsMaxTokensToHeadroom(t *testing.T) {
 			name:   "prompt already over the window floors rather than going negative",
 			numCtx: 512, maxTokens: 32768, prompt: strings.Repeat("token ", 4000),
 			check: func(t *testing.T, sent int) {
-				if sent != minCompletionTokens {
-					t.Errorf("max_tokens = %d, want the %d floor", sent, minCompletionTokens)
+				if sent != tokenest.MinCompletionTokens {
+					t.Errorf("max_tokens = %d, want the %d floor", sent, tokenest.MinCompletionTokens)
 				}
 			},
 		},
@@ -1288,13 +1289,13 @@ func TestHealthProbeUsesTheAdapterTransport(t *testing.T) {
 		t.Errorf("the probe went through the adapter's transport %d time(s), want 1", probes)
 	}
 
-	hc := a.healthClient()
+	hc := provider.HealthClient(a.client)
 	if hc.Transport != a.client.Transport {
 		t.Error("probe client does not share the adapter's transport")
 	}
-	if hc.Timeout != healthProbeTimeout {
+	if hc.Timeout != provider.HealthProbeTimeout {
 		t.Errorf("probe Client.Timeout = %v, want %v — it must not inherit the streaming client's unbounded one",
-			hc.Timeout, healthProbeTimeout)
+			hc.Timeout, provider.HealthProbeTimeout)
 	}
 	if a.client.Timeout != 0 {
 		t.Errorf("streaming client's Timeout = %v, want 0 (P59.2)", a.client.Timeout)

@@ -65,7 +65,21 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 		fn(&o)
 	}
 
-	primaryBase, err := buildOne(cfg.Provider.Default, cfg.Provider.APIKey, cfg.Provider.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), cfg.Provider.StreamIdleTimeout(), logger, o.caps)
+	primaryBase, err := buildOne(buildOneConfig{
+		name:                  cfg.Provider.Default,
+		apiKey:                cfg.Provider.APIKey,
+		baseURL:               cfg.Provider.BaseURL,
+		headers:               cfg.Provider.Headers,
+		think:                 cfg.Provider.Think,
+		reasoningEffort:       cfg.Provider.ReasoningEffort,
+		maxTokens:             cfg.Provider.MaxTokens,
+		contextWindow:         cfg.Provider.ContextWindow,
+		keepAlive:             cfg.Provider.KeepAlive,
+		responseHeaderTimeout: cfg.Provider.ResponseHeaderTimeout(),
+		streamIdleTimeout:     cfg.Provider.StreamIdleTimeout(),
+		logger:                logger,
+		caps:                  o.caps,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +102,21 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 			continue
 		}
 		apiKey := config.ProviderAPIKey(fb.Provider)
-		fbBase, err := buildOne(fb.Provider, apiKey, fb.BaseURL, cfg.Provider.Headers, cfg.Provider.Think, cfg.Provider.ReasoningEffort, cfg.Provider.MaxTokens, cfg.Provider.ContextWindow, cfg.Provider.KeepAlive, cfg.Provider.ResponseHeaderTimeout(), cfg.Provider.StreamIdleTimeout(), logger, o.caps)
+		fbBase, err := buildOne(buildOneConfig{
+			name:                  fb.Provider,
+			apiKey:                apiKey,
+			baseURL:               fb.BaseURL,
+			headers:               cfg.Provider.Headers,
+			think:                 cfg.Provider.Think,
+			reasoningEffort:       cfg.Provider.ReasoningEffort,
+			maxTokens:             cfg.Provider.MaxTokens,
+			contextWindow:         cfg.Provider.ContextWindow,
+			keepAlive:             cfg.Provider.KeepAlive,
+			responseHeaderTimeout: cfg.Provider.ResponseHeaderTimeout(),
+			streamIdleTimeout:     cfg.Provider.StreamIdleTimeout(),
+			logger:                logger,
+			caps:                  o.caps,
+		})
 		if err != nil {
 			logger.Warn("provider fallback: skipping misconfigured fallback", "provider", fb.Provider, "err", err)
 			continue
@@ -204,11 +232,36 @@ func validateBaseURL(name, apiKey, baseURL string, logger *slog.Logger) error {
 	return nil
 }
 
-// buildOne constructs a single unwrapped adapter for provider name. Shared by
-// the primary and every fallback target so their construction rules
-// (base URL defaults, thinking/reasoning options, key requirements) stay
-// identical.
-func buildOne(name, apiKey, baseURL string, headers map[string]string, think *bool, reasoningEffort string, maxTokens, contextWindow int, keepAlive string, responseHeaderTimeout, streamIdleTimeout time.Duration, logger *slog.Logger, caps ollama.CapabilityStore) (provider.Adapter, error) {
+// buildOneConfig bundles buildOne's parameters. The primary and every
+// fallback target build from the same field set (P78.6) — as 12 positional
+// arguments identical at both call sites, a same-typed swap (e.g.
+// maxTokens/contextWindow, both int) compiled cleanly and neither call site
+// was diffable against the signature at a glance.
+type buildOneConfig struct {
+	name                  string
+	apiKey                string
+	baseURL               string
+	headers               map[string]string
+	think                 *bool
+	reasoningEffort       string
+	maxTokens             int
+	contextWindow         int
+	keepAlive             string
+	responseHeaderTimeout time.Duration
+	streamIdleTimeout     time.Duration
+	logger                *slog.Logger
+	caps                  ollama.CapabilityStore
+}
+
+// buildOne constructs a single unwrapped adapter for cfg.name. Shared by the
+// primary and every fallback target so their construction rules (base URL
+// defaults, thinking/reasoning options, key requirements) stay identical.
+func buildOne(cfg buildOneConfig) (provider.Adapter, error) {
+	name, apiKey, baseURL := cfg.name, cfg.apiKey, cfg.baseURL
+	headers, think, reasoningEffort := cfg.headers, cfg.think, cfg.reasoningEffort
+	maxTokens, contextWindow, keepAlive := cfg.maxTokens, cfg.contextWindow, cfg.keepAlive
+	responseHeaderTimeout, streamIdleTimeout := cfg.responseHeaderTimeout, cfg.streamIdleTimeout
+	logger, caps := cfg.logger, cfg.caps
 	if err := validateBaseURL(name, apiKey, baseURL, logger); err != nil {
 		return nil, err
 	}

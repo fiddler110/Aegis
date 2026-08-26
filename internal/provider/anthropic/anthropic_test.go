@@ -795,3 +795,145 @@ func TestStreamIdleTimeoutAbortsAStalledRunner(t *testing.T) {
 		t.Fatal("the stream never ended — the idle bound did not reach sse.Run")
 	}
 }
+
+// TestHealthy is the P78.7 guard: the Anthropic adapter must satisfy
+// provider.HealthChecker so the drive's wait-and-resume (P50.1) fires for a
+// transient Anthropic outage exactly as it does for the OpenAI-compat and
+// native Ollama adapters — mirrored closely from openai_test.go's TestHealthy.
+func TestHealthy(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithBaseURL(srv.URL))
+	if !a.Healthy(context.Background()) {
+		t.Fatal("Healthy() = false against a live server answering /v1/models")
+	}
+	if gotMethod != http.MethodGet || gotPath != "/v1/models" {
+		t.Errorf("probe hit %s %s, want GET /v1/models", gotMethod, gotPath)
+	}
+
+	// An unreachable server (closed listener) is not healthy — the case the
+	// whole mechanism exists for.
+	down := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	downURL := down.URL
+	down.Close()
+	if New("k", WithBaseURL(downURL)).Healthy(context.Background()) {
+		t.Error("Healthy() = true against an unreachable server")
+	}
+}
+
+// TestHealthyTreatsAnAnsweringServerAsAlive mirrors openai_test.go's: this is
+// a liveness question, not a usability one, so a 401 (bad key) or 404 still
+// proves a server answered.
+func TestHealthyTreatsAnAnsweringServerAsAlive(t *testing.T) {
+	for _, code := range []int{
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusTooManyRequests, http.StatusInternalServerError,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		if !New("k", WithBaseURL(srv.URL)).Healthy(context.Background()) {
+			t.Errorf("Healthy() = false for status %d, want true — a server that answers at all is reachable", code)
+		}
+		srv.Close()
+	}
+}
+
+// TestHealthyRejectsGatewayUpstreamFailures is the carve-out: on 502/503/504
+// the thing answering is a proxy (or Anthropic's own "overloaded" 503)
+// explicitly reporting that the service is not there.
+func TestHealthyRejectsGatewayUpstreamFailures(t *testing.T) {
+	for _, code := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		if New("k", WithBaseURL(srv.URL)).Healthy(context.Background()) {
+			t.Errorf("Healthy() = true for status %d, want false — the upstream is down", code)
+		}
+		srv.Close()
+	}
+}
+
+// TestHealthySendsConfiguredHeaders: a gateway in front of Anthropic may need
+// its own headers to route the request at all, so the probe carries the same
+// ones Stream does, plus the required x-api-key/anthropic-version pair.
+func TestHealthySendsConfiguredHeaders(t *testing.T) {
+	var gotHeader, gotKey, gotVersion string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Gateway")
+		gotKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	if !New("sk-test", WithBaseURL(srv.URL), WithHeaders(map[string]string{"X-Gateway": "tenant-a"})).Healthy(context.Background()) {
+		t.Fatal("Healthy() = false against a live server")
+	}
+	if gotHeader != "tenant-a" {
+		t.Errorf("X-Gateway = %q, want the configured header forwarded", gotHeader)
+	}
+	if gotKey != "sk-test" {
+		t.Errorf("x-api-key = %q, want the configured key", gotKey)
+	}
+	if gotVersion != apiVersion {
+		t.Errorf("anthropic-version = %q, want %q", gotVersion, apiVersion)
+	}
+}
+
+// TestHealthProbeUsesTheAdapterTransport mirrors the other adapters' P61.5
+// guard: the probe must run on the adapter's own transport, so a user's
+// proxy/TLS/dialer configuration reaches the probe that gates P50.1 recovery —
+// while keeping its own short timeout, since the streaming client's is
+// deliberately unbounded so a long prefill isn't cut off (P59.2).
+func TestHealthProbeUsesTheAdapterTransport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithBaseURL(srv.URL))
+	if !a.Healthy(context.Background()) {
+		t.Fatal("Healthy() = false against a live server")
+	}
+
+	hc := provider.HealthClient(a.client)
+	if hc.Transport != a.client.Transport {
+		t.Error("probe client does not share the adapter's transport")
+	}
+	if hc.Timeout != provider.HealthProbeTimeout {
+		t.Errorf("probe Client.Timeout = %v, want %v — it must not inherit the streaming client's unbounded one",
+			hc.Timeout, provider.HealthProbeTimeout)
+	}
+	if a.client.Timeout != 0 {
+		t.Errorf("streaming client's Timeout = %v, want 0 (P59.2)", a.client.Timeout)
+	}
+}
+
+// TestHealthyReachableThroughDecorators pins that provider.CheckBackendHealth
+// reaches this adapter's Healthy() through the retry/harness decorators, the
+// same way it already does for the OpenAI-compat and native Ollama adapters —
+// this is what makes drive.recoverBackendDown's probe actually fire for an
+// Anthropic-backed drive instead of silently reporting "not supported".
+func TestHealthyReachableThroughDecorators(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	base := New("k", WithBaseURL(srv.URL))
+	wrapped := provider.WithRetry(base, provider.DefaultRetryPolicy(), nil)
+
+	healthy, supported := provider.CheckBackendHealth(context.Background(), wrapped)
+	if !supported {
+		t.Fatal("CheckBackendHealth: supported = false, want true — the base adapter implements HealthChecker")
+	}
+	if !healthy {
+		t.Error("CheckBackendHealth: healthy = false against a live server")
+	}
+}

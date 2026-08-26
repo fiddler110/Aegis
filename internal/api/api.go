@@ -761,6 +761,44 @@ type ConfigSkillsPatchRequest struct {
 	BuiltinEnabled []string `json:"builtin_enabled"`
 }
 
+// ConfigCostResponse is the GET /config/cost response (P78.8): the daemon's
+// currently effective cost.* settings (config.Load()'s merged view across
+// global/project/env layers), plus the scope a PATCH without an explicit
+// "scope" would default to. Mirrors ConfigSandboxResponse/ConfigSecurityResponse.
+type ConfigCostResponse struct {
+	Scope                 string  `json:"scope"`
+	BudgetUSD             float64 `json:"budget_usd"`
+	MaxTokensPerRun       int     `json:"max_tokens_per_run"`
+	MaxWallClockPerRunSec int     `json:"max_wall_clock_per_run"`
+	MaxTurnStallSec       int     `json:"max_turn_stall"`
+	SessionCapUSD         float64 `json:"session_cap_usd"`
+	DailyCapUSD           float64 `json:"daily_cap_usd"`
+	SessionTokenCap       int     `json:"session_token_cap"`
+	DailyTokenCap         int     `json:"daily_token_cap"`
+	AlertThreshold        float64 `json:"alert_threshold"`
+}
+
+// ConfigCostPatchRequest partially updates the cost: config block (PATCH
+// /config/cost, P78.8). Only fields present in the JSON body are changed; the
+// rest keep their current value from config.Load() before the patch is
+// written — mirrors ConfigSandboxPatchRequest's semantics, since the
+// underlying config.CostPatch/PatchGlobalCost/PatchProjectCost always replace
+// the whole cost: block wholesale. `aegis harden` was already able to write
+// this block via POST /config/harden; this is the read/partial-write pair
+// that was missing alongside it.
+type ConfigCostPatchRequest struct {
+	Scope                 string   `json:"scope,omitempty"`
+	BudgetUSD             *float64 `json:"budget_usd,omitempty"`
+	MaxTokensPerRun       *int     `json:"max_tokens_per_run,omitempty"`
+	MaxWallClockPerRunSec *int     `json:"max_wall_clock_per_run,omitempty"`
+	MaxTurnStallSec       *int     `json:"max_turn_stall,omitempty"`
+	SessionCapUSD         *float64 `json:"session_cap_usd,omitempty"`
+	DailyCapUSD           *float64 `json:"daily_cap_usd,omitempty"`
+	SessionTokenCap       *int     `json:"session_token_cap,omitempty"`
+	DailyTokenCap         *int     `json:"daily_token_cap,omitempty"`
+	AlertThreshold        *float64 `json:"alert_threshold,omitempty"`
+}
+
 // LocalModelsResponse lists what GET /models/local found pulled on the
 // configured Ollama server, so a client-side model picker can offer real tags
 // instead of the static curated catalog's generic family names. Reachable is

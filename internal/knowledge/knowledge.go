@@ -18,6 +18,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/embed"
 	"github.com/fiddler110/aegis/internal/fsguard"
+	"github.com/fiddler110/aegis/internal/sqlitestore"
 	_ "modernc.org/sqlite"
 )
 
@@ -37,28 +38,12 @@ type Store struct {
 	embedder embed.Embedder // nil = BM25-only (default)
 }
 
-// busyTimeoutDSN makes every connection the pool opens wait up to 5s for a
-// contended lock instead of failing with SQLITE_BUSY immediately (P63.4). It is
-// a DSN parameter rather than a `PRAGMA busy_timeout` Exec because the setting
-// is per-connection and is not persisted in the database file the way
-// journal_mode=WAL is — an Exec would cover only whichever pooled connection
-// served it. See internal/session for the longer note.
-const busyTimeoutDSN = "?_pragma=busy_timeout(5000)"
-
 // Open opens (or creates) a knowledge store at dbPath indexed against root.
 // embedder is optional (nil disables semantic recall and keeps BM25-only
 // search, the zero-config default).
 func Open(root, dbPath string, embedder embed.Embedder) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", dbPath+busyTimeoutDSN)
+	db, err := sqlitestore.Open(dbPath, "knowledge")
 	if err != nil {
-		return nil, fmt.Errorf("open knowledge db: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		_ = db.Close()
 		return nil, err
 	}
 	s := &Store{db: db, root: root, embedder: embedder}
@@ -75,7 +60,7 @@ func Open(root, dbPath string, embedder embed.Embedder) (*Store, error) {
 
 // hardenDBPermissions applies fsguard.RestrictToOwner (FIND-18/P27.10) to the
 // knowledge database file and to its WAL-mode sidecars (-wal, -shm; this
-// store always runs in WAL mode — see the PRAGMA above). It mirrors
+// store always runs in WAL mode — see sqlitestore.Open). It mirrors
 // session.hardenDBPermissions: the main database file is created by Aegis
 // itself, so a genuine ACL-set failure on it propagates as an error from
 // Open, while the sidecars may not exist yet at open time — fsguard.RestrictToOwner

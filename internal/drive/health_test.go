@@ -278,9 +278,10 @@ func withShrunkBackendBudget(t *testing.T, budget, interval time.Duration) func(
 // anyway. With the openai adapter's own liveness probe wired, the same error now
 // reaches waitForBackend and yields backendRecovered.
 //
-// The anthropic case is the control: it has no probe by design (no local server
-// to wait for), so the identical error must still fall through to the caller's
-// terminal path instead of spinning on a wait that can never end.
+// The anthropic case (P78.7) mirrors it: with the Anthropic adapter's own
+// liveness probe wired, the same class of transient outage (rate limit, 529
+// overloaded, transient 5xx) also reaches waitForBackend and either recovers
+// or gives up, instead of hard-aborting the drive.
 func TestRecoverBackendDownReachesTheOpenAIAdapter(t *testing.T) {
 	// A live OpenAI-compatible server: only its reachability matters, so the
 	// handler answers everything.
@@ -325,12 +326,25 @@ func TestRecoverBackendDownReachesTheOpenAIAdapter(t *testing.T) {
 		t.Errorf("openai adapter + dead server = %v, want backendGaveUp (the wait ran and expired)", got)
 	}
 
-	// Control: no probe on the cloud adapter → the drive must not wait.
-	cloud := provider.WithRetry(anthropic.New("k"), provider.DefaultRetryPolicy(), nil)
+	// P78.7: the Anthropic adapter now has its own liveness probe too — a
+	// transient outage (rate limit, 529 overloaded, transient 5xx) is exactly
+	// the kind of backend-down condition P50.1's wait-and-resume exists for,
+	// not something specific to a locally-restartable server. Same live/dead
+	// pair as the OpenAI-compat case above.
+	anthropicDown := provider.NewTransportError("anthropic", errors.New("connection reset by peer"))
+	cloud := provider.WithRetry(anthropic.New("k", anthropic.WithBaseURL(srv.URL)), provider.DefaultRetryPolicy(), nil)
 	st = backendState(func(hctx context.Context) (bool, bool) {
 		return provider.CheckBackendHealth(hctx, cloud)
 	})
-	if got := st.recoverBackendDown(ctx, provider.NewTransportError("anthropic", errors.New("connection reset by peer")), "phase-3 content"); got != backendNotDown {
-		t.Errorf("anthropic adapter = %v, want backendNotDown — there is no local server to wait for", got)
+	if got := st.recoverBackendDown(ctx, anthropicDown, "phase-3 content"); got != backendRecovered {
+		t.Errorf("anthropic adapter + live server = %v, want backendRecovered", got)
+	}
+
+	deadCloud := anthropic.New("k", anthropic.WithBaseURL(deadURL))
+	st = backendState(func(hctx context.Context) (bool, bool) {
+		return provider.CheckBackendHealth(hctx, deadCloud)
+	})
+	if got := st.recoverBackendDown(ctx, anthropicDown, "phase-3 content"); got != backendGaveUp {
+		t.Errorf("anthropic adapter + dead server = %v, want backendGaveUp (the wait ran and expired)", got)
 	}
 }

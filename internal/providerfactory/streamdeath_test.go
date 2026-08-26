@@ -170,23 +170,21 @@ func TestOversizedLineIsNamedOnEveryAdapter(t *testing.T) {
 // adapter can say "the server is back" (drive/health.go:75-80), because there is
 // nothing to wait *on* otherwise.
 //
-// Both local-capable adapters now answer: ollama.Adapter with a GET
-// /api/version, and openai.Adapter — the path P61.3 names, Ollama's
-// OpenAI-compat /v1 — with a GET <base>/models, the OpenAI-shaped equivalent
-// (/api/version is not part of that API, and this adapter also serves real
-// OpenAI, LM Studio and gateways). Until that was added the /v1 path was the
-// residual gap this map recorded: classified, but never waited out.
+// All three adapters now answer: ollama.Adapter with a GET /api/version,
+// openai.Adapter — the path P61.3 names, Ollama's OpenAI-compat /v1 — with a
+// GET <base>/models, the OpenAI-shaped equivalent (/api/version is not part
+// of that API, and this adapter also serves real OpenAI, LM Studio and
+// gateways), and anthropic.Adapter (P78.7) with a GET <base>/v1/models. Until
+// P61.6 the /v1 path was a residual gap this map recorded: classified, but
+// never waited out; until P78.7 the same was true of Anthropic itself — a
+// managed remote service still has genuine transient failure modes (rate
+// limits, 529 overloaded, a transient 5xx) where wait-and-resume is exactly
+// as valuable as it is for a locally-restartable server, so "no local process
+// to restart" turned out not to be a reason to leave it unsupported.
 var livenessProbeWired = map[string]bool{
-	"ollama": true,
-	"openai": true,
-	// By design, and the reason is about the *backend*, not about which adapter
-	// is "native": there is no local Anthropic server to wait for. A managed
-	// remote service is either having a transient outage — already the retry
-	// decorator's job — or an outage no bounded wait-and-resume would outlast,
-	// and probing it is a billable round-trip against someone else's quota. The
-	// distinction P50.1 draws is exactly this: supported==false means "don't
-	// wait on this backend", which is the honest answer here.
-	"anthropic": false,
+	"ollama":    true,
+	"openai":    true,
+	"anthropic": true,
 }
 
 // TestLivenessProbeReachIsRecorded keeps the map above honest against the real
@@ -201,7 +199,7 @@ func TestLivenessProbeReachIsRecorded(t *testing.T) {
 				t.Fatalf("provider %q is buildable but not in livenessProbeWired — record whether a "+
 					"mid-stream death on it can actually reach drive.waitForBackend (P50.1)", tc.name)
 			}
-			a, err := buildOne(tc.name, tc.apiKey, "http://127.0.0.1:1", nil, nil, "", 0, 0, "", 0, 0, nil, nil)
+			a, err := buildOne(buildOneConfig{name: tc.name, apiKey: tc.apiKey, baseURL: "http://127.0.0.1:1"})
 			if err != nil {
 				t.Fatalf("buildOne(%s): %v", tc.name, err)
 			}
@@ -264,7 +262,7 @@ func probeKilledStream(t *testing.T, name, apiKey, partial string) error {
 
 	// The idle bound is left off (0 -> the adapter's default, minutes long) so
 	// the watchdog cannot be what ends this stream: the read failure must.
-	a, err := buildOne(name, apiKey, srv.URL, nil, nil, "", 0, 0, "", 0, 0, nil, nil)
+	a, err := buildOne(buildOneConfig{name: name, apiKey: apiKey, baseURL: srv.URL})
 	if err != nil {
 		t.Fatalf("buildOne(%s): %v", name, err)
 	}

@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -501,6 +504,109 @@ func TestConfigSkillsGetAndPatchRoundTrip(t *testing.T) {
 	}
 	if len(got.BuiltinEnabled) != 2 || got.BuiltinEnabled[0] != "security-audit" {
 		t.Errorf("persisted BuiltinEnabled = %v", got.BuiltinEnabled)
+	}
+}
+
+// ─── /config/cost ────────────────────────────────────────────────────────────
+
+// TestConfigCostGetAndPatchRoundTrip is the P78.8 reachability check for the
+// GET/PATCH /config/cost pair added alongside sandbox/security/skills: POST
+// /config/harden could already write cost config, but nothing could read or
+// partially patch it directly. Exercised over raw HTTP (rather than the
+// internal/client wrappers the sandbox/security/skills tests use above)
+// since this change is scoped to internal/server and adding client methods
+// is out of scope.
+func TestConfigCostGetAndPatchRoundTrip(t *testing.T) {
+	redirectConfigDir(t)
+
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	srv.workspace = t.TempDir()
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	httpClient := ts.Client()
+	doReq := func(method, path string, body any) *http.Response {
+		t.Helper()
+		var rdr io.Reader
+		if body != nil {
+			b, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rdr = bytes.NewReader(b)
+		}
+		req, err := http.NewRequest(method, ts.URL+path, rdr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// GET reflects config defaults (zero values, since none are set).
+	getResp := doReq(http.MethodGet, "/config/cost?scope=global", nil)
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /config/cost status = %d, want 200", getResp.StatusCode)
+	}
+	var got api.ConfigCostResponse
+	if err := json.NewDecoder(getResp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode GET response: %v", err)
+	}
+	if got.Scope != "global" {
+		t.Errorf("Scope = %q, want %q", got.Scope, "global")
+	}
+
+	// PATCH only budget_usd; other fields must carry through untouched
+	// (partial-update semantics, matching sandbox/security).
+	budget := 5.0
+	patchResp := doReq(http.MethodPatch, "/config/cost", api.ConfigCostPatchRequest{
+		Scope:     "global",
+		BudgetUSD: &budget,
+	})
+	defer patchResp.Body.Close()
+	if patchResp.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH /config/cost status = %d, want 200", patchResp.StatusCode)
+	}
+	var patched api.ConfigCostResponse
+	if err := json.NewDecoder(patchResp.Body).Decode(&patched); err != nil {
+		t.Fatalf("decode PATCH response: %v", err)
+	}
+	if patched.BudgetUSD != 5.0 {
+		t.Errorf("BudgetUSD = %v, want 5.0", patched.BudgetUSD)
+	}
+
+	// Persisted to disk and visible on a follow-up GET.
+	data, err := os.ReadFile(config.GlobalConfigPath())
+	if err != nil {
+		t.Fatalf("read global config: %v", err)
+	}
+	if !strings.Contains(string(data), "budget_usd: 5") {
+		t.Errorf("global config missing budget_usd: 5:\n%s", data)
+	}
+	got2Resp := doReq(http.MethodGet, "/config/cost?scope=global", nil)
+	defer got2Resp.Body.Close()
+	var got2 api.ConfigCostResponse
+	if err := json.NewDecoder(got2Resp.Body).Decode(&got2); err != nil {
+		t.Fatalf("decode second GET response: %v", err)
+	}
+	if got2.BudgetUSD != 5.0 {
+		t.Errorf("GET after PATCH BudgetUSD = %v, want 5.0", got2.BudgetUSD)
 	}
 }
 

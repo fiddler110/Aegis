@@ -1,6 +1,16 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-25 — **P77.1** shipped. It was parked Tier 4 pending "a user reports
+**Last updated:** 2026-08-26 — **P78.1**–**P78.9** filed and shipped the same day. Filed from a
+five-track code-quality audit (sprawl/duplication/gaps, not security — that axis is `CodeReview.md`'s
+and **P76.1**'s) that read the whole tree in parallel by package group. All nine were opportunistic
+Tier 4 items with no fired trigger, picked up together rather than left parked, run as seven parallel
+subagents by disjoint package: the four god-file splits (**P78.1** `chat.go`, **P78.2** `engine.go`'s
+`Run()`, **P78.3** `slash.go`, **P78.4** `drive.go`), the provider-layer cleanup (**P78.5** dedup'd
+adapter helpers, **P78.6** `buildOne`'s struct bundle, **P78.7** Anthropic `Healthy()`), the
+`config.go` PATCH-endpoint generic plus the `/config/cost` gap it surfaced (**P78.8**), and six small
+residue findings (**P78.9**). Full record: [releases.md](releases.md#p781-p789-shipped-2026-08-26).
+
+**Last updated (previous):** 2026-08-25 — **P77.1** shipped. It was parked Tier 4 pending "a user reports
 specifically wanting the reasoning content itself" — the user did, directly. Investigating found the
 roadmap entry's own premise stale: `provider.ThinkingBlock`/`EventThinkingDelta` and the TUI's live
 dim-text-then-collapsible-block rendering (`ctrl+o` to expand) already existed end to end for both
@@ -535,10 +545,12 @@ request: [releases.md](releases.md#the-inline-truncation-request-closes-out-2026
 
 **Status: 25 open** — 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
 6 from the P66 review batch, 5 from the P67 external-source reading, 5 from the P71 batch filed
-2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), and **P74.21** (filed 2026-08-21
-the same day P74.17 shipped without it). **P77.2**, **P77.3**, **P77.4**, and **P77.5** (filed the same
+2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), **P74.21** (filed 2026-08-21
+the same day P74.17 shipped without it), and **P77.6** (filed 2026-08-25, spun out of P66.19). **P77.2**,
+**P77.3**, **P77.4**, and **P77.5** (filed the same
 day, same batch) all shipped 2026-08-24 — see [releases.md](releases.md#p774-shipped-2026-08-24).
-**P77.1** shipped 2026-08-25 — see [releases.md](releases.md#p771-shipped-2026-08-25). **P70.3**
+**P77.1** shipped 2026-08-25 — see [releases.md](releases.md#p771-shipped-2026-08-25). **P78.1**–**P78.9**
+filed and shipped 2026-08-26 — see [releases.md](releases.md#p781-p789-shipped-2026-08-26). **P70.3**
 shipped 2026-08-18 and has left this tier. **P63.10** shipped 2026-08-21, taken opportunistically while
 `internal/tui` was open for **P75.1** — record in
 [releases.md](releases.md#p6310-shipped-2026-08-21).
@@ -1174,6 +1186,9 @@ frame-diff or output-batching layer that would be tempted to dedupe them — unt
 the whole deliverable.
 
 Priority: Tier 4 — no concrete trigger, XS. A comment, not a feature.
+
+**P78.1**–**P78.9** (filed and shipped 2026-08-26, from a five-track code-quality/sprawl/duplication
+audit of the whole tree) — full record: [releases.md](releases.md#p781-p789-shipped-2026-08-26).
 
 ---
 

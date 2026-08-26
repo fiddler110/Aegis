@@ -589,15 +589,119 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 
+	// s is constructed here (P78.9), right after its one prerequisite (store),
+	// instead of ~250 lines into the function as it was pre-P78.9. adapter and
+	// tools start nil and are filled in by wireProvider/wireTools below once
+	// they exist; every other subsystem is filled in by exactly one wire*
+	// method call further down. The payoff: every wire* method runs against a
+	// real, already-addressable *s*, so none of them need the "var s *Server;
+	// closure reads s lazily at call time" forward-reference trick the cron
+	// RunFunc and the knowledge-provider closure used to require — cronPermCheck/
+	// cronNotify/knowledgeStoreFor are now passed as plain method values.
+	s := newWithDeps(cfg, logger, store, nil, nil)
+
 	// Per-model capability cache (P53.5): opened before the adapter so the
 	// Ollama adapter starts with the `think`-rejection latches a previous
 	// process already paid for, and reconciled against the models actually
 	// present so a re-pulled tag can't inherit the old weights' verdicts.
 	modelCaps := cfg.OpenModelCaps()
 	reconcileModelCaps(cfg, modelCaps, logger)
+	s.wireProvider(cfg, modelCaps, logger)
 
-	// A missing API key is not fatal: the daemon still serves session
-	// management and reports the error only when a turn is actually run.
+	cwd, err := os.Getwd()
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("getwd: %w", err)
+	}
+	s.workspace = cwd
+
+	if err := s.wireCoreStores(cfg, logger); err != nil {
+		store.Close()
+		return nil, err
+	}
+
+	sb, sandboxFallback, sandboxFallbackReason, err := SelectSandbox(cfg.Sandbox, cwd, logger)
+	if err != nil {
+		store.Close()
+		return nil, err
+	}
+	s.sandbox = sb
+	s.sandboxFallback = sandboxFallback
+	s.sandboxFallbackReason = sandboxFallbackReason
+
+	if err := s.wireCron(cwd, sb, logger); err != nil {
+		store.Close()
+		return nil, err
+	}
+
+	s.wireLSP(cfg, cwd, logger)
+
+	// Semantic recall layer (P5.8): opt-in; nil embedder keeps both stores
+	// BM25-only, which is the zero-config default.
+	s.embedder = embed.New(cfg.Embeddings.Enabled, cfg.Embeddings.Provider, cfg.Embeddings.Model, cfg.Embeddings.BaseURL)
+	s.wireKnowledgeAndMemory(cfg, cwd, logger)
+
+	if err := s.wireTools(cfg, cwd, sb, logger); err != nil {
+		store.Close()
+		return nil, err
+	}
+
+	if err := s.wireSecurityWarnings(cfg, logger); err != nil {
+		if s.knowledge != nil {
+			_ = s.knowledge.Close()
+		}
+		if s.longMem != nil {
+			_ = s.longMem.Close()
+		}
+		store.Close()
+		return nil, err
+	}
+
+	// Hand the tool-calling gate the same capability store the adapter got, so
+	// a probe verdict measured in an earlier process is reused instead of
+	// re-run (P53.5). Replacing the gate here (rather than parameterising
+	// newWithDeps) keeps that constructor's 50-odd test call sites untouched,
+	// and is safe because nothing has consulted the gate yet — it is only ever
+	// reached from a run, which cannot start until New returns.
+	s.modelCaps = modelCaps
+	s.toolCalling = toolcallprobe.NewGate(
+		toolcallprobe.WithTrials(cfg.Provider.ToolCallProbeTrials),
+		toolcallprobe.WithStore(modelcaps.ProbeStore{S: modelCaps}),
+	)
+
+	s.wirePermissionRules(cfg, logger)
+
+	s.memory = memory.NewSources(cwd, cfg.DataDir)
+	s.repoMap = loadRepoMap(cwd, repoMapOptions(cfg), logger)
+	_, _ = s.repoMaps.getOrCreate(cwd, func() (string, error) { return s.repoMap, nil })
+
+	s.wirePersonasAndCommands(cfg, cwd, logger)
+
+	if err := s.wireAuthAndTLS(cfg); err != nil {
+		store.Close()
+		return nil, err
+	}
+
+	s.wireHooks(cfg, logger)
+
+	if s.adapter != nil {
+		s.wireCompaction(cfg)
+	}
+
+	s.wireMCP(cfg, logger)
+
+	if err := s.wireSwarm(cfg, logger); err != nil {
+		store.Close()
+		return nil, err
+	}
+
+	return s, nil
+}
+
+// wireProvider builds the model adapter from cfg (a missing API key is not
+// fatal: the daemon still serves session management and reports the error
+// only when a turn is actually run) and stores it on s.
+func (s *Server) wireProvider(cfg *config.Config, modelCaps *modelcaps.Store, logger *slog.Logger) {
 	adapter, err := providerfactory.Build(cfg, logger, providerfactory.WithModelCaps(modelCaps))
 	if err != nil {
 		logger.Warn("provider not ready; message runs will fail until configured", "err", err)
@@ -614,131 +718,131 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		// max and calibrates the number (P35.3); this hot-path start does not.
 		logger.Warn(detail, "fix", providerfactory.LegacyOllamaCompatFix(cfg.Provider, 0))
 	}
+	s.adapter = adapter
+}
 
+// wireCoreStores opens the background-task, checkpoint and operation-register
+// stores, all of which share s.store's single DB connection.
+func (s *Server) wireCoreStores(cfg *config.Config, logger *slog.Logger) error {
 	// Background-task manager shares the session database's single connection.
-	taskStore, err := task.NewStore(store.DB())
+	taskStore, err := task.NewStore(s.store.DB())
 	if err != nil {
-		store.Close()
-		return nil, err
+		return err
 	}
-	taskMgr := task.NewManager(taskStore, logger)
+	s.tasks = task.NewManager(taskStore, logger)
 
 	// Checkpoint store shares the session database connection. Wired into the
 	// session store's Delete/Prune so checkpoint snapshots are cleaned up on
 	// every deletion path, not just the HTTP delete-session handler (P32.3).
-	checkpointStore, err := checkpoint.NewStore(store.DB())
+	checkpointStore, err := checkpoint.NewStore(s.store.DB())
 	if err != nil {
-		store.Close()
-		return nil, err
+		return err
 	}
-	store.SetCheckpointCleaner(checkpointStore)
+	s.store.SetCheckpointCleaner(checkpointStore)
+	s.checkpoints = checkpointStore
 
 	// Operation register shares the session database connection too (P65.4).
-	opRegisterStore, err := opregister.NewStore(store.DB())
+	opRegisterStore, err := opregister.NewStore(s.store.DB())
 	if err != nil {
-		store.Close()
-		return nil, err
+		return err
 	}
+	s.opRegister = opRegisterStore
+	return nil
+}
 
-	cwd, err := os.Getwd()
+// wireCron builds the background job scheduler and its RunFunc. Run after
+// s.tasks exists: the fire-time permission check and notification hooks are
+// plain method values (s.cronPermCheck, s.cronNotify) since s is already
+// fully addressable here (P78.9) — pre-P78.9 these had to be closures reading
+// a not-yet-assigned `var s *Server` lazily at actual fire time, long after
+// New returned (P27.15/FIND-08).
+func (s *Server) wireCron(cwd string, sb sandbox.Backend, logger *slog.Logger) error {
+	cronStore, err := cron.NewStore(s.store.DB())
 	if err != nil {
-		store.Close()
-		return nil, fmt.Errorf("getwd: %w", err)
-	}
-
-	sb, sandboxFallback, sandboxFallbackReason, err := SelectSandbox(cfg.Sandbox, cwd, logger)
-	if err != nil {
-		store.Close()
-		return nil, err
-	}
-
-	// Cron scheduler: fires due jobs as background tasks. s is declared here
-	// (nil) and assigned below by newWithDeps — the RunFunc closure only
-	// reads it at actual fire time, long after New returns, so capturing the
-	// not-yet-initialized variable is safe (P27.15/FIND-08: the fire-time
-	// permission check needs the fully assembled gate stack, which in turn
-	// needs the tool registry and parsed permission rules that don't exist
-	// until later in this constructor).
-	var s *Server
-	cronStore, err := cron.NewStore(store.DB())
-	if err != nil {
-		store.Close()
-		return nil, err
+		return err
 	}
 	runCronCmd := cronShellRunner(sb, cwd)
-	cronRun := newCronRunFunc(cronStore, taskMgr, runCronCmd,
-		func(ctx context.Context, j cron.Job) (bool, string) { return s.cronPermCheck(ctx, j) },
-		func(j cron.Job, status, output string) { s.cronNotify(j, status, output) }, logger)
-	cronSched := cron.NewScheduler(cronStore, cronRun, logger)
+	cronRun := newCronRunFunc(cronStore, s.tasks, runCronCmd, s.cronPermCheck, s.cronNotify, logger)
+	s.cronSched = cron.NewScheduler(cronStore, cronRun, logger)
+	return nil
+}
 
+// wireLSP starts every configured language server. No-op when none are
+// configured, leaving s.lspMgr nil.
+func (s *Server) wireLSP(cfg *config.Config, cwd string, logger *slog.Logger) {
+	if len(cfg.LSP) == 0 {
+		return
+	}
+	lspMgr := lsp.NewManager(cwd, logger)
+	for _, lc := range cfg.LSP {
+		if err := lspMgr.Start(context.Background(), lsp.ServerConfig{
+			Name: lc.Name, Command: lc.Command, Args: lc.Args, Extensions: lc.Extensions, Trust: lc.Trust,
+		}); err != nil {
+			logger.Warn("lsp server start failed", "name", lc.Name, "err", err)
+		}
+	}
+	s.lspMgr = lspMgr
+}
+
+// wireKnowledgeAndMemory opens the project knowledge base (P3.3) and
+// long-term entity memory (P3.1) stores, which share the per-user data
+// directory. Failures here are non-fatal — the tools are simply skipped.
+func (s *Server) wireKnowledgeAndMemory(cfg *config.Config, cwd string, logger *slog.Logger) {
+	knowledgeStore, err := knowledge.Open(cwd, cfg.KnowledgeDBPath(cwd), s.embedder)
+	if err != nil {
+		logger.Warn("knowledge store unavailable", "err", err)
+		knowledgeStore = nil
+	}
+	s.knowledge = knowledgeStore
+
+	projectName := filepath.Base(cwd)
+	longMemStore, err := longmem.Open(projectName, cfg.LongMemDBPath(), s.embedder)
+	if err != nil {
+		logger.Warn("long-term memory store unavailable", "err", err)
+		longMemStore = nil
+	}
+	s.longMem = longMemStore
+}
+
+// wireTools builds the tool registry and registers every built-in and plugin
+// tool. Must run after s.tasks, s.cronSched, s.sandbox, s.lspMgr, s.knowledge
+// and s.longMem are set, since regOpts wires all of them through into the
+// registered tools' host options.
+func (s *Server) wireTools(cfg *config.Config, cwd string, sb sandbox.Backend, logger *slog.Logger) error {
 	// Shared team task list for agent-team coordination (P5.1); reuses the
 	// session DB. A failure here is non-fatal — team tools are simply skipped.
-	teamTasks, err := swarm.NewTaskList(store.DB())
+	teamTasks, err := swarm.NewTaskList(s.store.DB())
 	if err != nil {
 		logger.Warn("swarm: team task list unavailable", "err", err)
 		teamTasks = nil
 	}
 
-	// LSP manager: start configured language servers.
-	var lspMgr *lsp.Manager
-	if len(cfg.LSP) > 0 {
-		lspMgr = lsp.NewManager(cwd, logger)
-		for _, lc := range cfg.LSP {
-			if err := lspMgr.Start(context.Background(), lsp.ServerConfig{
-				Name: lc.Name, Command: lc.Command, Args: lc.Args, Extensions: lc.Extensions, Trust: lc.Trust,
-			}); err != nil {
-				logger.Warn("lsp server start failed", "name", lc.Name, "err", err)
-			}
-		}
-	}
-
-	// Semantic recall layer (P5.8): opt-in; nil embedder keeps both stores
-	// BM25-only, which is the zero-config default.
-	embedder := embed.New(cfg.Embeddings.Enabled, cfg.Embeddings.Provider, cfg.Embeddings.Model, cfg.Embeddings.BaseURL)
-
-	// Project knowledge base (P3.3) and long-term entity memory (P3.1) share
-	// the per-user data directory. Failures here are non-fatal — the tools
-	// are simply skipped, mirroring the teamTasks pattern above.
-	knowledgeStore, err := knowledge.Open(cwd, cfg.KnowledgeDBPath(cwd), embedder)
-	if err != nil {
-		logger.Warn("knowledge store unavailable", "err", err)
-		knowledgeStore = nil
-	}
-	projectName := filepath.Base(cwd)
-	longMemStore, err := longmem.Open(projectName, cfg.LongMemDBPath(), embedder)
-	if err != nil {
-		logger.Warn("long-term memory store unavailable", "err", err)
-		longMemStore = nil
-	}
-
 	reg := tool.NewRegistry()
 	ft := filetracker.New()
 	todoList := builtin.NewTodoList()
-	// KnowledgeProvider is a closure over s (nil here, assigned below by
-	// newWithDeps) rather than a direct method value, so the deferred read at
-	// actual tool-call time sees the fully constructed Server — same pattern
-	// as cronRun/s.cronPermCheck above.
-	knowledgeProvider := builtin.KnowledgeProviderFunc(func(root string) (*knowledge.Store, error) { return s.knowledgeStoreFor(root) })
+	// knowledgeProvider is a plain method value (P78.9) — pre-P78.9 this had to
+	// be a closure reading a not-yet-assigned `var s *Server` lazily at actual
+	// tool-call time, same as the cron RunFunc above.
+	knowledgeProvider := builtin.KnowledgeProviderFunc(s.knowledgeStoreFor)
 	regOpts := enginecfg.BuiltinOptions(cfg, cwd)
-	regOpts.Tasks = taskMgr
-	regOpts.Cron = cronSched
+	regOpts.Tasks = s.tasks
+	regOpts.Cron = s.cronSched
 	regOpts.Sandbox = sb
 	regOpts.FileTracker = ft
-	regOpts.LSP = lspMgr
+	regOpts.LSP = s.lspMgr
 	regOpts.TodoList = todoList
 	// Search now comes from enginecfg.BuiltinOptions itself (a config-derived
 	// field, not host wiring) — see its own comment.
 	regOpts.TeamTasks = teamTasks
 	regOpts.MailboxRoot = swarm.MailboxRoot(cfg.DataDir)
-	regOpts.Knowledge = knowledgeStore
+	regOpts.Knowledge = s.knowledge
 	regOpts.KnowledgeProvider = knowledgeProvider
-	regOpts.LongMem = longMemStore
+	regOpts.LongMem = s.longMem
 	// LocalProfile and the rest of the config-derived option set are decided by
 	// enginecfg.BuiltinOptions (P62.10/P66.13); everything assigned above is host
 	// wiring only the daemon has, which is why it is assigned rather than shared.
 	if err := builtin.Register(reg, regOpts); err != nil {
-		store.Close()
-		return nil, err
+		return err
 	}
 
 	// Register external process tools (plugins).
@@ -758,8 +862,17 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		plugins.RegisterProcessTools(reg, pluginConfigs, logger)
 	}
 
-	// Security posture warnings. These are easy to misconfigure in ways that
-	// silently weaken isolation, so surface them loudly at startup.
+	s.fileTracker = ft
+	s.tools = reg
+	return nil
+}
+
+// wireSecurityWarnings surfaces startup warnings for security postures that
+// are easy to misconfigure in ways that silently weaken isolation, and
+// refuses to start outright for the one combination that means unattended
+// RCE (auto-approved execution over an unsandboxed backend). Must run after
+// s.tools/s.sandbox are set.
+func (s *Server) wireSecurityWarnings(cfg *config.Config, logger *slog.Logger) error {
 	if cfg.WorkspaceTrust.Frozen {
 		logger.Warn("workspace not trusted: project .aegis/config.yaml security-relevant settings are frozen to user/global values",
 			"dir", cfg.WorkspaceTrust.Dir, "changes", cfg.WorkspaceTrust.Changes,
@@ -768,7 +881,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			"stale_grant", cfg.WorkspaceTrust.Stale,
 			"fix", "run `aegis trust` to review and accept them")
 	}
-	if _, isLocal := sb.(*sandbox.LocalBackend); isLocal {
+	if _, isLocal := s.sandbox.(*sandbox.LocalBackend); isLocal {
 		if cfg.Permission.Mode != string(permission.ModePlan) {
 			// FIND-04/P27.14: the local backend strips secrets from the
 			// spawned env (P7.2) but gives no fs/network/process isolation —
@@ -789,72 +902,46 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			// sandbox.backend: podman before P25.2's aliasing) silently
 			// landed here. Refuse to start unless the operator has
 			// explicitly acknowledged the risk via the opt-out.
-			if err := unsandboxedAutoExecError(cfg.Permission, cfg.Sandbox.Backend, sandboxFallback, sandboxFallbackReason); err != nil {
-				if knowledgeStore != nil {
-					_ = knowledgeStore.Close()
-				}
-				if longMemStore != nil {
-					_ = longMemStore.Close()
-				}
-				store.Close()
-				return nil, err
+			if err := unsandboxedAutoExecError(cfg.Permission, cfg.Sandbox.Backend, s.sandboxFallback, s.sandboxFallbackReason); err != nil {
+				return err
 			}
 			logger.Warn("auto-approved execution is enabled with the local sandbox: every shell command runs on the host without prompting (permission.allow_unsandboxed_auto_exec is set, so this is not blocking startup)",
 				"mode", cfg.Permission.Mode, "auto_approve_exec", cfg.Permission.AutoApproveExec)
 		}
 	}
 	if cfg.Security.EgressThenWrite || len(cfg.Security.NetworkAllowList) > 0 {
-		if _, ok := reg.Get("shell"); ok {
+		if _, ok := s.tools.Get("shell"); ok {
 			logger.Warn("network security policy (egress_then_write / network_allowlist) does not constrain the shell tool; commands such as curl/wget/nc bypass it — enforce egress with the container sandbox for a hard guarantee")
 		}
 	}
+	return nil
+}
 
-	s = newWithDeps(cfg, logger, store, adapter, reg)
-	// Hand the tool-calling gate the same capability store the adapter got, so
-	// a probe verdict measured in an earlier process is reused instead of
-	// re-run (P53.5). Replacing the gate rather than parameterising
-	// newWithDeps keeps that constructor's 50-odd test call sites untouched,
-	// and is safe because nothing has consulted the gate yet — it is only ever
-	// reached from a run, which cannot start until New returns.
-	s.modelCaps = modelCaps
-	s.toolCalling = toolcallprobe.NewGate(
-		toolcallprobe.WithTrials(cfg.Provider.ToolCallProbeTrials),
-		toolcallprobe.WithStore(modelcaps.ProbeStore{S: modelCaps}),
-	)
-	// Parse text-based permission rules once at startup. A malformed rule is
-	// logged and skipped rather than aborting the daemon.
-	if len(cfg.Permission.Rules) > 0 {
-		rules, err := permission.ParseRules(cfg.Permission.Rules)
-		if err != nil {
-			logger.Warn("ignoring invalid permission rules", "err", err)
-		} else {
-			s.permRules = rules
-			logger.Info("loaded permission rules", "count", len(rules))
-			// P7.7: flag any rule that can never match because the target
-			// tool's schema has none of the fields subjectFor knows how to
-			// read — otherwise a scoped deny silently never fires.
-			permission.WarnUnmatchableRules(rules, reg.All(), func(msg string, args ...any) {
-				logger.Warn(msg, args...)
-			})
-		}
+// wirePermissionRules parses text-based permission rules once at startup. A
+// malformed rule is logged and skipped rather than aborting the daemon. Must
+// run after s.tools is set (P7.7's unmatchable-rule check reads its schema).
+func (s *Server) wirePermissionRules(cfg *config.Config, logger *slog.Logger) {
+	if len(cfg.Permission.Rules) == 0 {
+		return
 	}
-	s.tasks = taskMgr
-	s.cronSched = cronSched
-	s.checkpoints = checkpointStore
-	s.opRegister = opRegisterStore
-	s.fileTracker = ft
-	s.sandbox = sb
-	s.sandboxFallback = sandboxFallback
-	s.sandboxFallbackReason = sandboxFallbackReason
-	s.lspMgr = lspMgr
-	s.knowledge = knowledgeStore
-	s.longMem = longMemStore
-	s.embedder = embedder
-	s.workspace = cwd
-	s.memory = memory.NewSources(cwd, cfg.DataDir)
-	s.repoMap = loadRepoMap(cwd, repoMapOptions(cfg), logger)
-	_, _ = s.repoMaps.getOrCreate(cwd, func() (string, error) { return s.repoMap, nil })
+	rules, err := permission.ParseRules(cfg.Permission.Rules)
+	if err != nil {
+		logger.Warn("ignoring invalid permission rules", "err", err)
+		return
+	}
+	s.permRules = rules
+	logger.Info("loaded permission rules", "count", len(rules))
+	// P7.7: flag any rule that can never match because the target tool's
+	// schema has none of the fields subjectFor knows how to read — otherwise a
+	// scoped deny silently never fires.
+	permission.WarnUnmatchableRules(rules, s.tools.All(), func(msg string, args ...any) {
+		logger.Warn(msg, args...)
+	})
+}
 
+// wirePersonasAndCommands loads custom agent definitions, hot-reloadable
+// persona templates and slash commands from the user/project directories.
+func (s *Server) wirePersonasAndCommands(cfg *config.Config, cwd string, logger *slog.Logger) {
 	// Load custom agent definitions from user/project directories.
 	if n := agentdef.LoadFromDirs(agentdef.DiscoverDirs(cfg.DataDir, cwd)...); n > 0 {
 		logger.Info("loaded custom agent definitions", "count", n)
@@ -881,23 +968,30 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	}
 
 	s.cmdReg = commands.Discover(commands.CommandDirs(cfg.DataDir, cwd)...)
+}
 
+// wireAuthAndTLS generates (or loads) the daemon's bearer token and, when
+// configured, its TLS certificate/key pair.
+func (s *Server) wireAuthAndTLS(cfg *config.Config) error {
 	token, err := generateAndWriteToken(cfg.AuthTokenPath())
 	if err != nil {
-		store.Close()
-		return nil, fmt.Errorf("auth token: %w", err)
+		return fmt.Errorf("auth token: %w", err)
 	}
 	s.authToken = token
 
 	if cfg.Server.TLS.Enabled {
 		cert, err := ensureTLSCert(cfg.TLSCertPath(), cfg.TLSKeyPath())
 		if err != nil {
-			store.Close()
-			return nil, fmt.Errorf("tls cert: %w", err)
+			return fmt.Errorf("tls cert: %w", err)
 		}
 		s.tlsCert = &cert
 	}
+	return nil
+}
 
+// wireHooks builds the audit trail, desktop/webhook notifier and
+// user-configured lifecycle hooks.
+func (s *Server) wireHooks(cfg *config.Config, logger *slog.Logger) {
 	s.audit = hooks.NewAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
 	s.notifier = notify.New(cfg.Notify.Desktop, cfg.Notify.Webhook, logger)
 	s.execHook = enginecfg.ExecHooks(cfg, logger)
@@ -906,63 +1000,71 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	} else {
 		s.hooks = hooks.NewMulti(s.audit)
 	}
-	if adapter != nil {
-		compModel := cfg.Provider.Model
-		if cfg.Provider.SmallModel != "" {
-			compModel = cfg.Provider.SmallModel // prefer a fast small model for compaction
-		}
-		s.compModel = compModel
-		// Resolve the effective context window first (P23.1): explicit config,
-		// or auto-detected from a local Ollama server — whose OpenAI-compat
-		// endpoint otherwise truncates oversized prompts silently.
-		s.initContextWindow(context.Background())
-		// Keyed to the model compaction actually *runs on*, not the global one
-		// (P52.1, second half). Compaction prefers provider.small_model, so
-		// tuning the summarizer to the primary model's window is the same
-		// wrong-model-window bug P52.1 fixed for the engine, one layer down —
-		// and worse here, because the summarizer's own request is what gets
-		// silently truncated, producing the broken/empty summary that P39.8's
-		// latch exists to stop looping on. When compModel is the global model
-		// this is a cache hit and behaves exactly as before.
-		win, _ := s.effectiveContextWindowFor(context.Background(), compModel)
-		compOpts := compaction.Options{
-			// Serve the summarizer's own model with its own num_ctx (P52.4),
-			// for the same reason every other run gets one.
-			Adapter:       provider.WithNumCtx(adapter, win),
-			Model:         compModel,
-			ContextWindow: win,
-			// P66.14: the trigger reserves room for the completion, so the
-			// summarizer needs the same max_tokens the engine's gate uses —
-			// otherwise the two gate on different numbers, which is LLM-02.
-			MaxTokens: s.cfg.Provider.MaxTokens,
-			// A local model server caches the KV of each request's longest
-			// common prefix, so rewriting the middle of the conversation costs
-			// a full prefill recompute instead of nothing — make the
-			// deterministic prune pre-pass headroom-gated rather than
-			// unconditional there. Same local/loopback test admission control
-			// uses; cloud providers are unaffected. Measured worth ~1.7x on wall
-			// clock once P62.4 fixed the estimate the trigger runs on; see
-			// config.CompactionConfig for why the first measurement said the
-			// opposite. compaction.preserve_prefix_cache overrides the
-			// detection, so the gate stays A/B-able without a rebuild.
-			PreservePrefixCache: cfg.Compaction.PreservePrefixCacheOr(
-				config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL)),
-			// P67.6: how many clearable tool results the cold-cache pass leaves
-			// verbatim. 0 takes the package default; the pass floors it at 1.
-			ColdCacheKeep: cfg.Compaction.ColdCacheKeep,
-		}
-		// A local provider whose window is still unknown (Ollama unreachable at
-		// startup): skip auto-compaction rather than falling back to the 120k
-		// default. maybeRefreshContextWindow retunes the summarizer once the
-		// server is up and the window is known.
-		if win == 0 && cfg.Provider.Default == "ollama" {
-			compOpts.MaxBudget = 0 // explicit skip
-		}
-		s.summarizer = compaction.New(compOpts)
-		s.compactor = s.summarizer
-	}
+}
 
-	// Connect configured MCP servers and register their tools.
+// wireCompaction sizes and builds the compaction summarizer against the
+// model compaction actually runs on (provider.small_model when set,
+// otherwise the global model). Callers must only invoke this when s.adapter
+// is non-nil.
+func (s *Server) wireCompaction(cfg *config.Config) {
+	compModel := cfg.Provider.Model
+	if cfg.Provider.SmallModel != "" {
+		compModel = cfg.Provider.SmallModel // prefer a fast small model for compaction
+	}
+	s.compModel = compModel
+	// Resolve the effective context window first (P23.1): explicit config, or
+	// auto-detected from a local Ollama server — whose OpenAI-compat endpoint
+	// otherwise truncates oversized prompts silently.
+	s.initContextWindow(context.Background())
+	// Keyed to the model compaction actually *runs on*, not the global one
+	// (P52.1, second half). Compaction prefers provider.small_model, so tuning
+	// the summarizer to the primary model's window is the same wrong-model-
+	// window bug P52.1 fixed for the engine, one layer down — and worse here,
+	// because the summarizer's own request is what gets silently truncated,
+	// producing the broken/empty summary that P39.8's latch exists to stop
+	// looping on. When compModel is the global model this is a cache hit and
+	// behaves exactly as before.
+	win, _ := s.effectiveContextWindowFor(context.Background(), compModel)
+	compOpts := compaction.Options{
+		// Serve the summarizer's own model with its own num_ctx (P52.4), for
+		// the same reason every other run gets one.
+		Adapter:       provider.WithNumCtx(s.adapter, win),
+		Model:         compModel,
+		ContextWindow: win,
+		// P66.14: the trigger reserves room for the completion, so the
+		// summarizer needs the same max_tokens the engine's gate uses —
+		// otherwise the two gate on different numbers, which is LLM-02.
+		MaxTokens: cfg.Provider.MaxTokens,
+		// A local model server caches the KV of each request's longest common
+		// prefix, so rewriting the middle of the conversation costs a full
+		// prefill recompute instead of nothing — make the deterministic prune
+		// pre-pass headroom-gated rather than unconditional there. Same
+		// local/loopback test admission control uses; cloud providers are
+		// unaffected. Measured worth ~1.7x on wall clock once P62.4 fixed the
+		// estimate the trigger runs on; see config.CompactionConfig for why the
+		// first measurement said the opposite. compaction.preserve_prefix_cache
+		// overrides the detection, so the gate stays A/B-able without a rebuild.
+		PreservePrefixCache: cfg.Compaction.PreservePrefixCacheOr(
+			config.LocalBackend(cfg.Provider.Default, cfg.Provider.BaseURL)),
+		// P67.6: how many clearable tool results the cold-cache pass leaves
+		// verbatim. 0 takes the package default; the pass floors it at 1.
+		ColdCacheKeep: cfg.Compaction.ColdCacheKeep,
+	}
+	// A local provider whose window is still unknown (Ollama unreachable at
+	// startup): skip auto-compaction rather than falling back to the 120k
+	// default. maybeRefreshContextWindow retunes the summarizer once the
+	// server is up and the window is known.
+	if win == 0 && cfg.Provider.Default == "ollama" {
+		compOpts.MaxBudget = 0 // explicit skip
+	}
+	s.summarizer = compaction.New(compOpts)
+	s.compactor = s.summarizer
+}
+
+// wireMCP connects every configured MCP server, registers its tools, and —
+// once s.adapter exists — wires sampling so those servers can request text
+// generation from the model.
+func (s *Server) wireMCP(cfg *config.Config, logger *slog.Logger) {
 	mcpServers := make([]mcp.ServerConfig, 0, len(cfg.MCP))
 	for _, m := range cfg.MCP {
 		mcpServers = append(mcpServers, mcp.ServerConfig{
@@ -977,22 +1079,23 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 			ScanArguments:    m.ScanArguments,
 		})
 	}
-	s.mcpClients = mcp.RegisterServers(context.Background(), reg, mcpServers, logger)
+	s.mcpClients = mcp.RegisterServers(context.Background(), s.tools, mcpServers, logger)
 
-	// Wire sampling so MCP servers can request text generation from the model.
-	if adapter != nil {
-		samplingFn := buildSamplingHandler(adapter, cfg.Provider.Model, cfg.Provider.MaxTokens, logger)
+	if s.adapter != nil {
+		samplingFn := buildSamplingHandler(s.adapter, cfg.Provider.Model, cfg.Provider.MaxTokens, logger)
 		for _, cl := range s.mcpClients {
 			cl.Sampling = samplingFn
 		}
 	}
+}
 
-	// Multi-agent: choose a sub-agent backend and register the `agent` tool.
+// wireSwarm chooses the sub-agent backend and registers the `agent` tool.
+func (s *Server) wireSwarm(cfg *config.Config, logger *slog.Logger) error {
 	s.swarmReg = swarm.NewRegistry()
 	s.swarm = s.buildSwarmBackend(swarm.MailboxRoot(cfg.DataDir))
 	s.swarm.OnStop(s.onSubagentStop)
 	s.agentLimiter = swarm.NewAdaptiveLimiter(builtin.MaxParallelAgents)
-	if err := reg.Register(builtin.NewAgentTool(s.swarm, s.tasks,
+	return s.tools.Register(builtin.NewAgentTool(s.swarm, s.tasks,
 		builtin.WithCostCaps(cfg.Cost.BudgetUSD, cfg.Cost.MaxTokensPerRun),
 		builtin.WithConcurrencyLimiter(s.agentLimiter),
 		builtin.WithDataDir(cfg.DataDir),
@@ -1004,12 +1107,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 		// while the others are loaded. Inert unless provider.vram_budget_gb is
 		// set, so wiring it changes nothing for an install that has not opted in.
 		builtin.WithResidentSetClaim(s.claimResidentSet),
-	)); err != nil {
-		store.Close()
-		return nil, err
-	}
-
-	return s, nil
+	))
 }
 
 // SelectSandbox picks the command-execution backend per cfg.Backend:
@@ -1457,6 +1555,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /config/skills", s.handleGetConfigSkills)
 	mux.HandleFunc("GET /models/local", s.handleListLocalModels)
 	mux.HandleFunc("PATCH /config/skills", s.handlePatchConfigSkills)
+	mux.HandleFunc("GET /config/cost", s.handleGetConfigCost)
+	mux.HandleFunc("PATCH /config/cost", s.handlePatchConfigCost)
 	mux.HandleFunc("POST /config/harden", s.handleConfigHarden)
 	mux.HandleFunc("POST /debate", s.handleDebate)
 	mux.HandleFunc("POST /knowledge", s.handleKnowledge)

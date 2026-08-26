@@ -69,7 +69,7 @@ func TestIdleBound_EveryAdapterBoundsAStalledStream(t *testing.T) {
 // buildOne names its supported providers in the error it returns for an unknown
 // one, so a fourth adapter cannot be added without this test noticing.
 func TestIdleBound_TableCoversEveryBuildableProvider(t *testing.T) {
-	_, err := buildOne("definitely-not-a-provider", "", "", nil, nil, "", 0, 0, "", 0, 0, nil, nil)
+	_, err := buildOne(buildOneConfig{name: "definitely-not-a-provider"})
 	if err == nil {
 		t.Fatal("buildOne accepted an unknown provider")
 	}
@@ -115,7 +115,7 @@ func probeStalledStream(t *testing.T, name, apiKey string) (error, bool) {
 	defer srv.Close()
 	defer close(release)
 
-	a, err := buildOne(name, apiKey, srv.URL, nil, nil, "", 0, 0, "", 0, 50*time.Millisecond, nil, nil)
+	a, err := buildOne(buildOneConfig{name: name, apiKey: apiKey, baseURL: srv.URL, streamIdleTimeout: 50 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("buildOne(%s): %v", name, err)
 	}

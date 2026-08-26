@@ -323,11 +323,14 @@ func RaisedContextWindow(a Adapter) int {
 // against the backing model server, independent of a full Stream request. The
 // native Ollama adapter implements it (a GET /api/version) so a driven build
 // can wait for a crashed/restarting local server to come back before resuming a
-// phase from disk (P50.1) instead of aborting the whole run. Adapters whose
-// backend is a managed remote service (the cloud providers) need not implement
-// it — a transient outage there is already covered by the retry decorator.
-// Reach it through CheckBackendHealth, which unwraps the retry / failover
-// decorators.
+// phase from disk (P50.1) instead of aborting the whole run. The OpenAI-compat
+// and Anthropic adapters implement it too (P61.6/P78.7): the retry decorator
+// covers a single failed request, but the drive's phase-level wait-and-resume
+// is a coarser recovery a cloud backend's own outages (rate limits, 529
+// overloaded, a transient 5xx) benefit from exactly as a locally-restartable
+// server does. An adapter need not implement it when there is genuinely
+// nothing useful to wait on. Reach it through CheckBackendHealth, which
+// unwraps the retry / failover decorators.
 type HealthChecker interface {
 	// Healthy reports whether the backend answered a liveness probe within the
 	// deadline carried by ctx. It must be side-effect-free and must not load or

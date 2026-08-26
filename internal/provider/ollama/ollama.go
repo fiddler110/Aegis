@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -275,43 +274,12 @@ func (a *Adapter) Healthy(ctx context.Context) bool {
 	for k, v := range a.headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := a.healthClient().Do(req)
+	resp, err := provider.HealthClient(a.client).Do(req)
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
+	provider.DrainAndClose(resp)
 	return resp.StatusCode == http.StatusOK
-}
-
-// healthProbeTimeout is the whole-request bound on the liveness probe. A probe
-// must fail fast when the server is down, not hang — which is why it cannot
-// simply reuse the streaming client, whose Client.Timeout is deliberately zero
-// so a long prefill isn't cut off (P59.2).
-const healthProbeTimeout = 3 * time.Second
-
-// healthClient builds the probe's HTTP client: the *transport* is the streaming
-// client's, so any proxy, TLS or dialer configuration the adapter was given
-// applies to the probe too and the two share a connection pool — but the
-// timeout is the probe's own, since inheriting the streaming client's unbounded
-// one would defeat the point of a liveness check (P61.5). It used to be a
-// package-level client with its own default transport, which quietly meant the
-// probe gating P50.1 recovery ignored the user's transport configuration
-// entirely.
-//
-// Built per call rather than cached: an http.Client is a small value, the probe
-// is not a hot path, and the transport — the part that holds state worth
-// reusing — is shared, not rebuilt.
-func (a *Adapter) healthClient() *http.Client {
-	if a.client == nil {
-		return &http.Client{Timeout: healthProbeTimeout}
-	}
-	return &http.Client{
-		Transport:     a.client.Transport,
-		CheckRedirect: a.client.CheckRedirect,
-		Jar:           a.client.Jar,
-		Timeout:       healthProbeTimeout,
-	}
 }
 
 // WithKeepAlive sets how long Ollama keeps the model loaded after this
@@ -692,16 +660,14 @@ func scalarArg(v any) (string, bool) {
 }
 
 func translateTools(tools []provider.ToolSchema) []wireTool {
-	out := make([]wireTool, 0, len(tools))
-	for _, t := range tools {
+	return provider.TranslateTools(tools, func(name, description string, parameters json.RawMessage) wireTool {
 		var wt wireTool
 		wt.Type = "function"
-		wt.Function.Name = t.Name
-		wt.Function.Description = t.Description
-		wt.Function.Parameters = t.InputSchema
-		out = append(out, wt)
-	}
-	return out
+		wt.Function.Name = name
+		wt.Function.Description = description
+		wt.Function.Parameters = parameters
+		return wt
+	})
 }
 
 // Stream implements provider.Adapter.
@@ -815,54 +781,26 @@ func isThinkRejected(err error) bool {
 		strings.Contains(apiErr.Message, "does not support thinking")
 }
 
-// minNumPredict is the floor the P59.1 clamp never goes below. A prompt that
-// has already eaten its whole window is a situation compaction was supposed to
-// prevent, and the honest num_predict there is a negative number — which Ollama
-// reads as "generate until the context is full", the exact behavior being
-// avoided. Asking for a short answer instead at least leaves the model able to
-// say something (typically "I can't fit this"), which is more recoverable than
-// a generation that truncates mid-sentence.
-const minNumPredict = 512
-
 // clampNumPredict bounds the requested completion length by the room actually
-// left in the served window (P59.1).
-//
-// On Ollama num_ctx is one budget covering prompt *and* completion, but
-// provider.max_tokens rides through from config (default 32768) with nothing
-// reconciling the pair — no check in internal/config, none in `aegis doctor`.
-// Against a 4096 window, which is Ollama's own server default and a routinely
-// detected one, the request asks for 8x the whole window in output. The model
-// then runs into the ceiling mid-generation, which comes back as
-// done_reason "length" → StopMaxTokens → the engine's "continue from where you
-// left off" retry, growing the context and shrinking the next turn's headroom
-// until the run burns to its iteration cap. Front-truncation reached through
-// generation instead of through prompt growth, which is the one direction the
-// context subsystem was not watching.
-//
-// The estimate is the same script-aware one the engine compacts against
-// (internal/tokenest), so the two agree about how full a window is. It is only
-// an estimate, hence the 5% margin; the clamp is deliberately one-directional —
-// it never *raises* a caller's max_tokens, so a caller asking for a short answer
-// keeps getting one.
+// left in the served window (P59.1). The shared arithmetic — the same
+// script-aware estimate the engine compacts against, the 5% margin, the
+// tokenest.MinCompletionTokens floor, one-directionality — lives in
+// tokenest.ClampCompletionTokens next to Messages, since it is the same
+// arithmetic openai.clampMaxTokens applies once its own gate (a positively
+// identified Ollama backend) is open. This adapter's gate is unconditional:
+// on Ollama num_ctx is *always* one budget covering prompt and completion, so
+// unlike the OpenAI-compat adapter there is no backend-identity check here —
+// see tokenest.ClampCompletionTokens for what happens without a clamp at all.
 func (a *Adapter) clampNumPredict(maxTokens, numCtx int, system string, msgs []provider.Message) int {
-	if maxTokens <= 0 || numCtx <= 0 {
-		return maxTokens
-	}
-	headroom := numCtx - tokenest.Messages(system, msgs) - numCtx/20
-	if headroom >= maxTokens {
-		return maxTokens
-	}
-	if headroom < minNumPredict {
-		headroom = minNumPredict
-	}
-	if headroom > numCtx {
-		headroom = numCtx
+	sent := tokenest.ClampCompletionTokens(maxTokens, numCtx, system, msgs)
+	if sent == maxTokens {
+		return sent
 	}
 	// Debug, not Warn: this fires per request on a misconfigured pair, and the
 	// place to tell a user about the misconfiguration once is `aegis doctor`.
 	a.logger.Debug("ollama: clamped num_predict to the context window's remaining headroom",
-		"requested", maxTokens, "sent", headroom, "num_ctx", numCtx)
-	return headroom
+		"requested", maxTokens, "sent", sent, "num_ctx", numCtx)
+	return sent
 }
 
 // doChat sends one /api/chat request with the given think override (nil
@@ -940,37 +878,11 @@ func (a *Adapter) doChat(ctx context.Context, req provider.Request, think *bool)
 // a proxy in front of Ollama changes shape. Anything else — absent, null, or
 // neither — returns "" so the caller treats the chunk as ordinary.
 func errorMessage(raw json.RawMessage) string {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return strings.TrimSpace(s)
-	}
 	// P35.12: try common alternate string fields Ollama/proxies use for the
-	// message before giving up on the object shape.
-	var obj struct {
-		Message string `json:"message"`
-		Error   string `json:"error"`
-		Detail  string `json:"detail"`
-	}
-	if json.Unmarshal(raw, &obj) != nil {
-		return ""
-	}
-	for _, s := range []string{obj.Message, obj.Error, obj.Detail} {
-		if s = strings.TrimSpace(s); s != "" {
-			return s
-		}
-	}
-	// P35.12: object with none of those string fields — never swallow a
-	// present error into "", but don't surface raw multi-line JSON either.
-	// Compact it into a single tidy line; fall back to trimmed if that fails.
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, raw); err != nil {
-		return trimmed
-	}
-	return buf.String()
+	// message ("error", "detail") before giving up on the object shape and
+	// falling back to a compacted single-line rendering — a present error
+	// envelope must never be swallowed into "".
+	return provider.ErrorMessage(raw, "error", "detail")
 }
 
 // wireChunk is one line of the newline-delimited JSON stream /api/chat

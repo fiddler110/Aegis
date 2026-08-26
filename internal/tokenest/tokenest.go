@@ -112,6 +112,55 @@ func Tools(schemas []provider.ToolSchema) int {
 	return n
 }
 
+// MinCompletionTokens is the floor ClampCompletionTokens never goes below,
+// shared by the OpenAI-compat and native Ollama adapters' completion-length
+// clamps (P59.1/P61.4). A prompt that has already eaten its whole window is a
+// situation compaction was supposed to prevent, and the honest completion
+// budget there is a negative number — which a shared-context-window backend
+// reads as "generate until the context is full," the exact behavior being
+// avoided. Asking for a short answer instead at least leaves the model able
+// to say something (typically "I can't fit this"), which is more recoverable
+// than a generation that truncates mid-sentence.
+const MinCompletionTokens = 512
+
+// ClampCompletionTokens bounds a requested completion length (maxTokens) by
+// the room actually left in a served window that covers prompt *and*
+// completion out of one budget — Ollama's num_ctx, whether reached through the
+// native adapter's num_predict or the OpenAI-compat adapter's max_tokens.
+//
+// Without this, provider.max_tokens (default 32768) rides through untouched
+// against e.g. a stock 4096-token window — 8x the whole window in requested
+// output. The model then runs into the ceiling mid-generation, which comes
+// back as a "length" stop reason, the engine's "continue from where you left
+// off" retry, and context growth until the run burns to its iteration cap:
+// front-truncation reached through generation instead of through prompt
+// growth, which is the one direction the context subsystem was not watching.
+//
+// The estimate is the same script-aware one the engine compacts against
+// (Messages), so every caller agrees about how full a window is. It is only
+// an estimate, hence the 5% margin; the clamp is deliberately
+// one-directional — it never *raises* maxTokens, so a caller asking for a
+// short answer keeps getting one. Callers are responsible for their own
+// gating on top of this (whether the backend actually shares one budget
+// across prompt and completion at all) — this function only does the
+// arithmetic once both callers have decided the gate is open.
+func ClampCompletionTokens(maxTokens, numCtx int, system string, msgs []provider.Message) int {
+	if maxTokens <= 0 || numCtx <= 0 {
+		return maxTokens
+	}
+	headroom := numCtx - Messages(system, msgs) - numCtx/20
+	if headroom >= maxTokens {
+		return maxTokens
+	}
+	if headroom < MinCompletionTokens {
+		headroom = MinCompletionTokens
+	}
+	if headroom > numCtx {
+		headroom = numCtx
+	}
+	return headroom
+}
+
 // isDenseScript reports whether r belongs to a script whose written characters
 // each carry roughly a full token's worth of information (CJK Unified
 // Ideographs and common extensions, Hiragana, Katakana, Hangul syllables) —

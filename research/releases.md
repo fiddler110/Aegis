@@ -8,7 +8,27 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-25 (twenty-fifth record) — **P77.1 shipped: local reasoning is now on by
+**Last updated:** 2026-08-26 (twenty-sixth record) — **P78.1–P78.9 shipped: a nine-item code-quality
+batch, filed and shipped the same day.** A five-track audit (sprawl/duplication/gaps, not security —
+that axis is `CodeReview.md`'s and P76.1's) read the whole tree in parallel by package group and filed
+nine Tier 4 items; rather than leave them parked, all nine were picked up the same sitting as seven
+subagents working disjoint packages in parallel. Four god-file splits mirroring the P77.2-P77.5
+`tui.go` precedent (`internal/cli/chat.go`, `internal/engine/engine.go`'s `Run()`,
+`internal/tui/slash.go`, `internal/drive/drive.go`); a provider-layer cleanup (deduped
+OpenAI-compat/Ollama adapter helpers into `internal/provider`, bundled `providerfactory.buildOne`'s
+12-arg call into a struct, gave the Anthropic adapter a `Healthy()` so P50.1's wait-and-resume now
+covers cloud-backend outages too); a generic `patchConfigSection[T]` collapsing `internal/server/config.go`'s
+repeated PATCH-endpoint boilerplate, which also surfaced and closed a real gap (no `/config/cost`
+GET/PATCH pair, even though `handleConfigHarden` could already write it); and six smaller residue
+findings (further `tui.go`/`toolview.go` splits, a `server.go` `New()` two-phase `wire*` restructure, a
+new `internal/sqlitestore` shared by `internal/knowledge`/`internal/longmem`, a table-driven fix for
+`internal/permission/rules.go`'s duplicated field extraction, and one investigation-only item confirmed
+as deliberate). Full repo `go build ./...`, `go vet ./...`, and `go test ./...` all green, including one
+test fix of its own (`internal/drive`'s backend-recovery control case, which had encoded "Anthropic
+never waits" as an assumption P78.7 deliberately reversed). Full record: [P78.1–P78.9 shipped,
+2026-08-26](#p781-p789-shipped-2026-08-26).
+
+**Last updated (previous):** 2026-08-25 (twenty-fifth record) — **P77.1 shipped: local reasoning is now on by
 default.** Filed 2026-08-23 as a Tier 4 item needing "a user report specifically wanting the reasoning
 content itself" before it needed code — the user asked directly. Investigating first found the item's
 own premise out of date: `provider.ThinkingBlock`/`EventThinkingDelta` were already wired through both
@@ -490,6 +510,129 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### P78.1–P78.9 shipped, 2026-08-26
+
+**Filed 2026-08-26** from a five-track code-quality audit (sprawl/duplication/gaps only — the security
+axis is `CodeReview.md`'s and P76.1's) that read the whole tree in parallel by package group:
+`internal/engine`/`tool`/`permission`; `internal/tui`; `internal/server`/`cli`;
+`internal/provider`/`security`/`sandbox`; and the remaining smaller packages. All nine items were filed
+Tier 4, opportunistic, no fired trigger — but rather than leave them parked the user asked to work
+through the whole batch the same sitting. Done as seven parallel subagents, each scoped to a disjoint
+set of packages so no two touched the same file concurrently, followed by a full-repo integration
+build/test pass.
+
+**P78.1 — `internal/cli/chat.go` split.** 1575 lines, 34 top-level funcs, mixing CLI flag wiring,
+engine construction, phased/linear drive execution, signal handling, output formatting, and
+skill-preamble scanning — the same god-file shape `tui.go` was in before P77.2-P77.5. Split into
+`chat_engine.go` (`buildChatGate`/`chatEngineOptions`/`buildChatEngine`/`roundCapFor`/
+`buildChatSystem`/`chatRepoMapBlock`), `chat_drive.go` (the `chatDrive` struct, `runPhased`/
+`runLinear` and their compaction/signal-handling helpers), `chat_output.go` (`emitChatSummary`,
+`outputFormatKind`, `parseOutputFormat`, `emitStreamEvent`/`emitFinalJSON`), and `chat_skills.go`
+(`prepareChatSkills`, `scanPendingMarkers`, `suiteFileCount`, `compactSkillPreamble`), leaving
+`chat.go` (518 lines) with flag wiring and top-level command entry. Purely mechanical — no signature
+or logic changes.
+
+**P78.2 — `internal/engine/engine.go`'s `Run()` split.** The largest function in the codebase (~745
+lines) mixed budget/stall/compaction/guard setup, the iteration loop, nudge retraction, and round
+lifecycle in one body. Extracted `setupGuards` (once-per-run wrapping/gate construction, returning a
+cleanup `Run` defers) and `runIteration` (the former loop body, now called once per pass against a new
+`runLoopState` struct bundling what used to be loop-scoped locals) — both behavior-preserving,
+individually reviewable. Then moved the tool-execution block to a new `toolexec.go` and the
+path-tracking block to a new `pathtrack.go`, following the package's own `toolround.go`/`loopdetect.go`
+convention for pulling out a concern. `engine.go` shrank from 2742 to 2128 lines. No gate/run-bound
+wiring moved out of `enginecfg` — the P66.13 invariant this package stands on was left untouched, and
+its pinning tests still pass.
+
+**P78.3 — `internal/tui/slash.go` split.** `SlashDispatcher`'s ~60 `cmd*` methods (2013 lines) split
+by family, matching the existing `slash_security.go`/`slash_diff.go` precedent: `slash_session.go`
+(session/checkpoint/rewind/fork/side/rollback/detach), `slash_agent.go` (debate/threat-model/drive),
+`slash_bundle.go` (sandbox/theme/notify/archive/prune/bundle), leaving `slash.go` (1137 lines) with
+persona/mode/guard commands and the dispatcher table itself.
+
+**P78.4 — `internal/drive/drive.go` split.** 1840 lines mixing the phase state machine,
+error-recovery/escalation, and prompt-template string-building. Split into `drive/prompts.go` (the
+`phasePromptArchitecture`/`phasePromptDFD`/`phasePromptAnalysis`/`phasePromptFindings`/
+`phasePromptAssessment` family and related templates — byte-identical, confirmed by diff) and
+`drive/recovery.go` (`recoverPhase6Overflow`/`recoverToolFailureStall`/`recoverReasoningLoop` and their
+constants), leaving the phase state machine and orchestration in `drive.go`.
+
+**P78.5 — provider-adapter helper dedup.** `internal/provider/openai/openai.go` and
+`internal/provider/ollama/ollama.go` each independently defined `healthClient()`/`healthProbeTimeout`,
+`translateTools()`, `clampMaxTokens`/`clampNumPredict`, and `errorMessage()` — one to four near- or
+byte-identical. Hoisted into a new `internal/provider/helpers.go` (`HealthProbeTimeout`/`HealthClient`/
+`DrainAndClose`, a generic `TranslateTools[T]`, and `ErrorMessage` with an `altFields` param covering
+both adapters' wire-error shapes), with the shared token-headroom clamp arithmetic added to
+`internal/tokenest` instead (`MinCompletionTokens`/`ClampCompletionTokens`) next to the package's other
+shared token-estimation logic. Each adapter kept only its backend-specific gating.
+
+**P78.6 — `providerfactory.buildOne`'s 12 positional args bundled into a struct.** `buildOne` was
+called from both of `Build`'s call sites (primary and fallback) with the same 12-argument list
+verbatim — a real transposition-bug risk with no compiler check. Replaced with a `buildOneConfig`
+struct; all callers (both production call sites and every test call site across `factory_test.go`,
+`idlebound_test.go`, `streamdeath_test.go`) updated to construct it as a literal.
+
+**P78.7 — Anthropic adapter gained `Healthy()`.** `openai.go` and `ollama.go` both implemented
+`provider.HealthChecker`, wired for P50.1's phased-drive backend-down recovery (P61.6 closed this gap
+for OpenAI-compat, with the exact failure mode named in its own comment: "the drive aborted instead of
+resuming from disk"). Anthropic had no equivalent. **Scope decision made during implementation** (the
+roadmap entry flagged this as needing confirmation before building): implemented rather than WONTFIX'd
+— Anthropic's transient failure modes (rate limits, 529 overloaded, transient 5xx) are exactly the kind
+of backend-down condition P50.1's wait-and-resume exists for, not something specific to a
+locally-restartable server. `Healthy()` mirrors `openai.go`'s pattern (`GET /v1/models`, 502/503/504
+treated as unhealthy, everything else including 401/404 as healthy) using the new shared
+`provider.HealthClient`/`DrainAndClose`. `internal/providerfactory/streamdeath_test.go`'s
+`livenessProbeWired["anthropic"]` guard — which enforces that map stays honest against real adapter
+capability — flipped from `false` to `true` and now passes. `internal/drive/health_test.go`'s
+`TestRecoverBackendDownReachesTheOpenAIAdapter` had encoded the old assumption as its own control case
+("no probe on the cloud adapter → the drive must not wait"); updated to mirror the OpenAI-compat
+live/dead-server pair instead, asserting `backendRecovered`/`backendGaveUp` the same way.
+
+**P78.8 — `internal/server/config.go`'s PATCH-endpoint boilerplate collapsed, one real gap fixed.**
+`handleGetConfigSandbox`/`handlePatchConfigSandbox`, `...Security`, `...Skills` each repeated the same
+scope-resolve → load → build-patch → dispatch-by-scope → respond shape. Two things were investigated
+before treating this as pure refactor, per the roadmap entry's own caution: (1) `handlePatchConfigSkills`
+skipping the `config.Load()` its siblings make turned out to be intentional, not a bug — its request
+type is always-full-replace, so there's nothing for a base-config load to merge onto; preserved
+explicitly in the new helper. (2) The missing `/config/cost` GET/PATCH pair was a real gap —
+`handleConfigHarden` could already write `cost` config via `PatchGlobalCost`/`PatchProjectCost` with no
+way to read or partially patch it directly. Added `api.ConfigCostResponse`/`ConfigCostPatchRequest`,
+`handleGetConfigCost`/`handlePatchConfigCost`, and the route registrations, plus a round-trip test.
+Collapsed sandbox/security/skills/cost into two generics, `getConfigSection[Resp]` and
+`patchConfigSection[Req, T]`, the latter handing `build` a lazily-memoized `config.Load()` closure so
+skills' full-replace section can simply not call it.
+
+**P78.9 — six residue findings, all addressed:**
+- `internal/tui/tui.go` further split: `tui_stream.go` (stream lifecycle —
+  `startStream`/`beginStream`/`markModelOutput`/`streamStats`/`flushLiveText`, etc.) and
+  `tui_session.go` (`fetchSessions`/`switchSessionCmd`/`forkAndSwitchCmd`/`fetchBacktrackTargets`).
+- `internal/tui/toolview.go`'s pure LCS diff engine (`lcsIndices`/`buildEdits`/`intralineDiff`/
+  `splitDiffLines`) extracted into `internal/tui/diffengine.go`.
+- `internal/server/server.go`'s `New()` (~460 lines, three forward-reference closures over a
+  not-yet-assigned `s *Server`) restructured: `s := newWithDeps(...)` constructed immediately, then 13
+  `wire*` methods (`wireProvider`, `wireCron`, `wireKnowledgeAndMemory`, `wireSwarm`, etc.) fill it in,
+  replacing the closures with plain method values.
+- `internal/knowledge` and `internal/longmem`'s duplicated `Open`/pragma/migration-bootstrap shape:
+  confirmed real and extracted the byte-identical connection/pragma bootstrap (busy-timeout DSN,
+  `SetMaxOpenConns(1)`, WAL pragma) into a new `internal/sqlitestore` package; schema `migrate()`/query
+  logic left in each package since those have genuinely diverged. `hardenDBPermissions`'s separate
+  triplication (QUAL-04) was left untouched, out of scope here.
+- `internal/permission/rules.go`'s `subjectFor`/`subjectFieldNames` duplicated per-capability field
+  extraction with nothing enforcing agreement between them — the same class of gap P74.1 closed for
+  `bulkScopeToolNames`. Applied the same fix: one source-of-truth table
+  (`subjectFieldsByCapability`), both functions now derive from it, plus a new
+  `TestSubjectFieldTableIsInternallyConsistent` enforcing the table stays self-consistent.
+- `internal/provider/ollama`'s per-model think-rejection latch having no `internal/provider/openai`
+  equivalent: investigated and confirmed deliberate, not a gap. Ollama's latch exists because one
+  shared adapter instance serves a heterogeneous local-model mix where think-support is only
+  discoverable live; OpenAI's `reasoning_effort` is a single static, user-set, adapter-wide config
+  value with no live-discovery problem. No code change.
+
+**Tests:** each subagent ran `go build`/`go vet`/`go test` scoped to its own packages before finishing;
+after all seven landed, a full-repo `go build ./...`, `go vet ./...`, and `go test ./...` found exactly
+one integration failure — the `internal/drive` control-case test described under P78.7 above, which
+encoded the pre-P78.7 assumption — fixed and reverified. Final state: full repo build, vet, and test
+all clean.
 
 ### P77.1 shipped, 2026-08-25
 

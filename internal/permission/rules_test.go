@@ -381,3 +381,70 @@ func TestRuleGateAuditObserver(t *testing.T) {
 		t.Errorf("observer tool = %q, want shell", got.Tool)
 	}
 }
+
+// TestSubjectFieldTableIsInternallyConsistent guards subjectFieldsByCapability
+// — the single source of truth subjectFor and subjectFieldNames both derive
+// from (see the comment above it) — against the class of drift P74.1 fixed
+// for bulkScopeToolNames: a capability's field list changing in one place
+// (subjectFor's extraction) without the other (subjectFieldNames, which
+// WarnUnmatchableRules reports as "recognized") going out of sync. Since both
+// are now generated from the same table, this is mostly a structural
+// sanity check that the table itself has no duplicate/empty entries and that
+// subjectFieldNames is exactly its flattened, deduplicated union — but it
+// still catches a future hand-edit of subjectFieldNames that isn't routed
+// through the table.
+func TestSubjectFieldTableIsInternallyConsistent(t *testing.T) {
+	seenCap := map[tool.Capability]bool{}
+	wantNames := map[string]bool{}
+	for _, entry := range subjectFieldsByCapability {
+		if seenCap[entry.cap] {
+			t.Errorf("capability %q appears more than once in subjectFieldsByCapability", entry.cap)
+		}
+		seenCap[entry.cap] = true
+		if len(entry.fields) == 0 {
+			t.Errorf("capability %q has an empty field list in subjectFieldsByCapability", entry.cap)
+		}
+		for _, f := range entry.fields {
+			wantNames[f] = true
+		}
+	}
+
+	gotNames := map[string]bool{}
+	for _, f := range subjectFieldNames {
+		if gotNames[f] {
+			t.Errorf("subjectFieldNames contains duplicate field %q", f)
+		}
+		gotNames[f] = true
+	}
+
+	for f := range wantNames {
+		if !gotNames[f] {
+			t.Errorf("field %q appears in subjectFieldsByCapability but not in subjectFieldNames", f)
+		}
+	}
+	for f := range gotNames {
+		if !wantNames[f] {
+			t.Errorf("field %q appears in subjectFieldNames but not in any subjectFieldsByCapability entry", f)
+		}
+	}
+
+	// subjectFieldsFor must return exactly the table's entry for every
+	// capability the table declares, and nil (the "read every field"
+	// fallback in subjectFor) for one it doesn't.
+	for _, entry := range subjectFieldsByCapability {
+		got := subjectFieldsFor(entry.cap)
+		if len(got) != len(entry.fields) {
+			t.Errorf("subjectFieldsFor(%q) = %v, want %v", entry.cap, got, entry.fields)
+			continue
+		}
+		for i := range got {
+			if got[i] != entry.fields[i] {
+				t.Errorf("subjectFieldsFor(%q) = %v, want %v", entry.cap, got, entry.fields)
+				break
+			}
+		}
+	}
+	if got := subjectFieldsFor(tool.CapSpawn); got != nil {
+		t.Errorf("subjectFieldsFor(CapSpawn) = %v, want nil (no table entry, falls back to subjectFieldNames)", got)
+	}
+}

@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -195,47 +194,16 @@ func (a *Adapter) Healthy(ctx context.Context) bool {
 	for k, v := range a.headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := a.healthClient().Do(req)
+	resp, err := provider.HealthClient(a.client).Do(req)
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<12))
+	provider.DrainAndClose(resp)
 	switch resp.StatusCode {
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return false
 	}
 	return true
-}
-
-// healthProbeTimeout is the whole-request bound on the liveness probe. A probe
-// must fail fast when the server is down, not hang — which is why it cannot
-// simply reuse the streaming client, whose Client.Timeout is deliberately zero
-// so a long prefill isn't cut off (P59.2). Same value as the native adapter's,
-// because it answers the same question about the same class of server.
-const healthProbeTimeout = 3 * time.Second
-
-// healthClient builds the probe's HTTP client: the *transport* is the streaming
-// client's, so any proxy, TLS or dialer configuration the adapter was given
-// applies to the probe too and the two share a connection pool — but the timeout
-// is the probe's own, since inheriting the streaming client's unbounded one
-// would defeat the point of a liveness check (P61.5). A package-level client
-// with its own default transport would quietly mean the probe gating P50.1
-// recovery ignored the user's transport configuration entirely.
-//
-// Built per call rather than cached: an http.Client is a small value, the probe
-// is not a hot path, and the transport — the part that holds state worth
-// reusing — is shared, not rebuilt.
-func (a *Adapter) healthClient() *http.Client {
-	if a.client == nil {
-		return &http.Client{Timeout: healthProbeTimeout}
-	}
-	return &http.Client{
-		Transport:     a.client.Transport,
-		CheckRedirect: a.client.CheckRedirect,
-		Jar:           a.client.Jar,
-		Timeout:       healthProbeTimeout,
-	}
 }
 
 // --- wire types ---
@@ -384,24 +352,15 @@ func translate(system string, msgs []provider.Message) ([]wireMessage, error) {
 }
 
 func translateTools(tools []provider.ToolSchema) []wireTool {
-	out := make([]wireTool, 0, len(tools))
-	for _, t := range tools {
+	return provider.TranslateTools(tools, func(name, description string, parameters json.RawMessage) wireTool {
 		var wt wireTool
 		wt.Type = "function"
-		wt.Function.Name = t.Name
-		wt.Function.Description = t.Description
-		wt.Function.Parameters = t.InputSchema
-		out = append(out, wt)
-	}
-	return out
+		wt.Function.Name = name
+		wt.Function.Description = description
+		wt.Function.Parameters = parameters
+		return wt
+	})
 }
-
-// minCompletionTokens is the floor clampMaxTokens never goes below, and is
-// deliberately the same 512 as the native adapter's minNumPredict: a prompt
-// that has already filled the window still has to be allowed to say something,
-// and the two paths reach the same server, so they must not disagree about how
-// much "something" is.
-const minCompletionTokens = 512
 
 // clampMaxTokens bounds the requested completion length by the room actually
 // left in the served window (P61.4), and is the OpenAI-compat counterpart to
@@ -439,25 +398,16 @@ func (a *Adapter) clampMaxTokens(maxTokens, numCtx int, system string, msgs []pr
 	if !a.sharedContextWindow || a.baseURL == defaultBaseURL {
 		return maxTokens
 	}
-	if maxTokens <= 0 || numCtx <= 0 {
-		return maxTokens
-	}
-	headroom := numCtx - tokenest.Messages(system, msgs) - numCtx/20
-	if headroom >= maxTokens {
-		return maxTokens
-	}
-	if headroom < minCompletionTokens {
-		headroom = minCompletionTokens
-	}
-	if headroom > numCtx {
-		headroom = numCtx
+	sent := tokenest.ClampCompletionTokens(maxTokens, numCtx, system, msgs)
+	if sent == maxTokens {
+		return sent
 	}
 	// Debug, not Warn, for the same reason the native adapter logs it that way:
 	// this fires on every request of a misconfigured pair, and the place to
 	// tell a user about the misconfiguration once is `aegis doctor`.
 	slog.Default().Debug("openai: clamped max_tokens to the context window's remaining headroom",
-		"requested", maxTokens, "sent", headroom, "num_ctx", numCtx)
-	return headroom
+		"requested", maxTokens, "sent", sent, "num_ctx", numCtx)
+	return sent
 }
 
 // Stream implements provider.Adapter.
@@ -563,24 +513,7 @@ func (a *toolAccum) callID(index int) string {
 // field, a chunk whose "error" is neither string nor object — returns "" so
 // the caller drops it as benign noise instead of failing the turn.
 func errorMessage(raw json.RawMessage) string {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return strings.TrimSpace(s)
-	}
-	var obj struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(raw, &obj) != nil {
-		return ""
-	}
-	if msg := strings.TrimSpace(obj.Message); msg != "" {
-		return msg
-	}
-	return trimmed
+	return provider.ErrorMessage(raw)
 }
 
 // streamErrorMessage is errorMessage for a chunk that failed to decode as a

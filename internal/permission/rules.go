@@ -280,11 +280,72 @@ func ruleToolMatches(selector string, t tool.Tool) bool {
 	return false
 }
 
-// subjectFieldNames are the input-field names subjectFor knows how to read. A
-// tool whose schema exposes none of these can never contribute a non-empty
+// subjectFieldsByCapability is the single source of truth for which input
+// fields subjectFor reads for each tool capability, and in what preference
+// order. subjectFieldNames (the flat list WarnUnmatchableRules reports as
+// "recognized") is derived from it below, so the two can never drift out of
+// agreement the way the pre-P74.1 grep case did: back then subjectFor's
+// switch and the reasoning about which fields "count" as a subject lived in
+// two unconnected places, and grep's scope field was recognized by neither.
+// Adding a field for a capability here is now the only edit needed for both
+// extraction and the no-op-rule warning to see it. This mirrors
+// bulkScopeToolNames just above, which closes the same class of gap for the
+// bulk-scope tool *names* rather than the *fields*.
+var subjectFieldsByCapability = []struct {
+	cap    tool.Capability
+	fields []string
+}{
+	// Falling back to path/file_path covers execute-capability tools whose
+	// primary scoping field is a workspace path rather than a shell command —
+	// security_scan and latex_build both declare "path" and no "command" at
+	// all, so they hit the same P74.1 shape as grep: a recognized subject
+	// field the extraction switch never consulted.
+	{tool.CapExecute, []string{"command", "path", "file_path"}},
+	{tool.CapWrite, []string{"path", "file_path"}},
+	// Falling back to query/pattern (not just path/file_path) closes the same
+	// class of gap P74.1 fixed for grep on other CapRead tools whose primary
+	// field is a search term rather than a path — project_knowledge and
+	// entity_recall both declare only "query", and previously landed here
+	// with neither path field set, so subjectFor returned "" for them exactly
+	// like it used to for grep despite toolHasSubjectField saying a rule
+	// could match.
+	{tool.CapRead, []string{"path", "file_path", "query", "pattern"}},
+	{tool.CapNetwork, []string{"url", "query"}},
+}
+
+// subjectFieldNames are the input-field names subjectFor knows how to read,
+// deduplicated across every capability in subjectFieldsByCapability. A tool
+// whose schema exposes none of these can never contribute a non-empty
 // subject, so a rule scoping it with anything other than "*" is a silent
 // no-op (P7.7) — see WarnUnmatchableRules.
-var subjectFieldNames = []string{"command", "path", "file_path", "url", "query", "pattern"}
+var subjectFieldNames = buildSubjectFieldNames()
+
+func buildSubjectFieldNames() []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, entry := range subjectFieldsByCapability {
+		for _, f := range entry.fields {
+			if !seen[f] {
+				seen[f] = true
+				out = append(out, f)
+			}
+		}
+	}
+	return out
+}
+
+// subjectFieldsFor returns the ordered field list subjectFor reads for a
+// capability, or nil if the capability has no entry in
+// subjectFieldsByCapability (the "unknown capability" fallback in subjectFor
+// then reads every recognized field instead).
+func subjectFieldsFor(cap tool.Capability) []string {
+	for _, entry := range subjectFieldsByCapability {
+		if entry.cap == cap {
+			return entry.fields
+		}
+	}
+	return nil
+}
 
 // subjectFor extracts the string a rule's glob matches against, choosing the
 // field most relevant to the tool's capability and falling back to any common
@@ -305,32 +366,26 @@ func subjectFor(t tool.Tool, input json.RawMessage) string {
 	if json.Unmarshal(input, &args) != nil {
 		return ""
 	}
-	switch t.Capability() {
-	case tool.CapExecute:
-		// Falling back to path/file_path covers execute-capability tools whose
-		// primary scoping field is a workspace path rather than a shell
-		// command — security_scan and latex_build both declare "path" and no
-		// "command" at all, so they hit the same P74.1 shape as grep: a
-		// recognized subject field the extraction switch never consulted.
-		return firstNonEmpty(args.Command, args.Path, args.FilePath)
-	case tool.CapWrite:
-		return firstNonEmpty(args.Path, args.FilePath)
-	case tool.CapRead:
-		if bulkScopeToolNames[t.Name()] {
-			return bulkScopeSubject(t.Name(), args.Path, args.Pattern, args.Glob)
-		}
-		// Falling back to query/pattern (not just path/file_path) closes the
-		// same class of gap P74.1 fixed for grep on other CapRead tools whose
-		// primary field is a search term rather than a path — project_knowledge
-		// and entity_recall both declare only "query", and previously landed
-		// here with neither path field set, so subjectFor returned "" for them
-		// exactly like it used to for grep despite toolHasSubjectField saying a
-		// rule could match.
-		return firstNonEmpty(args.Path, args.FilePath, args.Query, args.Pattern)
-	case tool.CapNetwork:
-		return firstNonEmpty(args.URL, args.Query)
+	if t.Capability() == tool.CapRead && bulkScopeToolNames[t.Name()] {
+		return bulkScopeSubject(t.Name(), args.Path, args.Pattern, args.Glob)
 	}
-	return firstNonEmpty(args.Command, args.Path, args.FilePath, args.URL, args.Query, args.Pattern)
+	values := map[string]string{
+		"command":   args.Command,
+		"path":      args.Path,
+		"file_path": args.FilePath,
+		"url":       args.URL,
+		"query":     args.Query,
+		"pattern":   args.Pattern,
+	}
+	fields := subjectFieldsFor(t.Capability())
+	if fields == nil {
+		fields = subjectFieldNames
+	}
+	vals := make([]string, len(fields))
+	for i, f := range fields {
+		vals[i] = values[f]
+	}
+	return firstNonEmpty(vals...)
 }
 
 func firstNonEmpty(vals ...string) string {

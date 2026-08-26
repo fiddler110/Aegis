@@ -11,9 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,19 +21,11 @@ import (
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/sandbox"
-	"github.com/fiddler110/aegis/internal/security"
 	"github.com/fiddler110/aegis/internal/tokenest"
 	"github.com/fiddler110/aegis/internal/tool"
-	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/fiddler110/aegis/internal/toolshim"
 	"github.com/fiddler110/aegis/internal/trace"
 )
-
-// redactSecretsFn is a seam over security.RedactText so tests can stub in
-// findings without needing the real gitleaks binary on PATH — mirrors
-// gitpr.go's scanPRTextForSecrets seam over security.ScanText (P24.6 /
-// FIND-13).
-var redactSecretsFn = security.RedactText
 
 // Conversation is the mutable transcript the engine drives.
 type Conversation struct {
@@ -718,26 +708,140 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	// this emit, so the run has exactly one lock and one ordering.
 	emit = serializedEmit(emit)
 
+	// P78.2: setupGuards does the once-per-run construction (budget/stall
+	// context wrapping, orphan repair, the compaction/guard/loop gates, the
+	// shim notice, the per-run file-tracking reset) and hands back the
+	// runLoopState runIteration reads and mutates on every pass below.
+	rl, ctx, cleanup := e.setupGuards(ctx, conv, emit)
+	defer cleanup()
+
+	// P67.7: the round a turn's stream may have started dispatching into, held
+	// across the loop body so every exit can tear it down.
+	//
+	// A deferred abort plus one at the top of each iteration covers every path
+	// out of the body — the `return`s through the defer, the `continue`s through
+	// the top-of-loop call — without wrapping the body in a closure. abort() is
+	// nil-safe and idempotent, and runTools clears the variable once it has taken
+	// ownership, so a consumed round is never torn down under its own results.
+	defer func() { rl.pendingRound.abort() }()
+
+	for iter := 0; iter < e.maxIterations; iter++ {
+		cont, err := e.runIteration(ctx, rl, iter)
+		if !cont {
+			return err
+		}
+	}
+
+	err := fmt.Errorf("engine: exceeded max iterations (%d)", e.maxIterations)
+	emit(Event{Kind: KindError, Err: err})
+	return err
+}
+
+// runLoopState is the state that persists across iterations of Run's main
+// loop (P78.2): the per-run guards setupGuards constructs once, and the
+// counters/accumulators each call to runIteration reads and mutates. Bundled
+// into one struct, passed by pointer, so runIteration takes a fixed argument
+// list instead of the long, order-sensitive set of locals the inline loop
+// body used to close over.
+type runLoopState struct {
+	conv *Conversation
+	emit EmitFunc
+
 	// runID ties this run's turn traces together (P66.11/GAP-01). A session
 	// accumulates the traces of many runs — one per request — so without it a
-	// per-turn record cannot be attributed to the request that produced it, which
-	// is the first thing anyone reconstructing a bad session needs. Generated per
-	// Run rather than per Engine because an Engine can be run more than once.
-	runID := newRunID()
-
+	// per-turn record cannot be attributed to the request that produced it,
+	// which is the first thing anyone reconstructing a bad session needs.
+	// Generated per Run rather than per Engine because an Engine can be run
+	// more than once.
+	runID string
 	// P63.9: the four run budgets — cost, context tokens, generated tokens,
 	// wall clock — and the run-start instant they share. See budget.go for why
 	// this concern was the one lifted first.
-	budget := e.newRunBudget()
-	ctx, cancelBudget := budget.deadline(ctx)
-	defer cancelBudget()
-
+	budget *runBudget
 	// P39.17: the per-turn stall detector. Layered *inside* the run deadline so
 	// a run that is both out of time and hung reports the operator's own bound
-	// first (see the override order at each abort site below). See stall.go.
+	// first (see the override order at each abort site in runIteration). See
+	// stall.go.
+	stall *stallWatch
+	// compact is the P2.7/P28.4/P39.8 compaction concern (P63.9): the headroom
+	// trigger, the summarizer's failure and latch bookkeeping, the shim's prompt
+	// cost, and the one context-full notice a run may emit. Never nil — the
+	// no-compactor case is still its business. See compact.go.
+	compact *compactionGuard
+	// guardRetry is the output guard's verdict handling and its bounded
+	// corrective retry (P63.9), including the P59.8 schema the retry re-asks
+	// under — carried across exactly one turn boundary by the gate rather than by
+	// a variable here. nil when no guard is configured; every method tolerates
+	// that. See guardretry.go.
+	guardRetry *guardGate
+	// loop is the P53.2 loop gate plus the window it decides on (P63.9). nil when
+	// loop detection is disabled; every method tolerates that, so the gate below
+	// carries no nil check. The per-turn half of the concern is the loopVerdict it
+	// returns, scoped to exactly one call to runIteration.
+	loop *loopGuard
+
+	// nudges tracks the corrective/nudge scaffolding injected this run (guard
+	// retries, the P28.3 zero-tool nudge, the P34.1 empty-answer nudge, and the
+	// P52.3 tool-failure nudge — the last two bounded to one attempt per run) so
+	// it can all be retracted before Run returns — see nudgeState.retractAll
+	// (P40.6).
+	nudges nudgeState
+	// toolFailures is the P52.3 circuit breaker: it aggregates the per-round
+	// IsError signal (previously emitted and then dropped on the floor) so a run
+	// whose every tool call fails gets a corrective nudge and, if it keeps
+	// failing, ends with a named error instead of burning to maxIterations.
+	// Per-Run by construction, like every other counter here.
+	toolFailures        toolFailureTracker
+	toolRoundsCompleted int
+	// overflowClipRounds bounds P74.16's reactive clip: a context-overflow error
+	// on the turn just sent clips the trailing tool-result batch in place and
+	// retries, rather than failing the whole run the way every overflow did
+	// before. Bounded the same way the phased drive bounds its own overflow
+	// resets (maxPhase6OverflowResets) — a window too small for even one clipped
+	// result must not spin forever pretending to make progress.
+	overflowClipRounds int
+	// toolCallAsTextWarned bounds the P34.2 notice to one per run: the check
+	// sits on a path a guard retry can re-enter.
+	toolCallAsTextWarned bool
+	// runUsage accumulates token counts across every turn of this run so the
+	// terminal KindDone event can carry a total (P25.5) — previously it was
+	// emitted bare, so API/eval-harness clients that only look at the final
+	// event (unlike the TUI, which reads the per-turn KindTurnDone events)
+	// always saw zero, even though a local/Ollama run's per-turn estimate was
+	// computed and displayed live in the TUI status bar the whole time.
+	// runUsageEstimated is true when any contributing turn had no real
+	// provider-reported usage, so the total is flagged honestly rather than
+	// implying every turn's count came straight from the provider.
+	runUsage          provider.Usage
+	runUsageSeen      bool
+	runUsageEstimated bool
+
+	// pendingRound is the round a turn's stream may have started dispatching
+	// into, held across iterations so every exit can tear it down. See the
+	// P67.7 comment at its use in Run and runIteration.
+	pendingRound *toolRound
+}
+
+// setupGuards performs Run's once-per-run setup: wrapping ctx with the budget
+// and stall deadlines, repairing any tool_use blocks left orphaned by a
+// previous interrupted run, constructing the compaction/guard/loop gates,
+// announcing the tool-call shim if active, and resetting the per-run
+// written/started/read file tracking. It returns the assembled runLoopState,
+// the wrapped context, and a cleanup func the caller must defer (P78.2:
+// extracted from Run's body verbatim; behavior unchanged).
+func (e *Engine) setupGuards(ctx context.Context, conv *Conversation, emit EmitFunc) (*runLoopState, context.Context, func()) {
+	runID := newRunID()
+
+	budget := e.newRunBudget()
+	ctx, cancelBudget := budget.deadline(ctx)
+
 	stall := e.newStallWatch()
 	ctx, stopStall := stall.watch(ctx)
-	defer stopStall()
+
+	cleanup := func() {
+		stopStall()
+		cancelBudget()
+	}
 
 	// Repair any tool_use blocks left without a matching tool_result by a
 	// previous interrupted run. Without this, most providers reject the
@@ -758,10 +862,6 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 		conv.invalidate()
 	}
 
-	// compact is the P2.7/P28.4/P39.8 compaction concern (P63.9): the headroom
-	// trigger, the summarizer's failure and latch bookkeeping, the shim's prompt
-	// cost, and the one context-full notice a run may emit. Never nil — the
-	// no-compactor case is still its business. See compact.go.
 	compact := e.newCompactionGuard()
 	// P66.7: say so once, up front, when the system prompt alone crowds the
 	// served window — compaction runs below can never touch it, so the per-turn
@@ -769,17 +869,7 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	compact.noticeOversizedSystem(conv, emit)
 	compact.compactOnEntry(ctx, conv)
 
-	// guardRetry is the output guard's verdict handling and its bounded
-	// corrective retry (P63.9), including the P59.8 schema the retry re-asks
-	// under — carried across exactly one turn boundary by the gate rather than by
-	// a variable here. nil when no guard is configured; every method tolerates
-	// that. See guardretry.go.
 	guardRetry := e.newGuardGate()
-
-	// loop is the P53.2 loop gate plus the window it decides on (P63.9). nil when
-	// loop detection is disabled; every method tolerates that, so the gate below
-	// carries no nil check. The per-turn half of the concern is the loopVerdict it
-	// returns, declared inside the turn loop.
 	loop := e.newLoopGuard()
 
 	// P53.6: announce the shim once per run. What the catalog *costs* the
@@ -801,592 +891,565 @@ func (e *Engine) Run(ctx context.Context, conv *Conversation, emit EmitFunc) err
 	e.readFiles, e.readFileSet = nil, make(map[string]struct{})
 	e.readFilesMu.Unlock()
 
-	// nudges tracks the corrective/nudge scaffolding injected this run (guard
-	// retries, the P28.3 zero-tool nudge, the P34.1 empty-answer nudge, and the
-	// P52.3 tool-failure nudge — the last two bounded to one attempt per run) so
-	// it can all be retracted before Run returns — see nudgeState.retractAll
-	// (P40.6).
-	var nudges nudgeState
-	// toolFailures is the P52.3 circuit breaker: it aggregates the per-round
-	// IsError signal (previously emitted and then dropped on the floor) so a run
-	// whose every tool call fails gets a corrective nudge and, if it keeps
-	// failing, ends with a named error instead of burning to maxIterations.
-	// Per-Run by construction, like every other counter here.
-	var toolFailures toolFailureTracker
-	toolRoundsCompleted := 0
-	// overflowClipRounds bounds P74.16's reactive clip: a context-overflow error
-	// on the turn just sent clips the trailing tool-result batch in place and
-	// retries, rather than failing the whole run the way every overflow did
-	// before. Bounded the same way the phased drive bounds its own overflow
-	// resets (maxPhase6OverflowResets) — a window too small for even one clipped
-	// result must not spin forever pretending to make progress.
-	overflowClipRounds := 0
-	// toolCallAsTextWarned bounds the P34.2 notice to one per run: the check
-	// sits on a path a guard retry can re-enter.
-	toolCallAsTextWarned := false
-	// runUsage accumulates token counts across every turn of this run so the
-	// terminal KindDone event can carry a total (P25.5) — previously it was
-	// emitted bare, so API/eval-harness clients that only look at the final
-	// event (unlike the TUI, which reads the per-turn KindTurnDone events)
-	// always saw zero, even though a local/Ollama run's per-turn estimate was
-	// computed and displayed live in the TUI status bar the whole time.
-	// runUsageEstimated is true when any contributing turn had no real
-	// provider-reported usage, so the total is flagged honestly rather than
-	// implying every turn's count came straight from the provider.
-	var (
-		runUsage          provider.Usage
-		runUsageSeen      bool
-		runUsageEstimated bool
-	)
+	return &runLoopState{
+		conv:       conv,
+		emit:       emit,
+		runID:      runID,
+		budget:     budget,
+		stall:      stall,
+		compact:    compact,
+		guardRetry: guardRetry,
+		loop:       loop,
+	}, ctx, cleanup
+}
 
-	// P67.7: the round a turn's stream may have started dispatching into, held
-	// across the loop body so every exit can tear it down.
-	//
-	// A deferred abort plus one at the top of each iteration covers every path
-	// out of the body — the `return`s through the defer, the `continue`s through
-	// the top-of-loop call — without wrapping the body in a closure. abort() is
-	// nil-safe and idempotent, and runTools clears the variable once it has taken
-	// ownership, so a consumed round is never torn down under its own results.
-	var pendingRound *toolRound
-	defer func() { pendingRound.abort() }()
+// runIteration runs one pass of Run's main loop (P78.2: extracted from Run's
+// for-loop body verbatim; behavior unchanged). It aborts any round left over
+// from the previous iteration, applies the pre-turn gates (context
+// cancellation, budget, compaction, step-limit), runs one model turn,
+// classifies the result (max-tokens continuation, shim format error, zero-tool
+// nudge, empty answer, guard retry, or a tool round to dispatch), and — for a
+// tool round — runs the tools and applies the round's correctives (loop
+// nudge, shim-mixed nudge, tool-failure breaker, steer injection).
+//
+// cont reports whether Run's for loop should continue to the next iteration.
+// When cont is false, Run returns err immediately (nil on the ordinary
+// successful-completion path, non-nil on every error/abort path) — every
+// return site below has already emitted whatever KindError/KindDone event
+// that implies, exactly as the inline loop body did.
+func (e *Engine) runIteration(ctx context.Context, rl *runLoopState, iter int) (cont bool, err error) {
+	// Any round the previous iteration started and did not consume — a turn
+	// that ended in a corrective nudge, a discarded hallucinated call —
+	// belongs to a turn that is over. Cancel it and wait for its goroutines
+	// before starting another.
+	rl.pendingRound.abort()
+	rl.pendingRound = nil
 
-	for iter := 0; iter < e.maxIterations; iter++ {
-		// Any round the previous iteration started and did not consume — a turn
-		// that ended in a corrective nudge, a discarded hallucinated call —
-		// belongs to a turn that is over. Cancel it and wait for its goroutines
-		// before starting another.
-		pendingRound.abort()
-		pendingRound = nil
-
-		select {
-		case <-ctx.Done():
-			return budget.override(stall.override(ErrInterrupted))
-		default:
-		}
-
-		// Budget gate: stop before spending on another paid model call. See
-		// runBudget.exceeded for why this gate exists separately from the
-		// pre-tool-round one below.
-		if err := budget.exceeded(); err != nil {
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-
-		// Allow callers to inject dynamic context or refresh tool metadata
-		// before each model turn (e.g. re-read a file, update memory state).
-		if e.prepareStep != nil {
-			if updated := e.prepareStep(ctx, conv.Messages); updated != nil {
-				conv.Messages = updated
-				conv.invalidate()
-			}
-		}
-
-		// P2.6: On the final iteration, if any tool rounds have already completed,
-		// inject a step-limit summary instruction and suppress tool schemas so the
-		// model produces a plain-text progress summary rather than aborting with an
-		// error. If no tools ran yet, skip the injection (model is in its first turn
-		// and should simply answer).
-		// P59.8: a schema-guard corrective retry is sent with decoding
-		// constrained to the required shape, and with tools off — the remaining
-		// task at that point is "emit this object", and a grammar plus a tool
-		// schema pull the same turn in two directions. takeFormat empties the
-		// carry as it reads it, so a *second* failure re-asks under the constraint
-		// again rather than latching it on for the rest of the run.
-		//
-		// Decided before the compaction gate below purely so the gate can be told
-		// whether this turn carries tool schemas — that changes the prompt size it
-		// is estimating, and a turn without them is not a valid calibration sample
-		// (P62.4). The step-limit *injection* still happens after the gate, so the
-		// order of side effects on conv is unchanged.
-		format := guardRetry.takeFormat()
-		suppressTools := format != nil
-		stepLimited := iter == e.maxIterations-1 && toolRoundsCompleted > 0
-		if stepLimited {
-			suppressTools = true
-		}
-
-		// Compaction gate: measure headroom and shorten the conversation before
-		// spending a turn on a prompt that will not fit. Every decision this
-		// concern makes — trigger, summarizer latch, deterministic fallback, the
-		// once-per-run context-full notice — is inside. See compact.go.
-		compact.beforeTurn(ctx, conv, emit, suppressTools)
-
-		if stepLimited {
-			emit(Event{Kind: KindNotice, Text: fmt.Sprintf("step limit reached (%d tool rounds) — asking the model to summarize; raise provider.max_iterations for longer tasks", e.maxIterations)})
-			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-				provider.TextBlock{Text: "[Step limit reached. Summarize what you have accomplished, what constraints were met, and what work remains. Do not call any tools.]"},
-			}})
-		}
-
-		turnStart := time.Now()
-		// P67.7: open a round for this turn's stream to dispatch into, when
-		// early dispatch is admissible at all.
-		//
-		// Two exclusions, both structural rather than cautious. Under
-		// suppressTools the request carries no schemas, so any tool_use in the
-		// reply is a hallucination P2.6 discards — dispatching it would run a
-		// call the engine is about to decide never happened. Under the tool-call
-		// shim the calls are not in the stream: they are parsed out of the reply
-		// *text* after it completes, so there is nothing to dispatch early and
-		// the whole mechanism has no purchase.
-		//
-		// And a third, which is a real limit on this item rather than a detail.
-		// The pre-tool-round budget gate exists precisely so that a turn whose
-		// own usage crosses the cap stops before its tool calls run — and that
-		// usage is not known until the turn ends. A call dispatched mid-stream
-		// cannot honor a bound that is not yet decidable, so a run with a spend
-		// cap keeps the pre-P67.7 batch behaviour. This is the workload the item
-		// targets either way: it names local models, where generation latency
-		// dominates and pricing is zero, so BudgetUSD is unset. See
-		// runBudget.spendBounded.
-		if !suppressTools && !e.toolShim && e.tools != nil && !budget.spendBounded() {
-			pendingRound = e.newToolRound(ctx, emit)
-		}
-		assistant, toolUses, usage, stopReason, err := e.turn(ctx, conv, emit, suppressTools, format, pendingRound)
-		if err != nil {
-			// P59.2: when the run deadline above is what killed the turn, the
-			// adapter reports whatever cancellation looked like from its side —
-			// typically a transport error, which callers classify as
-			// backend-unavailable and would then *wait for and resume*, turning a
-			// deliberate budget abort into a retry loop. Re-derive the real
-			// reason first so the wall-clock error (fatal by design, unlike a
-			// context overflow or a tool-failure trip) is what propagates.
-			//
-			// P39.17: the stall detector cancels the same ctx for the same
-			// reason, so it needs the same re-attribution. Wall clock is checked
-			// outermost — a run past an explicit operator bound reports that
-			// bound even if it also happens to be silent.
-			err = budget.override(stall.override(err))
-			// P74.16: a context-overflow error is recoverable in place, not just
-			// at the phased drive's whole-conversation-reset granularity — the
-			// batch that just overflowed the request is still sitting at the end
-			// of conv.Messages, and clipping it usually frees enough headroom to
-			// retry the same turn rather than aborting the run. Bounded by
-			// maxOverflowClipRounds so a window too small for even one clipped
-			// result fails rather than spinning; each attempt still counts an
-			// iteration, same as every other corrective in this loop.
-			if provider.IsContextOverflowError(err) && overflowClipRounds < maxOverflowClipRounds {
-				if clipOverflowBatch(conv) {
-					overflowClipRounds++
-					emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context overflowed; clipped the most recent tool result(s) to make room and retrying (%d/%d)", overflowClipRounds, maxOverflowClipRounds)})
-					continue
-				}
-			}
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-		conv.Append(assistant)
-
-		// P62.4: the provider just reported how many prompt tokens that request
-		// really was. Fold it into the estimate's correction before the next
-		// turn's headroom check, which is the only thing standing between a long
-		// run and a local server silently dropping its oldest turns.
-		compact.afterTurn(usage, e.effectiveContextWindow())
-
-		var runCost float64
-		if e.cost != nil && usage != nil {
-			if usage.IsEstimated {
-				// Tokens still count toward MaxTokensPerRun even when the
-				// provider gave no real usage (local/Ollama models) — only the
-				// dollar figure is skipped, since pricing an estimate would be
-				// misleading (P10.5).
-				e.cost.AddTokens(*usage)
-			} else {
-				runCost = e.cost.Add(e.model, *usage)
-			}
-		}
-		emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
-		if usage != nil {
-			runUsageSeen = true
-			runUsage.InputTokens += usage.InputTokens
-			runUsage.OutputTokens += usage.OutputTokens
-			runUsage.CacheCreationTokens += usage.CacheCreationTokens
-			runUsage.CacheReadTokens += usage.CacheReadTokens
-			if usage.IsEstimated {
-				runUsageEstimated = true
-			}
-		}
-
-		// Assemble a structured trace for this turn. Tool calls (if any) are
-		// filled in after they run below; for a final turn it is emitted at the
-		// end of the branch, once the guard has ruled.
-		tr := e.newTrace(iter, usage, turnStart)
-		tr.RunID = runID
-		tr.StopReason = string(stopReason)
-		// P66.11/GAP-01: what compaction did at the top of *this* turn, which the
-		// guard computed and dropped. Nil unless something happened.
-		tr.Compaction = compact.event()
-		tr.CalibrationSamples = compact.calibrationSamples()
-
-		// P2.6: If we suppressed tools but the model hallucinated tool calls,
-		// discard them so the turn is treated as a final text answer.
-		if suppressTools && len(toolUses) > 0 {
-			toolUses = nil
-		}
-
-		// nativeCalls is the count of tool calls that arrived through the
-		// provider's own protocol, captured before the shim parse below can add
-		// to toolUses — the P59.6 checks need to tell "the model emitted a real
-		// call" from "we recovered one from its prose".
-		nativeCalls := len(toolUses)
-
-		// P53.6: under the shim the request carried no tool schemas, so any call
-		// this turn made is sitting in the reply text. Parse it here — before the
-		// zero-tool-calls branch below — so the whole rest of the loop (loop
-		// detector, budget gates, runTools, failure breaker) sees an ordinary
-		// tool round and needs no knowledge of how the calls arrived.
-		shimParseErr := ""
-		if e.toolShim && !suppressTools && len(toolUses) == 0 {
-			calls, err := toolshim.Parse(assistantText(assistant), e.exposedToolNames(), fmt.Sprintf("shim-%d", iter))
-			switch {
-			case errors.Is(err, toolshim.ErrNoCalls):
-				// No attempt at all — an ordinary final answer.
-			case err != nil:
-				// An attempt that doesn't meet the contract. Nothing runs: a
-				// reply the parser had to guess at is not an input a permission
-				// prompt should be built from.
-				shimParseErr = err.Error()
-			default:
-				toolUses = calls
-			}
-		}
-
-		// P59.6: both prose-tool-call checks used to sit inside the zero-call
-		// branch below, which asks "can this model produce the protocol at all".
-		// The question that actually matters for the 14-27B class is how
-		// *often* — a model that emits one real call and prints two more as
-		// prose in the same reply is the common shape, and the zero-call gate
-		// made it invisible: no notice, and under the shim the printed calls
-		// were silently dropped rather than parsed or declined. Run the checks
-		// on any turn whose reply text carries the shape.
-		//
-		// shimMixedPending carries the mixed-round correction past the tool
-		// round, for the same reason loopVerdict.nudge does: the native calls
-		// this turn made are real and must still be answered with tool_result
-		// blocks, so nothing may be appended between them and their results.
-		shimMixedPending := false
-		if e.toolShim && !suppressTools && nativeCalls > 0 {
-			// The parsed calls are deliberately *not* dispatched. Both readings
-			// of a mixed round are defensible — parsed calls are unprivileged
-			// and pass the same permission gate — but declining is the safer
-			// default and the one consistent with the parser's existing
-			// decline-rather-than-repair posture: a turn that half-speaks two
-			// protocols is a turn whose intent is genuinely ambiguous, and
-			// running both halves would double-execute a model that wrote the
-			// same call twice in two dialects.
-			_, err := toolshim.Parse(assistantText(assistant), e.exposedToolNames(), fmt.Sprintf("shim-mixed-%d", iter))
-			if !errors.Is(err, toolshim.ErrNoCalls) {
-				shimMixedPending = true
-			}
-		}
-		//
-		// The zero-call gate is dropped; the "no tool call has succeeded all
-		// run" gate is deliberately kept for the zero-native-call case, because
-		// there it is still doing real work: a model that has already made a
-		// structured call and then quotes JSON in its answer is quoting, not
-		// failing, and warning about that is the false positive
-		// TestToolCallAsTextNoticeSkippedAfterRealToolCall exists to prevent.
-		// A *mixed* turn is different in kind — the printed call was written to
-		// be executed and silently wasn't — so it warns regardless of history.
-		if !toolCallAsTextWarned && !suppressTools && (nativeCalls > 0 || toolRoundsCompleted == 0) {
-			if names := e.exposedToolNames(); len(names) > 0 && looksLikeToolCallJSON(assistantText(assistant), names) {
-				toolCallAsTextWarned = true
-				if nativeCalls > 0 {
-					// A partial-protocol turn. The P34.2 claim below would be
-					// wrong here — this model demonstrably *can* call a tool —
-					// so name what was actually lost instead.
-					emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
-						"model wrote a tool call into its prose alongside %d real tool call(s) — the written one did not run", nativeCalls)})
-				} else {
-					// P34.2: the qwen2.5-coder:1.5b signature — a model whose
-					// Ollama manifest claims tool support simply cannot speak
-					// the protocol, then fabricates the results it never
-					// fetched. Name it once; never block, since a prose-only
-					// session with such a model is still legitimate and the user
-					// may not care.
-					emit(Event{Kind: KindNotice, Text: "model emitted a tool call as text — it may not support tool calling; run `aegis doctor` to check this model"})
-				}
-			}
-		}
-
-		if len(toolUses) == 0 {
-			// P66.11/GAP-01: the trace for a final-answer turn is emitted at the
-			// *end* of this branch rather than the top, because the two things
-			// worth recording about such a turn — which corrective it provoked,
-			// and what the output guard made of it — are both decided below.
-			// Every exit from here goes through emitTrace exactly once; a path
-			// that returns or continues without it loses the turn from the record
-			// entirely, which is why the correctives append and the emit are kept
-			// adjacent at each site.
-			emitTrace := func() {
-				tr.WallMS = time.Since(turnStart).Milliseconds()
-				emit(Event{Kind: KindTrace, Trace: &tr})
-			}
-			// If the model was cut off by the token limit, inject a continuation
-			// prompt and loop rather than silently returning a truncated response.
-			if stopReason == provider.StopMaxTokens {
-				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-					provider.TextBlock{Text: "[Your response was cut off at the token limit. Continue from where you left off, completing any remaining task steps.]"},
-				}})
-				tr.Correctives = append(tr.Correctives, "max_tokens_continuation")
-				emitTrace()
-				continue
-			}
-			// P53.6: the model tried to call a tool under the shim and got the
-			// format wrong. Hand back the specific reason and the contract, and
-			// let it try again — bounded, because a model that cannot produce
-			// the shape after two corrections is not going to on the third, and
-			// its prose answer is still worth surfacing.
-			if shimParseErr != "" {
-				if nudges.shimFormatNudges < shimFormatNudgeMax {
-					nudges.shimFormatNudges++
-					emit(Event{Kind: KindNotice, Text: "tool-call shim: could not parse the model's tool call (" + shimParseErr + ") — asking it to reformat"})
-					conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-						provider.TextBlock{Text: shimFormatNudgeText(shimParseErr)},
-					}})
-					tr.Correctives = append(tr.Correctives, "shim_format")
-					emitTrace()
-					continue
-				}
-				emit(Event{Kind: KindNotice, Text: "tool-call shim: the model never produced a parsable tool call — answering from its text instead"})
-			}
-			// P28.3: nothing has been done yet this run (no tool round has
-			// completed), tools are actually available, retries remain, and the
-			// triggering request plainly reads as an actionable task — the
-			// deepseek-r1:8b live-eval failure mode, where the model's
-			// reasoning gets dumped as a text-only final answer instead of
-			// being followed by a real tool call. Ask it to reconsider and act
-			// rather than silently accepting the text-only turn as done.
-			if e.zeroToolNudgeMax >= 0 && toolRoundsCompleted == 0 && nudges.zeroToolNudges < e.zeroToolNudgeMax &&
-				e.tools != nil && len(e.tools.Schemas()) > 0 &&
-				looksActionable(lastUserText(conv.Messages)) {
-				nudges.zeroToolNudges++
-				emit(Event{Kind: KindNotice, Text: "model answered in text only on what looks like an actionable task — asking it to reconsider and act"})
-				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-					provider.TextBlock{Text: zeroToolNudgeText},
-				}})
-				tr.Correctives = append(tr.Correctives, "zero_tool")
-				emitTrace()
-				continue
-			}
-			// P34.1: the model ended its turn without error but produced no
-			// user-visible text at all, so the user is about to receive an
-			// empty reply (observed live with gpt-oss:20b, which emits its
-			// conclusion into the thinking channel and stops). Ask once for a
-			// plain-text answer. Bounded to a single attempt so a model that
-			// simply won't speak can't spin the loop; if the nudge also comes
-			// back empty, say so rather than returning silence.
-			if assistantText(assistant) == "" {
-				if nudges.emptyAnswerNudges == 0 {
-					nudges.emptyAnswerNudges++
-					emit(Event{Kind: KindNotice, Text: "model ended its turn with no text — asking it for a plain-text answer"})
-					conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-						provider.TextBlock{Text: emptyAnswerNudgeText},
-					}})
-					tr.Correctives = append(tr.Correctives, "empty_answer")
-					emitTrace()
-					continue
-				}
-				emit(Event{Kind: KindNotice, Text: "model produced no text even after being asked for a plain-text answer — the reply is empty"})
-			}
-			// The P34.2 prose-tool-call notice used to live here, gated on a
-			// zero-call turn; P59.6 hoisted it above so a mixed round reaches it
-			// too.
-			// Guard gate: validate the final answer and, if it fails with retries
-			// left, append a corrective and arm the next turn's schema. The
-			// retry count stays here in nudgeState — retractAll reads it — and is
-			// passed in rather than duplicated. See guardretry.go.
-			retrying := guardRetry.review(ctx, conv, emit, assistantText(assistant), toolRoundsCompleted, nudges.guardRetries)
-			tr.Guard = guardRetry.lastVerdict()
-			if retrying {
-				nudges.guardRetries++
-				tr.Correctives = append(tr.Correctives, "guard")
-				emitTrace()
-				continue
-			}
-			emitTrace()
-			nudges.retractAll(conv)
-			doneEv := Event{Kind: KindDone}
-			if runUsageSeen {
-				u := runUsage
-				u.IsEstimated = runUsageEstimated
-				doneEv.Usage = &u
-			}
-			emit(doneEv)
-			return nil
-		}
-
-		// Loop guard: stop if the model keeps requesting the same tool calls.
-		// The decision (abort / nudge / neither) and whether this turn entered the
-		// detector's window are the verdict's, not Run's — see loopGuard.check for
-		// P53.2(a)'s poll exemption and P53.2(b)'s outcome-decides-the-ending rule.
-		// loopVerdict is per-turn state and is scoped to exactly this iteration.
-		loopV := loop.check(toolUses, nudges.loopNudges)
-		if loopV.abort != nil {
-			emit(Event{Kind: KindError, Err: loopV.abort})
-			return loopV.abort
-		}
-		if loopV.notice != "" {
-			nudges.loopNudges++
-			emit(Event{Kind: KindNotice, Text: loopV.notice})
-		}
-
-		// Budget gate: stop before launching another (paid) tool round, and
-		// before its side effects, rather than one iteration later.
-		if err := budget.exceeded(); err != nil {
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-
-		round := pendingRound
-		pendingRound = nil // runTools owns it from here, including its teardown
-		results, toolTraces, err := e.runTools(ctx, toolUses, emit, round)
-		if err != nil {
-			// P59.2: the run deadline cancels tool execution too, so the same
-			// re-attribution the model turn needs applies here — and P39.17's
-			// stall detector likewise, since a wedged tool is one of the two
-			// places a turn can go silent.
-			err = budget.override(stall.override(err))
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-		// P53.6: a shimmed assistant message holds only text — the calls were
-		// parsed out of it, never emitted as tool_use blocks — so tool_result
-		// blocks here would be orphaned and rejected by the provider. Render
-		// them as text instead. Native rounds are unchanged.
-		if e.toolShim {
-			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-				provider.TextBlock{Text: toolshim.RenderResults(toolUses, results)},
-			}})
-		} else {
-			conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
-		}
-		toolRoundsCompleted++
-		// P59.10: retract the zero-tool nudge here rather than at run end. The
-		// nudge is now spent — the gate at the injection site only fires it while
-		// toolRoundsCompleted == 0, so a completed round makes it permanently
-		// ineligible this run — and retracting a message from the middle of the
-		// conversation invalidates a local runner's KV prefix cache from that
-		// point on. Doing it now, when only this round sits after it, costs one
-		// small re-prefill; doing it at run end costs a re-prefill of everything
-		// the run produced in between. See prefixcache_test.go for both halves of
-		// the measurement.
-		nudges.retractSpentZeroTool(conv)
-
-		// P66.11/GAP-01: a tool-round turn's correctives — the recoverable-loop
-		// nudge, the mixed-dialect correction, the tool-failure nudge — are all
-		// decided *below* this point, so the trace is emitted at the end of the
-		// round rather than here. The closure is idempotent because the round has
-		// two exits: the ordinary end of the loop body, and the tool-failure
-		// abort, which used to emit a trace before returning and must keep doing
-		// so — a turn that ends a run is the last turn anyone will want a record
-		// of.
-		roundTraceEmitted := false
-		emitRoundTrace := func() {
-			if roundTraceEmitted {
-				return
-			}
-			roundTraceEmitted = true
-			tr.ToolCalls = toolTraces
-			tr.WallMS = time.Since(turnStart).Milliseconds()
-			emit(Event{Kind: KindTrace, Trace: &tr})
-		}
-
-		// P53.2(b): the loop gate records a turn *before* its tools run, so the
-		// outcome that classifies a cycle as recoverable or fatal is only knowable
-		// here.
-		loop.noteOutcome(loopV, results)
-		// Inject the recoverable-loop corrective now that the round's tool_result
-		// blocks are in place, keeping the transcript well-formed — the same
-		// injection point the P52.3 nudge below uses.
-		if loopV.nudge != "" {
-			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-				provider.TextBlock{Text: loopV.nudge},
-			}})
-			tr.Correctives = append(tr.Correctives, "loop")
-		}
-		// P59.6: the same injection point, for the mixed-round correction. The
-		// native calls of this turn have just run and been answered; now tell
-		// the model the ones it *printed* did not, and how to emit them. Bounded
-		// by the same counter as the P53.6 format corrective — a model that
-		// keeps mixing dialects after two corrections is not going to stop, and
-		// its real calls are still working.
-		if shimMixedPending {
-			if nudges.shimFormatNudges < shimFormatNudgeMax {
-				nudges.shimFormatNudges++
-				emit(Event{Kind: KindNotice, Text: "tool-call shim: the model printed a tool call in its prose alongside a real one — the printed call was not run; asking it to emit all calls in the shim format"})
-				conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-					provider.TextBlock{Text: shimMixedNudgeText()},
-				}})
-				tr.Correctives = append(tr.Correctives, "shim_mixed")
-			} else {
-				emit(Event{Kind: KindNotice, Text: "tool-call shim: the model is still printing tool calls in its prose — those did not run"})
-			}
-		}
-
-		// P52.3: consecutive-tool-failure circuit breaker. loopDetector cannot
-		// see this stall — it matches on tool name + canonicalized input, and the
-		// common local-model failure is a model whose arguments legitimately
-		// differ every round (retry edit_file with a slightly different
-		// old_string after each "not found"), so every signature is distinct.
-		// Count failing rounds instead: nudge at the first threshold, end the run
-		// at the second rather than letting it burn to maxIterations.
-		toolFailures.record(toolUses, results)
-		if toolFailures.shouldAbort() {
-			err := toolFailures.abortError()
-			emitRoundTrace()
-			emit(Event{Kind: KindError, Err: err})
-			return err
-		}
-		// P59.11: an outstanding corrective becomes spent the moment the failure
-		// streak it was correcting ends, so retract it here rather than at run
-		// end. Retraction is a mid-history edit and everything after it must be
-		// re-prefilled by a local runner; doing it now leaves only the rounds
-		// between the nudge and the recovery downstream of the break, instead of
-		// the entire rest of the run (measured at 25.9x — see prefixcache_test.go).
-		// The correction is not lost: the injection gate below can fire again if
-		// failures recur, which is an append and costs nothing.
-		if toolFailures.cleared() {
-			nudges.retractSpentToolFailure(conv)
-		}
-		// P63.12: ask the conversation whether a corrective is still standing
-		// rather than a flag set when one was injected. Compaction can have
-		// deleted it since, and suppressing re-injection on the strength of a
-		// message that is no longer there loses the correction silently — no
-		// notice, no log line, and a counter that still looks healthy.
-		if toolFailures.shouldNudge() && !hasNudge(conv, toolFailureNudgePrefix) &&
-			nudges.toolFailureNudges < toolFailureNudgeMax {
-			nudges.toolFailureNudges++
-			emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
-				"%d tool round(s) in a row failed (%s: %s) — asking the model to re-inspect state instead of retrying",
-				toolFailures.rounds(), toolFailures.toolLabel(), toolFailures.lastErrorText)})
-			conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
-				provider.TextBlock{Text: toolFailures.nudgeText()},
-			}})
-			tr.Correctives = append(tr.Correctives, "tool_failure")
-		}
-
-		// Drain one pending steer message (if any) between tool rounds, injecting
-		// it as a user message so the model adjusts its plan on the next turn.
-		if e.steerChan != nil {
-			select {
-			case steer, ok := <-e.steerChan:
-				if ok && len([]rune(steer)) > 0 {
-					conv.Append(provider.Message{
-						Role:    provider.RoleUser,
-						Content: []provider.Block{provider.TextBlock{Text: steer}},
-					})
-					emit(Event{Kind: KindSteer, Text: steer})
-				}
-			default:
-			}
-		}
-		emitRoundTrace()
+	select {
+	case <-ctx.Done():
+		return false, rl.budget.override(rl.stall.override(ErrInterrupted))
+	default:
 	}
 
-	err := fmt.Errorf("engine: exceeded max iterations (%d)", e.maxIterations)
-	emit(Event{Kind: KindError, Err: err})
-	return err
+	// Budget gate: stop before spending on another paid model call. See
+	// runBudget.exceeded for why this gate exists separately from the
+	// pre-tool-round one below.
+	if err := rl.budget.exceeded(); err != nil {
+		rl.emit(Event{Kind: KindError, Err: err})
+		return false, err
+	}
+
+	// Allow callers to inject dynamic context or refresh tool metadata
+	// before each model turn (e.g. re-read a file, update memory state).
+	if e.prepareStep != nil {
+		if updated := e.prepareStep(ctx, rl.conv.Messages); updated != nil {
+			rl.conv.Messages = updated
+			rl.conv.invalidate()
+		}
+	}
+
+	// P2.6: On the final iteration, if any tool rounds have already completed,
+	// inject a step-limit summary instruction and suppress tool schemas so the
+	// model produces a plain-text progress summary rather than aborting with an
+	// error. If no tools ran yet, skip the injection (model is in its first turn
+	// and should simply answer).
+	// P59.8: a schema-guard corrective retry is sent with decoding
+	// constrained to the required shape, and with tools off — the remaining
+	// task at that point is "emit this object", and a grammar plus a tool
+	// schema pull the same turn in two directions. takeFormat empties the
+	// carry as it reads it, so a *second* failure re-asks under the constraint
+	// again rather than latching it on for the rest of the run.
+	//
+	// Decided before the compaction gate below purely so the gate can be told
+	// whether this turn carries tool schemas — that changes the prompt size it
+	// is estimating, and a turn without them is not a valid calibration sample
+	// (P62.4). The step-limit *injection* still happens after the gate, so the
+	// order of side effects on conv is unchanged.
+	format := rl.guardRetry.takeFormat()
+	suppressTools := format != nil
+	stepLimited := iter == e.maxIterations-1 && rl.toolRoundsCompleted > 0
+	if stepLimited {
+		suppressTools = true
+	}
+
+	// Compaction gate: measure headroom and shorten the conversation before
+	// spending a turn on a prompt that will not fit. Every decision this
+	// concern makes — trigger, summarizer latch, deterministic fallback, the
+	// once-per-run context-full notice — is inside. See compact.go.
+	rl.compact.beforeTurn(ctx, rl.conv, rl.emit, suppressTools)
+
+	if stepLimited {
+		rl.emit(Event{Kind: KindNotice, Text: fmt.Sprintf("step limit reached (%d tool rounds) — asking the model to summarize; raise provider.max_iterations for longer tasks", e.maxIterations)})
+		rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+			provider.TextBlock{Text: "[Step limit reached. Summarize what you have accomplished, what constraints were met, and what work remains. Do not call any tools.]"},
+		}})
+	}
+
+	turnStart := time.Now()
+	// P67.7: open a round for this turn's stream to dispatch into, when
+	// early dispatch is admissible at all.
+	//
+	// Two exclusions, both structural rather than cautious. Under
+	// suppressTools the request carries no schemas, so any tool_use in the
+	// reply is a hallucination P2.6 discards — dispatching it would run a
+	// call the engine is about to decide never happened. Under the tool-call
+	// shim the calls are not in the stream: they are parsed out of the reply
+	// *text* after it completes, so there is nothing to dispatch early and
+	// the whole mechanism has no purchase.
+	//
+	// And a third, which is a real limit on this item rather than a detail.
+	// The pre-tool-round budget gate exists precisely so that a turn whose
+	// own usage crosses the cap stops before its tool calls run — and that
+	// usage is not known until the turn ends. A call dispatched mid-stream
+	// cannot honor a bound that is not yet decidable, so a run with a spend
+	// cap keeps the pre-P67.7 batch behaviour. This is the workload the item
+	// targets either way: it names local models, where generation latency
+	// dominates and pricing is zero, so BudgetUSD is unset. See
+	// runBudget.spendBounded.
+	if !suppressTools && !e.toolShim && e.tools != nil && !rl.budget.spendBounded() {
+		rl.pendingRound = e.newToolRound(ctx, rl.emit)
+	}
+	assistant, toolUses, usage, stopReason, err := e.turn(ctx, rl.conv, rl.emit, suppressTools, format, rl.pendingRound)
+	if err != nil {
+		// P59.2: when the run deadline above is what killed the turn, the
+		// adapter reports whatever cancellation looked like from its side —
+		// typically a transport error, which callers classify as
+		// backend-unavailable and would then *wait for and resume*, turning a
+		// deliberate budget abort into a retry loop. Re-derive the real
+		// reason first so the wall-clock error (fatal by design, unlike a
+		// context overflow or a tool-failure trip) is what propagates.
+		//
+		// P39.17: the stall detector cancels the same ctx for the same
+		// reason, so it needs the same re-attribution. Wall clock is checked
+		// outermost — a run past an explicit operator bound reports that
+		// bound even if it also happens to be silent.
+		err = rl.budget.override(rl.stall.override(err))
+		// P74.16: a context-overflow error is recoverable in place, not just
+		// at the phased drive's whole-conversation-reset granularity — the
+		// batch that just overflowed the request is still sitting at the end
+		// of conv.Messages, and clipping it usually frees enough headroom to
+		// retry the same turn rather than aborting the run. Bounded by
+		// maxOverflowClipRounds so a window too small for even one clipped
+		// result fails rather than spinning; each attempt still counts an
+		// iteration, same as every other corrective in this loop.
+		if provider.IsContextOverflowError(err) && rl.overflowClipRounds < maxOverflowClipRounds {
+			if clipOverflowBatch(rl.conv) {
+				rl.overflowClipRounds++
+				rl.emit(Event{Kind: KindNotice, Text: fmt.Sprintf("context overflowed; clipped the most recent tool result(s) to make room and retrying (%d/%d)", rl.overflowClipRounds, maxOverflowClipRounds)})
+				return true, nil
+			}
+		}
+		rl.emit(Event{Kind: KindError, Err: err})
+		return false, err
+	}
+	rl.conv.Append(assistant)
+
+	// P62.4: the provider just reported how many prompt tokens that request
+	// really was. Fold it into the estimate's correction before the next
+	// turn's headroom check, which is the only thing standing between a long
+	// run and a local server silently dropping its oldest turns.
+	rl.compact.afterTurn(usage, e.effectiveContextWindow())
+
+	var runCost float64
+	if e.cost != nil && usage != nil {
+		if usage.IsEstimated {
+			// Tokens still count toward MaxTokensPerRun even when the
+			// provider gave no real usage (local/Ollama models) — only the
+			// dollar figure is skipped, since pricing an estimate would be
+			// misleading (P10.5).
+			e.cost.AddTokens(*usage)
+		} else {
+			runCost = e.cost.Add(e.model, *usage)
+		}
+	}
+	rl.emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
+	if usage != nil {
+		rl.runUsageSeen = true
+		rl.runUsage.InputTokens += usage.InputTokens
+		rl.runUsage.OutputTokens += usage.OutputTokens
+		rl.runUsage.CacheCreationTokens += usage.CacheCreationTokens
+		rl.runUsage.CacheReadTokens += usage.CacheReadTokens
+		if usage.IsEstimated {
+			rl.runUsageEstimated = true
+		}
+	}
+
+	// Assemble a structured trace for this turn. Tool calls (if any) are
+	// filled in after they run below; for a final turn it is emitted at the
+	// end of the branch, once the guard has ruled.
+	tr := e.newTrace(iter, usage, turnStart)
+	tr.RunID = rl.runID
+	tr.StopReason = string(stopReason)
+	// P66.11/GAP-01: what compaction did at the top of *this* turn, which the
+	// guard computed and dropped. Nil unless something happened.
+	tr.Compaction = rl.compact.event()
+	tr.CalibrationSamples = rl.compact.calibrationSamples()
+
+	// P2.6: If we suppressed tools but the model hallucinated tool calls,
+	// discard them so the turn is treated as a final text answer.
+	if suppressTools && len(toolUses) > 0 {
+		toolUses = nil
+	}
+
+	// nativeCalls is the count of tool calls that arrived through the
+	// provider's own protocol, captured before the shim parse below can add
+	// to toolUses — the P59.6 checks need to tell "the model emitted a real
+	// call" from "we recovered one from its prose".
+	nativeCalls := len(toolUses)
+
+	// P53.6: under the shim the request carried no tool schemas, so any call
+	// this turn made is sitting in the reply text. Parse it here — before the
+	// zero-tool-calls branch below — so the whole rest of the loop (loop
+	// detector, budget gates, runTools, failure breaker) sees an ordinary
+	// tool round and needs no knowledge of how the calls arrived.
+	shimParseErr := ""
+	if e.toolShim && !suppressTools && len(toolUses) == 0 {
+		calls, err := toolshim.Parse(assistantText(assistant), e.exposedToolNames(), fmt.Sprintf("shim-%d", iter))
+		switch {
+		case errors.Is(err, toolshim.ErrNoCalls):
+			// No attempt at all — an ordinary final answer.
+		case err != nil:
+			// An attempt that doesn't meet the contract. Nothing runs: a
+			// reply the parser had to guess at is not an input a permission
+			// prompt should be built from.
+			shimParseErr = err.Error()
+		default:
+			toolUses = calls
+		}
+	}
+
+	// P59.6: both prose-tool-call checks used to sit inside the zero-call
+	// branch below, which asks "can this model produce the protocol at all".
+	// The question that actually matters for the 14-27B class is how
+	// *often* — a model that emits one real call and prints two more as
+	// prose in the same reply is the common shape, and the zero-call gate
+	// made it invisible: no notice, and under the shim the printed calls
+	// were silently dropped rather than parsed or declined. Run the checks
+	// on any turn whose reply text carries the shape.
+	//
+	// shimMixedPending carries the mixed-round correction past the tool
+	// round, for the same reason loopVerdict.nudge does: the native calls
+	// this turn made are real and must still be answered with tool_result
+	// blocks, so nothing may be appended between them and their results.
+	shimMixedPending := false
+	if e.toolShim && !suppressTools && nativeCalls > 0 {
+		// The parsed calls are deliberately *not* dispatched. Both readings
+		// of a mixed round are defensible — parsed calls are unprivileged
+		// and pass the same permission gate — but declining is the safer
+		// default and the one consistent with the parser's existing
+		// decline-rather-than-repair posture: a turn that half-speaks two
+		// protocols is a turn whose intent is genuinely ambiguous, and
+		// running both halves would double-execute a model that wrote the
+		// same call twice in two dialects.
+		_, err := toolshim.Parse(assistantText(assistant), e.exposedToolNames(), fmt.Sprintf("shim-mixed-%d", iter))
+		if !errors.Is(err, toolshim.ErrNoCalls) {
+			shimMixedPending = true
+		}
+	}
+	//
+	// The zero-call gate is dropped; the "no tool call has succeeded all
+	// run" gate is deliberately kept for the zero-native-call case, because
+	// there it is still doing real work: a model that has already made a
+	// structured call and then quotes JSON in its answer is quoting, not
+	// failing, and warning about that is the false positive
+	// TestToolCallAsTextNoticeSkippedAfterRealToolCall exists to prevent.
+	// A *mixed* turn is different in kind — the printed call was written to
+	// be executed and silently wasn't — so it warns regardless of history.
+	if !rl.toolCallAsTextWarned && !suppressTools && (nativeCalls > 0 || rl.toolRoundsCompleted == 0) {
+		if names := e.exposedToolNames(); len(names) > 0 && looksLikeToolCallJSON(assistantText(assistant), names) {
+			rl.toolCallAsTextWarned = true
+			if nativeCalls > 0 {
+				// A partial-protocol turn. The P34.2 claim below would be
+				// wrong here — this model demonstrably *can* call a tool —
+				// so name what was actually lost instead.
+				rl.emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
+					"model wrote a tool call into its prose alongside %d real tool call(s) — the written one did not run", nativeCalls)})
+			} else {
+				// P34.2: the qwen2.5-coder:1.5b signature — a model whose
+				// Ollama manifest claims tool support simply cannot speak
+				// the protocol, then fabricates the results it never
+				// fetched. Name it once; never block, since a prose-only
+				// session with such a model is still legitimate and the user
+				// may not care.
+				rl.emit(Event{Kind: KindNotice, Text: "model emitted a tool call as text — it may not support tool calling; run `aegis doctor` to check this model"})
+			}
+		}
+	}
+
+	if len(toolUses) == 0 {
+		// P66.11/GAP-01: the trace for a final-answer turn is emitted at the
+		// *end* of this branch rather than the top, because the two things
+		// worth recording about such a turn — which corrective it provoked,
+		// and what the output guard made of it — are both decided below.
+		// Every exit from here goes through emitTrace exactly once; a path
+		// that returns or continues without it loses the turn from the record
+		// entirely, which is why the correctives append and the emit are kept
+		// adjacent at each site.
+		emitTrace := func() {
+			tr.WallMS = time.Since(turnStart).Milliseconds()
+			rl.emit(Event{Kind: KindTrace, Trace: &tr})
+		}
+		// If the model was cut off by the token limit, inject a continuation
+		// prompt and loop rather than silently returning a truncated response.
+		if stopReason == provider.StopMaxTokens {
+			rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+				provider.TextBlock{Text: "[Your response was cut off at the token limit. Continue from where you left off, completing any remaining task steps.]"},
+			}})
+			tr.Correctives = append(tr.Correctives, "max_tokens_continuation")
+			emitTrace()
+			return true, nil
+		}
+		// P53.6: the model tried to call a tool under the shim and got the
+		// format wrong. Hand back the specific reason and the contract, and
+		// let it try again — bounded, because a model that cannot produce
+		// the shape after two corrections is not going to on the third, and
+		// its prose answer is still worth surfacing.
+		if shimParseErr != "" {
+			if rl.nudges.shimFormatNudges < shimFormatNudgeMax {
+				rl.nudges.shimFormatNudges++
+				rl.emit(Event{Kind: KindNotice, Text: "tool-call shim: could not parse the model's tool call (" + shimParseErr + ") — asking it to reformat"})
+				rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+					provider.TextBlock{Text: shimFormatNudgeText(shimParseErr)},
+				}})
+				tr.Correctives = append(tr.Correctives, "shim_format")
+				emitTrace()
+				return true, nil
+			}
+			rl.emit(Event{Kind: KindNotice, Text: "tool-call shim: the model never produced a parsable tool call — answering from its text instead"})
+		}
+		// P28.3: nothing has been done yet this run (no tool round has
+		// completed), tools are actually available, retries remain, and the
+		// triggering request plainly reads as an actionable task — the
+		// deepseek-r1:8b live-eval failure mode, where the model's
+		// reasoning gets dumped as a text-only final answer instead of
+		// being followed by a real tool call. Ask it to reconsider and act
+		// rather than silently accepting the text-only turn as done.
+		if e.zeroToolNudgeMax >= 0 && rl.toolRoundsCompleted == 0 && rl.nudges.zeroToolNudges < e.zeroToolNudgeMax &&
+			e.tools != nil && len(e.tools.Schemas()) > 0 &&
+			looksActionable(lastUserText(rl.conv.Messages)) {
+			rl.nudges.zeroToolNudges++
+			rl.emit(Event{Kind: KindNotice, Text: "model answered in text only on what looks like an actionable task — asking it to reconsider and act"})
+			rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+				provider.TextBlock{Text: zeroToolNudgeText},
+			}})
+			tr.Correctives = append(tr.Correctives, "zero_tool")
+			emitTrace()
+			return true, nil
+		}
+		// P34.1: the model ended its turn without error but produced no
+		// user-visible text at all, so the user is about to receive an
+		// empty reply (observed live with gpt-oss:20b, which emits its
+		// conclusion into the thinking channel and stops). Ask once for a
+		// plain-text answer. Bounded to a single attempt so a model that
+		// simply won't speak can't spin the loop; if the nudge also comes
+		// back empty, say so rather than returning silence.
+		if assistantText(assistant) == "" {
+			if rl.nudges.emptyAnswerNudges == 0 {
+				rl.nudges.emptyAnswerNudges++
+				rl.emit(Event{Kind: KindNotice, Text: "model ended its turn with no text — asking it for a plain-text answer"})
+				rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+					provider.TextBlock{Text: emptyAnswerNudgeText},
+				}})
+				tr.Correctives = append(tr.Correctives, "empty_answer")
+				emitTrace()
+				return true, nil
+			}
+			rl.emit(Event{Kind: KindNotice, Text: "model produced no text even after being asked for a plain-text answer — the reply is empty"})
+		}
+		// The P34.2 prose-tool-call notice used to live here, gated on a
+		// zero-call turn; P59.6 hoisted it above so a mixed round reaches it
+		// too.
+		// Guard gate: validate the final answer and, if it fails with retries
+		// left, append a corrective and arm the next turn's schema. The
+		// retry count stays here in nudgeState — retractAll reads it — and is
+		// passed in rather than duplicated. See guardretry.go.
+		retrying := rl.guardRetry.review(ctx, rl.conv, rl.emit, assistantText(assistant), rl.toolRoundsCompleted, rl.nudges.guardRetries)
+		tr.Guard = rl.guardRetry.lastVerdict()
+		if retrying {
+			rl.nudges.guardRetries++
+			tr.Correctives = append(tr.Correctives, "guard")
+			emitTrace()
+			return true, nil
+		}
+		emitTrace()
+		rl.nudges.retractAll(rl.conv)
+		doneEv := Event{Kind: KindDone}
+		if rl.runUsageSeen {
+			u := rl.runUsage
+			u.IsEstimated = rl.runUsageEstimated
+			doneEv.Usage = &u
+		}
+		rl.emit(doneEv)
+		return false, nil
+	}
+
+	// Loop guard: stop if the model keeps requesting the same tool calls.
+	// The decision (abort / nudge / neither) and whether this turn entered the
+	// detector's window are the verdict's, not Run's — see loopGuard.check for
+	// P53.2(a)'s poll exemption and P53.2(b)'s outcome-decides-the-ending rule.
+	// loopVerdict is per-turn state and is scoped to exactly this iteration.
+	loopV := rl.loop.check(toolUses, rl.nudges.loopNudges)
+	if loopV.abort != nil {
+		rl.emit(Event{Kind: KindError, Err: loopV.abort})
+		return false, loopV.abort
+	}
+	if loopV.notice != "" {
+		rl.nudges.loopNudges++
+		rl.emit(Event{Kind: KindNotice, Text: loopV.notice})
+	}
+
+	// Budget gate: stop before launching another (paid) tool round, and
+	// before its side effects, rather than one iteration later.
+	if err := rl.budget.exceeded(); err != nil {
+		rl.emit(Event{Kind: KindError, Err: err})
+		return false, err
+	}
+
+	round := rl.pendingRound
+	rl.pendingRound = nil // runTools owns it from here, including its teardown
+	results, toolTraces, err := e.runTools(ctx, toolUses, rl.emit, round)
+	if err != nil {
+		// P59.2: the run deadline cancels tool execution too, so the same
+		// re-attribution the model turn needs applies here — and P39.17's
+		// stall detector likewise, since a wedged tool is one of the two
+		// places a turn can go silent.
+		err = rl.budget.override(rl.stall.override(err))
+		rl.emit(Event{Kind: KindError, Err: err})
+		return false, err
+	}
+	// P53.6: a shimmed assistant message holds only text — the calls were
+	// parsed out of it, never emitted as tool_use blocks — so tool_result
+	// blocks here would be orphaned and rejected by the provider. Render
+	// them as text instead. Native rounds are unchanged.
+	if e.toolShim {
+		rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+			provider.TextBlock{Text: toolshim.RenderResults(toolUses, results)},
+		}})
+	} else {
+		rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: results})
+	}
+	rl.toolRoundsCompleted++
+	// P59.10: retract the zero-tool nudge here rather than at run end. The
+	// nudge is now spent — the gate at the injection site only fires it while
+	// toolRoundsCompleted == 0, so a completed round makes it permanently
+	// ineligible this run — and retracting a message from the middle of the
+	// conversation invalidates a local runner's KV prefix cache from that
+	// point on. Doing it now, when only this round sits after it, costs one
+	// small re-prefill; doing it at run end costs a re-prefill of everything
+	// the run produced in between. See prefixcache_test.go for both halves of
+	// the measurement.
+	rl.nudges.retractSpentZeroTool(rl.conv)
+
+	// P66.11/GAP-01: a tool-round turn's correctives — the recoverable-loop
+	// nudge, the mixed-dialect correction, the tool-failure nudge — are all
+	// decided *below* this point, so the trace is emitted at the end of the
+	// round rather than here. The closure is idempotent because the round has
+	// two exits: the ordinary end of the loop body, and the tool-failure
+	// abort, which used to emit a trace before returning and must keep doing
+	// so — a turn that ends a run is the last turn anyone will want a record
+	// of.
+	roundTraceEmitted := false
+	emitRoundTrace := func() {
+		if roundTraceEmitted {
+			return
+		}
+		roundTraceEmitted = true
+		tr.ToolCalls = toolTraces
+		tr.WallMS = time.Since(turnStart).Milliseconds()
+		rl.emit(Event{Kind: KindTrace, Trace: &tr})
+	}
+
+	// P53.2(b): the loop gate records a turn *before* its tools run, so the
+	// outcome that classifies a cycle as recoverable or fatal is only knowable
+	// here.
+	rl.loop.noteOutcome(loopV, results)
+	// Inject the recoverable-loop corrective now that the round's tool_result
+	// blocks are in place, keeping the transcript well-formed — the same
+	// injection point the P52.3 nudge below uses.
+	if loopV.nudge != "" {
+		rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+			provider.TextBlock{Text: loopV.nudge},
+		}})
+		tr.Correctives = append(tr.Correctives, "loop")
+	}
+	// P59.6: the same injection point, for the mixed-round correction. The
+	// native calls of this turn have just run and been answered; now tell
+	// the model the ones it *printed* did not, and how to emit them. Bounded
+	// by the same counter as the P53.6 format corrective — a model that
+	// keeps mixing dialects after two corrections is not going to stop, and
+	// its real calls are still working.
+	if shimMixedPending {
+		if rl.nudges.shimFormatNudges < shimFormatNudgeMax {
+			rl.nudges.shimFormatNudges++
+			rl.emit(Event{Kind: KindNotice, Text: "tool-call shim: the model printed a tool call in its prose alongside a real one — the printed call was not run; asking it to emit all calls in the shim format"})
+			rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+				provider.TextBlock{Text: shimMixedNudgeText()},
+			}})
+			tr.Correctives = append(tr.Correctives, "shim_mixed")
+		} else {
+			rl.emit(Event{Kind: KindNotice, Text: "tool-call shim: the model is still printing tool calls in its prose — those did not run"})
+		}
+	}
+
+	// P52.3: consecutive-tool-failure circuit breaker. loopDetector cannot
+	// see this stall — it matches on tool name + canonicalized input, and the
+	// common local-model failure is a model whose arguments legitimately
+	// differ every round (retry edit_file with a slightly different
+	// old_string after each "not found"), so every signature is distinct.
+	// Count failing rounds instead: nudge at the first threshold, end the run
+	// at the second rather than letting it burn to maxIterations.
+	rl.toolFailures.record(toolUses, results)
+	if rl.toolFailures.shouldAbort() {
+		err := rl.toolFailures.abortError()
+		emitRoundTrace()
+		rl.emit(Event{Kind: KindError, Err: err})
+		return false, err
+	}
+	// P59.11: an outstanding corrective becomes spent the moment the failure
+	// streak it was correcting ends, so retract it here rather than at run
+	// end. Retraction is a mid-history edit and everything after it must be
+	// re-prefilled by a local runner; doing it now leaves only the rounds
+	// between the nudge and the recovery downstream of the break, instead of
+	// the entire rest of the run (measured at 25.9x — see prefixcache_test.go).
+	// The correction is not lost: the injection gate below can fire again if
+	// failures recur, which is an append and costs nothing.
+	if rl.toolFailures.cleared() {
+		rl.nudges.retractSpentToolFailure(rl.conv)
+	}
+	// P63.12: ask the conversation whether a corrective is still standing
+	// rather than a flag set when one was injected. Compaction can have
+	// deleted it since, and suppressing re-injection on the strength of a
+	// message that is no longer there loses the correction silently — no
+	// notice, no log line, and a counter that still looks healthy.
+	if rl.toolFailures.shouldNudge() && !hasNudge(rl.conv, toolFailureNudgePrefix) &&
+		rl.nudges.toolFailureNudges < toolFailureNudgeMax {
+		rl.nudges.toolFailureNudges++
+		rl.emit(Event{Kind: KindNotice, Text: fmt.Sprintf(
+			"%d tool round(s) in a row failed (%s: %s) — asking the model to re-inspect state instead of retrying",
+			rl.toolFailures.rounds(), rl.toolFailures.toolLabel(), rl.toolFailures.lastErrorText)})
+		rl.conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+			provider.TextBlock{Text: rl.toolFailures.nudgeText()},
+		}})
+		tr.Correctives = append(tr.Correctives, "tool_failure")
+	}
+
+	// Drain one pending steer message (if any) between tool rounds, injecting
+	// it as a user message so the model adjusts its plan on the next turn.
+	if e.steerChan != nil {
+		select {
+		case steer, ok := <-e.steerChan:
+			if ok && len([]rune(steer)) > 0 {
+				rl.conv.Append(provider.Message{
+					Role:    provider.RoleUser,
+					Content: []provider.Block{provider.TextBlock{Text: steer}},
+				})
+				rl.emit(Event{Kind: KindSteer, Text: steer})
+			}
+		default:
+		}
+	}
+	emitRoundTrace()
+	return true, nil
 }
 
 // nudgeState counts the corrective/nudge scaffolding a single engine.Run
@@ -2049,683 +2112,6 @@ func newRunID() string {
 		return ""
 	}
 	return hex.EncodeToString(b[:])
-}
-
-// maxParallelTools bounds how many tool calls run concurrently in one round.
-const maxParallelTools = 8
-
-// runTools executes the requested tools and returns tool-result blocks in the
-// same order they were requested (as required for tool-use/result pairing).
-//
-// When the model requests several tools, read/network calls run fully
-// concurrently with everything else; write/execute calls take a shared
-// exclusive lock so they never race with each other (P8.6 — reads are no
-// longer blocked behind a concurrent write/execute call in the same round).
-// Event emission is serialized so streamed output is never interleaved
-// mid-write. A single tool call takes the simple sequential path.
-//
-// P67.7: the scheduler itself lives in toolround.go and can be fed one call at a
-// time while the model turn is still streaming. This function is the batch entry
-// point — the caller that already has the whole slice — and `started` is the
-// round the stream may have opened, or nil. Calls already dispatched from the
-// stream are skipped rather than re-run; only the tail the stream did not
-// dispatch is added here.
-func (e *Engine) runTools(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc, started *toolRound) ([]provider.Block, []trace.ToolCall, error) {
-	// The sequential path stays for the single-call case, which is most rounds,
-	// and it is only reachable when the stream dispatched nothing: a round that
-	// already has a goroutine in flight cannot be re-run in-order.
-	if started == nil && len(toolUses) <= 1 {
-		return e.runToolsSequential(ctx, toolUses, emit)
-	}
-
-	r := started
-	if r == nil {
-		r = e.newToolRound(ctx, emit)
-	}
-	// Everything the stream did not already dispatch. The prefix property holds
-	// because the stream adds calls in arrival order and stops adding at the
-	// first ineligible one, so `pending` is always a prefix of toolUses.
-	for _, tu := range toolUses[min(r.pending(), len(toolUses)):] {
-		r.add(tu)
-	}
-	return r.wait()
-}
-
-// capRound applies the P67.1 aggregate bound to a completed round, rewriting the
-// result blocks in place.
-//
-// It runs after every result has been emitted, which is the point: the user has
-// already seen each tool's full (per-call-capped) output in the UI and the trace
-// records what ran, so what this trims is only the *model's* copy — the one whose
-// size is the problem. Trimming before emission would hide output from the human
-// to save the model's context, which is the wrong trade in both directions.
-//
-// A hook that returns the wrong number of results is ignored rather than trusted:
-// the alternative is pairing a tool_result with the wrong tool_use id, which
-// every provider rejects and which would be a much worse failure than an
-// unbounded round.
-func (e *Engine) capRound(ctx context.Context, results []provider.Block) {
-	if e.roundResultCap == nil || len(results) <= 1 {
-		return
-	}
-	texts := make([]string, len(results))
-	for i, blk := range results {
-		tr, ok := blk.(provider.ToolResultBlock)
-		if !ok {
-			// An interrupted round leaves nil blocks behind; nothing to bound.
-			return
-		}
-		texts[i] = tr.Content
-	}
-	// Through toolCtx for the same reason collectWrittenFiles is (P66.10/ARCH-03):
-	// the spill lands in a workspace, and on a session with a custom workdir the
-	// bare run context would put it in the daemon's instead — where read_file
-	// cannot reach it, which turns the locator into a dead end.
-	capped := e.roundResultCap(e.toolCtx(ctx), texts)
-	if len(capped) != len(results) {
-		e.logger.Warn("round result cap returned the wrong number of results; ignoring",
-			"want", len(results), "got", len(capped))
-		return
-	}
-	for i, blk := range results {
-		tr := blk.(provider.ToolResultBlock)
-		if capped[i] == tr.Content {
-			continue
-		}
-		tr.Content = capped[i]
-		results[i] = tr
-	}
-}
-
-// toolTargetPath extracts a tool call's filesystem target from its JSON input,
-// used to order same-path writes and reads within one tool round. Builtin file
-// tools (read_file, write_file, edit_file, multiedit, ls, …) all name their
-// target "path"; the value is cleaned so equivalent spellings ("f.py",
-// "./f.py") compare equal. Returns "" when the input carries no "path" string,
-// so non-file tools never gate one another. Matching is exact after cleaning:
-// on a case-insensitive filesystem two differently-cased spellings of one path
-// won't be ordered, but a model emitting a write→read pair reuses the same
-// string, so this is a non-issue in practice and avoids wrongly serializing
-// distinct paths on a case-sensitive filesystem.
-func toolTargetPath(input json.RawMessage) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var probe struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(input, &probe); err != nil || probe.Path == "" {
-		return ""
-	}
-	return filepath.Clean(probe.Path)
-}
-
-// runToolsSequential is the simple in-order path used for a single tool call.
-func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, []trace.ToolCall, error) {
-	results := make([]provider.Block, 0, len(toolUses))
-	traces := make([]trace.ToolCall, 0, len(toolUses))
-	for _, tu := range toolUses {
-		select {
-		case <-ctx.Done():
-			return nil, nil, ErrInterrupted
-		default:
-		}
-
-		emit(Event{Kind: KindToolCall, ToolName: tu.Name, ToolID: tu.ID, ToolInput: tu.Input})
-		// P39.17: both edges of the call. The start edge says the round is
-		// under way; the finish edge is what keeps a long round of many
-		// short tools from ever looking silent.
-		beat(ctx)
-		start := time.Now()
-		content, isErr := e.executeTool(ctx, tu)
-		beat(ctx)
-		traces = append(traces, trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr})
-		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
-
-		results = append(results, provider.ToolResultBlock{
-			ToolUseID: tu.ID,
-			Content:   content,
-			IsError:   isErr,
-		})
-	}
-	return results, traces, nil
-}
-
-// serializeTool reports whether a tool call must run exclusively (write/
-// execute capabilities), preventing it from racing other tool calls in the
-// same round. Capability is evaluated per-call (tool.EffectiveCapability,
-// P25.4c) so a call a tool reclassifies as narrower than its usual
-// capability — e.g. a read-only shell command — isn't serialized behind
-// concurrent writes/execs for no reason. Unknown tools are treated as serial
-// out of caution.
-func (e *Engine) serializeTool(name string, input json.RawMessage) bool {
-	if e.tools == nil {
-		return true
-	}
-	t, ok := e.tools.Get(name)
-	if !ok {
-		return true
-	}
-	switch tool.EffectiveCapability(t, input) {
-	case tool.CapWrite, tool.CapExecute:
-		return true
-	default:
-		return false
-	}
-}
-
-// interruptedNotStartedText is the synthetic result for an orphaned call the
-// runtime is known never to have begun. It is the pre-P65.1 wording, kept
-// verbatim because for this half it was always true.
-func interruptedNotStartedText(name string) string {
-	return fmt.Sprintf("tool call interrupted; %s did not run", name)
-}
-
-// interruptedMalformedText is the synthetic result for an orphaned call whose
-// arguments never parsed as valid JSON at all (P74.14). Unlike
-// interruptedNotStartedText, this is not a claim about timing — the call
-// could not have dispatched regardless of whether the run was interrupted,
-// because its arguments are truncated or malformed. Telling the model
-// "interrupted" here invites a retry of the same call verbatim; the model
-// needs to know instead that it must reissue the call with valid arguments.
-func interruptedMalformedText(name string) string {
-	return fmt.Sprintf("tool call never dispatched; %s's arguments were malformed or truncated JSON."+
-		" Reissue the call with valid arguments.", name)
-}
-
-// siblingCancelledText is the result reported for a call that never started
-// because an earlier write/execute call in the same parallel round failed
-// (P67.4). This is the one cancellation case where "nothing happened" is
-// honestly assertable — the call had not reached Execute — so unlike
-// interruptedMaybeRanText it says so plainly, and the model is free to re-issue
-// it once it has dealt with the failure.
-func siblingCancelledText(name, failed string) string {
-	if failed == "" {
-		return fmt.Sprintf("%s%s did not run because another call in the same round failed. Nothing was executed.", siblingCancelledPrefix, name)
-	}
-	return fmt.Sprintf("%s%s did not run because %s failed earlier in the same round. Nothing was executed.", siblingCancelledPrefix, name, failed)
-}
-
-// siblingCancelledPrefix and roundCancelledMarker are the two stable markers
-// that identify a result as an artifact of a P67.4 round cancellation rather
-// than as something a tool actually reported. isRoundCancelledResult is the
-// only reader; the tool-failure breaker uses it (see toolfailure.go).
-const (
-	siblingCancelledPrefix = "tool call skipped; "
-	roundCancelledMarker   = "The round was cancelled because "
-)
-
-// isRoundCancelledResult reports whether a tool result was produced by
-// cancelling the round rather than by running the tool (P67.4).
-func isRoundCancelledResult(content string) bool {
-	return strings.HasPrefix(content, siblingCancelledPrefix) || strings.Contains(content, roundCancelledMarker)
-}
-
-// siblingCancelledSuffix explains a cancellation to a call that was already
-// running when it happened. Appended to (never substituted for) whatever the
-// tool itself reported, because that text may describe real work the call had
-// already done before the cancellation reached it.
-func siblingCancelledSuffix(failed string) string {
-	if failed == "" {
-		return roundCancelledMarker + "another call in it failed."
-	}
-	return fmt.Sprintf("%s%s failed.", roundCancelledMarker, failed)
-}
-
-// interruptedMaybeRanText is the synthetic result for an orphaned call that had
-// reached its Execute when the run was cancelled (P65.1).
-//
-// The second sentence is the whole point of the split, and it is a claim about
-// how a model reads the first: told an effect is *uncertain* it re-checks, told
-// the effect did not happen it re-runs. Re-running a `shell` that already
-// deleted half a directory, or a write that already landed, is the failure this
-// wording exists to prevent — and the tool most likely to be running when a
-// stall bound fires is the long one that stalled, which is exactly the class
-// where "did not run" is both most likely false and most costly to believe.
-func interruptedMaybeRanText(name string) string {
-	return fmt.Sprintf("tool call interrupted while running; %s may have partially completed."+
-		" Verify before assuming its effects did or did not land.", name)
-}
-
-// interruptedMaybeRanSafeText is interruptedMaybeRanText's counterpart for a
-// call tool.EffectiveReplay classifies ReplaySafe (P65.4): the call is known
-// to be harmless to reissue with the same input, so the model doesn't need to
-// go verify anything first — it can just ask again if it still needs the
-// result.
-func interruptedMaybeRanSafeText(name string) string {
-	return fmt.Sprintf("tool call interrupted while running; %s may or may not have completed."+
-		" This call is idempotent — it is safe to simply retry it with the same input if you still need the result.", name)
-}
-
-// repairOrphanedToolUses scans the conversation for tool_use blocks in assistant
-// messages that have no matching tool_result in a subsequent user message, and
-// injects synthetic error results. This prevents providers from rejecting a
-// conversation that was interrupted mid-tool-round (e.g. by context cancel).
-//
-// P65.1: started carries the tool_use IDs the runtime is known to have begun
-// executing, so the synthetic result can tell "never started" from "may have
-// run" instead of asserting the first for both. Every mechanism Aegis has for
-// bounding a run cancels the run context mid-flight by design — MaxTurnStall
-// (on by default, and the only bound covering the tool-execution phase),
-// MaxWallClockPerRun, a user interrupt, a TUI quit-while-streaming — so this
-// path is reached routinely rather than exceptionally, and the drive's reset
-// ladder then hands the next context whatever this function wrote. An unknown
-// ID is treated as not started, which is the pre-P65.1 behaviour and the only
-// honest answer when there is no record either way.
-//
-// tools, when non-nil, is consulted via tool.EffectiveReplay for every orphan
-// classified "may have run" (P65.4): a ReplaySafe tool gets a synthetic
-// result telling the model it's fine to simply reissue the call, instead of
-// the universally conservative "verify before assuming" wording every tool
-// got before this existed. Nil tools (every caller predating this, and every
-// existing test) keeps that universal wording exactly as it was.
-func repairOrphanedToolUses(msgs []provider.Message, started map[string]struct{}, tools *tool.Registry) []provider.Message {
-	if len(msgs) == 0 {
-		return msgs
-	}
-
-	// Collect all resolved tool_use IDs.
-	resolved := make(map[string]bool, len(msgs))
-	for _, msg := range msgs {
-		if msg.Role != provider.RoleUser {
-			continue
-		}
-		for _, b := range msg.Content {
-			if tr, ok := b.(provider.ToolResultBlock); ok {
-				resolved[tr.ToolUseID] = true
-			}
-		}
-	}
-
-	// Check whether any assistant message has unresolved tool_use blocks.
-	hasOrphans := false
-	for _, msg := range msgs {
-		if msg.Role != provider.RoleAssistant {
-			continue
-		}
-		for _, b := range msg.Content {
-			if tu, ok := b.(provider.ToolUseBlock); ok && !resolved[tu.ID] {
-				hasOrphans = true
-				break
-			}
-		}
-		if hasOrphans {
-			break
-		}
-	}
-	if !hasOrphans {
-		return msgs
-	}
-
-	// Rebuild the message list, inserting synthetic error results after each
-	// assistant message that has orphaned tool_use blocks.
-	out := make([]provider.Message, 0, len(msgs)+1)
-	skip := make(map[int]bool) // next-user-message indices already merged
-	for i, msg := range msgs {
-		if skip[i] {
-			continue
-		}
-		out = append(out, msg)
-		if msg.Role != provider.RoleAssistant {
-			continue
-		}
-
-		var synth []provider.Block
-		for _, b := range msg.Content {
-			if tu, ok := b.(provider.ToolUseBlock); ok && !resolved[tu.ID] {
-				_, ran := started[tu.ID]
-				text := interruptedNotStartedText(tu.Name)
-				switch {
-				case ran:
-					text = interruptedMaybeRanText(tu.Name)
-					if tools != nil {
-						if t, ok := tools.Get(tu.Name); ok && tool.EffectiveReplay(t, tu.Input) == tool.ReplaySafe {
-							text = interruptedMaybeRanSafeText(tu.Name)
-						}
-					}
-				case !json.Valid(tu.Input):
-					// P74.14: a call that never reached dispatch and whose
-					// arguments never parsed at all was never going to run,
-					// interruption or not — see interruptedMalformedText.
-					text = interruptedMalformedText(tu.Name)
-				}
-				synth = append(synth, provider.ToolResultBlock{
-					ToolUseID: tu.ID,
-					Content:   text,
-					IsError:   true,
-				})
-			}
-		}
-		if len(synth) == 0 {
-			continue
-		}
-
-		nextIdx := i + 1
-		if nextIdx < len(msgs) && msgs[nextIdx].Role == provider.RoleUser {
-			// Merge synthetic results into the existing user message.
-			combined := make([]provider.Block, len(msgs[nextIdx].Content)+len(synth))
-			copy(combined, msgs[nextIdx].Content)
-			copy(combined[len(msgs[nextIdx].Content):], synth)
-			out = append(out, provider.Message{Role: provider.RoleUser, Content: combined})
-			skip[nextIdx] = true
-		} else {
-			out = append(out, provider.Message{Role: provider.RoleUser, Content: synth})
-		}
-	}
-	return out
-}
-
-// registeredToolNames lists every tool registered on reg (regardless of
-// exposure/deferred state — the model should be told every real name, not
-// just what's currently exposed), sorted and comma-joined for use in a
-// model-visible error message (P39.2): a small local model that invents a
-// tool name can self-correct from this list instead of spending a turn
-// guessing at a name that doesn't exist.
-func registeredToolNames(reg *tool.Registry) string {
-	if reg == nil {
-		return "(none)"
-	}
-	all := reg.All()
-	names := make([]string, 0, len(all))
-	for _, t := range all {
-		names = append(names, t.Name())
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
-}
-
-// toolCtx decorates ctx with everything a tool call needs to resolve the same
-// way regardless of *which* engine path invoked it: the registry actually
-// governing this run, the per-session workdir (P25.1) and the extra workspace
-// roots.
-//
-// It is a helper rather than three lines inside executeTool because
-// executeTool is not the only caller of a tool — collectWrittenFiles reads
-// files back for the output guard by calling read_file directly. Before P66.10
-// that second path used the bare run context, so read_file fell back to its
-// construction-time root (the daemon workspace) and, on any session with a
-// custom workdir, the guard silently validated nothing (ARCH-03). Any future
-// direct tool invocation must go through here too.
-func (e *Engine) toolCtx(ctx context.Context) context.Context {
-	ctx = tool.WithRegistry(ctx, e.tools)
-	if e.workdir != "" {
-		ctx = tool.WithWorkdir(ctx, e.workdir)
-	}
-	ctx = tool.WithExtraRoots(ctx, e.extraRoots)
-	return tool.WithContextWindow(ctx, e.effectiveContextWindow())
-}
-
-// executeTool looks up and runs a single tool, converting failures into
-// model-visible error results rather than aborting the whole run.
-func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (string, bool) {
-	if e.tools == nil {
-		return fmt.Sprintf("no tools available (requested %q)", tu.Name), true
-	}
-	ctx = e.toolCtx(ctx)
-	t, ok := e.tools.Get(tu.Name)
-	if !ok {
-		return fmt.Sprintf("unknown tool %q; registered tools: %s", tu.Name, registeredToolNames(e.tools)), true
-	}
-	if e.gate != nil {
-		if allowed, reason := e.gate.Check(ctx, t, tu.Input); !allowed {
-			e.logger.Info("tool call blocked by gate", "tool", tu.Name, "reason", reason)
-			return reason, true
-		}
-	}
-	if e.hooks != nil {
-		if err := e.hooks.PreToolUse(ctx, tu.Name, tu.Input); err != nil {
-			e.logger.Info("tool call blocked by hook", "tool", tu.Name, "err", err)
-			return fmt.Sprintf("blocked by hook: %v", err), true
-		}
-	}
-	// P65.1: mark the call started here rather than at the top of executeTool.
-	// The distinction the synthetic interrupted result has to make is "did this
-	// call's effects begin", and everything above this line — an unknown tool, a
-	// gate refusal, a hook veto — returns without the tool ever running, so
-	// marking at entry would over-warn on exactly the calls whose "did not run"
-	// is provably true. Those branches return a result of their own and so are
-	// only orphaned if the whole round is discarded by a cancel, which is the
-	// case this is trying to describe accurately.
-	e.markToolStarted(tu.ID)
-	if e.onToolStarted != nil {
-		e.onToolStarted(tu.ID, tu.Name, tu.Input)
-	}
-	res, err := t.Execute(ctx, tu.Input)
-	// P65.4: the durable record's only job is telling a future process whether
-	// this call's effect began — that question is answered the instant Execute
-	// returns, success or error alike, so this clears before any of the
-	// result-shaping below (which can itself fail without changing the answer).
-	if e.onToolFinished != nil {
-		e.onToolFinished(tu.ID)
-	}
-	content, isErr := res.Content, res.IsError
-	if err != nil {
-		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)
-		content, isErr = fmt.Sprintf("tool error: %v", err), true
-	}
-	// P74.9: a legitimately empty, non-error result is indistinguishable from a
-	// failure to a model, and a local model in particular tends to re-issue the
-	// call. Applies after the error path above so a real error keeps its own
-	// message rather than being read as "empty".
-	if !isErr {
-		content = builtin.NormalizeEmptyResult(tu.Name, content)
-	}
-	// P63.8: effective capability (P25.4c), not the static one — a tool that
-	// reclassifies into CapWrite for a specific call would otherwise have its
-	// written paths go unrecorded, costing that call its output-guard file
-	// validation and its quarantine-on-fail rollback. Same reasoning that moved
-	// ContextualGate (P32.2) and ScopeGate (P63.3) off the static capability,
-	// and it makes this branch agree with the redaction branch below, which
-	// reads the same tool and the same input.
-	if !isErr && tool.EffectiveCapability(t, tu.Input) == tool.CapWrite {
-		paths := writtenPathsFromInput(tu.Input)
-		if len(paths) == 0 {
-			// P32.6: writtenPathsFromInput only recognizes "path"/"file_path"/
-			// "edits[].path". A write-capability tool using a different input
-			// shape (an MCP tool, or a future builtin) silently gets no
-			// output-guard file validation and no quarantine-on-fail rollback —
-			// surface that gap instead of letting it degrade silently.
-			e.logger.Warn("write-capability tool call yielded no paths for output-guard coverage", "tool", tu.Name)
-		}
-		e.recordWrittenPaths(paths)
-	}
-	// P65.2: record what this call read, on the same effective-capability rule
-	// (P25.4c) the write branch above uses — so a `cat` routed through shell is
-	// recorded the way a read_file call would be. Errors are excluded: a failed
-	// read tells the model nothing about the file and would put a path the
-	// session never saw into the carried set.
-	if !isErr && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
-		e.recordReadPaths(writtenPathsFromInput(tu.Input))
-	}
-	if !isErr && e.redactSecrets && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
-		// P24.12 / FIND-09: opt-in scrub of tool-read file content for secret
-		// patterns before it's appended to the conversation sent to whichever
-		// provider is configured (a cloud API by default has no visibility
-		// restriction on what a file read surfaces). Strictly best-effort and
-		// never blocking — a scan failure or gitleaks being absent leaves
-		// content untouched, since the tool result must still reach the model
-		// either way. Effective capability (P25.4c) so a `cat` of a
-		// secrets-bearing file gets the same scrub a read_file call would.
-		if redacted, findings, scanErr := redactSecretsFn(ctx, content); scanErr == nil && len(findings) > 0 {
-			content = redacted
-			e.logger.Info("redacted secret pattern(s) from tool output", "tool", tu.Name, "count", len(findings))
-		}
-	}
-	if e.hooks != nil {
-		e.hooks.PostToolUse(ctx, tu.Name, tu.Input, content, isErr)
-	}
-	return content, isErr
-}
-
-// writtenPathsFromInput extracts workspace-relative file paths from a
-// write-capability tool call's input, recognizing the "path"/"file_path"
-// fields used by write_file/edit_file/diagram, and the "edits[].path" shape
-// used by multi_edit. Unrecognized shapes (e.g. an MCP or custom write tool
-// with different field names) yield no paths — the guard simply won't see
-// that tool's output, matching the existing subjectFor limitation in
-// internal/permission/rules.go rather than guessing.
-func writtenPathsFromInput(input json.RawMessage) []string {
-	var args struct {
-		Path     string `json:"path"`
-		FilePath string `json:"file_path"`
-		Edits    []struct {
-			Path string `json:"path"`
-		} `json:"edits"`
-	}
-	if json.Unmarshal(input, &args) != nil {
-		return nil
-	}
-	var paths []string
-	if args.Path != "" {
-		paths = append(paths, args.Path)
-	}
-	if args.FilePath != "" {
-		paths = append(paths, args.FilePath)
-	}
-	for _, e := range args.Edits {
-		if e.Path != "" {
-			paths = append(paths, e.Path)
-		}
-	}
-	return paths
-}
-
-// recordWrittenPaths adds paths to the current run's written-files set.
-func (e *Engine) recordWrittenPaths(paths []string) {
-	if len(paths) == 0 {
-		return
-	}
-	e.writtenFilesMu.Lock()
-	defer e.writtenFilesMu.Unlock()
-	if e.writtenFiles == nil {
-		// Run resets this per run; the lazy init keeps a tool call outside a
-		// Run (or before its reset) from panicking on a nil map write.
-		e.writtenFiles = make(map[string]struct{})
-	}
-	for _, p := range paths {
-		e.writtenFiles[p] = struct{}{}
-	}
-}
-
-// recordReadPaths adds paths to the current run's read-files list (P65.2),
-// preserving first-seen order and dropping duplicates.
-func (e *Engine) recordReadPaths(paths []string) {
-	if len(paths) == 0 {
-		return
-	}
-	e.readFilesMu.Lock()
-	defer e.readFilesMu.Unlock()
-	if e.readFileSet == nil {
-		e.readFileSet = make(map[string]struct{})
-	}
-	for _, p := range paths {
-		if _, dup := e.readFileSet[p]; dup {
-			continue
-		}
-		e.readFileSet[p] = struct{}{}
-		e.readFiles = append(e.readFiles, p)
-	}
-}
-
-// touchedFiles reports what this run has read and modified, for a
-// FileContextCompactor to carry across a compaction (P65.2).
-//
-// The written half is sorted while the read half keeps insertion order, and the
-// asymmetry is not an oversight: writtenFiles is a set owned by the output guard
-// and has no recency information to preserve, so a stable order is the best
-// available; readFiles was built for this caller and does have one, which is
-// what the carried list's cap depends on.
-func (e *Engine) touchedFiles() (read, modified []string) {
-	e.readFilesMu.Lock()
-	read = append(read, e.readFiles...)
-	e.readFilesMu.Unlock()
-
-	e.writtenFilesMu.Lock()
-	for p := range e.writtenFiles {
-		modified = append(modified, p)
-	}
-	e.writtenFilesMu.Unlock()
-	sort.Strings(modified)
-	return read, modified
-}
-
-// markToolStarted records that a tool call reached its Execute (P65.1). Called
-// from both the sequential and the concurrent tool paths, hence the mutex.
-func (e *Engine) markToolStarted(id string) {
-	if id == "" {
-		return
-	}
-	e.startedToolsMu.Lock()
-	defer e.startedToolsMu.Unlock()
-	if e.startedTools == nil {
-		// Run resets this per run; the lazy init keeps a tool call outside a
-		// Run (or before its reset) from panicking on a nil map write, matching
-		// recordWrittenPaths above.
-		e.startedTools = make(map[string]struct{})
-	}
-	e.startedTools[id] = struct{}{}
-}
-
-// startedToolSet snapshots the started-call IDs for repairOrphanedToolUses. A
-// copy rather than the live map: the repair is a pure function of the message
-// list and this set, and handing it the map under no lock would race a tool
-// round still finishing from an earlier cancelled Run.
-func (e *Engine) startedToolSet() map[string]struct{} {
-	e.startedToolsMu.Lock()
-	defer e.startedToolsMu.Unlock()
-	out := make(map[string]struct{}, len(e.startedTools))
-	for id := range e.startedTools {
-		out[id] = struct{}{}
-	}
-	return out
-}
-
-// maxGuardFiles caps how many written files are read back for guard
-// validation, so a task that touches dozens of files doesn't balloon the
-// validator prompt or issue that many extra reads.
-const maxGuardFiles = 5
-
-// collectWrittenFiles reads back the current content of every file written
-// or edited so far this run via the registered read_file tool (so path
-// resolution/sandboxing matches whatever wrote it), for the output guard to
-// validate against the actual deliverable rather than only the assistant's
-// chat summary. Best-effort: a tool registry without read_file, or a read
-// failure for a given path, silently yields no content for that path rather
-// than failing the run — the guard still gets the chat text either way.
-func (e *Engine) collectWrittenFiles(ctx context.Context) []guard.FileContent {
-	e.writtenFilesMu.Lock()
-	paths := make([]string, 0, len(e.writtenFiles))
-	for p := range e.writtenFiles {
-		paths = append(paths, p)
-	}
-	e.writtenFilesMu.Unlock()
-	if len(paths) == 0 || e.tools == nil {
-		return nil
-	}
-	reader, ok := e.tools.Get("read_file")
-	if !ok {
-		return nil
-	}
-	// Same decoration executeTool applies: without it read_file resolves
-	// against its construction-time root, not this session's workdir (ARCH-03).
-	ctx = e.toolCtx(ctx)
-	sort.Strings(paths) // deterministic order for reproducible prompts/tests
-	if len(paths) > maxGuardFiles {
-		paths = paths[:maxGuardFiles]
-	}
-	var out []guard.FileContent
-	for _, p := range paths {
-		input, err := json.Marshal(map[string]string{"path": p})
-		if err != nil {
-			continue
-		}
-		res, err := reader.Execute(ctx, input)
-		if err != nil || res.IsError {
-			continue
-		}
-		out = append(out, guard.FileContent{Path: p, Content: res.Content})
-	}
-	return out
 }
 
 // assistantText concatenates the text blocks of an assistant message.

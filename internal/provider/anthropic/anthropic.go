@@ -153,6 +153,65 @@ func New(apiKey string, opts ...Option) *Adapter {
 // Name implements provider.Adapter.
 func (a *Adapter) Name() string { return "anthropic" }
 
+// Compile-time proof that the adapter satisfies the optional capability the
+// drive's recovery is gated on (P50.1/P61.6, mirrored here by P78.7). Without
+// it, wait-and-resume is inert on this adapter: a transient outage (rate
+// limit, 529 overloaded, a transient 5xx) is correctly classified
+// (provider.IsBackendUnavailableError) but drive.recoverBackendDown still
+// returns backendNotDown because nothing can answer "is it back yet?", so the
+// drive hard-aborts instead of waiting and resuming from disk — the same
+// failure openai.go's Healthy() fixed for the OpenAI-compat path, applying to
+// a cloud backend's transient failure modes instead of a locally-restartable
+// server's.
+var _ provider.HealthChecker = (*Adapter)(nil)
+
+// Healthy implements provider.HealthChecker: a cheap GET <base>/v1/models
+// against the Anthropic API, used by the phased drive (P50.1) to wait for a
+// transient outage to clear before resuming a phase from disk.
+//
+// /v1/models is side-effect-free (it lists what is available, starts no
+// generation) and, like openai.go's /models probe, requires no request body —
+// unlike Stream, which needs a real prompt to send. It still needs the
+// x-api-key/anthropic-version headers Stream sends, since an unauthenticated
+// request to a real endpoint answers a different question than the one being
+// asked here.
+//
+// What counts as healthy mirrors openai.go's reasoning exactly: this is a
+// liveness question, not a usability one — recoverBackendDown already knows
+// the request failed, all it needs is whether there is a server on the other
+// end again. A 401 (bad/missing key) or 404 still proves an HTTP server
+// answered, which is the honest signal for "reachable"; treating those as
+// unhealthy would make the drive wait out its full recovery budget against a
+// server that was up the whole time. The carve-out is the gateway 5xx trio
+// (502/504 bad gateway/timeout, 503 unavailable — the last also being
+// Anthropic's own "overloaded" status), where the responder is explicitly
+// saying the service is not there.
+//
+// It runs on the adapter's own transport (so proxy/TLS configuration
+// applies) under a short timeout of its own (provider.HealthClient), so a
+// probe can't block on the long prefill budget the streaming client allows.
+func (a *Adapter) Healthy(ctx context.Context) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+"/v1/models", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("x-api-key", a.apiKey)
+	req.Header.Set("anthropic-version", apiVersion)
+	for k, v := range a.headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := provider.HealthClient(a.client).Do(req)
+	if err != nil {
+		return false
+	}
+	provider.DrainAndClose(resp)
+	switch resp.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return false
+	}
+	return true
+}
+
 // --- wire types ---
 
 type wireRequest struct {
