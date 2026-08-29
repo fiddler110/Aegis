@@ -147,19 +147,23 @@ func newDebateCmd() *cobra.Command {
 				if win := seatWindows[model]; win > 0 {
 					seatAdapter = provider.WithNumCtx(adapter, win)
 				}
-				eng, err := engine.New(engine.Options{
-					Adapter:         seatAdapter,
-					Tools:           reg,
-					Gate:            gate,
-					Hooks:           engineHooks,
-					Cost:            tracker,
-					Purpose:         provider.PurposeDebate, // P67.3
-					RoundResultCap:  roundCapFor(cwd),       // P67.1
-					BudgetUSD:       cfg.Cost.BudgetUSD,
-					MaxTokensPerRun: cfg.Cost.MaxTokensPerRun,
-					Model:           model,
-					MaxTokens:       cfg.Provider.MaxTokens,
-				})
+				opts := engine.Options{
+					Adapter:        seatAdapter,
+					Tools:          reg,
+					Gate:           gate,
+					Hooks:          engineHooks,
+					Cost:           tracker,
+					Purpose:        provider.PurposeDebate, // P67.3
+					RoundResultCap: roundCapFor(cwd),       // P67.1
+					Model:          model,
+				}
+				// P66.13/ARCH-06: one shared reading of config, so a seat gets
+				// the operator's bounds and the same backend parameters the
+				// session path uses. Inherited whole — a seat is a bounded
+				// sub-run, and elapsed time is not divisible across seats.
+				enginecfg.CostLimits(cfg).Apply(&opts)
+				enginecfg.ModelBackend(cfg).Apply(&opts)
+				eng, err := engine.New(opts)
 				if err != nil {
 					return "", err
 				}

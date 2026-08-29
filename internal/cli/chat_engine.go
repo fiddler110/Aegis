@@ -13,7 +13,6 @@ import (
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
-	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/sysprompt"
@@ -91,23 +90,14 @@ func buildChatEngine(o chatEngineOptions) (*engine.Engine, error) {
 		Compactor: o.compact,
 		// P67.1: the per-call caps in truncate.go bound one result; this
 		// bounds what a parallel round contributes in aggregate.
-		RoundResultCap: roundCapFor(o.cwd),
-		// P66.14/LLM-03: admits this backend's reported prompt counts as
-		// calibration samples. The compat adapter on an :11434 base_url
-		// is the documented Ollama configuration and had never been
-		// admitted.
-		SharedContextWindow: providerfactory.CertainlyOllama(cfg.Provider),
+		RoundResultCap:      roundCapFor(o.cwd),
 		Cost:                o.tracker,
-		Temperature:         cfg.Provider.Temperature,
-		Seed:                cfg.Provider.Seed,
 		Model:               cfg.Provider.Model,
-		MaxTokens:           cfg.Provider.MaxTokens,
 		ContextWindowTokens: o.ctxWin,
 		// P59.7: the phased drive is the one caller that actually
 		// escalates the serving window mid-run, so it is the caller
 		// whose engine most needs to see the escalation.
 		ContextWindowFloor: func() int { return provider.RaisedContextWindow(o.adapter) },
-		ToolCallShim:       cfg.Provider.ToolCallShimEnabled(),
 		Logger:             o.logger,
 		// The CLI drive runs in cwd, so its registry is already rooted
 		// there; additional roots are the only thing it can't derive
@@ -121,6 +111,9 @@ func buildChatEngine(o chatEngineOptions) (*engine.Engine, error) {
 	// context-denominated cap is the wrong instrument for it. Saying that as
 	// one named call is the difference between a decision and an omission.
 	enginecfg.CostLimits(cfg).WithoutContextTokenCap().Apply(&opts)
+	// The sampling knobs, the tool-call shim and the P66.14/LLM-03 calibration
+	// admission travel together for the same reason the bounds above do.
+	enginecfg.ModelBackend(cfg).Apply(&opts)
 	if cfg.OutputGuard.Enabled {
 		// Unlike the daemon there is no per-turn model resolution here, so the
 		// verdict runs on the adapter as configured rather than one re-wrapped

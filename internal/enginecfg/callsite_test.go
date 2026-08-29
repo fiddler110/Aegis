@@ -39,11 +39,20 @@ func TestEveryEngineCallSiteDecidesItsGate(t *testing.T) {
 		src := string(data)
 		for _, idx := range callIndexes(src, "engine.New(") {
 			sites++
-			call := balancedCall(src[idx:])
+			// The whole enclosing function, not just the call's own argument
+			// list. A site may assemble engine.Options in a local and pass it
+			// by name — several do, so that enginecfg's Apply helpers have
+			// something to write into — and the gate decision is then made a
+			// few lines above the call rather than inside it. Reading the
+			// function is the same question asked of strictly more source; see
+			// enclosingFunc for why over-reading is the safe direction.
+			// Comments are stripped: a site that documents having *removed* a
+			// bare permission.New must not be read as still having one.
+			region := stripLineComments(enclosingFunc(src, idx) + balancedCall(src[idx:]))
 			// The shared constructor, or a gate value that reached this call
-			// from one. A literal permission.New in the call is deliberately
-			// *not* accepted: that is the bypass itself.
-			if strings.Contains(call, "Gate:") && !strings.Contains(call, "permission.New(") {
+			// from one. A literal permission.New is deliberately *not*
+			// accepted: that is the bypass itself.
+			if strings.Contains(region, "Gate:") && !strings.Contains(region, "permission.New(") {
 				continue
 			}
 			if strings.Contains(precedingComment(src[:idx]), "Gate") {

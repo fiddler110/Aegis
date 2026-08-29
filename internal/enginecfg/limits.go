@@ -87,3 +87,34 @@ func (l Limits) Apply(o *engine.Options) {
 	o.RedactSecrets = l.RedactSecrets
 	o.ColdCacheAfter = l.ColdCacheAfter
 }
+
+// WithBudgetOverride returns a copy whose spend and context-token bounds are
+// replaced wholesale by a caller-computed per-agent allowance.
+//
+// Both values are taken as given, including zero: a swarm share is computed
+// from what the parent has already spent, and "this teammate gets no dollar
+// allowance because the provider is unpriced" is a real answer that must not
+// silently fall back to the operator's whole-run figure. Callers that mean
+// "use mine only if I have one" want WithRemainingAllowance below.
+func (l Limits) WithBudgetOverride(usd float64, tokens int) Limits {
+	l.BudgetUSD = usd
+	l.MaxTokensPerRun = tokens
+	return l
+}
+
+// WithRemainingAllowance returns a copy in which each bound is replaced only
+// when the caller actually has a figure for it (> 0), leaving the configured
+// value in place otherwise.
+//
+// This is the subprocess worker's shape: a WorkerSpec carries whatever the
+// parent had left at spawn time, and an absent (zero) field means "the parent
+// did not compute one", not "unbounded".
+func (l Limits) WithRemainingAllowance(usd float64, tokens int) Limits {
+	if usd > 0 {
+		l.BudgetUSD = usd
+	}
+	if tokens > 0 {
+		l.MaxTokensPerRun = tokens
+	}
+	return l
+}

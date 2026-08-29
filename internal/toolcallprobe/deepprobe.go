@@ -171,6 +171,22 @@ func RunDeepFill(ctx context.Context, adapter provider.Adapter, model string) (D
 	// is no filesystem, network or process effect for a permission layer to
 	// mediate, and a gate here would only be able to refuse the probe its own
 	// instrument (P66.13).
+	//
+	// Limits: none either, and for a related reason. The probe's whole job is to
+	// answer "can this model emit a tool call at all", and it is bounded by its
+	// own instrument — deepFillMaxTurns turns of deepFillMaxTokens each, against
+	// two tools that do nothing. An operator's max_iterations or wall-clock
+	// budget applied here would not make it safer; it would make a *diagnostic*
+	// inconclusive on exactly the misconfigured setup someone is running the
+	// diagnostic to understand. cost.max_turn_stall is the one arguable
+	// omission, and the probe is instead bounded by the caller's context.
+	//
+	// Backend: none. The probe is asking whether this model speaks the native
+	// tool protocol, so engaging the tool-call shim would answer a different
+	// question — it would report success for a model that cannot, which is the
+	// exact verdict the modelcaps cache then persists. Sampling is likewise
+	// fixed rather than inherited: a probe run at the operator's temperature is
+	// not a repeatable measurement.
 	eng, err := engine.New(engine.Options{
 		Adapter:   adapter,
 		Tools:     reg,

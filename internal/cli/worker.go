@@ -199,16 +199,8 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		Logger:   logger,
 	})
 
-	budgetUSD := cfg.Cost.BudgetUSD
-	if spec.RemainingBudgetUSD > 0 {
-		budgetUSD = spec.RemainingBudgetUSD
-	}
-	maxTokensPerRun := cfg.Cost.MaxTokensPerRun
-	if spec.RemainingTokens > 0 {
-		maxTokensPerRun = spec.RemainingTokens
-	}
 	tracker := cost.NewTracker()
-	eng, err := engine.New(engine.Options{
+	opts := engine.Options{
 		Adapter:        adapter,
 		Tools:          reg,
 		Gate:           gate,
@@ -216,30 +208,24 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		Cost:           tracker,
 		Purpose:        provider.PurposeSubAgent, // P67.3
 		RoundResultCap: roundCapFor(cwd),         // P67.1
-		// A subprocess teammate talks to the same model server as its parent, so
-		// it inherits the same backend identification (P66.14/LLM-03).
-		SharedContextWindow: providerfactory.CertainlyOllama(cfg.Provider),
-		Temperature:         cfg.Provider.Temperature,
-		Seed:                cfg.Provider.Seed,
-		BudgetUSD:           budgetUSD,
-		MaxTokensPerRun:     maxTokensPerRun,
-		// P59.4: inherited whole, for the same reason the in-process backend
-		// does (server.go) — the WorkerSpec's remaining-allowance computation
-		// carries two dimensions, and widening it is a separate change.
-		MaxGeneratedTokensPerRun: cfg.Cost.MaxGeneratedTokensPerRun,
-		// Subprocess teammates inherit the bound whole, for the same reason the
-		// in-process backend does (server.go): elapsed time isn't divisible
-		// across siblings the way spend is.
-		MaxWallClockPerRun: cfg.Cost.MaxWallClockPerRun(),
-		MaxTurnStall:       cfg.Cost.MaxTurnStall(),
-		Model:              model,
-		MaxTokens:          cfg.Provider.MaxTokens,
-		// A subprocess teammate talks to the same model server as its parent, so
-		// it needs the same tool-calling fallback (P53.6) — a shim that applied
-		// only to the parent would leave every spawned agent unable to act.
-		ToolCallShim: cfg.Provider.ToolCallShimEnabled(),
-		ExtraRoots:   driveExtraRoots(cwd, cfg, logger),
-	})
+		Model:          model,
+		ExtraRoots:     driveExtraRoots(cwd, cfg, logger),
+	}
+	// P66.13/ARCH-06: one shared reading of the run bounds. The WorkerSpec's
+	// remaining-allowance computation carries exactly two dimensions, so those
+	// two are replaced when the parent computed them and every other bound —
+	// generated tokens, wall clock, stall, iterations, loop threshold, secret
+	// redaction, cold cache — is inherited whole. Elapsed time in particular
+	// isn't divisible across siblings the way spend is.
+	enginecfg.CostLimits(cfg).
+		WithRemainingAllowance(spec.RemainingBudgetUSD, spec.RemainingTokens).
+		Apply(&opts)
+	// A subprocess teammate talks to the same model server as its parent, so it
+	// inherits the sampling parameters, the tool-calling fallback (P53.6 — a
+	// shim that applied only to the parent would leave every spawned agent
+	// unable to act) and the backend identification (P66.14/LLM-03).
+	enginecfg.ModelBackend(cfg).Apply(&opts)
+	eng, err := engine.New(opts)
 	if err != nil {
 		return "", cost.Snapshot{}, err
 	}

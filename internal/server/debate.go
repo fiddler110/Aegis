@@ -10,6 +10,7 @@ import (
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/debate"
 	"github.com/fiddler110/aegis/internal/engine"
+	"github.com/fiddler110/aegis/internal/enginecfg"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 )
@@ -152,23 +153,36 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.
 		// P65.4: no InitialStartedTools/OnToolStarted/OnToolFinished here — a
 		// debate role is a bounded sub-run of an already-durable parent turn,
 		// not itself a resumable session with a session ID to key a register on.
-		eng, err := engine.New(engine.Options{
-			Adapter:         s.modelAdapter(ctxWin),
-			Tools:           tools,
-			Gate:            gate,
-			Compactor:       s.compactor,
-			Hooks:           engineHooks,
-			Cost:            tracker,
-			Purpose:         provider.PurposeDebate, // P67.3
-			BudgetUSD:       s.cfg.Cost.BudgetUSD,
-			MaxTokensPerRun: s.cfg.Cost.MaxTokensPerRun,
-			Model:           model,
-			MaxTokens:       s.cfg.Provider.MaxTokens,
-			Logger:          s.logger,
-			Workdir:         workdir,
-			RoundResultCap:  roundCapFor(workdir), // P67.1
-			ExtraRoots:      s.workspaceRootsFor(workdir),
-		})
+		opts := engine.Options{
+			Adapter:   s.modelAdapter(ctxWin),
+			Tools:     tools,
+			Gate:      gate,
+			Compactor: s.compactor,
+			Hooks:     engineHooks,
+			Cost:      tracker,
+			Purpose:   provider.PurposeDebate, // P67.3
+			Model:     model,
+			// A role had a Compactor but no window to measure against, so the
+			// engine's per-turn 85%-fill check never ran for a debate seat
+			// however long it grew — only Run's entry-point Compact did, gated
+			// by the summarizer's own budget, which is tuned to the compaction
+			// model rather than to the model this seat runs on. Identical
+			// defect and identical fix to the one subAgentRunner carries; the
+			// window is resolved per seat just above (P69.1), so feed it in.
+			ContextWindowTokens: ctxWin,
+			Logger:              s.logger,
+			Workdir:             workdir,
+			RoundResultCap:      roundCapFor(workdir), // P67.1
+			ExtraRoots:          s.workspaceRootsFor(workdir),
+		}
+		// P66.13/ARCH-06: one shared reading of config, so a bound or a backend
+		// parameter added later reaches a debate seat too. Inherited whole
+		// rather than divided: a seat is a bounded sub-run of an already-bounded
+		// parent turn, and elapsed time in particular is not divisible across
+		// seats that may run concurrently.
+		enginecfg.CostLimits(s.cfg).Apply(&opts)
+		enginecfg.ModelBackend(s.cfg).Apply(&opts)
+		eng, err := engine.New(opts)
 		if err != nil {
 			return "", err
 		}
