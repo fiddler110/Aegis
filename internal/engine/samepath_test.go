@@ -242,3 +242,99 @@ func TestToolTargetPath(t *testing.T) {
 		})
 	}
 }
+
+// TestDependencyWaitHoldsNoConcurrencySlot is the regression for the round
+// deadlock the same-path graph could produce on its own.
+//
+// A call blocked on an earlier same-path write must hold no semaphore slot
+// while it waits. When it did, the waiters competed with the very call they
+// were waiting for: a round of one write to path P followed by more than
+// maxParallelTools reads of P had every reader take a slot and park on the
+// write's done channel while the write was still queued for a slot none of
+// them would release. Nothing broke that cycle — roundCtx is cancelled only by
+// a sibling *failure*, and no sibling was running to fail — so the round hung
+// until the P39.17 stall watch fired and the run died as ErrTurnStalled, which
+// is fatal to a phased drive.
+//
+// The property is measured rather than the deadlock reproduced, because
+// reproducing it depends on the write losing a scheduling race it usually
+// wins — a test that passes nine times in ten proves nothing. Instead: block a
+// write to P, queue more than maxParallelTools reads of P behind it, and add
+// one independent read of Q *last*. Q shares nothing with P, so it is gated
+// only by slot availability. If the parked P-readers hold slots, Q — the last
+// call spawned, so the last to compete — cannot start; if they hold nothing,
+// it starts immediately.
+func TestDependencyWaitHoldsNoConcurrencySlot(t *testing.T) {
+	writeStarted := make(chan struct{})
+	release := make(chan struct{})
+	independentStarted := make(chan struct{})
+
+	writeBlocker := blockingTool{
+		name: "write_file", cap: tool.CapWrite,
+		onStart: func() { close(writeStarted) }, block: release,
+	}
+	// The dependent readers block too, so a slot one of them acquires after the
+	// write completes cannot be recycled to Q before the assertion below.
+	dependentRead := blockingTool{name: "read_file", cap: tool.CapRead, block: release}
+	independentRead := blockingTool{
+		name: "read_other", cap: tool.CapRead,
+		onStart: func() { close(independentStarted) },
+	}
+
+	events := []provider.Event{
+		{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_w", Name: "write_file", Input: json.RawMessage(`{"path":"p.txt"}`)}},
+	}
+	// Comfortably more readers than there are slots, so the pre-fix behaviour
+	// exhausts the semaphore rather than merely filling it.
+	for i := 0; i < maxParallelTools*2; i++ {
+		events = append(events, provider.Event{
+			Type:    provider.EventToolUse,
+			ToolUse: &provider.ToolUseBlock{ID: "tu_r" + itoa(i), Name: "read_file", Input: json.RawMessage(`{"path":"p.txt"}`)},
+		})
+	}
+	// Added last: it competes for a slot after every dependent reader has.
+	events = append(events,
+		provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_q", Name: "read_other", Input: json.RawMessage(`{"path":"q.txt"}`)}},
+		provider.Event{Type: provider.EventDone, Stop: provider.StopToolUse},
+	)
+
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		events,
+		{{Type: provider.EventTextDelta, Text: "ok"}, {Type: provider.EventDone, Stop: provider.StopEndTurn}},
+	}}
+
+	reg := tool.NewRegistry()
+	for _, tl := range []tool.Tool{writeBlocker, dependentRead, independentRead} {
+		if err := reg.Register(tl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eng, _ := New(Options{Adapter: adapter, Tools: reg, Model: "test"})
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- eng.Run(context.Background(), conv, nil) }()
+
+	select {
+	case <-writeStarted:
+	case <-time.After(5 * time.Second):
+		close(release)
+		<-runDone
+		t.Fatal("the write never started: it lost the semaphore to the readers waiting on it — the round is deadlocked")
+	}
+	select {
+	case <-independentStarted:
+	case <-time.After(5 * time.Second):
+		close(release)
+		<-runDone
+		t.Fatalf("an independent read could not start while %d calls sat waiting on a same-path write: "+
+			"a call blocked on its dependency is holding a concurrency slot", maxParallelTools*2)
+	}
+	close(release)
+
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}

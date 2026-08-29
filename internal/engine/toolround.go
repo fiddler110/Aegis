@@ -244,29 +244,26 @@ func (r *toolRound) run(s *toolSlot) {
 		r.abandon(s)
 		return
 	}
-	// The concurrency bound, held for the whole of this call. Acquired here
-	// rather than at add() so a saturated round never blocks the stream that is
-	// still feeding it.
-	select {
-	case r.sem <- struct{}{}:
-		defer func() { <-r.sem }()
-	case <-r.roundCtx.Done():
-		r.abandon(s)
-		return
-	}
-
 	// Wait for earlier same-path writes in this round to finish before touching
-	// the path. Deadlock-free: writes never wait on reads, and every awaited call
-	// was added earlier — so its goroutine is already running and will close its
-	// done channel on every exit path, including abandonment. Give up if the run
-	// is interrupted or the round was cancelled by a sibling's failure (P67.4).
+	// the path. Every awaited call was added earlier — waitFor only points
+	// backwards — so its goroutine is already running and will close its done
+	// channel on every exit path, including abandonment. Give up if the run is
+	// interrupted or the round was cancelled by a sibling's failure (P67.4).
 	//
-	// Under incremental dispatch the awaited write may not even have been added
-	// yet when this read starts — it has, since waitFor only points backwards,
-	// but it may not have *run* yet, and it may be queued behind the semaphore.
-	// That is the correct behaviour and the reason the semaphore is acquired
-	// above rather than below: a read holding a slot while waiting on a write
-	// that cannot get one would deadlock the round.
+	// This wait comes *before* the semaphore, and the order is the whole reason
+	// the round cannot deadlock. Holding a slot while blocked on a dependency
+	// makes the waiters compete with the call they are waiting for: a round of
+	// one write to path P followed by maxParallelTools reads of P can have every
+	// reader take a slot and park on prev.done while the write is still queued
+	// for a slot none of them will release. Nothing then breaks the cycle —
+	// roundCtx is cancelled only by a sibling *failure*, and no sibling is
+	// running to fail — so the round hangs until the P39.17 stall watch fires at
+	// its bound and the run dies as ErrTurnStalled, which is fatal to a phased
+	// drive. Waiting first means a blocked call holds nothing, so the write it
+	// waits on can always make progress.
+	//
+	// The dependency graph itself stays acyclic for the reason it always did:
+	// writes never wait on reads, and edges only point backwards.
 	for _, prev := range s.waitFor {
 		select {
 		case <-prev.done:
@@ -274,6 +271,17 @@ func (r *toolRound) run(s *toolSlot) {
 			r.abandon(s)
 			return
 		}
+	}
+
+	// The concurrency bound, held for the whole of the actual call. Acquired
+	// here rather than at add() so a saturated round never blocks the stream
+	// that is still feeding it.
+	select {
+	case r.sem <- struct{}{}:
+		defer func() { <-r.sem }()
+	case <-r.roundCtx.Done():
+		r.abandon(s)
+		return
 	}
 	if r.roundCtx.Err() != nil {
 		r.abandon(s)
