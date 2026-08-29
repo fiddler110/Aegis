@@ -3,6 +3,7 @@ package server
 import (
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/config"
@@ -35,7 +36,9 @@ func TestSelectSandboxFallsBackToLocal(t *testing.T) {
 	}
 
 	if _, oerr := sandbox.NewOSBackend(dir, cfg.Network, cfg.StripEnv, cfg.OSExtraReadPaths); oerr == nil {
-		if sb == nil || sb.Name() != "os" {
+		// OSBackend.Name() is "os:" + mechanism ("os:seatbelt", "os:bubblewrap"),
+		// never a bare "os", so this must match on the prefix.
+		if sb == nil || !strings.HasPrefix(sb.Name(), "os:") {
 			t.Errorf("expected cascade to the os backend on a host with OS sandboxing available, got %v", sb)
 		}
 	} else {

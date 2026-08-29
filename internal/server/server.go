@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -479,19 +478,12 @@ func (s *Server) workdirAllowed(workdir string) bool {
 
 // withinRoot reports whether target equals root or is nested under it. Both
 // arguments must already be absolute, cleaned paths.
+//
+// CLN-1: the body is sandbox.WithinRoot — same lexical comparison, same
+// Windows case-folding, same "root itself counts as inside". This stays as a
+// named local so the two call sites below read the way they did.
 func withinRoot(root, target string) bool {
-	root, target = filepath.Clean(root), filepath.Clean(target)
-	if runtime.GOOS == "windows" {
-		root, target = strings.ToLower(root), strings.ToLower(target)
-	}
-	if root == target {
-		return true
-	}
-	rel, err := filepath.Rel(root, target)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return sandbox.WithinRoot(root, target)
 }
 
 // approvalDecision carries the client's answer to an interactive approval prompt.

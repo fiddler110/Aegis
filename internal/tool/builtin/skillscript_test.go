@@ -16,12 +16,27 @@ import (
 // bundledScripts are the five scripts P39.18 wraps as typed tools.
 var bundledScripts = []string{"recon.py", "scaffold.py", "inventory.py", "verify.py", "normalize_ids.py"}
 
+// tempRoot is t.TempDir() with symlinks resolved. The tools under test report
+// paths that have been through ValidatePathIn, whose deliberate contract is to
+// return the symlink-resolved path; on macOS t.TempDir() hands back a /var/...
+// name that is really a symlink to /private/var/..., so an unresolved
+// expectation fails on the resolution alone and says nothing about the tool.
+// Mirrors the helper of the same name in internal/sandbox.
+func tempRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return root
+}
+
 // scriptSkillDir builds a workspace with a materialized skill directory holding
 // stub scripts, so the tools construct without needing python or the real
 // bundle.
 func scriptSkillDir(t *testing.T, scripts ...string) (root, skillDir string) {
 	t.Helper()
-	root = t.TempDir()
+	root = tempRoot(t)
 	rel := filepath.Join(".aegis", "builtin-skills", "threat-modeling")
 	dir := filepath.Join(root, rel)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

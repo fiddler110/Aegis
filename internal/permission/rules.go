@@ -134,6 +134,40 @@ func (r Rule) matches(t tool.Tool, subject string) bool {
 	return r.re.MatchString(subject)
 }
 
+// matchesAny reports whether the rule matches at least one of a call's
+// subjects. This is the deny direction: a multi-file write is denied when any
+// single path it touches is denied, because the call is all-or-nothing and
+// letting it through would write the denied path along with the rest.
+func (r Rule) matchesAny(t tool.Tool, subjects []string) bool {
+	for _, s := range subjects {
+		if r.matches(t, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesAll reports whether the rule matches every one of a call's subjects.
+// This is the allow direction, and the asymmetry with matchesAny is deliberate
+// — the same asymmetry matchesBulkScope already documents. A scoped
+// "allow write(docs/**)" is clearance for the paths it names, so a call that
+// touches docs/a.md *and* src/main.go must not be auto-approved wholesale on
+// the strength of the first one. Falling through to the base gate (which
+// prompts) is the right outcome there, not a silent grant.
+//
+// An empty subject set never satisfies an allow rule.
+func (r Rule) matchesAll(t tool.Tool, subjects []string) bool {
+	if len(subjects) == 0 {
+		return false
+	}
+	for _, s := range subjects {
+		if !r.matches(t, s) {
+			return false
+		}
+	}
+	return true
+}
+
 // bulkScopeToolNames are Read-capability tools whose path-like input argument
 // (if any) is a search *root*, not the object actually read — any descendant
 // of that root may end up in the tool's output (P74.1). grep and glob take no
@@ -347,9 +381,62 @@ func subjectFieldsFor(cap tool.Capability) []string {
 	return nil
 }
 
+// subjectsFor returns every subject a rule must be tested against for one call.
+//
+// It exists because a rule matches one string while a call may name several
+// files. multi_edit is the case that forced it: its schema carries *only*
+// edits[].path — no top-level path or file_path — so subjectFor returned "" for
+// it and a path-scoped rule could never match. `deny write(secrets/**)` blocked
+// write_file on secrets/key.pem and allowed multi_edit on the identical path,
+// with no diagnostic anywhere: WarnUnmatchableRules stays quiet because the
+// rule does match the other write tools.
+//
+// For every tool with a single path field — which is all of them but multi_edit
+// — this returns exactly one subject and the matching below is bit-for-bit what
+// it always was.
+func subjectsFor(t tool.Tool, input json.RawMessage) []string {
+	primary := subjectFor(t, input)
+	extra := editPathsFromInput(input)
+	if len(extra) == 0 {
+		return []string{primary}
+	}
+	if primary == "" {
+		return extra
+	}
+	return append([]string{primary}, extra...)
+}
+
+// editPathsFromInput extracts the edits[].path values from a multi-file edit
+// call, or nil for the input shapes that don't carry them. It is the one
+// spelling of that extraction in this package — scopeWritePaths (scope.go) uses
+// it too, so the scope gate and the rule gate cannot come to disagree about
+// which files a multi_edit call touches, which is exactly how they had already
+// diverged.
+func editPathsFromInput(input json.RawMessage) []string {
+	if len(input) == 0 {
+		return nil
+	}
+	var args struct {
+		Edits []struct {
+			Path string `json:"path"`
+		} `json:"edits"`
+	}
+	if json.Unmarshal(input, &args) != nil {
+		return nil
+	}
+	var paths []string
+	for _, e := range args.Edits {
+		if e.Path != "" {
+			paths = append(paths, e.Path)
+		}
+	}
+	return paths
+}
+
 // subjectFor extracts the string a rule's glob matches against, choosing the
 // field most relevant to the tool's capability and falling back to any common
-// field present in the input.
+// field present in the input. It answers for a single path field; a call naming
+// several files goes through subjectsFor, which wraps this.
 func subjectFor(t tool.Tool, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
@@ -501,11 +588,12 @@ func NewRuleGate(base checker, rules []Rule, opts ...RuleOption) *RuleGate {
 
 // Check implements engine.Gate.
 func (g *RuleGate) Check(ctx context.Context, t tool.Tool, input json.RawMessage) (bool, string) {
-	subject := subjectFor(t, input)
+	subjects := subjectsFor(t, input)
 
-	// Deny rules take precedence and are evaluated first.
+	// Deny rules take precedence and are evaluated first, and match on *any*
+	// subject; allow rules below require *all* of them. See matchesAny/matchesAll.
 	for _, r := range g.rules {
-		if r.Action == RuleDeny && r.matches(t, subject) {
+		if r.Action == RuleDeny && r.matchesAny(t, subjects) {
 			reason := fmt.Sprintf("%s blocked by permission rule: %s", t.Name(), r.raw)
 			g.emit(t, r, Deny, reason)
 			return false, reason
@@ -513,7 +601,7 @@ func (g *RuleGate) Check(ctx context.Context, t tool.Tool, input json.RawMessage
 	}
 	// An explicit allow short-circuits the mode gate and approver.
 	for _, r := range g.rules {
-		if r.Action == RuleAllow && r.matches(t, subject) {
+		if r.Action == RuleAllow && r.matchesAll(t, subjects) {
 			g.emit(t, r, Allow, "allowed by permission rule: "+r.raw)
 			return true, ""
 		}
@@ -571,11 +659,20 @@ func WarnUnmatchableRules(rules []Rule, tools []tool.Tool, warn func(msg string,
 // toolHasSubjectField reports whether t's declared input schema exposes at
 // least one of subjectFieldNames. An unparseable schema returns true so a
 // schema we can't introspect never produces a false-positive warning.
+//
+// "edits" counts, because subjectsFor now reads edits[].path. Before that it
+// did not, and multi_edit was correctly reported here as unmatchable while
+// being silently unmatched at Check time — the warning was right and the gate
+// was wrong. Now that the gate matches, the warning has to stop firing or it
+// becomes the false positive.
 func toolHasSubjectField(t tool.Tool) bool {
 	var schema struct {
 		Properties map[string]json.RawMessage `json:"properties"`
 	}
 	if json.Unmarshal(t.InputSchema(), &schema) != nil {
+		return true
+	}
+	if _, ok := schema.Properties["edits"]; ok {
 		return true
 	}
 	for _, f := range subjectFieldNames {

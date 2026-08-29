@@ -300,7 +300,7 @@ func TestShellCommandCapabilityClassification(t *testing.T) {
 	st := newShellTool(root, 5, nil, nil)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cap, ok := classifyShellCommand(root, c.command)
+			cap, ok := classifyShellCommand(root, c.command, false)
 			if c.wantCap == tool.CapExecute {
 				if ok {
 					t.Fatalf("classifyShellCommand(%q) classified as %s, want unclassified", c.command, cap)

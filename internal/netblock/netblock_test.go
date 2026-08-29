@@ -33,6 +33,35 @@ func TestIsPrivateBlocksNewlyCoveredRanges(t *testing.T) {
 	}
 }
 
+// TestIsPrivateBlocksNAT64AndReservedV4 is SEC-F. 64:ff9b::/96 is the NAT64
+// well-known prefix: To4() returns nil for it, so it is invisible to every
+// IPv4 entry in the table, and on a network with a NAT64 gateway
+// 64:ff9b::a00:0001 is a live path to 10.0.0.1 — a real way around the IPv4
+// blocklist rather than a theoretical one. The multicast and reserved/future
+// v4 ranges were only partly covered: IsLinkLocalMulticast caught the
+// 224.0.0.0/24 slice and nothing else.
+//
+// Each of these returns false against the pre-fix table.
+func TestIsPrivateBlocksNAT64AndReservedV4(t *testing.T) {
+	for _, tc := range []struct{ ip, why string }{
+		{"64:ff9b::a00:0001", "NAT64 well-known prefix wrapping 10.0.0.1"},
+		{"64:ff9b::7f00:1", "NAT64 wrapping 127.0.0.1"},
+		{"64:ff9b::", "NAT64 prefix lower edge"},
+		{"225.0.0.1", "multicast outside the 224.0.0.0/24 slice"},
+		{"239.255.255.250", "SSDP multicast"},
+		{"240.0.0.1", "reserved/future space"},
+		{"255.255.255.255", "limited broadcast"},
+	} {
+		ip := net.ParseIP(tc.ip)
+		if ip == nil {
+			t.Fatalf("net.ParseIP(%s) failed", tc.ip)
+		}
+		if !IsPrivate(ip) {
+			t.Errorf("IsPrivate(%s) = false, want true (%s)", tc.ip, tc.why)
+		}
+	}
+}
+
 // TestIsPrivateStillBlocksTheOriginalRanges keeps the pre-P66.10 blocklist
 // pinned after the move out of web.go/http.go, including the IPv4-mapped form
 // the resolver can hand back.

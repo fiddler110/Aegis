@@ -260,3 +260,88 @@ func resolveExisting(path string) (resolved, tail string) {
 	}
 	return real, filepath.Join(segments...)
 }
+
+// --- shared path containment (CLN-1) ---
+//
+// "Is this path inside that root" had four implementations before this: the
+// three below plus escapesRoot, and they did not agree. The server copy
+// resolved no symlinks and treated root == target as inside; checkpoint
+// resolved and case-folded but treated it as outside; drive resolved and
+// treated it as inside but never case-folded. Three reviewers had to read
+// three implementations to reason about one property, and the two production
+// bugs this pass turned up (SEC-H and the shell-checkpoint capture) were both
+// a resolved path compared against an unresolved root — the exact failure this
+// spread invites.
+//
+// The variation that was real is kept as three named entry points rather than
+// flattened away, because each caller genuinely wants a different question
+// answered. What is no longer duplicated is the answer.
+
+// WithinRoot reports whether target is root itself or nested beneath it,
+// comparing lexically after case-folding on Windows (where "C:\Work" and
+// "c:\work" are the same directory, so a case difference must not read as — or
+// be used to disguise — an escape).
+//
+// It resolves no symlinks. Use it only where both arguments are already in the
+// same namespace: either both unresolved, or both already resolved by the
+// caller, which is what the ValidatePath* functions above do. When in doubt
+// use WithinRootResolved — a resolved path compared against an unresolved root
+// silently reports every path as an escape.
+func WithinRoot(root, target string) bool {
+	return !escapesRoot(root, target)
+}
+
+// WithinRootResolved is WithinRoot with both sides put through
+// ResolveForCompare first, so a root or a target reached through a symlink is
+// judged on the directory it actually names. This is the safe default.
+func WithinRootResolved(root, target string) bool {
+	return WithinRoot(ResolveForCompare(root), ResolveForCompare(target))
+}
+
+// StrictlyWithinRootResolved is WithinRootResolved with root itself excluded:
+// target must name something *beneath* root, not root.
+//
+// The distinction matters where target is known to be a file rather than a
+// directory — internal/checkpoint's restore validation, where a captured path
+// equal to the workspace root is not a file that could have been captured, and
+// refusing it is the conservative reading.
+func StrictlyWithinRootResolved(root, target string) bool {
+	rr, rt := ResolveForCompare(root), ResolveForCompare(target)
+	if !WithinRoot(rr, rt) {
+		return false
+	}
+	rel, err := filepath.Rel(foldPathForCompare(rr), foldPathForCompare(rt))
+	return err == nil && rel != "."
+}
+
+// ResolveForCompare turns p into the path containment should be judged on:
+// symlinks resolved as far as the filesystem can, the rest cleaned lexically.
+//
+// A path legitimately may not exist yet — a checkpoint captures a file that is
+// about to be created, or one deleted during the turn that restore will
+// recreate — so EvalSymlinks on the full path is not enough. Walk up to the
+// deepest ancestor that does exist, resolve that, and re-append the components
+// below it. That still catches a symlinked directory in the middle of the path
+// (the classic escape) while letting a not-yet-existing leaf inside the root
+// validate.
+func ResolveForCompare(p string) string {
+	if p == "" {
+		return p
+	}
+	resolved, tail := resolveExisting(filepath.Clean(p))
+	if tail == "" {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(filepath.Join(resolved, tail))
+}
+
+// foldPathForCompare normalizes case where the platform's filesystem does.
+// EvalSymlinks on Windows can hand back a different casing (or the long form
+// of an 8.3 name) than the one recorded earlier, so a case-sensitive
+// comparison would reject legitimate paths.
+func foldPathForCompare(p string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(p)
+	}
+	return p
+}

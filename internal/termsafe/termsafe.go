@@ -5,7 +5,10 @@
 // output to a real terminal, and both need exactly these two policies.
 package termsafe
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // StripControlSeqs removes ANSI/OSC/C1 terminal control sequences from s,
 // leaving normal printable text (including UTF-8) untouched.
@@ -26,7 +29,7 @@ import "strings"
 // applied separately via lipgloss/glamour after this point, not embedded in
 // the raw model text.
 func StripControlSeqs(s string) string {
-	if !strings.ContainsRune(s, 0x1b) && !strings.ContainsAny(s, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1c\x1d\x1e\x1f\x7f") {
+	if !strings.ContainsRune(s, 0x1b) && !strings.ContainsAny(s, c0AndDel) && !containsC1(s) {
 		return s
 	}
 
@@ -57,14 +60,28 @@ func StripControlSeqs(s string) string {
 			i++
 			continue
 		}
-		// DEL and C1 control range (0x80-0x9f) when expressed as raw bytes
-		// (rather than the ESC-prefixed 7-bit form handled above) — UTF-8
-		// continuation bytes never appear as a lone byte in this range at the
-		// start of a rune, so this only ever strips genuine C1 controls, not
-		// multi-byte UTF-8 sequences (whose bytes are all >= 0x80 but whose
-		// leading byte is >= 0xC0).
-		if c == 0x7f {
+		// DEL, then the C1 control range — see c1SkipLen. This comment used to
+		// claim the C1 half was already handled here; only the DEL test below
+		// existed, so the property a reader would have relied on was not
+		// actually provided. SEC-G.
+		if c == 0x7f { // DEL
 			i++
+			continue
+		}
+		// Everything at or above 0x80 is decoded as a rune rather than copied
+		// byte-by-byte. That is what makes the C1 strip below safe: the C1
+		// range (0x80-0x9f) overlaps UTF-8 *continuation* bytes exactly, so a
+		// byte-wise test would mistake the second byte of "À" (0xc3 0x80) for a
+		// control and corrupt the text. Advancing a whole rune at a time means
+		// c1SkipLen is only ever asked about a rune boundary.
+		if c >= 0x80 {
+			if skip := c1SkipLen(s[i:]); skip > 0 {
+				i += skip
+				continue
+			}
+			_, size := utf8.DecodeRuneInString(s[i:])
+			b.WriteString(s[i : i+size])
+			i += size
 			continue
 		}
 
@@ -89,7 +106,7 @@ func StripControlSeqs(s string) string {
 // contents, grep/web_fetch/web_search results (P28.1) — that legitimately
 // carries ANSI colour from the tool it came from.
 func StripDangerousSeqs(s string) string {
-	if !strings.ContainsRune(s, 0x1b) && !strings.ContainsAny(s, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1c\x1d\x1e\x1f\x7f") {
+	if !strings.ContainsRune(s, 0x1b) && !strings.ContainsAny(s, c0AndDel) && !containsC1(s) {
 		return s
 	}
 
@@ -120,8 +137,24 @@ func StripDangerousSeqs(s string) string {
 			i++
 			continue
 		}
-		if c == 0x7f {
+		if c == 0x7f { // DEL
 			i++
+			continue
+		}
+		// Everything at or above 0x80 is decoded as a rune rather than copied
+		// byte-by-byte. That is what makes the C1 strip below safe: the C1
+		// range (0x80-0x9f) overlaps UTF-8 *continuation* bytes exactly, so a
+		// byte-wise test would mistake the second byte of "À" (0xc3 0x80) for a
+		// control and corrupt the text. Advancing a whole rune at a time means
+		// c1SkipLen is only ever asked about a rune boundary.
+		if c >= 0x80 {
+			if skip := c1SkipLen(s[i:]); skip > 0 {
+				i += skip
+				continue
+			}
+			_, size := utf8.DecodeRuneInString(s[i:])
+			b.WriteString(s[i : i+size])
+			i += size
 			continue
 		}
 
@@ -173,4 +206,49 @@ func escSeqLen(s string) int {
 		}
 		return 0
 	}
+}
+
+// c0AndDel is the set of C0 control bytes (minus tab/LF/CR, which are
+// meaningful in normal text) plus DEL, used by both fast paths.
+const c0AndDel = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1c\x1d\x1e\x1f\x7f"
+
+// containsC1 reports whether s holds a C1 control in either spelling. It
+// exists so the fast paths cannot return early on a string whose only
+// dangerous content is an 8-bit C1 byte.
+func containsC1(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 0x80 && c <= 0x9f {
+			return true
+		}
+		if s[i] == 0xc2 && i+1 < len(s) && s[i+1] >= 0x80 && s[i+1] <= 0x9f {
+			return true
+		}
+	}
+	return false
+}
+
+// c1SkipLen reports how many bytes to drop when s begins with a C1 control,
+// and 0 when it does not. s must begin at a rune boundary.
+//
+// C1 controls have two spellings that reach a terminal as bytes. The raw
+// 8-bit form is a lone 0x80-0x9f byte: it cannot begin a valid UTF-8 rune
+// (leading bytes are < 0x80 or >= 0xc2), so at a rune boundary it is a
+// control, not text — 0x9b in particular is 8-bit CSI, the same introducer as
+// ESC '['. The encoded form is U+0080-U+009F written properly as UTF-8, which
+// is always 0xc2 followed by 0x80-0x9f. Neither is legitimate in prose or in
+// tool output, and the ESC-prefixed 7-bit form is handled by escSeqLen above.
+//
+// In practice a modern terminal in UTF-8 mode renders a lone 0x9b as U+FFFD
+// rather than acting on it, so this is defense in depth rather than a live
+// exploit — but it is the property this package's documentation asserts, and
+// asserting it without providing it is worse than either.
+func c1SkipLen(s string) int {
+	c := s[0]
+	if c >= 0x80 && c <= 0x9f {
+		return 1
+	}
+	if c == 0xc2 && len(s) >= 2 && s[1] >= 0x80 && s[1] <= 0x9f {
+		return 2
+	}
+	return 0
 }

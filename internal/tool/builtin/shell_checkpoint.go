@@ -132,6 +132,39 @@ func gitRepoRoot(ctx context.Context, root string) string {
 			return root
 		}
 	}
+	// The subdirectory case needs that same spelling care, and for a while did
+	// not get it. git reports a *symlink-resolved* toplevel, so on a host where
+	// the workspace is reached through a symlink — every macOS workspace under
+	// /tmp or /var, any project behind a symlinked home or volume mount — the
+	// two sides of workspaceAbs' lexical filepath.Rel lived in different
+	// namespaces. Every candidate path then read as outside the workspace and
+	// was dropped, which is precisely the miss P66.15 exists to prevent: the
+	// shell's writes were never captured and `/rewind` silently restored
+	// nothing. Re-express git's answer as the ancestor of root that it names,
+	// counting the segments in the resolved namespace but climbing in root's
+	// own, so everything downstream stays in one namespace.
+	if resolvedTop, terr := filepath.EvalSymlinks(top); terr == nil {
+		if resolvedRoot, rerr := filepath.EvalSymlinks(root); rerr == nil {
+			rel, relErr := filepath.Rel(resolvedTop, resolvedRoot)
+			if relErr == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				climbed := root
+				for range strings.Split(rel, string(filepath.Separator)) {
+					climbed = filepath.Dir(climbed)
+				}
+				// Only trust the climb if it actually lands on the directory
+				// git named. A symlink *inside* the relative segment span
+				// could make the two spellings differ in depth, and a wrong
+				// base here is the hazard half of P66.15 rather than the miss
+				// half — so verify by identity and fall back to git's spelling
+				// when it does not hold.
+				if ci, err := os.Stat(climbed); err == nil {
+					if ti, err := os.Stat(top); err == nil && os.SameFile(ci, ti) {
+						return climbed
+					}
+				}
+			}
+		}
+	}
 	return top
 }
 

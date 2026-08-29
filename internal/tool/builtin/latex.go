@@ -320,7 +320,7 @@ func checkLatexBibConfinement(roots []sandbox.Root, texDir, outDir, control stri
 		}
 		return p
 	}
-	roots = latexResolvedRoots(roots)
+	roots = resolvedRoots(roots)
 	texDir, outDir = resolve(texDir), resolve(outDir)
 	bases := []string{texDir, outDir}
 	if texDir == outDir {
@@ -418,25 +418,6 @@ func checkLatexBibConfinement(roots []sandbox.Root, texDir, outDir, control stri
 				}
 			}
 		}
-	}
-	return out
-}
-
-// latexResolvedRoots returns roots with every path symlink-resolved.
-//
-// The P52.2/P52.10 scans compare already-resolved candidate paths against the
-// confinement roots, so every root has to live in the same namespace or a
-// document's own chapters read as escapes — on macOS a workspace under /tmp or
-// /var is reached through a symlink. sandbox.ValidatePathIn resolves each root
-// for its *final* check, but its fast pre-check runs against the root as given,
-// and that pre-check is what would wrongly reject a /private/... candidate.
-func latexResolvedRoots(roots []sandbox.Root) []sandbox.Root {
-	out := make([]sandbox.Root, len(roots))
-	for i, r := range roots {
-		if real, err := filepath.EvalSymlinks(r.Path); err == nil {
-			r.Path = real
-		}
-		out[i] = r
 	}
 	return out
 }
@@ -677,7 +658,7 @@ func checkLatexConfinement(roots []sandbox.Root, texAbs string) []string {
 	// macOS a workspace under /tmp or /var is reached through a symlink, and
 	// validating a /private/... path against the unresolved root would flag the
 	// document's own chapters as escapes.
-	roots = latexResolvedRoots(roots)
+	roots = resolvedRoots(roots)
 	root := latexPrimaryRoot(roots)
 
 	var out []string
@@ -711,7 +692,7 @@ func latexWalkSources(roots []sandbox.Root, texAbs string, visit func(path, src 
 	// the validator's own resolution), so the roots have to live in the same
 	// namespace or the document's own chapters read as escapes — on macOS a
 	// workspace under /tmp or /var is reached through a symlink.
-	roots = latexResolvedRoots(roots)
+	roots = resolvedRoots(roots)
 	seen := make(map[string]bool)
 	queue := []string{texAbs}
 

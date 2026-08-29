@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/fsguard"
 	"github.com/fiddler110/aegis/internal/redact"
 )
 
@@ -187,6 +188,18 @@ func (a *Audit) write(rec auditRecord) {
 		if err != nil {
 			slog.Error("audit: failed to open log", "path", a.path, "err", err)
 			return
+		}
+		// The audit JSONL holds redacted-but-still-revealing tool inputs —
+		// every shell command and every path the session touched. The 0o600
+		// above is sufficient on POSIX and cosmetic on Windows, where a new
+		// file inherits its parent directory's ACL and the mode argument does
+		// nothing; fsguard applies a real non-inherited ACL there and is a
+		// no-op on POSIX. Same treatment as the daemon token, the SQLite
+		// stores, the TLS key, the swarm mailbox and the trust store.
+		// Best-effort: an unhardenable audit log is still worth writing, and
+		// losing the trail entirely would be the worse failure.
+		if ferr := fsguard.RestrictToOwner(a.path); ferr != nil {
+			slog.Warn("audit: could not restrict log permissions", "path", a.path, "err", ferr)
 		}
 		a.file = f
 	}

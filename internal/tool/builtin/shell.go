@@ -60,7 +60,7 @@ func (t *shellTool) CapabilityFor(input json.RawMessage) tool.Capability {
 		// recognized `gh` subcommand is read-only on the *filesystem* but is
 		// still network egress, and plan mode Asks for CapNetwork where it
 		// silently Allows CapRead.
-		if cap, ok := classifyShellCommand(t.root, args.Command); ok {
+		if cap, ok := classifyShellCommand(t.root, args.Command, t.usesPowerShell()); ok {
 			return cap
 		}
 	}
@@ -139,7 +139,7 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	// see shell_checkpoint.go — unless the command is already known safe.
 	var text string
 	var err error
-	if _, classified := classifyShellCommand(root, args.Command); classified {
+	if _, classified := classifyShellCommand(root, args.Command, t.usesPowerShell()); classified {
 		// Any classified command is non-mutating (CapRead or, for gh,
 		// CapNetwork), so there is nothing for the checkpoint snapshot to
 		// capture.
