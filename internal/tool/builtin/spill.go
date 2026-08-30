@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/fsguard"
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // P64.1: a capped result's remainder used to be unrecoverable. The notice said
@@ -103,7 +104,17 @@ func spillText(ctx context.Context, root, kind, text string) (rel string, ok boo
 		return "", false
 	}
 	name := fmt.Sprintf("%s-%s-%s.txt", sanitizeSpillKind(kind), time.Now().UTC().Format("20060102T150405"), hex.EncodeToString(nonce[:]))
-	spillPath := filepath.Join(dir, name)
+	// spillPath's own components (spillDirRel, a sanitized kind, a timestamp,
+	// a random nonce) never carry a traversal segment, but root itself can be
+	// a symlink whose target moved since the caller validated it — the same
+	// TOCTOU sandbox.ValidatePath already closes for every read/write tool.
+	// Routing the write through it here costs one syscall-bound check and
+	// keeps spill's confinement identical to theirs instead of a hand-rolled
+	// exception.
+	spillPath, err := sandbox.ValidatePath(root, spillDirRel+"/"+name)
+	if err != nil {
+		return "", false
+	}
 	if err := os.WriteFile(spillPath, []byte(text), 0o600); err != nil {
 		return "", false
 	}
