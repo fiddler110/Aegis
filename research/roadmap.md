@@ -1,6 +1,14 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-26 — **P78.1**–**P78.9** filed and shipped the same day. Filed from a
+**Last updated:** 2026-08-30 — **P79.1** filed. Surfaced while committing an unrelated gap-fix batch
+(`research/gaps.md`): `TestReadOnlyGitArgvAgreesAcrossBothPaths`, `TestReadOnlyShellAttachedValueConfinement`,
+`TestReadOnlyShellPowerShellPathConfinement` and `TestReadOnlyShellCommandWindowsPaths` in
+`internal/tool/builtin` were already failing on a pristine pull of `main` (commit `519efbd`, PR #51's
+security-hardening sweep), before any of that session's own changes — isolated by running the same
+tests against that commit in isolation with everything else stashed. Not filed as shipped or even
+triaged past "reproduces and isn't mine" — see the entry for what's known.
+
+**Last updated (previous):** 2026-08-26 — **P78.1**–**P78.9** filed and shipped the same day. Filed from a
 five-track code-quality audit (sprawl/duplication/gaps, not security — that axis is `CodeReview.md`'s
 and **P76.1**'s) that read the whole tree in parallel by package group. All nine were opportunistic
 Tier 4 items with no fired trigger, picked up together rather than left parked, run as seven parallel
@@ -52,8 +60,9 @@ adding items.
 
 ## Status
 
-**36 open items: 28 build + 8 verification-only.** Tier 1: 0. Tier 2: 1 (**P76.2**, filed 2026-08-23,
-survivor of P76.1 Session B). Tier 3: 2 (**P76.1**, filed 2026-08-21, both sessions now done — see its
+**37 open items: 29 build + 8 verification-only.** Tier 1: 0. Tier 2: 2 (**P76.2**, filed 2026-08-23,
+survivor of P76.1 Session B; **P79.1**, filed 2026-08-30, a Windows read-only-shell confinement
+regression). Tier 3: 2 (**P76.1**, filed 2026-08-21, both sessions now done — see its
 entry; **P76.3**, filed 2026-08-23, survivor of P76.1 Session A). Tier 4: 25. Verification: 8.
 
 **Shipped history lives in [releases.md](releases.md), not here.** This document tracks only open
@@ -393,6 +402,46 @@ equivalent) to each of the three quit paths, matching what `m.cancel` already do
 the `Run()` doc comment's claim to match once it's actually true again.
 
 Priority: Tier 2 — S, no dependency, self-contained.
+
+### P79.1 — Windows read-only-shell classifier no longer detects absolute-path escapes (regression, PR #51)
+
+**Filed 2026-08-30, surfaced incidentally** while committing an unrelated gap-fix batch
+(`research/gaps.md`'s security/quality review) — `go test ./...` on a freshly-pulled `main` showed
+four failing tests in `internal/tool/builtin`:
+`TestReadOnlyGitArgvAgreesAcrossBothPaths/pathspec_escape`,
+`TestReadOnlyShellAttachedValueConfinement` (ten subtests — `grep --file=`, `rg --ignore-file=`,
+`fd --base-directory=`, `file --magic-file=`, attached-short forms, `tree`/`uniq` operands, …),
+`TestReadOnlyShellPowerShellPathConfinement` (`Get-Content -Path`/`-Path:`), and
+`TestReadOnlyShellCommandWindowsPaths` (`Get-Content`, `Get-ChildItem` with a bare absolute operand).
+All assert `readOnlyShellCommand`/`classifyShellCommand` (`internal/tool/builtin/shell_readonly.go`)
+reject a command whose operand or attached-flag value is an absolute Windows path outside the
+confinement root; all instead accept it.
+
+**Isolated to before this session's own changes**: stashed everything (tracked and untracked),
+fast-forward-pulled to `main`'s tip at the time (`519efbd`, "enginecfg bypass fix, round-deadlock fix,
+and security hardening sweep (#51)" — the PR that added 85 lines to
+`internal/sandbox/pathvalidator.go` and touched `shell_readonly.go` itself), and ran the same four
+tests against that commit alone with nothing else applied. They failed identically, confirming the
+regression predates and is unrelated to the gap-fix commit — not root-caused further; the likely seam
+is `internal/tool/builtin/argv_confine.go`'s `firstArgvEscape` → `sandbox.ValidatePath`, since that's
+the one confinement primitive both the git-argv and shell-argv paths share and PR #51 touched
+`pathvalidator.go` directly, but that's a hypothesis to verify, not a finding.
+
+**Why this matters more than a typical failing test**: `shellTool.CapabilityFor`
+(`internal/tool/builtin/shell.go:54-68`) uses this same classifier to downgrade a shell call from
+`tool.CapExecute` to `tool.CapRead` — a `CapRead` classification is *silently allowed* under the
+plan-mode read gate instead of requiring execute approval (`internal/permission`). If the classifier
+now accepts a command whose real target resolves outside the workspace root as if it were a safe
+read-only-within-root command, a plan-mode session on Windows could have a shell read arbitrary
+host files (an SSH key, `/etc/hosts`-equivalent) without an approval prompt. Whether that path is
+*actually* reachable in production (vs. only in the two test files calling the classifier directly)
+has not been checked — the four failing tests exercise `readOnlyShellCommand`/`classifyShellCommand`
+directly, not `shellTool.CapabilityFor` end-to-end, so confirming exploitability through the real
+tool call is the first thing a build session on this item should do.
+
+Priority: Tier 2 — S, no dependency, self-contained, but confirm real-path exploitability (not just
+the unit-level classifier) before treating severity as settled — it may belong in Tier 1 once that's
+known.
 
 ---
 
