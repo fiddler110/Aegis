@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fiddler110/aegis/internal/fsguard"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/sqlitestore"
 	"github.com/fiddler110/aegis/internal/trace"
 	"github.com/google/uuid"
 
@@ -143,68 +143,25 @@ func (s *Store) SetCheckpointCleaner(c CheckpointCleaner) {
 	s.checkpoints = c
 }
 
-// busyTimeoutDSN makes every connection the pool opens wait up to 5s for a
-// contended lock instead of failing with SQLITE_BUSY immediately (P63.4).
-// SetMaxOpenConns(1) only serializes writers inside *this* process; an
-// `aegis chat` CLI and a running `aegis serve` contend across processes, which
-// is exactly the case WAL is meant to survive.
-//
-// It is a DSN parameter rather than a `db.Exec("PRAGMA busy_timeout=...")`
-// because busy_timeout is per-connection state, not persisted in the database
-// file the way journal_mode=WAL is: an Exec sets it on whichever pooled
-// connection happens to serve it, and any connection the pool opens later
-// (after an idle close or a connection error) silently reverts to the default.
-// modernc.org/sqlite applies `_pragma=` params in newConn, so every connection
-// gets it.
-const busyTimeoutDSN = "?_pragma=busy_timeout(5000)"
-
 // Open opens (and migrates) the session store at path.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+busyTimeoutDSN)
+	// CLN-3: this used to re-implement sqlitestore.Open outright — same DSN
+	// constant, same SetMaxOpenConns(1), same WAL pragma — and was the only
+	// one of the three stores that did not create its parent directory.
+	db, err := sqlitestore.Open(path, "session")
 	if err != nil {
-		return nil, fmt.Errorf("open db: %w", err)
-	}
-	db.SetMaxOpenConns(1) // SQLite: serialize writes
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("enable WAL: %w", err)
+		return nil, err
 	}
 	s := &Store{db: db, bgRetention: DefaultBGEventRetention, bgSincePrune: map[string]int{}}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := hardenDBPermissions(path); err != nil {
+	if err := sqlitestore.HardenPermissions(path, "session"); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("restrict session db permissions: %w", err)
+		return nil, err
 	}
 	return s, nil
-}
-
-// hardenDBPermissions applies fsguard.RestrictToOwner (FIND-29/P24.16) to the
-// session database file and to its WAL-mode sidecars (-wal, -shm; this store
-// always runs in WAL mode — see the PRAGMA above). It is a no-op on POSIX,
-// where the file's mode bit already restricts it to its owner.
-//
-// The main database file is created by Aegis itself, so a genuine ACL-set
-// failure on it propagates as an error from Open, the same treatment
-// generateAndWriteToken gives daemon.token. The sidecars may not exist yet
-// at open time — fsguard.RestrictToOwner already treats a missing file as a
-// no-op — so any other failure hardening one of them is only logged, not
-// fatal: the primary db file being locked down already covers the bulk of
-// the exposure, and a locked-down host shouldn't fail every session open
-// over a WAL sidecar's ACL.
-func hardenDBPermissions(path string) error {
-	if err := fsguard.RestrictToOwner(path); err != nil {
-		return err
-	}
-	for _, suffix := range []string{"-wal", "-shm"} {
-		sidecar := path + suffix
-		if err := fsguard.RestrictToOwner(sidecar); err != nil {
-			slog.Default().Warn("failed to restrict session db sidecar permissions", "path", sidecar, "err", err)
-		}
-	}
-	return nil
 }
 
 // Close releases the database handle.

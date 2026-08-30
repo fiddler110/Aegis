@@ -33,6 +33,14 @@ import (
 //     put internal hosts.
 //   - 192.0.0.0/24 (IETF protocol assignments) and 198.18.0.0/15 (benchmarking)
 //     — non-routable ranges with no legitimate fetch target in them.
+//   - 64:ff9b::/96 — the NAT64 well-known prefix. To4() returns nil for it, so
+//     it is invisible to every entry in the IPv4 table above: on a network with
+//     a NAT64 gateway, 64:ff9b::a00:0001 is a live path to 10.0.0.1. It needs
+//     such a gateway to be exploitable, which is why it sits here rather than
+//     among the always-dangerous entries, but it is a real way around the list.
+//   - 224.0.0.0/4 and 240.0.0.0/4 — multicast and reserved/future space. Only
+//     the 224.0.0.0/24 slice was covered, via IsLinkLocalMulticast; neither
+//     range holds a legitimate unicast fetch target.
 //
 // Deliberately absent: ::ffff:0:0/96. It looks like belt-and-braces for
 // IPv4-mapped addresses, but net.IPNet.Contains reduces it via To4() to
@@ -49,7 +57,10 @@ var privateRanges = []*net.IPNet{
 	mustParseCIDR("198.18.0.0/15"),
 	mustParseCIDR("127.0.0.0/8"),
 	mustParseCIDR("169.254.0.0/16"),
+	mustParseCIDR("224.0.0.0/4"),
+	mustParseCIDR("240.0.0.0/4"),
 	mustParseCIDR("::1/128"),
+	mustParseCIDR("64:ff9b::/96"),
 	mustParseCIDR("fc00::/7"),
 	mustParseCIDR("fe80::/10"),
 }

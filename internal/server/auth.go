@@ -41,9 +41,9 @@ func generateAndWriteToken(path string) (string, error) {
 }
 
 // authMiddleware checks for a valid Bearer token on all requests except
-// /healthz. Requests without a valid token receive 401. While a P27.12/
-// FIND-14 lockout window is active (see registerAuthFailure), every request
-// — including one carrying a correct token — is rejected with 429 instead.
+// /healthz. Requests without a valid token receive 401, or 429 while a
+// P27.12/FIND-14 lockout window is active (see registerAuthFailure). A
+// request carrying the correct token is served throughout the window.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /healthz is public; the web UI page itself is served without a token
@@ -63,25 +63,49 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "server misconfigured: auth token missing")
 			return
 		}
-		if remaining, locked := s.authLockoutRemaining(); locked {
-			writeError(w, http.StatusTooManyRequests, fmt.Sprintf(
-				"too many invalid authentication attempts; try again in %s", remaining.Round(time.Second)))
-			return
-		}
+		// The token is checked *before* the lockout window, and a valid one is
+		// let through it. The window is process-wide and the daemon is
+		// loopback-only, so consulting it first meant any local process could
+		// spend ten bad requests and then wedge the operator's own client out
+		// of its own daemon for up to 60s, renewably — a self-DoS reachable by
+		// anything on the box. Per-remote-address scoping is no help when
+		// every request comes from 127.0.0.1; the useful distinction is
+		// per-credential, and "presented the right token" is exactly that.
+		// The throttle against guessing is untouched: a guesser has no valid
+		// token by definition, so it still meets the 429 on every attempt.
+		// /auth/exchange already reasons its way to this same conclusion for
+		// its own route.
 		auth := r.Header.Get("Authorization")
 		const prefix = "Bearer "
-		if !strings.HasPrefix(auth, prefix) {
-			s.recordInvalidAuthAttempt(r)
-			writeError(w, http.StatusUnauthorized, "missing authorization")
-			return
+		hasPrefix := strings.HasPrefix(auth, prefix)
+		// Compare unconditionally so the timing does not vary with the reason
+		// for rejection; a missing header compares against the empty string.
+		provided := ""
+		if hasPrefix {
+			provided = auth[len(prefix):]
 		}
-		provided := auth[len(prefix):]
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(s.authToken)) != 1 {
+		valid := hasPrefix && subtle.ConstantTimeCompare([]byte(provided), []byte(s.authToken)) == 1
+
+		if !valid {
+			if remaining, locked := s.authLockoutRemaining(); locked {
+				writeError(w, http.StatusTooManyRequests, fmt.Sprintf(
+					"too many invalid authentication attempts; try again in %s", remaining.Round(time.Second)))
+				return
+			}
 			s.recordInvalidAuthAttempt(r)
+			if !hasPrefix {
+				writeError(w, http.StatusUnauthorized, "missing authorization")
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
-		s.resetAuthFailureStreak()
+		// Deliberately do not reset the streak while a window is active: the
+		// holder of a valid token gets service, but a concurrent guesser's
+		// progress toward the next (longer) window is not cleared for it.
+		if _, locked := s.authLockoutRemaining(); !locked {
+			s.resetAuthFailureStreak()
+		}
 		next.ServeHTTP(w, r)
 	})
 }

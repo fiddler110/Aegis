@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // MaxVerifyRounds bounds the P39.6 verify-and-fix loop: after the drive's
@@ -395,19 +397,14 @@ func latestDirMatching(cwd, glob string) string {
 // withinRoot reports whether path is root itself or lies beneath it, comparing
 // symlink-resolved forms so a workspace reached through a symlink (every /tmp
 // or /var path on macOS) is not mistaken for an escape.
+//
+// CLN-1: the body is sandbox.WithinRootResolved. Two incidental gains over the
+// copy this replaces — the shared resolver walks up to the deepest existing
+// ancestor instead of giving up on the whole path, and it case-folds on
+// Windows, which this copy did not. Neither changes the answer here: the only
+// caller checks info.IsDir() first, so the path exists.
 func withinRoot(root, path string) bool {
-	resolve := func(p string) string {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return r
-		}
-		return filepath.Clean(p)
-	}
-	root, path = resolve(root), resolve(path)
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+	return sandbox.WithinRootResolved(root, path)
 }
 
 // pythonExe returns the path to a working python interpreter (python3

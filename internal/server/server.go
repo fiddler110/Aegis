@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -479,19 +478,12 @@ func (s *Server) workdirAllowed(workdir string) bool {
 
 // withinRoot reports whether target equals root or is nested under it. Both
 // arguments must already be absolute, cleaned paths.
+//
+// CLN-1: the body is sandbox.WithinRoot — same lexical comparison, same
+// Windows case-folding, same "root itself counts as inside". This stays as a
+// named local so the two call sites below read the way they did.
 func withinRoot(root, target string) bool {
-	root, target = filepath.Clean(root), filepath.Clean(target)
-	if runtime.GOOS == "windows" {
-		root, target = strings.ToLower(root), strings.ToLower(target)
-	}
-	if root == target {
-		return true
-	}
-	rel, err := filepath.Rel(root, target)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return sandbox.WithinRoot(root, target)
 }
 
 // approvalDecision carries the client's answer to an interactive approval prompt.
@@ -552,7 +544,44 @@ func (a *sseApprover) Approve(ctx context.Context, toolName, reason string, inpu
 
 // New constructs a daemon from config. The workspace root for tools is the
 // process working directory.
-func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
+//
+// It is a sequence of wire* stages, several of which take a durable resource —
+// an open SQLite handle, a spawned language-server or MCP-server process, a
+// persistent workspace container, an audit file — and each of which can fail.
+//
+// The err return is named so one deferred rollback can undo whatever came up
+// before the failure. Before this, each error path hand-wrote its own cleanup
+// and every one of them was the cleanup that was correct when that stage was
+// added: a wireTools failure closed only the session store, stranding the
+// sandbox, the language servers and both recall stores; a wireSwarm failure —
+// the last stage, so the one with the most behind it — additionally stranded
+// the spawned MCP server processes and the audit file handle. Only
+// wireSecurityWarnings ever closed the knowledge/long-memory pair, because it
+// happened to be the stage someone debugged.
+//
+// The success path deliberately registers nothing: a Server handed back to the
+// caller owns its subsystems, and ListenAndServe's own shutdown sequence closes
+// them when the daemon stops. This is strictly the undo for a constructor that
+// never returned one.
+//
+// Note the `err =` rather than `err :=` at each stage below. A shadowed error
+// in an `if err := ...` would leave the named return nil, and the rollback
+// would silently never run.
+func New(cfg *config.Config, logger *slog.Logger) (_ *Server, err error) {
+	var rollback []func()
+	// onFailure registers a teardown for a resource just acquired. Order is
+	// reverse-acquisition, so a stage never tears down something a later stage
+	// still holds a reference to.
+	onFailure := func(undo func()) { rollback = append(rollback, undo) }
+	defer func() {
+		if err == nil {
+			return
+		}
+		for i := len(rollback) - 1; i >= 0; i-- {
+			rollback[i]()
+		}
+	}()
+
 	if err := cfg.EnsureDataDir(); err != nil {
 		return nil, err
 	}
@@ -588,6 +617,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	onFailure(func() { store.Close() })
 
 	// s is constructed here (P78.9), right after its one prerequisite (store),
 	// instead of ~250 lines into the function as it was pre-P78.9. adapter and
@@ -610,50 +640,56 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		store.Close()
 		return nil, fmt.Errorf("getwd: %w", err)
 	}
 	s.workspace = cwd
 
-	if err := s.wireCoreStores(cfg, logger); err != nil {
-		store.Close()
+	if err = s.wireCoreStores(cfg, logger); err != nil {
 		return nil, err
 	}
 
-	sb, sandboxFallback, sandboxFallbackReason, err := SelectSandbox(cfg.Sandbox, cwd, logger)
-	if err != nil {
-		store.Close()
+	sb, sandboxFallback, sandboxFallbackReason, sbErr := SelectSandbox(cfg.Sandbox, cwd, logger)
+	if sbErr != nil {
+		err = sbErr
 		return nil, err
 	}
 	s.sandbox = sb
 	s.sandboxFallback = sandboxFallback
 	s.sandboxFallbackReason = sandboxFallbackReason
+	// A Docker/Podman backend may already hold a persistent per-workspace
+	// container by this point, which outlives the process that started it.
+	onFailure(func() { s.sandbox.Close() })
 
-	if err := s.wireCron(cwd, sb, logger); err != nil {
-		store.Close()
+	if err = s.wireCron(cwd, sb, logger); err != nil {
 		return nil, err
 	}
 
 	s.wireLSP(cfg, cwd, logger)
+	// Each configured language server is a spawned child process.
+	onFailure(func() {
+		if s.lspMgr != nil {
+			s.lspMgr.Close()
+		}
+	})
 
 	// Semantic recall layer (P5.8): opt-in; nil embedder keeps both stores
 	// BM25-only, which is the zero-config default.
 	s.embedder = embed.New(cfg.Embeddings.Enabled, cfg.Embeddings.Provider, cfg.Embeddings.Model, cfg.Embeddings.BaseURL)
 	s.wireKnowledgeAndMemory(cfg, cwd, logger)
-
-	if err := s.wireTools(cfg, cwd, sb, logger); err != nil {
-		store.Close()
-		return nil, err
-	}
-
-	if err := s.wireSecurityWarnings(cfg, logger); err != nil {
+	onFailure(func() {
 		if s.knowledge != nil {
 			_ = s.knowledge.Close()
 		}
 		if s.longMem != nil {
 			_ = s.longMem.Close()
 		}
-		store.Close()
+	})
+
+	if err = s.wireTools(cfg, cwd, sb, logger); err != nil {
+		return nil, err
+	}
+
+	if err = s.wireSecurityWarnings(cfg, logger); err != nil {
 		return nil, err
 	}
 
@@ -677,21 +713,33 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 
 	s.wirePersonasAndCommands(cfg, cwd, logger)
 
-	if err := s.wireAuthAndTLS(cfg); err != nil {
-		store.Close()
+	if err = s.wireAuthAndTLS(cfg); err != nil {
 		return nil, err
 	}
 
 	s.wireHooks(cfg, logger)
+	// The audit sink is an open file the daemon appends policy decisions to.
+	onFailure(func() {
+		if s.audit != nil {
+			_ = s.audit.Close()
+		}
+	})
 
 	if s.adapter != nil {
 		s.wireCompaction(cfg)
 	}
 
 	s.wireMCP(cfg, logger)
+	// Each MCP client is a spawned server process (stdio transport) or a live
+	// connection. wireSwarm below is the last stage, so without this a failure
+	// there left every configured MCP server running with nothing attached.
+	onFailure(func() {
+		for _, c := range s.mcpClients {
+			_ = c.Close()
+		}
+	})
 
-	if err := s.wireSwarm(cfg, logger); err != nil {
-		store.Close()
+	if err = s.wireSwarm(cfg, logger); err != nil {
 		return nil, err
 	}
 
@@ -1356,13 +1404,22 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		sharedTracker, _ := swarm.CostTrackerFromContext(ctx).(*cost.Tracker)
 
 		tracker := sharedTracker
-		budgetUSD := s.cfg.Cost.BudgetUSD
-		maxTokensPerRun := s.cfg.Cost.MaxTokensPerRun
+		// P66.13/ARCH-06: one shared reading of the run bounds, so a knob added
+		// to `cost:` (or to the three non-`cost:` bounds that ride with it —
+		// max_iterations, loop_threshold, redact_secrets — or cold_cache_after)
+		// reaches a spawned teammate too. Hand-copying five of the nine here is
+		// what left security.redact_secrets inert for every sub-agent: a
+		// teammate's read-tool output went to the provider unscrubbed on a
+		// daemon whose operator had explicitly turned redaction on.
+		limits := enginecfg.CostLimits(s.cfg)
 		var foldBack *cost.Tracker
 		if usd, toks, ok := swarm.BudgetOverrideFromContext(ctx); ok {
 			foldBack = cost.NewTracker()
 			tracker = foldBack
-			budgetUSD, maxTokensPerRun = usd, toks
+			// Taken whole, zeros included — see WithBudgetOverride. Only these
+			// two dimensions are shared out (swarm.WithBudgetOverride carries
+			// exactly two); every other bound below is inherited.
+			limits = limits.WithBudgetOverride(usd, toks)
 		} else if tracker == nil {
 			tracker = cost.NewTracker()
 		}
@@ -1390,7 +1447,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		// spawned sub-agent has no durable session of its own to key a register
 		// on (internal/swarm confirmed: a crashed teammate's goroutine leaves no
 		// record today regardless), and is explicitly out of scope for this pass.
-		eng, err := engine.New(engine.Options{
+		opts := engine.Options{
 			Adapter:   s.modelAdapter(spawnWin),
 			Tools:     s.subAgentToolRegistry(cfg.ParentSessionID),
 			Gate:      gate,
@@ -1409,29 +1466,8 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			RoundResultCap:      roundCapFor(cfg.Workdir), // P67.1
 			Hooks:               engineHooks,
 			Cost:                tracker,
-			BudgetUSD:           budgetUSD,
-			MaxTokensPerRun:     maxTokensPerRun,
-			// P59.4: inherited whole rather than as a divided share. The
-			// share computation above carries exactly two dimensions
-			// (swarm.WithBudgetOverride), and widening that seam to a third is
-			// its own change; inheriting whole bounds each teammate
-			// individually, which is weaker than a share but strictly better
-			// than the uncapped alternative for an opt-in, off-by-default key.
-			MaxGeneratedTokensPerRun: s.cfg.Cost.MaxGeneratedTokensPerRun,
-			// A spawned teammate inherits the operator's time bound rather than
-			// getting its own share of it, unlike the cost/token floors above:
-			// those are divisible (spend is additive across siblings), elapsed
-			// time is not — teammates run concurrently, so "N minutes" means the
-			// same N minutes for each of them.
-			MaxWallClockPerRun: s.cfg.Cost.MaxWallClockPerRun(),
-			MaxTurnStall:       s.cfg.Cost.MaxTurnStall(),
-			Model:              model,
-			MaxTokens:          s.cfg.Provider.MaxTokens,
-			// Same model server as the parent session, so the same tool-calling
-			// fallback (P53.6) — a shimmed session whose spawns weren't shimmed
-			// would hand every teammate a model that can't call a tool.
-			ToolCallShim: s.cfg.Provider.ToolCallShimEnabled(),
-			Logger:       s.logger,
+			Model:               model,
+			Logger:              s.logger,
 			// Set explicitly from cfg.Workdir (P25.8) rather than relying on
 			// the parent session's tool.WithWorkdir ctx value leaking through
 			// the spawn's context chain — that accidental inheritance only
@@ -1443,7 +1479,19 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			// additional roots are a property of the workspace, not of who
 			// is asking (P52.13).
 			ExtraRoots: s.workspaceRootsFor(cfg.Workdir),
-		})
+		}
+		// P59.4/P52.15: every bound not shared out above is inherited whole
+		// rather than divided. The cost/token floors are divisible because
+		// spend is additive across siblings; elapsed time is not — teammates
+		// run concurrently, so "N minutes" means the same N minutes for each.
+		limits.Apply(&opts)
+		// A teammate talks to the same model server as the session that spawned
+		// it, so it needs the same sampling parameters, the same tool-calling
+		// fallback (P53.6 — a shimmed session whose spawns weren't shimmed
+		// hands every teammate a model that can't call a tool), and the same
+		// backend identification for calibration (P66.14/LLM-03).
+		enginecfg.ModelBackend(s.cfg).Apply(&opts)
+		eng, err := engine.New(opts)
 		if err != nil {
 			return "", err
 		}

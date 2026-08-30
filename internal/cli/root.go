@@ -82,43 +82,13 @@ Use "aegis <command> --help" for details on any command below.`,
 			if err != nil {
 				return err
 			}
-			// A missing TLS cert here just means no daemon has ever started at
-			// this data dir yet (server.New generates it) — treat it the same
-			// as "no daemon reachable" below, not as fatal.
-			cl, clErr := client.NewFromConfig(cfg)
-
-			// Check whether a daemon is already running.
-			reachable := false
-			if clErr == nil {
-				healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
-				reachable = cl.Health(healthCtx) == nil
-				healthCancel()
+			// Reuse a running daemon if present; otherwise start one embedded
+			// in this process, which cleanup shuts down when the TUI exits.
+			cl, _, cleanup, err := connectOrStartDaemon(cmd.Context(), cfg)
+			if err != nil {
+				return err
 			}
-
-			if !reachable {
-				// No daemon reachable — start one embedded in this process.
-				// The returned cancel shuts it down when the TUI exits.
-				stopDaemon, startErr := startEmbeddedDaemon(cfg)
-				if startErr != nil {
-					return fmt.Errorf("start daemon: %w", startErr)
-				}
-				defer stopDaemon()
-
-				// Rebuild the client before polling, not after: startEmbeddedDaemon
-				// has now written daemon.token and (with server.tls.enabled)
-				// generated daemon.crt, neither of which existed when cl was built
-				// above on a first run. From here on a load failure is a real bug
-				// (the daemon we just started guarantees both files exist), so it
-				// is fatal rather than folded into "keep waiting".
-				cl, clErr = client.NewFromConfig(cfg)
-				if clErr != nil {
-					return fmt.Errorf("daemon started but client could not be configured: %w", clErr)
-				}
-
-				if !waitForDaemon(cl, 10*time.Second) {
-					return fmt.Errorf("daemon at %s did not become ready within 10 s", cfg.Server.Addr)
-				}
-			}
+			defer cleanup()
 
 			warnSandboxFallback(cl)
 			warnWorkspaceTrust(cfg)
@@ -167,8 +137,10 @@ Use "aegis <command> --help" for details on any command below.`,
 
 			// tui.Run scrubs cl's bearer token (Client.Zero) once the TUI
 			// event loop exits, since that's the last consumer of it before
-			// this process returns (FIND-33/P24.21) — no separate defer
-			// needed here.
+			// this process returns (FIND-33/P24.21). The deferred cleanup
+			// above scrubs it too; Zero is idempotent, and having the
+			// guarantee hold whether or not tui.Run is reached is the point
+			// of putting it there (CLN-4).
 			runErr := tui.Run(tui.Config{
 				Client:         cl,
 				SessionID:      sessionID,

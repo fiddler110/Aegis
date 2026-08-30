@@ -200,3 +200,40 @@ func TestStripDangerousSeqsIdempotent(t *testing.T) {
 		t.Errorf("not idempotent: once=%q twice=%q", once, twice)
 	}
 }
+
+// TestC1ControlsAreStripped is SEC-G. The package documented stripping "DEL and
+// C1 control range (0x80-0x9f) when expressed as raw bytes" and explained at
+// length why that was safe against UTF-8 continuation bytes -- but the code
+// below the comment was `if c == 0x7f`, DEL only.
+//
+// The UTF-8 cases are the reason the fix had to make the loop rune-aware
+// rather than add a byte test: the C1 range overlaps continuation bytes
+// exactly, so U+00C0 (0xc3 0x80) would be corrupted by the naive spelling.
+// Those cases fail against a byte-wise C1 strip, and the C1 cases fail against
+// the pre-fix code.
+func TestC1ControlsAreStripped(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"raw 8-bit CSI", "a\x9bb", "ab"},
+		{"raw C1 lower edge", "a\x80b", "ab"},
+		{"raw C1 upper edge", "a\x9fb", "ab"},
+		{"utf8-encoded C1", "a\u0080b", "ab"},
+		{"utf8-encoded 8-bit CSI", "a\u009bb", "ab"},
+		{"DEL still stripped", "a\x7fb", "ab"},
+		// Must survive intact: the second byte of U+00C0 is 0x80, inside the
+		// C1 range, so a byte-wise strip would eat it.
+		{"U+00C0 survives", "A\u00c0B", "A\u00c0B"},
+		{"accented text survives", "caf\u00e9", "caf\u00e9"},
+		{"CJK survives", "\u65e5\u672c\u8a9e", "\u65e5\u672c\u8a9e"},
+		{"emoji survives", "ok \U0001f389", "ok \U0001f389"},
+		{"nbsp is not C1", "a\u00a0b", "a\u00a0b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StripControlSeqs(tc.in); got != tc.want {
+				t.Errorf("StripControlSeqs(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if got := StripDangerousSeqs(tc.in); got != tc.want {
+				t.Errorf("StripDangerousSeqs(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

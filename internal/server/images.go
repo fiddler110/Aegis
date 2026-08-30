@@ -37,12 +37,19 @@ func resolveSafeImagePath(p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("empty image path")
 	}
-	// sandbox.IsRooted, not filepath.IsAbs: the latter answers false on Windows
-	// for "/etc/passwd" and `\Windows\...`, so this refusal silently stopped
-	// applying there and the path fell through to the Join below, which folds
-	// the leading separator and resolves it somewhere under the working
-	// directory instead. Not an escape — the Rel check below still holds — but
-	// the same input was refused on macOS and quietly accepted on Windows.
+	// Refuse a leading separator in either spelling, on every platform, before
+	// consulting sandbox.IsRooted. IsRooted is deliberately platform-conditional
+	// — off Windows it is just filepath.IsAbs, so `\Windows\...` reads there as
+	// a legitimate (if odd) relative filename — and this call site wants the
+	// opposite property. An image path arrives from an API client as a name
+	// relative to the working directory; there is no such thing as a rooted one
+	// we mean to honour, and accepting the backslash spelling on POSIX while
+	// refusing it on Windows is the same input behaving two ways, which is the
+	// defect this refusal exists to close. Not an escape either way — the Rel
+	// check below still holds — but identical behaviour is the point.
+	if p[0] == '/' || p[0] == '\\' {
+		return "", fmt.Errorf("absolute image paths are not allowed")
+	}
 	if sandbox.IsRooted(p) {
 		return "", fmt.Errorf("absolute image paths are not allowed")
 	}

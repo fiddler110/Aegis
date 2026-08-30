@@ -55,10 +55,9 @@ func doAuthedGet(t *testing.T, url, token string) *http.Response {
 
 // TestAuthLockoutEngagesAfterThresholdAndExpires is the P27.12/FIND-14
 // regression: recordInvalidAuthAttempt only logged before this (FIND-11);
-// now, once the consecutive-failure streak reaches authLockThreshold, the
-// daemon must reject every request — even one carrying the correct token —
-// with 429 until the backoff window elapses, at which point normal auth
-// resumes.
+// now, once the consecutive-failure streak reaches authLockThreshold, a
+// request that cannot present the token is rejected with 429 until the
+// backoff window elapses, at which point normal auth resumes.
 func TestAuthLockoutEngagesAfterThresholdAndExpires(t *testing.T) {
 	_, ts := newAuthTestServer(t)
 
@@ -71,11 +70,11 @@ func TestAuthLockoutEngagesAfterThresholdAndExpires(t *testing.T) {
 		}
 	}
 
-	// Even a request with the *correct* token must now be rejected while
-	// locked — the lockout blocks by request volume, not by guess accuracy.
-	resp := doAuthedGet(t, ts.URL+"/sessions", "secret-token-123")
+	// A further *invalid* attempt now meets the window rather than a 401:
+	// the throttle against guessing is what the lockout is for.
+	resp := doAuthedGet(t, ts.URL+"/sessions", "totally-wrong-guess")
 	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("status while locked = %d, want 429", resp.StatusCode)
+		t.Fatalf("invalid attempt while locked = %d, want 429", resp.StatusCode)
 	}
 
 	// After the (short, base-delay) window elapses, normal auth resumes.
@@ -83,6 +82,46 @@ func TestAuthLockoutEngagesAfterThresholdAndExpires(t *testing.T) {
 	resp = doAuthedGet(t, ts.URL+"/sessions", "secret-token-123")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status after lockout expired = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestAuthLockoutDoesNotWedgeTheTokenHolder is SEC-D. The lockout window used
+// to be consulted *before* the token comparison, and the streak is
+// process-wide, so any local process could spend ten bad requests and lock the
+// operator's own client out of its own daemon for up to 60s, renewably. The
+// daemon is loopback-only, so per-remote-address scoping is no help — every
+// request comes from 127.0.0.1. The useful distinction is per-credential.
+//
+// Fails against the pre-fix code with 429 on the valid-token request.
+func TestAuthLockoutDoesNotWedgeTheTokenHolder(t *testing.T) {
+	srv, ts := newAuthTestServer(t)
+
+	// A hostile (or merely broken) local process arms the window.
+	for i := 0; i < authLockThreshold; i++ {
+		doAuthedGet(t, ts.URL+"/sessions", "totally-wrong-guess")
+	}
+	if _, locked := srv.authLockoutRemaining(); !locked {
+		t.Fatal("precondition: the lockout window should be armed")
+	}
+
+	// The holder of the real token is still served.
+	resp := doAuthedGet(t, ts.URL+"/sessions", "secret-token-123")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("valid token while locked = %d, want 200; the window must not wedge the token holder", resp.StatusCode)
+	}
+
+	// ...and being served did not clear the guesser's progress toward the
+	// next, longer window.
+	srv.authLockMu.Lock()
+	streak := srv.authConsecutiveFailures
+	srv.authLockMu.Unlock()
+	if streak == 0 {
+		t.Error("a success inside the window cleared the failure streak; the throttle must survive it")
+	}
+
+	// The guesser still meets the window.
+	if resp := doAuthedGet(t, ts.URL+"/sessions", "totally-wrong-guess"); resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("invalid attempt while locked = %d, want 429", resp.StatusCode)
 	}
 }
 
@@ -123,8 +162,11 @@ func TestAuthLockoutMessageDoesNotLeakToken(t *testing.T) {
 		doAuthedGet(t, ts.URL+"/sessions", "totally-wrong-guess-value")
 	}
 
+	// The 429 is now reached by a request that cannot present the token, so
+	// this asks for the body of *that* response. A valid token is served
+	// through the window (SEC-D) and would return 200 with no message to check.
 	req, _ := http.NewRequest("GET", ts.URL+"/sessions", nil)
-	req.Header.Set("Authorization", "Bearer secret-token-123")
+	req.Header.Set("Authorization", "Bearer totally-wrong-guess-value")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

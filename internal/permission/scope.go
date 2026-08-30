@@ -172,9 +172,6 @@ func scopeWritePaths(input json.RawMessage) []string {
 	var args struct {
 		Path     string `json:"path"`
 		FilePath string `json:"file_path"`
-		Edits    []struct {
-			Path string `json:"path"`
-		} `json:"edits"`
 	}
 	if json.Unmarshal(input, &args) != nil {
 		return nil
@@ -186,10 +183,8 @@ func scopeWritePaths(input json.RawMessage) []string {
 	if args.FilePath != "" {
 		paths = append(paths, args.FilePath)
 	}
-	for _, e := range args.Edits {
-		if e.Path != "" {
-			paths = append(paths, e.Path)
-		}
-	}
-	return paths
+	// editPathsFromInput (rules.go) is shared with the rule gate on purpose: the
+	// scope gate handled edits[] and subjectFor did not, and that divergence is
+	// what let a deny rule miss multi_edit entirely.
+	return append(paths, editPathsFromInput(input)...)
 }

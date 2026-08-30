@@ -14,7 +14,6 @@ import (
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
-	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
@@ -324,24 +323,14 @@ func (s *Server) newEngine(sessionID, mode string, approver permission.Approver,
 		Compactor:               s.compactor,
 		Hooks:                   engineHooks,
 		Cost:                    tracker,
-		Temperature:             s.cfg.Provider.Temperature,
-		Seed:                    s.cfg.Provider.Seed,
 		Model:                   model,
-		MaxTokens:               s.cfg.Provider.MaxTokens,
 		ContextWindowTokens:     ctxWin,
 		ContextWindowFloor:      func() int { return provider.RaisedContextWindow(s.adapter) },
 		SteerChan:               steerCh,
 		ZeroToolNudgeMaxRetries: s.cfg.Provider.ZeroToolNudge,
-		ToolCallShim:            s.cfg.Provider.ToolCallShimEnabled(),
 		// P67.1: the per-call caps in truncate.go are per *call*; this bounds
 		// what a parallel round contributes in aggregate.
-		RoundResultCap: roundCapFor(workdir),
-		// P66.14/LLM-03: the token-estimate calibration is admissible only
-		// against a backend positively identified as reporting the full prompt
-		// each turn and truncating in silence. Previously gated on a native-only
-		// telemetry field, so it was inert on the documented openai + :11434/v1
-		// configuration.
-		SharedContextWindow: providerfactory.CertainlyOllama(s.cfg.Provider),
+		RoundResultCap:      roundCapFor(workdir),
 		Logger:              s.logger,
 		Workdir:             workdir,
 		ExtraRoots:          s.workspaceRootsFor(workdir),
@@ -349,10 +338,11 @@ func (s *Server) newEngine(sessionID, mode string, approver permission.Approver,
 		OnToolStarted:       onToolStarted,
 		OnToolFinished:      onToolFinished,
 	}
-	// P66.13/ARCH-06: the run bounds come from one shared reading of config, so
-	// a new one reaches the CLI paths too instead of being set here and
-	// forgotten there.
+	// P66.13/ARCH-06: the run bounds and the backend parameters both come from
+	// one shared reading of config, so a new one reaches the CLI, sub-agent and
+	// debate paths too instead of being set here and forgotten there.
 	enginecfg.CostLimits(s.cfg).Apply(&opts)
+	enginecfg.ModelBackend(s.cfg).Apply(&opts)
 	guardOpts.Apply(&opts)
 	// Gate: set above from s.buildGate, which is enginecfg.BuildGate bound to the
 	// daemon's live rules and audit sink.

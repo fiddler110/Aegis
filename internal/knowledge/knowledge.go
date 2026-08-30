@@ -9,7 +9,6 @@ import (
 	"database/sql"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/embed"
-	"github.com/fiddler110/aegis/internal/fsguard"
 	"github.com/fiddler110/aegis/internal/sqlitestore"
 	_ "modernc.org/sqlite"
 )
@@ -51,32 +49,11 @@ func Open(root, dbPath string, embedder embed.Embedder) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := hardenDBPermissions(dbPath); err != nil {
+	if err := sqlitestore.HardenPermissions(dbPath, "knowledge"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("restrict knowledge db permissions: %w", err)
 	}
 	return s, nil
-}
-
-// hardenDBPermissions applies fsguard.RestrictToOwner (FIND-18/P27.10) to the
-// knowledge database file and to its WAL-mode sidecars (-wal, -shm; this
-// store always runs in WAL mode — see sqlitestore.Open). It mirrors
-// session.hardenDBPermissions: the main database file is created by Aegis
-// itself, so a genuine ACL-set failure on it propagates as an error from
-// Open, while the sidecars may not exist yet at open time — fsguard.RestrictToOwner
-// already treats a missing file as a no-op — so any other failure hardening
-// one of them is only logged, not fatal.
-func hardenDBPermissions(path string) error {
-	if err := fsguard.RestrictToOwner(path); err != nil {
-		return err
-	}
-	for _, suffix := range []string{"-wal", "-shm"} {
-		sidecar := path + suffix
-		if err := fsguard.RestrictToOwner(sidecar); err != nil {
-			slog.Default().Warn("failed to restrict knowledge db sidecar permissions", "path", sidecar, "err", err)
-		}
-	}
-	return nil
 }
 
 func (s *Store) migrate() error {

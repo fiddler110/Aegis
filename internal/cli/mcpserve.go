@@ -1,13 +1,9 @@
 package cli
 
 import (
-	"context"
-	"fmt"
 	"os"
 	"os/signal"
-	"time"
 
-	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/logging"
 	"github.com/fiddler110/aegis/internal/mcpserver"
@@ -58,40 +54,16 @@ func newMCPServeCmd() *cobra.Command {
 			}
 			defer closer.Close()
 
-			// A missing TLS cert here just means no daemon has ever started at
-			// this data dir yet — treat it the same as "no daemon reachable".
-			cl, clErr := client.NewFromConfig(cfg)
-			reachable := false
-			if clErr == nil {
-				healthCtx, healthCancel := context.WithTimeout(cmd.Context(), 2*time.Second)
-				reachable = cl.Health(healthCtx) == nil
-				healthCancel()
+			// Reuse a running daemon if present; otherwise start one embedded
+			// in this process and stop it when the client disconnects. cl
+			// lives for the whole MCP session — srv.Serve blocks until the
+			// calling harness disconnects — and cleanup scrubs its token once
+			// that returns (FIND-33/P24.21).
+			cl, _, cleanup, err := connectOrStartDaemon(cmd.Context(), cfg)
+			if err != nil {
+				return err
 			}
-
-			// Reuse a running daemon if present; otherwise start one embedded in
-			// this process and stop it when the client disconnects.
-			if !reachable {
-				stopDaemon, startErr := startEmbeddedDaemon(cfg)
-				if startErr != nil {
-					return fmt.Errorf("start daemon: %w", startErr)
-				}
-				defer stopDaemon()
-				cl, clErr = client.NewFromConfig(cfg)
-				if clErr != nil {
-					return fmt.Errorf("daemon started but client could not be configured: %w", clErr)
-				}
-				if !waitForDaemon(cl, 10*time.Second) {
-					return fmt.Errorf("daemon at %s did not become ready within 10s", cfg.Server.Addr)
-				}
-			}
-			// cl (the final value, after any reassignment above) lives for
-			// the whole MCP session — srv.Serve blocks until the calling
-			// harness disconnects — so scrub its token once that returns,
-			// right before this command's process exits (FIND-33/P24.21).
-			// Placed after the reassignment so the defer captures the
-			// client that actually gets used, not the discarded
-			// pre-embedded-daemon one.
-			defer cl.Zero()
+			defer cleanup()
 
 			resolvedMode := mode
 			if resolvedMode == "" {

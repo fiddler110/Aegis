@@ -710,13 +710,23 @@ var readOnlyGitSubcommands = map[string]bool{
 // Being conservative here is deliberate: a false negative just means the call
 // keeps requiring an execute approval like today; a false positive would
 // auto-approve something that mutates state or exfiltrates data.
-func classifyShellCommand(root, command string) (tool.Capability, bool) {
+//
+// powershell selects the quoting dialect the command will actually be run
+// under, which decides only one thing: whether a backslash escapes the next
+// character (POSIX `/bin/sh -c`) or is an ordinary path separator (PowerShell).
+// Getting that backwards is a hole in either direction, so it is a parameter
+// rather than a guess — see splitShellWords.
+func classifyShellCommand(root, command string, powershell bool) (tool.Capability, bool) {
 	command = strings.TrimSpace(command)
 	if command == "" || strings.ContainsAny(command, permission.ShellChainMetaChars) {
 		return tool.CapExecute, false
 	}
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+	// Split the way the shell will, not the way strings.Fields does. Quoting is
+	// not decoration here: it changes what a token *is*, and the confinement
+	// check below can only judge a path it can recognize as one. See
+	// splitShellWords for the escape this closes.
+	fields, ok := splitShellWords(command, !powershell)
+	if !ok || len(fields) == 0 {
 		return tool.CapExecute, false
 	}
 	bin := strings.ToLower(baseBinaryName(fields[0]))
@@ -730,8 +740,8 @@ func classifyShellCommand(root, command string) (tool.Capability, bool) {
 	if spec == nil {
 		return tool.CapExecute, false
 	}
-	cap, ok := spec.classify(fields[1:])
-	if !ok {
+	cap, classified := spec.classify(fields[1:])
+	if !classified {
 		return tool.CapExecute, false
 	}
 	// argvStaysInRoot (argv_confine.go) confines operands *and* attached flag
@@ -745,6 +755,100 @@ func classifyShellCommand(root, command string) (tool.Capability, bool) {
 		return tool.CapExecute, false
 	}
 	return cap, true
+}
+
+// splitShellWords splits a command into the argument vector the shell will
+// actually build, removing quotes and (when escapeBackslash) backslash escapes.
+//
+// It replaces strings.Fields, which was the whole of VULN-14: Fields splits on
+// whitespace and nothing else, so a quoted path reached the confinement check
+// with its quotes still attached. `cat '/etc/passwd'` handed argvStaysInRoot the
+// literal token `'/etc/passwd'`, which does not start with a separator, so
+// sandbox.ValidatePath read it as a *relative* name, joined it under the root,
+// found it confined, and the call was downgraded to CapRead — which plan mode
+// allows silently. The shell then stripped the quotes and read the real file.
+// Every spelling of that worked: `"..."`, `\/etc/passwd`, `”/etc/passwd`. Worst
+// of all, deniedGitFlags compares raw tokens, so `git diff '--output=/tmp/x'`
+// was not recognized as --output at all — an out-of-workspace *write*, silently
+// approved. Quoting is not cosmetic to this classifier; it decides what a token
+// is, and the classifier has to see what the shell will see.
+//
+// escapeBackslash must match the shell that will run the command, and the two
+// dialects disagree in a way that is a hole in both directions. Under POSIX
+// `/bin/sh -c` a backslash escapes the next character, so treating it literally
+// lets `cat \/etc/passwd` through. Under PowerShell it is an ordinary path
+// separator, so treating it as an escape turns `\Windows\System32\config\SAM`
+// into the relative name `WindowsSystem32configSAM`, which confines happily —
+// the same hole, mirrored. Hence a parameter rather than a default.
+//
+// It reports false for input the shell itself would reject or continue: an
+// unterminated quote, or a trailing escape. Failing closed there costs the call
+// its downgrade, which is the cheap direction.
+//
+// This is a *quoting* splitter, not a shell parser. It does not need to be one:
+// classifyShellCommand has already refused the command outright if it contains
+// any of ShellChainMetaChars, so expansion, substitution, redirection and
+// chaining are all gone before a single token is built here.
+func splitShellWords(command string, escapeBackslash bool) ([]string, bool) {
+	var (
+		words   []string
+		cur     strings.Builder
+		started bool // distinguishes an empty quoted word ("") from no word at all
+		quote   byte // 0 when outside quotes, else '\'' or '"'
+	)
+	flush := func() {
+		if started {
+			words = append(words, cur.String())
+			cur.Reset()
+			started = false
+		}
+	}
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case quote == '\'':
+			// Single quotes are literal in both dialects: no escape processing,
+			// which is why `'\/etc'` keeps its backslash.
+			if c == '\'' {
+				quote = 0
+				continue
+			}
+			cur.WriteByte(c)
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+				continue
+			}
+			if escapeBackslash && c == '\\' && i+1 < len(command) {
+				i++
+				cur.WriteByte(command[i])
+				continue
+			}
+			cur.WriteByte(c)
+		case c == ' ' || c == '\t':
+			flush()
+		case c == '\'' || c == '"':
+			quote = c
+			started = true
+		case escapeBackslash && c == '\\':
+			if i+1 >= len(command) {
+				return nil, false // a trailing escape continues the line
+			}
+			i++
+			cur.WriteByte(command[i])
+			started = true
+		default:
+			// Byte-wise is safe for UTF-8: none of the bytes handled above can
+			// appear as a continuation byte, so multi-byte runes pass intact.
+			cur.WriteByte(c)
+			started = true
+		}
+	}
+	if quote != 0 {
+		return nil, false // unterminated quote
+	}
+	flush()
+	return words, true
 }
 
 // confinementArgs adapts an argv for argvPathCandidates, which knows the two
@@ -777,8 +881,12 @@ func (s *commandSpec) confinementArgs(args []string) []string {
 // tool.CapRead. It is the narrower question classifyShellCommand answers:
 // a command classified as tool.CapNetwork (gh) is not a *read*, so it neither
 // gets plan mode's silent allow nor counts as read-only anywhere else.
+//
+// It asks the POSIX-shell question. That is the right default for a helper with
+// no tool to ask: every non-Windows host runs `/bin/sh -c`, and a Windows host
+// reaches classifyShellCommand through shellTool.usesPowerShell() instead.
 func readOnlyShellCommand(root, command string) bool {
-	cap, ok := classifyShellCommand(root, command)
+	cap, ok := classifyShellCommand(root, command, false)
 	return ok && cap == tool.CapRead
 }
 

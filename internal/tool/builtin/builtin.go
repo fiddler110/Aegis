@@ -336,6 +336,30 @@ func resolveWrite(ctx context.Context, root, p string) (string, error) {
 	return abs, nil
 }
 
+// resolvedRoots returns roots with every path symlink-resolved, leaving a root
+// that cannot be resolved (it may not exist yet) as it was.
+//
+// Anything that compares an already-resolved absolute path against a
+// confinement root needs this first, or the two are in different namespaces and
+// every comparison is wrong in whichever direction the link points. On macOS a
+// workspace under /tmp or /var is reached through exactly such a link, so this
+// is the common case there rather than an exotic one.
+//
+// Two call sites depend on it for opposite reasons, which is why it is one
+// helper: the LaTeX confinement scans (P52.2/P52.10) would otherwise read a
+// document's own chapters as escapes, and denyMaterializedSkillWrite would
+// otherwise fail to recognize its own guarded tree.
+func resolvedRoots(roots []sandbox.Root) []sandbox.Root {
+	out := make([]sandbox.Root, len(roots))
+	for i, r := range roots {
+		if real, err := filepath.EvalSymlinks(r.Path); err == nil {
+			r.Path = real
+		}
+		out[i] = r
+	}
+	return out
+}
+
 // materializedSkillsRel is the workspace-relative directory built-in skills are
 // extracted into (skills.MaterializeBuiltinsToProject). Kept as literal segments
 // rather than importing internal/skills, which would make internal/tool/builtin
@@ -363,8 +387,16 @@ var materializedSkillsRel = []string{".aegis", "builtin-skills"}
 // skills are ordinary workspace content an agent may legitimately be asked to
 // write. Nor does it cover the shell tool, which can still reach the tree; the
 // per-phase refresh in internal/drive repairs that case instead.
+//
+// abs arrives symlink-resolved — that is sandbox.ValidatePathIn's contract, and
+// resolvedRoots is what puts the roots in the same namespace so the comparison
+// below means anything. Without it the guard was inert on every host whose
+// workspace is reached through a link (on macOS, anything under /tmp or /var):
+// filepath.Rel of a /private/var candidate against a /var root yields a
+// ".."-leading path, the write reads as outside the guarded tree, and the very
+// clobbering the P38.1 note describes went through unopposed.
 func denyMaterializedSkillWrite(roots []sandbox.Root, abs string) error {
-	for _, r := range roots {
+	for _, r := range resolvedRoots(roots) {
 		if r.Path == "" {
 			continue
 		}

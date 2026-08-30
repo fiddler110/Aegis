@@ -217,6 +217,13 @@ func updateConfigFile(path string, dryRun bool) (report []string, changed bool, 
 	return report, true, nil
 }
 
+// sectionBoundaryRe matches the first column-0, non-blank line, which is where
+// a top-level section ends. Constant, so it is compiled once at package load
+// rather than on every insertIntoSection call — it was the only per-call
+// MustCompile left in the tree outside table construction. startRe below is
+// key-dependent and stays inline.
+var sectionBoundaryRe = regexp.MustCompile(`(?m)^\S`)
+
 // insertIntoSection finds the top-level (column-0), active "<key>:" line in
 // text and splices block in just before the section ends — the first
 // subsequent line that itself starts at column 0 (the next top-level key or
@@ -233,9 +240,8 @@ func insertIntoSection(text, key, block string) (string, bool) {
 		return "", false
 	}
 	rest := text[loc[1]:]
-	boundaryRe := regexp.MustCompile(`(?m)^\S`)
 	insertPos := len(text)
-	if b := boundaryRe.FindStringIndex(rest); b != nil {
+	if b := sectionBoundaryRe.FindStringIndex(rest); b != nil {
 		insertPos = loc[1] + b[0]
 	}
 	head := strings.TrimRight(text[:insertPos], "\n")

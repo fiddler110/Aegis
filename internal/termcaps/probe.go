@@ -93,6 +93,17 @@ func Probe(in, out *os.File, environ []string) Caps {
 	if in == nil || out == nil {
 		return Caps{Source: "not probed: no terminal handles"}
 	}
+	// Screen with Stat() before Fd(). os.File.Fd() permanently unregisters the
+	// descriptor from the Go runtime poller and switches it to blocking mode,
+	// so asking term.IsTerminal first would damage every non-terminal caller on
+	// the way to telling us it is not a terminal: SetReadDeadline afterwards
+	// returns nil and has no effect, and the next Read blocks in a raw syscall
+	// forever. A character device is a necessary condition for a terminal, so
+	// this rejects pipes, regular files and sockets without touching Fd(), and
+	// everything past this point already needs a real terminal.
+	if !isCharDevice(in) || !isCharDevice(out) {
+		return Caps{Source: "not probed: stdin/stdout is not a terminal"}
+	}
 	if !term.IsTerminal(in.Fd()) || !term.IsTerminal(out.Fd()) {
 		return Caps{Source: "not probed: stdin/stdout is not a terminal"}
 	}
@@ -123,6 +134,18 @@ func Probe(in, out *os.File, environ []string) Caps {
 		caps.Source = fmt.Sprintf("partially probed: %v — features answered before the cut-off are still reliable", err)
 	}
 	return caps
+}
+
+// isCharDevice reports whether f is a character device, the cheap precondition
+// for "is a terminal" that costs no poller registration. A failed Stat is
+// reported as not-a-device: the probe's contract is to degrade to nothing
+// supported rather than to guess.
+func isCharDevice(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 // readReplies runs Decide against in under an outer safety deadline.

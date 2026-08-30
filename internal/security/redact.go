@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/fiddler110/aegis/internal/redact"
 )
 
 // gitleaksSecretDoc mirrors the subset of gitleaks' JSON report fields needed
@@ -55,39 +57,51 @@ func parseGitleaksWithSecrets(data []byte) ([]gitleaksSecretDoc, error) {
 // bookkeeping across potential line-ending/encoding differences between what
 // gitleaks scanned on disk and the in-memory text.
 //
-// This mirrors ScanText's exact fail-open posture: if gitleaks isn't on PATH
-// (checked via the package's lookPath seam) or anything in the scan pipeline
-// fails, the original text is returned unchanged with nil findings and a nil
-// error — callers must never gain a hard dependency on gitleaks being
-// installed, and a scrubbing pass must never block a tool result from
-// reaching the model.
+// The scrub is two layers, and the order matters. internal/redact runs first
+// and unconditionally: it is a dependency-free, in-process pattern set (PEM
+// keys, AWS IDs, sk- keys, GitHub/Slack tokens, JWTs, bearer headers) already
+// trusted at the MCP outbound boundary, the audit trail and transcript export.
+// gitleaks then runs on top when it is on PATH, catching what the pattern set
+// does not.
+//
+// The layering closes a silent hole. This function used to open with a bare
+// `if !lookPath("gitleaks") { return text, nil, nil }`, so an operator who set
+// RedactSecrets on a cloud provider, on a host without gitleaks, got exactly
+// zero redaction — no warning, and no way to tell that state apart from
+// "scanned, found nothing." The fail-open posture below is deliberate and
+// stays: a scrubbing pass must never block a tool result from reaching the
+// model. What it now fails open *to* is the in-process floor rather than
+// nothing at all.
+//
+// Running the floor first also means fewer raw secrets reach disk: gitleaks
+// scans a temp file, and it now writes the already-floor-redacted text.
 func RedactText(ctx context.Context, text string) (string, []Finding, error) {
+	redacted, findings := redactInProcess(text)
+
 	if !lookPath("gitleaks") {
-		return text, nil, nil
+		return redacted, findings, nil
 	}
 
 	dir, err := os.MkdirTemp("", "gitleaks-redact-*")
 	if err != nil {
-		return text, nil, nil
+		return redacted, findings, nil
 	}
 	defer os.RemoveAll(dir)
 
-	if err := os.WriteFile(filepath.Join(dir, "content.txt"), []byte(text), 0o600); err != nil {
-		return text, nil, nil
+	if err := os.WriteFile(filepath.Join(dir, "content.txt"), []byte(redacted), 0o600); err != nil {
+		return redacted, findings, nil
 	}
 
 	report, err := runGitleaksHostDirReport(ctx, dir)
 	if err != nil {
-		return text, nil, nil
+		return redacted, findings, nil
 	}
 
 	docs, err := parseGitleaksWithSecrets(report)
 	if err != nil || len(docs) == 0 {
-		return text, nil, nil
+		return redacted, findings, nil
 	}
 
-	redacted := text
-	findings := make([]Finding, 0, len(docs))
 	for _, d := range docs {
 		secret := d.Secret
 		if secret == "" {
@@ -107,4 +121,32 @@ func RedactText(ctx context.Context, text string) (string, []Finding, error) {
 		})
 	}
 	return redacted, findings, nil
+}
+
+// redactInProcess applies the internal/redact pattern set and reports one
+// Finding per class that matched, so the count travels with the text.
+//
+// The findings exist so callers can tell "scrubbed, nothing found" apart from
+// "never ran" — the property redact.Text's own doc comment argues for, and the
+// reason this layer is not silent. Location is the class name rather than a
+// file:line: the pattern set works on an in-memory string with no line
+// bookkeeping, and inventing an offset would be worse than naming the class.
+func redactInProcess(text string) (string, []Finding) {
+	classes := redact.Classes(text)
+	out, n := redact.Text(text)
+	if n == 0 || len(classes) == 0 {
+		return out, nil
+	}
+	findings := make([]Finding, 0, len(classes))
+	for _, c := range classes {
+		findings = append(findings, Finding{
+			Tool:        "internal/redact",
+			RuleID:      c,
+			Severity:    SevHigh,
+			Title:       "potential secret (" + c + ")",
+			Location:    c,
+			Remediation: "rotate the exposed credential and remove it from the codebase",
+		})
+	}
+	return out, findings
 }

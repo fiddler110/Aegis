@@ -5,11 +5,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/fiddler110/aegis/internal/fsguard"
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // P64.1: a capped result's remainder used to be unrecoverable. The notice said
@@ -100,8 +104,32 @@ func spillText(ctx context.Context, root, kind, text string) (rel string, ok boo
 		return "", false
 	}
 	name := fmt.Sprintf("%s-%s-%s.txt", sanitizeSpillKind(kind), time.Now().UTC().Format("20060102T150405"), hex.EncodeToString(nonce[:]))
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+	// spillPath's own components (spillDirRel, a sanitized kind, a timestamp,
+	// a random nonce) never carry a traversal segment, but root itself can be
+	// a symlink whose target moved since the caller validated it — the same
+	// TOCTOU sandbox.ValidatePath already closes for every read/write tool.
+	// Routing the write through it here costs one syscall-bound check and
+	// keeps spill's confinement identical to theirs instead of a hand-rolled
+	// exception.
+	spillPath, err := sandbox.ValidatePath(root, spillDirRel+"/"+name)
+	if err != nil {
 		return "", false
+	}
+	if err := os.WriteFile(spillPath, []byte(text), 0o600); err != nil {
+		return "", false
+	}
+	// A spill file holds the overflow of a truncated tool result — raw file
+	// contents, verbatim. The 0o600 above is sufficient on POSIX and cosmetic
+	// on Windows, where a new file inherits its parent directory's ACL and the
+	// mode argument does nothing; fsguard applies a real non-inherited ACL
+	// there and is a no-op on POSIX. This is the same treatment the daemon
+	// token, the three SQLite stores, the TLS key, the swarm mailbox, the trust
+	// store and the modelcaps cache already get. Best-effort, deliberately: a
+	// spill that cannot be hardened is still better than a truncated result
+	// with nowhere to go, and the caller's contract is ok=false means *nothing
+	// was written*.
+	if err := fsguard.RestrictToOwner(spillPath); err != nil {
+		slog.Warn("spill: could not restrict file permissions", "path", spillPath, "err", err)
 	}
 	reapSpills(dir)
 	return spillDirRel + "/" + name, true

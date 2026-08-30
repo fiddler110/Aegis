@@ -19,12 +19,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
 // maxSnapshotBytes caps the size of a single file snapshot. Files larger than
@@ -249,65 +249,22 @@ func (s *Store) workspaceRoot(ctx context.Context, checkpointID string) (string,
 	return root, err
 }
 
-// resolveForCompare turns p into the path that containment should be judged on:
-// symlinks resolved as far as the filesystem can, the rest cleaned lexically.
-//
-// A captured path legitimately may not exist at restore time — a file created
-// during the turn is about to be deleted, or a file deleted during the turn is
-// about to be recreated — so EvalSymlinks on the full path is not enough. Walk
-// up to the deepest ancestor that *does* exist, resolve that, and re-append the
-// components below it. That still catches a symlinked directory in the middle
-// of the path (the classic escape), while letting a not-yet-existing leaf
-// inside the root validate.
-func resolveForCompare(p string) string {
-	p = filepath.Clean(p)
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return filepath.Clean(r)
-	}
-	rest := ""
-	cur := p
-	for {
-		parent := filepath.Dir(cur)
-		if parent == cur { // reached the volume/filesystem root
-			return p
-		}
-		rest = filepath.Join(filepath.Base(cur), rest)
-		cur = parent
-		if r, err := filepath.EvalSymlinks(cur); err == nil {
-			return filepath.Clean(filepath.Join(r, rest))
-		}
-	}
-}
-
-// foldPath normalizes case where the platform's filesystem does. Windows paths
-// compare case-insensitively, and EvalSymlinks there can hand back a different
-// casing (or the long form of an 8.3 name) than the one recorded at capture
-// time, so a case-sensitive comparison would reject legitimate paths.
-func foldPath(p string) string {
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(p)
-	}
-	return p
-}
-
 // withinRoot reports whether path resolves to a location strictly inside root.
-// Both sides go through resolveForCompare, so this is a real filesystem
-// containment check — `..` segments and symlinked ancestors are resolved — not
-// a string-prefix test (which would accept /work-other for a root of /work).
+// Both sides are symlink-resolved, so this is a real filesystem containment
+// check — `..` segments and symlinked ancestors are resolved — not a
+// string-prefix test (which would accept /work-other for a root of /work).
+//
+// CLN-1: the containment itself is sandbox.StrictlyWithinRootResolved. The two
+// guards stay here because they are this caller's preconditions rather than
+// properties of containment: an empty root is a checkpoint row with no
+// workspace recorded, and a relative path is not something restore may write.
+// "Strictly" is the P70.1 posture — a captured path equal to the workspace
+// root is not a file that could have been captured, and is refused.
 func withinRoot(root, path string) bool {
 	if root == "" || !filepath.IsAbs(path) {
 		return false
 	}
-	rr := foldPath(resolveForCompare(root))
-	rp := foldPath(resolveForCompare(path))
-	rel, err := filepath.Rel(rr, rp)
-	if err != nil {
-		return false
-	}
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
+	return sandbox.StrictlyWithinRootResolved(root, path)
 }
 
 // RestoreFiles writes each captured file in the checkpoint back to its
