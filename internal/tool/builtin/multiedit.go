@@ -191,7 +191,7 @@ func (t *multieditTool) loadFile(abs string, first editSpec) (*fileState, error)
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, fmt.Errorf("%s does not exist; pass an empty old_string to create it, or use write_file", first.Path)
 	default:
-		return nil, fmt.Errorf("cannot read %s: %v", first.Path, err)
+		return nil, fmt.Errorf("cannot read %s: %w", first.Path, err)
 	}
 }
 

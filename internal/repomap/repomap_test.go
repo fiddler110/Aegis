@@ -22,6 +22,50 @@ func writeFile(t *testing.T, dir, rel, content string) string {
 	return p
 }
 
+// TestBuildSkipsSymlinkedFiles pins GAP-1.1: unlike every builtin tool
+// (which resolves through sandbox.ValidatePath/ValidatePathIn before
+// touching disk), Build used to open whatever a source-extension file entry
+// pointed at, following symlinks with no confinement check. A symlink
+// planted inside an otherwise-trusted root — by a prior turn, or synced from
+// an untrusted source — could point anywhere the process can read, and its
+// declaration signatures would end up in the model-visible repo map. Build
+// must skip symlinked file entries outright rather than read through them.
+func TestBuildSkipsSymlinkedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "real.go", "package main\n\nfunc RealFunc() {}\n")
+
+	outside := t.TempDir()
+	target := writeFile(t, outside, "secret.go", "package secret\n\nfunc LeakedFunc() {}\n")
+
+	link := filepath.Join(dir, "linked.go")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink creation not permitted in this environment: %v", err)
+	}
+
+	m, err := Build(dir, Options{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var sawReal, sawLeaked bool
+	for _, f := range m.Files {
+		for _, s := range f.Symbols {
+			if strings.Contains(s, "RealFunc") {
+				sawReal = true
+			}
+			if strings.Contains(s, "LeakedFunc") {
+				sawLeaked = true
+			}
+		}
+	}
+	if !sawReal {
+		t.Error("expected the real, non-symlinked file's symbol to be indexed")
+	}
+	if sawLeaked {
+		t.Error("Build read through a symlink and indexed a symbol from outside the root")
+	}
+}
+
 func TestBuildExtractsGoSymbols(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "main.go", `package main

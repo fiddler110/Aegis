@@ -132,6 +132,30 @@ func TestNewInvalidPathErrors(t *testing.T) {
 	}
 }
 
+// TestNewAppliesPermissionHardening is the cross-platform half of GAP-3.1's
+// regression coverage (Windows DACL assertions live in
+// logging_windows_test.go, mirroring fsguard's own split): on POSIX,
+// fsguard.RestrictToOwner is a no-op, so this only pins that New still opens
+// and writes successfully with the hardening call in place.
+func TestNewAppliesPermissionHardening(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aegis.log")
+	logger, closer, err := New(Options{Path: path})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	logger.Info("hardened")
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "hardened") {
+		t.Errorf("log file = %q, want it to contain \"hardened\"", data)
+	}
+}
+
 // TestRotatingWriterRotatesOnSize verifies a write that would push the file
 // past MaxSizeBytes rotates first (GAP-02): the prior content lands in
 // aegis.log.1 and the new write starts a fresh, short file.

@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/fiddler110/aegis/internal/fsguard"
 )
 
 // Options controls logger construction.
@@ -41,6 +43,13 @@ func New(opts Options) (*slog.Logger, io.Closer, error) {
 			f, err = newRotatingWriter(opts.Path, opts.MaxSizeBytes, opts.MaxBackups)
 		} else {
 			f, err = os.OpenFile(opts.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			// GAP-3.1: 0o600 alone is cosmetic on Windows (new files inherit
+			// the parent directory's ACL) — every other security-sensitive
+			// file in this codebase applies this hardening, and log content
+			// is not guaranteed metadata-only forever.
+			if err == nil {
+				_ = fsguard.RestrictToOwner(opts.Path)
+			}
 		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("open log file %s: %w", opts.Path, err)
@@ -92,6 +101,7 @@ func newRotatingWriter(path string, maxSize int64, maxBackups int) (*rotatingWri
 	if err != nil {
 		return nil, err
 	}
+	_ = fsguard.RestrictToOwner(path) // GAP-3.1, see New's comment
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
@@ -142,6 +152,7 @@ func (w *rotatingWriter) rotateLocked() error {
 	if err != nil {
 		return err
 	}
+	_ = fsguard.RestrictToOwner(w.path) // GAP-3.1, see New's comment
 	w.f = f
 	w.size = 0
 	return nil

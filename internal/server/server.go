@@ -120,6 +120,16 @@ type Server struct {
 	repoMapMu    sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
 	personaDirs  []string          // directories rescanned by refreshPersonas for hot reload
 
+	// daemonCtx is cancelled when ListenAndServe's caller shuts the daemon
+	// down. Background work spawned off the request path (goroutines that
+	// must outlive the handler that started them, like the async checkpoint
+	// git-SHA capture in messages.go) derives its own bounded context from
+	// this one instead of context.Background(), so it is cancelled early on
+	// graceful shutdown rather than only bounded by its own timeout.
+	// Defaults to context.Background() in newWithDeps so tests that never
+	// call ListenAndServe still get a valid, non-nil context.
+	daemonCtx context.Context
+
 	// knowledgeStores/repoMaps cache a per-session-Workdir instance of each
 	// daemon-wide singleton (P25.9): s.knowledge/s.repoMap above remain the
 	// fast path for the daemon's own default workspace (root == s.workspace),
@@ -1525,7 +1535,8 @@ func newWithDeps(cfg *config.Config, logger *slog.Logger, store *session.Store, 
 	// refines the rest of the P53.4 conformance sample in the background, so
 	// provider.tool_call_probe_trials never costs first-message latency.
 	s := &Server{cfg: cfg, store: store, adapter: adapter, tools: tools, logger: logger, runs: newRunRegistry(),
-		toolCalling: toolcallprobe.NewGate(toolcallprobe.WithTrials(cfg.Provider.ToolCallProbeTrials))}
+		toolCalling: toolcallprobe.NewGate(toolcallprobe.WithTrials(cfg.Provider.ToolCallProbeTrials)),
+		daemonCtx:   context.Background()}
 	if cfg.Server.MaxConcurrentRuns > 0 {
 		s.runSem = make(chan struct{}, cfg.Server.MaxConcurrentRuns)
 	}
@@ -1634,6 +1645,7 @@ func (s *Server) validateListenAddr() error {
 
 // ListenAndServe runs the daemon until ctx is cancelled.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	s.daemonCtx = ctx
 	if s.authToken == "" {
 		return fmt.Errorf("server: refusing to start: auth token was not generated")
 	}

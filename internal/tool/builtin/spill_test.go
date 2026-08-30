@@ -9,6 +9,26 @@ import (
 	"testing"
 )
 
+// TestSpillWriteSucceedsWithHardening is the cross-platform half of GAP-3.2's
+// regression coverage (Windows DACL assertions live in
+// spill_windows_test.go, mirroring fsguard's own split): on POSIX,
+// fsguard.RestrictToOwner is a no-op, so this only pins that spillText still
+// writes successfully with the hardening call in place.
+func TestSpillWriteSucceedsWithHardening(t *testing.T) {
+	root := t.TempDir()
+	rel, ok := spillText(context.Background(), root, "shell", "secret content")
+	if !ok {
+		t.Fatal("spillText reported failure")
+	}
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "secret content" {
+		t.Errorf("spilled content = %q, want %q", data, "secret content")
+	}
+}
+
 // TestSpillIsBestEffort covers P64.1's third load-bearing rule: no session, no
 // store, or a failed write leaves the inline result exactly as it was and never
 // converts a success into isError. A spill is an improvement on the notice, never

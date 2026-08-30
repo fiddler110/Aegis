@@ -402,6 +402,18 @@ func Build(root string, opts Options) (*Map, error) {
 			}
 			return nil
 		}
+		// GAP-1.1: unlike every builtin tool (which resolves through
+		// sandbox.ValidatePath/ValidatePathIn), Build has no reason to
+		// follow a symlinked file into reading it — a symlink planted
+		// inside an otherwise-trusted root (e.g. by a prior turn, or synced
+		// from an untrusted source) could otherwise point anywhere the
+		// daemon process can read, and its declaration-line signatures would
+		// end up in the model-visible repo map. d.Type() reports the direct
+		// entry's mode without following the link, so this skips it before
+		// any read.
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
 		patterns, ok := langPatterns[strings.ToLower(filepath.Ext(name))]
 		if !ok {
 			return nil

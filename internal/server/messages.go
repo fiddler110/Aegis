@@ -279,9 +279,13 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 			s.logger.Warn("create checkpoint", "session", id, "err", err)
 		} else {
 			snap = s.checkpoints.NewSnapshotter(cp.ID)
-			// P3.4: capture the HEAD commit SHA asynchronously so rollback can reset to it.
+			// P3.4: capture the HEAD commit SHA asynchronously so rollback can
+			// reset to it. GAP-2.1: derived from the daemon's own lifetime
+			// context (s.daemonCtx) rather than context.Background(), so
+			// graceful shutdown cancels an in-flight capture immediately
+			// instead of waiting out captureGitSHA's own bound.
 			go func(cpID string) {
-				if sha := captureGitSHA(context.Background(), workdir); sha != "" {
+				if sha := captureGitSHA(s.daemonCtx, workdir); sha != "" {
 					if err := s.checkpoints.SetGitSHA(context.Background(), cpID, sha); err != nil {
 						s.logger.Warn("set checkpoint git sha", "checkpoint", cpID, "err", err)
 					}

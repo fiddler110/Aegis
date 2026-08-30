@@ -889,10 +889,21 @@ func execGitCmd(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// captureGitSHACmdTimeout bounds every captureGitSHA invocation (GAP-2.1):
+// `git rev-parse HEAD` is normally instant, but a corrupted repo, a
+// network-mounted workdir, a hanging git hook, or a held .git/index lock can
+// block it indefinitely. captureGitSHA enforces this bound itself, on top of
+// whatever the caller's ctx already carries, so it can never leak the
+// goroutine (or the child git process) for the life of the daemon regardless
+// of what context a future caller passes in.
+const captureGitSHACmdTimeout = 5 * time.Second
+
 // captureGitSHA returns the current HEAD commit SHA via `git rev-parse HEAD`,
-// returning an empty string if git is unavailable or the directory is not a
-// repo.
+// returning an empty string if git is unavailable, the directory is not a
+// repo, or the command doesn't complete within captureGitSHACmdTimeout.
 func captureGitSHA(ctx context.Context, root string) string {
+	ctx, cancel := context.WithTimeout(ctx, captureGitSHACmdTimeout)
+	defer cancel()
 	out, err := execGitCmd(ctx, "-C", root, "rev-parse", "HEAD")
 	if err != nil {
 		return ""
