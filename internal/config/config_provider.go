@@ -430,6 +430,37 @@ func isLoopbackBaseURL(raw string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// MeteredCloudEndpoint reports whether the resolved provider is a remote,
+// per-token-billed endpoint — the one case where an unbounded run costs real
+// money (P81.15/FIND-15), and therefore the only case that gets a shipped spend
+// ceiling.
+//
+// The line is drawn with IsLoopbackBaseURL rather than a second test of its
+// own, deliberately: providerfactory's validateBaseURL already treats "loopback"
+// as the boundary between an endpoint the operator is hosting and one they are
+// paying, and two predicates that mean the same thing drift apart. So an
+// explicit base_url decides on its own — loopback (Ollama, LiteLLM, an
+// OpenAI-compatible proxy on this machine) is never metered, anything else is
+// treated as remote. Only with no base_url at all does the adapter name decide,
+// and only "anthropic" and "openai" bill: exactly the names for which
+// providerfactory's defaultProviderHost has a host to name.
+//
+// It errs toward *metered* for a remote host reached under a local adapter name
+// (an Ollama server on another box), and that direction is free rather than
+// merely acceptable: a USD cap over unpriced inference never fires, because the
+// usage carries no dollar cost to accumulate against it.
+func (p ProviderConfig) MeteredCloudEndpoint() bool {
+	if strings.TrimSpace(p.BaseURL) != "" {
+		return !isLoopbackBaseURL(p.BaseURL)
+	}
+	switch strings.ToLower(strings.TrimSpace(p.Default)) {
+	case "anthropic", "openai":
+		return true
+	default:
+		return false
+	}
+}
+
 // ProviderFallbackConfig is one entry in ProviderConfig.Fallback.
 type ProviderFallbackConfig struct {
 	Provider string `koanf:"provider"` // "anthropic", "openai", or "ollama"

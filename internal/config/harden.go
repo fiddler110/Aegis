@@ -14,6 +14,26 @@ const (
 	HardenDailyTokenCap   = 2_000_000
 )
 
+// tightenable reports whether harden may lower a USD cap: it is either wide
+// open (0 = unlimited) or still sitting at the shipped cloud default.
+//
+// The second clause is what P81.15 made necessary. Until the cloud spend
+// ceilings shipped, "the operator never answered this" and "the value is 0" were
+// the same statement, so `<= 0` was a complete test. Now a metered cloud
+// provider arrives at $10/$50 without anybody choosing them, and reading that as
+// a considered answer would make `aegis harden` silently stop tightening the
+// exact caps it exists to tighten — a hardening command reporting "already
+// hardened" about a default it did not set.
+//
+// It compares against the shipped value rather than against HardenSessionCapUSD,
+// so harden still never *raises* a cap and still leaves a tighter operator
+// choice (a $1.50 session cap) alone. The one ambiguous case is an operator who
+// deliberately typed the shipped number; harden tightening that is the harmless
+// direction, and it is what they asked for by running harden.
+func tightenable(cap, shippedDefault float64) bool {
+	return cap <= 0 || cap == shippedDefault
+}
+
 // HardenPlan is the pure "what would a hardened profile change" computation
 // shared by `aegis harden` (internal/cli/harden.go) and
 // POST /config/harden (internal/server/config.go, P15.2) — kept in one place
@@ -84,11 +104,11 @@ func ComputeHardenPlan(cfg *Config) HardenPlan {
 		AlertThreshold:  cfg.Cost.AlertThreshold,
 	}
 	var costChanges []string
-	if costPatch.SessionCapUSD <= 0 {
+	if tightenable(costPatch.SessionCapUSD, DefaultCloudSessionCapUSD) {
 		costPatch.SessionCapUSD = HardenSessionCapUSD
 		costChanges = append(costChanges, fmt.Sprintf("session_cap_usd -> $%.2f", HardenSessionCapUSD))
 	}
-	if costPatch.DailyCapUSD <= 0 {
+	if tightenable(costPatch.DailyCapUSD, DefaultCloudDailyCapUSD) {
 		costPatch.DailyCapUSD = HardenDailyCapUSD
 		costChanges = append(costChanges, fmt.Sprintf("daily_cap_usd -> $%.2f", HardenDailyCapUSD))
 	}

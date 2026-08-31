@@ -174,11 +174,15 @@ func defaults() map[string]any {
 		"diagram.kroki_url":                      "https://kroki.io",
 		"cost.budget_usd":                        0.0,
 		"cost.max_tokens_per_run":                0,
-		"cost.session_cap_usd":                   0.0,
-		"cost.daily_cap_usd":                     0.0,
-		"cost.session_token_cap":                 0,
-		"cost.daily_token_cap":                   0,
-		"cost.alert_threshold":                   0.8,
+		// cost.session_cap_usd and cost.daily_cap_usd are deliberately absent
+		// from this map. Their default is conditional on the resolved provider
+		// (P81.15) and is applied by applyCloudSpendDefaults after the merge;
+		// listing them here at 0.0 would make koanf report every load as having
+		// stated them, and an operator's explicit `0` — the documented way to
+		// say *unlimited* — would be indistinguishable from not having answered.
+		"cost.session_token_cap": 0,
+		"cost.daily_token_cap":   0,
+		"cost.alert_threshold":   0.8,
 		// P39.17: on by default, unlike every other cost bound. See
 		// DefaultMaxTurnStallSec for why fifteen minutes and why silence is the
 		// one time-shaped signal that needs no operator judgement.
@@ -598,6 +602,14 @@ func Load() (*Config, error) {
 	// expanding $VAR before the diff would compare an expanded project value
 	// against an unexpanded baseline one and report a change that isn't there.
 	cfg.Provider.APIKey = ProviderAPIKey(cfg.Provider.Default)
+
+	// P81.15/FIND-15: a metered cloud endpoint gets a shipped spend ceiling on
+	// any cap no layer stated. After the freeze for the same reason as the key
+	// resolution above — the provider this classifies must be the one that will
+	// actually be dialled, not one an untrusted project asked for and had
+	// reverted. `full` is the merged instance, so Exists is true for a value
+	// from any layer, including an explicit 0.
+	applyCloudSpendDefaults(&cfg, full.Exists)
 
 	// Expand $VAR / ${VAR} references in MCP auth tokens so secrets can be
 	// kept in environment variables or .aegis/.env rather than in the YAML.

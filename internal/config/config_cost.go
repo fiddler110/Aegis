@@ -124,6 +124,68 @@ func (c CostConfig) MaxWallClockPerRun() time.Duration {
 // enumerating test above is what enforces the choice.
 const DefaultMaxTurnStallSec = 900
 
+// Shipped spend ceilings for a *metered cloud* provider (P81.15/FIND-15).
+//
+// Every cost bound but max_turn_stall used to default to 0 = unlimited, and
+// max_turn_stall catches silence — a model that keeps producing tokens, whether
+// it is looping or steered there by an injected instruction, never trips it. So
+// the shipped state was: nothing bounds spend until the operator notices the
+// bill. internal/cost and the server's pre-turn checks implement the accounting
+// correctly; nothing was switched on.
+//
+// They apply only when ProviderConfig.MeteredCloudEndpoint() says the resolved
+// provider bills per token at a remote endpoint, and only to a cap no layer has
+// set (see applyCloudSpendDefaults). On the loopback/local path — this project's
+// normal mode — the caps stay at 0, because a bound on unpriced local inference
+// can only ever be a false stop.
+//
+// The values are deliberately *looser* than HardenSessionCapUSD /
+// HardenDailyCapUSD (5/25). Those are what an operator opts into by running
+// `aegis harden`, and an opt-in may reasonably interrupt work to make its point.
+// A shipped default may not: a ceiling that trips during ordinary work would be
+// removed by the first operator it inconvenienced, and a removed ceiling bounds
+// nothing. $10 is well past a day's ordinary agent-assisted work on a coding
+// task and well short of a runaway; $50 is the same judgement across every
+// session in a UTC day. Both are starting points to be edited, not a
+// prescription — and an explicit `0` still means unlimited.
+const (
+	DefaultCloudSessionCapUSD = 10.0
+	DefaultCloudDailyCapUSD   = 50.0
+)
+
+// applyCloudSpendDefaults installs the P81.15 cloud spend ceilings on a cap that
+// no configuration layer stated.
+//
+// Two things make this a load-bearing function rather than two more entries in
+// defaults(). First, the defaults layer cannot ask what provider it is about:
+// the answer depends on provider.base_url and provider.default *after* the
+// merge and after the trust freeze has had its say (a base_url from an untrusted
+// project is reverted before we get here, so this classifies the endpoint that
+// will actually be dialled, not the one the repository asked for). Second, the
+// keys are deliberately absent from defaults() so that koanf's Exists can tell
+// "unset" from "set to zero" — 0 is the documented way to say *unlimited*, and
+// an operator who wrote it must keep getting it. Anything a layer states,
+// including a zero, is left exactly as it is.
+//
+// One residual, stated rather than rounded off: `cost` is projectSettable (see
+// configTrustPolicy), so an untrusted project config can state `daily_cap_usd: 0`
+// and opt out of this ceiling. That follows from cost's existing classification —
+// a project already loosens its own ceilings there, and none of them buys a
+// capability the permission gate has not already granted — and narrowing it to
+// the operator's own layers would be a change to that classification, not to
+// this default. It is worth revisiting if `cost` is ever reclassified.
+func applyCloudSpendDefaults(cfg *Config, stated func(key string) bool) {
+	if !cfg.Provider.MeteredCloudEndpoint() {
+		return
+	}
+	if !stated("cost.session_cap_usd") {
+		cfg.Cost.SessionCapUSD = DefaultCloudSessionCapUSD
+	}
+	if !stated("cost.daily_cap_usd") {
+		cfg.Cost.DailyCapUSD = DefaultCloudDailyCapUSD
+	}
+}
+
 // MaxTurnStall returns cost.max_turn_stall as a time.Duration, or 0 when set to
 // zero or negative — which the engine reads as "no stall detection" (P39.17).
 //
