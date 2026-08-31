@@ -611,6 +611,19 @@ func Load() (*Config, error) {
 	// from any layer, including an explicit 0.
 	applyCloudSpendDefaults(&cfg, full.Exists)
 
+	// P81.15: a project may tighten a spend or run bound, never loosen one.
+	// The baseline gets the same defaults resolved against the project-excluded
+	// layer set, so "the operator's ceiling" is the one that would be in force
+	// with this repository absent — which is the only comparison that catches
+	// the commonest case, a project writing `daily_cap_usd: 0`. That states a
+	// value, so Exists suppresses the shipped default above, and without a
+	// defaulted baseline to compare against there is nothing here that even
+	// looks like a change. Unconditional: trust is not a spend decision, so
+	// this runs for trusted workspaces too. See projectMayTighten.
+	baseWithDefaults := baseCfg
+	applyCloudSpendDefaults(&baseWithDefaults, baseline.Exists)
+	clampProjectLoosenedBounds(&cfg, &baseWithDefaults)
+
 	// Expand $VAR / ${VAR} references in MCP auth tokens so secrets can be
 	// kept in environment variables or .aegis/.env rather than in the YAML.
 	for i := range cfg.MCP {
@@ -677,7 +690,14 @@ func applyWorkspaceTrust(cfg, baseline *Config, dir string, status workspacetrus
 		return
 	}
 
-	freezeToBaseline(cfg, baseline, func(p trustPolicy) bool { return p != projectSettable })
+	freezeToBaseline(cfg, baseline, func(p trustPolicy) bool {
+		// projectMayTighten is excluded for the same reason it is excluded
+		// from securityRelevantDiff: reverting it wholesale here would throw
+		// away a project's legitimate *tightening* along with a loosening.
+		// clampProjectLoosenedBounds handles those keys, unconditionally and
+		// after the cloud spend defaults have resolved on both sides.
+		return p != projectSettable && p != projectMayTighten
+	})
 	cfg.WorkspaceTrust.Frozen = true
 	cfg.WorkspaceTrust.Changes = diffs
 }

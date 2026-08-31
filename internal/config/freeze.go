@@ -16,6 +16,27 @@ const (
 	// trusted or not. Reserved for keys with no host-execution, network-
 	// egress, confinement or audit-integrity effect.
 	projectSettable trustPolicy = iota
+	// projectMayTighten: a project's .aegis/config.yaml may make this bound
+	// *stricter* than the operator's own layers resolve to, freely and with no
+	// trust prompt, but may never loosen or remove it. A loosened value is
+	// reverted to the baseline and logged (clampProjectLoosenedBounds).
+	//
+	// P81.15. The keys are the cost bounds. Freezing them outright was the
+	// obvious alternative and is wrong: "this repo needs a smaller budget" is
+	// an ordinary, harmless thing for a project to say, and making it raise a
+	// trust prompt teaches the operator to click through the prompt that also
+	// guards permission/sandbox/mcp. Leaving them projectSettable was the
+	// status quo and is also wrong: the shipped cloud ceiling is not a bound
+	// at all if any repository you clone can write `daily_cap_usd: 0`.
+	//
+	// Trust deliberately does not unlock loosening, which is what separates
+	// this from frozenUntilTrusted. Trusting a repository's config is a
+	// judgement about what that code may *do* on this machine; the spend
+	// ceiling is a statement about the operator's own money, and a runaway
+	// loop in a trusted repository bills exactly the same as one in an
+	// untrusted repository. There is no trust decision to make here, so these
+	// keys never enter securityRelevantDiff and never raise a prompt.
+	projectMayTighten
 	// frozenUntilTrusted: the project layer is discarded (the key falls back
 	// to its user/global value) until an operator runs `aegis trust` here.
 	frozenUntilTrusted
@@ -181,11 +202,28 @@ var configTrustPolicy = map[string]trustPolicy{
 	"tui":             projectSettable, // theme, keybindings, image rendering
 	"swarm":           projectSettable, // in_process vs. subprocess sub-agents; the subprocess is Aegis itself
 	"tools":           projectSettable, // additive deferred-tool families; permission still gates every call
-	// cost is spend and run-length ceilings. A project loosening its own
-	// ceilings buys no capability the operator has not already granted — the
-	// permission gate is unaffected — and a repo whose build genuinely takes
-	// forty turns has a legitimate reason to say so.
-	"cost": projectSettable,
+	// cost is spend and run-length ceilings, and the block stays settable: a
+	// repo whose build genuinely takes forty turns has a legitimate reason to
+	// say so, and alert_threshold is a display preference.
+	//
+	// The bounds themselves are projectMayTighten (P81.15). The reasoning that
+	// used to justify leaving them fully settable — "a project loosening its
+	// own ceilings buys no capability the operator has not already granted" —
+	// was true of the permission gate and false of the bill. It was written
+	// when every one of these defaulted to 0/unlimited, so there was no
+	// ceiling for a project to loosen; once a metered cloud endpoint ships a
+	// real default, `daily_cap_usd: 0` in a cloned repo's config is the whole
+	// ceiling removed by the party it exists to bound. Tightening stays free.
+	"cost":                              projectSettable,
+	"cost.budget_usd":                   projectMayTighten,
+	"cost.max_tokens_per_run":           projectMayTighten,
+	"cost.max_generated_tokens_per_run": projectMayTighten,
+	"cost.max_wall_clock_per_run":       projectMayTighten,
+	"cost.max_turn_stall":               projectMayTighten,
+	"cost.session_cap_usd":              projectMayTighten,
+	"cost.daily_cap_usd":                projectMayTighten,
+	"cost.session_token_cap":            projectMayTighten,
+	"cost.daily_token_cap":              projectMayTighten,
 }
 
 // policyFor returns the policy for a dotted config path: the path's own entry
@@ -301,7 +339,11 @@ func Diff(from, to *Config) []string {
 func securityRelevantDiff(full, base *Config) []string {
 	var diffs []string
 	walkConfigPolicy(full, base, func(path string, pol trustPolicy, fullv, basev reflect.Value) {
-		if pol == projectSettable {
+		// projectMayTighten keys are absent here on purpose: they are handled
+		// unconditionally by clampProjectLoosenedBounds, so they never need a
+		// trust decision and must not add a line to a prompt that is asking
+		// about permission/sandbox/mcp. See the policy's doc comment.
+		if pol == projectSettable || pol == projectMayTighten {
 			return
 		}
 		diffs = append(diffs, describeChanges(path, basev, fullv)...)
@@ -387,6 +429,89 @@ func applyBaselineOnlyKeys(cfg, baseline *Config) {
 			"key", path, "fix", "set it in ~/.config/aegis/config.yaml or the environment")
 		cfgv.Set(basev)
 	})
+}
+
+// clampProjectLoosenedBounds reverts every projectMayTighten bound the project
+// layer made looser than the operator's own layers resolve to, and leaves the
+// ones it made stricter alone.
+//
+// P81.15. Unconditional, like applyBaselineOnlyKeys and for a related reason:
+// there is no trust decision to make (see projectMayTighten), so this runs
+// whether or not the workspace is trusted and whether or not a project config
+// file exists.
+//
+// It must run *after* applyCloudSpendDefaults, and baseline must be a config
+// the same defaults have been applied to — via the project-excluded layer set,
+// so "the operator's ceiling" means the one that would be in force with this
+// repository absent. Ordering is the whole fix in the commonest case: a
+// project writing `daily_cap_usd: 0` states a value koanf's Exists reports as
+// set, which suppresses the shipped default, so before the defaults are
+// resolved on both sides there is nothing here that even looks like a change.
+func clampProjectLoosenedBounds(cfg, baseline *Config) {
+	walkConfigPolicy(cfg, baseline, func(path string, pol trustPolicy, cfgv, basev reflect.Value) {
+		if pol != projectMayTighten || !looserBound(cfgv, basev) {
+			return
+		}
+		slog.Default().Warn("ignoring project config that would loosen a spend or run bound",
+			"key", path,
+			"project", formatValue(cfgv),
+			"in_force", formatValue(basev),
+			"fix", "raise it in ~/.config/aegis/config.yaml or the environment if this is intended")
+		cfgv.Set(basev)
+	})
+}
+
+// looserBound reports whether cfgv is a weaker bound than basev.
+//
+// Every key this is asked about documents `0 = unlimited` (or, for
+// max_turn_stall, `0 = disabled`), which makes zero simultaneously the
+// numerically smallest value and the semantically loosest one. A naive
+// "smaller wins" comparison therefore reads `daily_cap_usd: 0` as the
+// tightest possible ceiling and lets through precisely the value this exists
+// to reject. Non-positive is normalized to unlimited on both sides, matching
+// how MaxWallClockPerRun and MaxTurnStall already read these fields.
+//
+// Anything not numeric fails closed — reported as looser, and so reverted —
+// so a bound added to the table with a shape this does not understand is
+// conservative rather than silently unguarded.
+func looserBound(cfgv, basev reflect.Value) bool {
+	if reflect.DeepEqual(cfgv.Interface(), basev.Interface()) {
+		return false
+	}
+	c, ok := boundMagnitude(cfgv)
+	if !ok {
+		return true
+	}
+	b, ok := boundMagnitude(basev)
+	if !ok {
+		return true
+	}
+	switch {
+	case b <= 0:
+		// The operator's own layers impose no bound, so nothing the project
+		// can say is weaker than it.
+		return false
+	case c <= 0:
+		// Unlimited against a real operator ceiling: the removal case.
+		return true
+	default:
+		return c > b
+	}
+}
+
+// boundMagnitude reads a bound field as a float, reporting false for a kind
+// looserBound has no ordering for.
+func boundMagnitude(v reflect.Value) (float64, bool) {
+	switch v.Kind() {
+	case reflect.Float32, reflect.Float64:
+		return v.Float(), true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(v.Int()), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return float64(v.Uint()), true
+	default:
+		return 0, false
+	}
 }
 
 // rejectRelativeCommandOverrides drops any `commands:` value the project layer
