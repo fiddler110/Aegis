@@ -320,6 +320,16 @@ func (s *Server) wireAuthAndTLS(cfg *config.Config) error {
 	}
 	s.authToken = token
 
+	// P81.3/FIND-03: a second, separately-stored credential for the config
+	// PATCH endpoints that can weaken the daemon's security posture. Written
+	// to its own file so that "reads daemon.token" and "can weaken command
+	// isolation" are no longer the same permission.
+	adminToken, err := generateAndWriteToken(cfg.AdminTokenPath())
+	if err != nil {
+		return fmt.Errorf("admin token: %w", err)
+	}
+	s.adminToken = adminToken
+
 	if cfg.Server.TLS.Enabled {
 		cert, err := ensureTLSCert(cfg.TLSCertPath(), cfg.TLSKeyPath(), s.logger)
 		if err != nil {

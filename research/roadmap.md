@@ -459,6 +459,19 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
+**Updated 2026-08-31 (ninth entry the same day)**: **P81.3's credential split — the one piece this
+table's ranking named as needing an operator decision before code — is decided and shipped.** The
+operator chose a second, separately-stored token (`admin.token`) over an interactive TUI/UI
+confirmation, gating all four config PATCH endpoints named in the finding. `requireAdminToken`
+(`internal/server/auth.go`) wraps `PATCH /config/{sandbox,security,skills,cost}`; the daemon refuses
+to start if the token wasn't generated, the same posture as the bearer token. `client.Client` carries
+it transparently for every CLI caller (`NewFromConfig` reads it from disk like `daemon.token`), so
+nothing already working needed a code change on the caller side — only the web UI's browser session,
+which by design never receives it, loses access to the one PATCH-gated endpoint it called
+(`/config/skills`'s toggle panel), surfacing as a 403 toast rather than a silent failure. **P81.3** is
+now fully closed; **P81.4** — the web UI's own token-exposure problem, and the natural place to decide
+whether browser sessions ever get a path to posture-weakening calls — moves to the top of this table.
+
 **Updated 2026-08-31 (eighth entry the same day)**: **the five items this table's ranking named next are
 all worked.** **P81.8**'s TUI surfacing shipped (a new `internal/egress.Tracker`, live per-run web_fetch
 byte count in the TUI status line/sidebar); **P81.1**'s scan-hit decision point shipped (a heuristic
@@ -553,10 +566,9 @@ table, deliberately, so `scripts/roadmap-status.sh` and this ranking agree.
 See [releases.md](releases.md) for every record.
 
 | #   | Item                                                                                              | Tier / size          | Why now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| --- | ------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | **P81.3**'s credential split — a second daemon secret or an interactive confirmation for posture-weakening PATCH endpoints | Tier 3 — design decision | The runtime-transition-refusal half shipped 2026-08-31; this is what's left, and it needs an operator decision (how many secrets this daemon has) before code, not more research. |
-| 2   | **P81.4** — the web UI hands the real daemon token to browser JavaScript                          | Tier 3 — High         | Next fresh item in the Tier 3 take order (P81.1/P81.8/P81.5/P81.2/P81.3 all worked 2026-08-31). `High` effort, `Redesign` mitigation — larger than it looks because the SPA's whole call path changes, and it wants **P81.25**'s revocation story to be useful.                                                                                                                                                                                                                                                                                              |
-| 3   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2, P80.4) — _parked by choice, 2026-08-16_ | Verification         | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** now have what they needed — a surviving data dir and `aegis sessions trace <id>`, shipped as **P68.1** (2026-08-22) — so whenever this row is next picked up, the next sitting can actually judge them instead of reproducing the same unreadable evidence. |
+| --- | ------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **P81.4** — the web UI hands the real daemon token to browser JavaScript                          | Tier 3 — High         | Next fresh item in the Tier 3 take order (P81.1/P81.8/P81.5/P81.2/P81.3 all worked 2026-08-31). `High` effort, `Redesign` mitigation — larger than it looks because the SPA's whole call path changes, and it wants **P81.25**'s revocation story to be useful.                                                                                                                                                                                                                                                                                              |
+| 2   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2, P80.4) — _parked by choice, 2026-08-16_ | Verification         | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** now have what they needed — a surviving data dir and `aegis sessions trace <id>`, shipped as **P68.1** (2026-08-22) — so whenever this row is next picked up, the next sitting can actually judge them instead of reproducing the same unreadable evidence. |
 
 **One item is deliberately off this list, Tier 4 with no fired trigger.** **P74.21** (filed
 2026-08-21) is the half of P74.17's own roadmap entry that did not ship with it — see
@@ -1540,11 +1552,39 @@ there is no `PATCH /config/permission` endpoint, the fixtures seed `permission.a
 writing the redirected global `config.yaml` directly before the sandbox PATCH — the only way to get
 that state onto disk at all today.
 
-Priority: Tier 3 — **the runtime-transition refusal is closed.** The credential split is a genuine
-design decision — a second, separately-stored token, or an interactive TUI/UI confirmation for
-posture-weakening endpoints — that changes the daemon's secret/deployment model and was deliberately
-left to the operator rather than decided unilaterally in this sitting; it stays open, Tier 3, until
-that decision is made.
+**The credential split SHIPPED 2026-08-31** as the operator-chosen design: a second, separately-stored
+token rather than an interactive TUI/UI confirmation. The daemon now generates
+`<data_dir>/admin.token` alongside `daemon.token` (`wireAuthAndTLS` in `internal/server/wiring.go`,
+same `generateAndWriteToken`/`fsguard.RestrictToOwner` path, new `config.AdminTokenPath()`) and
+`requireAdminToken` (`internal/server/auth.go`) wraps `PATCH /config/sandbox`, `/config/security`,
+`/config/skills` and `/config/cost` (`internal/server/lifecycle.go`) to additionally require it via
+an `X-Aegis-Admin-Token` header, checked with `subtle.ConstantTimeCompare` after `authMiddleware` has
+already accepted the normal bearer token — a caller holding only `daemon.token` gets 403, not 401,
+distinguishing "authenticated but not authorized for this posture-weakening call" from "not
+authenticated at all". `ListenAndServe` refuses to start if the admin token was never generated, the
+same way it already does for the bearer token. `client.Client` grew `WithAdminToken`/
+`WithAdminTokenFile` (and a `PatchConfigCost`/`GetConfigCost` pair that didn't exist yet); `NewFromConfig`
+reads `admin.token` from disk automatically, so every CLI command that already worked continues to,
+with no operator action needed. `server.allow_remote` itself has no PATCH endpoint — it's a
+startup-only config value — so nothing there needed gating; the roadmap's mention of it was
+context, not a second surface to close.
+
+**Known consequence, accepted as part of this design.** The web UI's page-token exchange
+(**P81.4**) hands a browser only the real bearer token, never `admin.token` — deliberately, since a
+browser-reachable admin token would defeat the whole point of the split. The one PATCH-gated
+endpoint the frontend actually calls, `/config/skills` (`SkillsMemoryPanel.tsx`), now returns 403 for
+every browser session; the daemon's error message ("missing or invalid X-Aegis-Admin-Token header")
+surfaces as a toast via the frontend's existing generic error handling, so the failure is visible
+rather than silent, but the control is not usable from the web UI until it gets its own story —
+plausibly the same interactive-confirmation mechanism **P81.4**'s revocable browser credential would
+need anyway. `SecurityPanel.tsx`'s sandbox section is GET-only and unaffected; `/config/security` and
+`/config/cost` have no frontend caller today.
+
+Tests: `TestConfigPatchRequiresAdminToken` (all four endpoints reject without the header and succeed
+with it) plus every existing config-PATCH test's server/client test helpers now carry both tokens.
+
+Priority: Tier 3 — closed. No further roadmap work here; a future item can revisit the web UI's
+access to posture-weakening config if that becomes a real operator need.
 
 ### P81.4 — The web UI hands the real daemon token to browser JavaScript (FIND-04)
 

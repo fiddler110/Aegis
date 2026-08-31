@@ -41,13 +41,14 @@ func TestConfigPatchWritesAuditRecord(t *testing.T) {
 	}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 	srv.authToken = "test-token"
+	srv.adminToken = "test-admin-token"
 	srv.workspace = t.TempDir()
 	srv.audit = hooks.NewAudit(auditPath)
 	defer srv.audit.Close()
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
-	cl := client.New(ts.URL).WithToken("test-token")
+	cl := client.New(ts.URL).WithToken("test-token").WithAdminToken("test-admin-token")
 
 	if _, err := cl.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{
 		Scope:   "global",

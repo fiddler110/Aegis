@@ -66,14 +66,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /security/baseline", s.handleSecurityBaseline)
 	mux.HandleFunc("POST /security/install", s.handleSecurityInstall)
 	mux.HandleFunc("GET /config/sandbox", s.handleGetConfigSandbox)
-	mux.HandleFunc("PATCH /config/sandbox", s.handlePatchConfigSandbox)
+	mux.HandleFunc("PATCH /config/sandbox", s.requireAdminToken(s.handlePatchConfigSandbox))
 	mux.HandleFunc("GET /config/security", s.handleGetConfigSecurity)
-	mux.HandleFunc("PATCH /config/security", s.handlePatchConfigSecurity)
+	mux.HandleFunc("PATCH /config/security", s.requireAdminToken(s.handlePatchConfigSecurity))
 	mux.HandleFunc("GET /config/skills", s.handleGetConfigSkills)
 	mux.HandleFunc("GET /models/local", s.handleListLocalModels)
-	mux.HandleFunc("PATCH /config/skills", s.handlePatchConfigSkills)
+	mux.HandleFunc("PATCH /config/skills", s.requireAdminToken(s.handlePatchConfigSkills))
 	mux.HandleFunc("GET /config/cost", s.handleGetConfigCost)
-	mux.HandleFunc("PATCH /config/cost", s.handlePatchConfigCost)
+	mux.HandleFunc("PATCH /config/cost", s.requireAdminToken(s.handlePatchConfigCost))
 	mux.HandleFunc("POST /config/harden", s.handleConfigHarden)
 	mux.HandleFunc("POST /debate", s.handleDebate)
 	mux.HandleFunc("POST /knowledge", s.handleKnowledge)
@@ -118,6 +118,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}()
 	if s.authToken == "" {
 		return fmt.Errorf("server: refusing to start: auth token was not generated")
+	}
+	if s.adminToken == "" {
+		return fmt.Errorf("server: refusing to start: admin token was not generated")
 	}
 	if err := s.validateListenAddr(); err != nil {
 		return err

@@ -761,6 +761,19 @@ server:
   # non-loopback address until this is explicitly acknowledged (FIND-08).
   allow_remote: false
 
+  # PATCH /config/sandbox, /config/security, /config/skills and /config/cost
+  # can weaken the daemon's own security posture (sandbox backend, redaction,
+  # cost ceilings) — since any local process running as the operator can read
+  # daemon.token, the bearer token alone was not a meaningful gate on those
+  # four calls specifically (P81.3/FIND-03). The daemon additionally
+  # generates a second, separately-stored credential, <data_dir>/admin.token,
+  # and requires it (via the X-Aegis-Admin-Token header) on those endpoints
+  # only — every other route is unaffected. `aegis`'s CLI commands read it
+  # the same way they read daemon.token, from disk, so an operator using the
+  # CLI notices nothing; a caller that holds only daemon.token (a browser
+  # session via the web UI's page-token exchange, an MCP client, a script
+  # that copied just the one file) gets a 403 naming the missing header.
+
   # Bounds which directories a client may request as a session's working
   # directory (P25.1) once allow_remote is set: the resolved path must be
   # the daemon's own default workspace (or nested under it) or nested under

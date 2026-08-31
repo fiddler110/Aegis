@@ -48,6 +48,12 @@ type Client struct {
 	// holds the token; it does not eliminate the token's presence in
 	// process memory.
 	authToken []byte
+
+	// adminToken holds the P81.3/FIND-03 second credential (config.AdminTokenPath)
+	// required, on top of authToken, for the config PATCH endpoints that can
+	// weaken the daemon's security posture (sandbox/security/skills/cost). Same
+	// mutable-byte-slice-for-Zero rationale as authToken above.
+	adminToken []byte
 }
 
 // New returns a client for the daemon at addr (host:port).
@@ -86,6 +92,28 @@ func (c *Client) WithTokenFile(path string) *Client {
 	}
 	c2 := *c
 	c2.authToken = bytes.TrimSpace(data)
+	return &c2
+}
+
+// WithAdminToken returns a copy of c that additionally authenticates config
+// PATCH calls (sandbox/security/skills/cost) with the given P81.3/FIND-03
+// admin token, alongside the normal bearer token authToken already carries.
+func (c *Client) WithAdminToken(token string) *Client {
+	c2 := *c
+	c2.adminToken = []byte(token)
+	return &c2
+}
+
+// WithAdminTokenFile reads the admin token from path and returns a copy of c
+// carrying it, the WithTokenFile analog of WithAdminToken. If the file cannot
+// be read, c is returned unchanged.
+func (c *Client) WithAdminTokenFile(path string) *Client {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return c
+	}
+	c2 := *c
+	c2.adminToken = bytes.TrimSpace(data)
 	return &c2
 }
 
@@ -150,7 +178,12 @@ func NewFromConfig(cfg *config.Config) (*Client, error) {
 		}
 		c = pinned
 	}
-	return c.WithTokenFile(cfg.AuthTokenPath()), nil
+	c = c.WithTokenFile(cfg.AuthTokenPath())
+	// admin.token is optional here: a caller without it simply can't reach
+	// the posture-weakening config PATCH endpoints (403), which is the
+	// correct default for most CLI invocations. WithAdminTokenFile is a
+	// no-op when the file is absent.
+	return c.WithAdminTokenFile(cfg.AdminTokenPath()), nil
 }
 
 func (c *Client) setAuth(req *http.Request) {
@@ -160,20 +193,33 @@ func (c *Client) setAuth(req *http.Request) {
 		// that comment for the full explanation.
 		req.Header.Set("Authorization", "Bearer "+string(c.authToken))
 	}
+	if len(c.adminToken) != 0 {
+		req.Header.Set(adminTokenHeaderName, string(c.adminToken))
+	}
 }
 
-// Zero overwrites authToken's backing bytes with zeroes in place and clears
-// the field, so a Client that is done being used no longer holds the bearer
-// token in its own memory (FIND-33/P24.21). Call it once a Client's useful
-// life is over: at the end of a one-shot CLI command (typically via defer),
-// or when replacing a cached client with a freshly-authenticated one. Safe
-// to call multiple times, and a no-op on a Client with no token. See
-// authToken's doc comment for what Zero can and cannot guarantee.
+// adminTokenHeaderName mirrors internal/server's constant of the same name
+// (see auth.go there) — duplicated rather than imported to avoid a
+// client->server package dependency for one header name.
+const adminTokenHeaderName = "X-Aegis-Admin-Token"
+
+// Zero overwrites authToken's and adminToken's backing bytes with zeroes in
+// place and clears both fields, so a Client that is done being used no
+// longer holds either credential in its own memory (FIND-33/P24.21). Call it
+// once a Client's useful life is over: at the end of a one-shot CLI command
+// (typically via defer), or when replacing a cached client with a
+// freshly-authenticated one. Safe to call multiple times, and a no-op on a
+// Client with no tokens. See authToken's doc comment for what Zero can and
+// cannot guarantee.
 func (c *Client) Zero() {
 	for i := range c.authToken {
 		c.authToken[i] = 0
 	}
 	c.authToken = nil
+	for i := range c.adminToken {
+		c.adminToken[i] = 0
+	}
+	c.adminToken = nil
 }
 
 // Health checks daemon reachability.
@@ -377,6 +423,26 @@ func (c *Client) PatchConfigSkills(ctx context.Context, scope string, names []st
 	var out api.ConfigSkillsResponse
 	req := api.ConfigSkillsPatchRequest{Scope: scope, BuiltinEnabled: names}
 	if err := c.do(ctx, http.MethodPatch, "/config/skills", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetConfigCost returns the daemon's currently effective cost: config
+// (budgets/ceilings). scope selects "project" or "global"; empty lets the
+// daemon pick a default.
+func (c *Client) GetConfigCost(ctx context.Context, scope string) (*api.ConfigCostResponse, error) {
+	var out api.ConfigCostResponse
+	if err := c.do(ctx, http.MethodGet, "/config/cost"+scopeQuery(scope), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PatchConfigCost partially updates the cost: config block.
+func (c *Client) PatchConfigCost(ctx context.Context, req api.ConfigCostPatchRequest) (*api.ConfigCostResponse, error) {
+	var out api.ConfigCostResponse
+	if err := c.do(ctx, http.MethodPatch, "/config/cost", req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

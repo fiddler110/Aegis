@@ -790,6 +790,19 @@ func (c *Config) AuthTokenPath() string {
 	return filepath.Join(c.DataDir, "daemon.token")
 }
 
+// AdminTokenPath returns the path to the daemon's second, separately-stored
+// admin token (P81.3/FIND-03), required in addition to the normal bearer
+// token on config PATCH endpoints that can weaken the daemon's security
+// posture (sandbox backend, security policy, skills, cost ceilings). A
+// process that reads daemon.token (any local process running as the
+// operator) does not automatically also read admin.token; an operator who
+// wants those endpoints reachable by the same caller as everything else can
+// still do so, but it is no longer the default consequence of holding the
+// one token every other call already needs.
+func (c *Config) AdminTokenPath() string {
+	return filepath.Join(c.DataDir, "admin.token")
+}
+
 // MCPTokenPath returns the path to the auto-generated `aegis mcp-serve`
 // stdio auth token file, used when AEGIS_MCP_TOKEN is not set in the
 // environment (P27.4/FIND-06).

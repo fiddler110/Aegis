@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -75,11 +76,12 @@ func newConfigTestServer(t *testing.T, workspace string) *client.Client {
 	}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 	srv.authToken = "test-token"
+	srv.adminToken = "test-admin-token"
 	srv.workspace = workspace
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return client.New(ts.URL).WithToken("test-token")
+	return client.New(ts.URL).WithToken("test-token").WithAdminToken("test-admin-token")
 }
 
 // newConfigTestServerWithSandbox is newConfigTestServer plus a pre-set
@@ -103,6 +105,7 @@ func newConfigTestServerWithSandbox(t *testing.T, workspace string, sb sandbox.B
 	}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 	srv.authToken = "test-token"
+	srv.adminToken = "test-admin-token"
 	srv.workspace = workspace
 	srv.sandbox = sb
 	srv.sandboxFallback = fallback
@@ -110,7 +113,7 @@ func newConfigTestServerWithSandbox(t *testing.T, workspace string, sb sandbox.B
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return client.New(ts.URL).WithToken("test-token")
+	return client.New(ts.URL).WithToken("test-token").WithAdminToken("test-admin-token")
 }
 
 func strPtr(s string) *string { return &s }
@@ -226,6 +229,57 @@ func TestConfigSandboxGetNoFallbackWhenActiveMatchesConfigured(t *testing.T) {
 	}
 	if resp.FallbackReason != "" {
 		t.Errorf("FallbackReason = %q, want empty", resp.FallbackReason)
+	}
+}
+
+// TestConfigPatchRequiresAdminToken is P81.3/FIND-03's credential-split half:
+// holding the normal bearer token (daemon.token) must no longer be enough to
+// reach a config PATCH endpoint that can weaken the daemon's security
+// posture — a second, separately-stored admin token (admin.token, sent via
+// X-Aegis-Admin-Token) is required too. Covers all four gated endpoints; GET
+// is unaffected since it can't change anything.
+func TestConfigPatchRequiresAdminToken(t *testing.T) {
+	redirectConfigDir(t)
+	cl := newConfigTestServer(t, "") // carries both tokens by default
+	unprivileged := cl.WithAdminToken("")
+
+	cases := []struct {
+		name string
+		call func(*client.Client) error
+	}{
+		{"sandbox", func(c *client.Client) error {
+			_, err := c.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{Scope: "global", Backend: strPtr("auto")})
+			return err
+		}},
+		{"security", func(c *client.Client) error {
+			_, err := c.PatchConfigSecurity(context.Background(), api.ConfigSecurityPatchRequest{Scope: "global", EgressThenWrite: boolPtr(true)})
+			return err
+		}},
+		{"skills", func(c *client.Client) error {
+			_, err := c.PatchConfigSkills(context.Background(), "global", []string{})
+			return err
+		}},
+		{"cost", func(c *client.Client) error {
+			budget := 1.0
+			_, err := c.PatchConfigCost(context.Background(), api.ConfigCostPatchRequest{Scope: "global", BudgetUSD: &budget})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call(unprivileged)
+			if err == nil {
+				t.Fatal("expected a 403 without the admin token, got success")
+			}
+			var se *client.StatusError
+			if !errors.As(err, &se) || se.Code != http.StatusForbidden {
+				t.Fatalf("expected a 403 StatusError, got %v", err)
+			}
+			// The same call with the admin token attached must succeed.
+			if err := tc.call(cl); err != nil {
+				t.Fatalf("with admin token: %v", err)
+			}
+		})
 	}
 }
 
@@ -630,6 +684,7 @@ func TestConfigCostGetAndPatchRoundTrip(t *testing.T) {
 	}
 	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 	srv.authToken = "test-token"
+	srv.adminToken = "test-admin-token"
 	srv.workspace = t.TempDir()
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -650,6 +705,7 @@ func TestConfigCostGetAndPatchRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set(adminTokenHeaderName, "test-admin-token")
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := httpClient.Do(req)
 		if err != nil {

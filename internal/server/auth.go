@@ -226,6 +226,42 @@ func (s *Server) resetAuthFailureStreak() {
 	s.authConsecutiveFailures = 0
 }
 
+// adminTokenHeaderName carries the P81.3/FIND-03 second credential required,
+// in addition to the normal bearer token authMiddleware already checked, on
+// config PATCH endpoints that can weaken the daemon's security posture. A
+// distinct header rather than a second "Bearer" value keeps the two
+// credentials from being interchangeable by accident in a client that just
+// forwards "Authorization" verbatim.
+const adminTokenHeaderName = "X-Aegis-Admin-Token"
+
+// requireAdminToken wraps a handler for a posture-weakening config PATCH
+// endpoint (sandbox/security/skills/cost) so it additionally requires
+// admin.token — a credential stored in its own file (config.AdminTokenPath),
+// separate from daemon.token — via the X-Aegis-Admin-Token header. This runs
+// after authMiddleware has already accepted the normal bearer token, so a
+// rejection here means the caller holds daemon.token but not admin.token: it
+// answers 403, not 401, to distinguish "authenticated but not authorized for
+// this posture-weakening call" from "not authenticated at all". See P81.3's
+// roadmap entry: any local process running as the operator can read
+// daemon.token, so gating these four endpoints on that same token made
+// "reachable by every other call" and "can weaken command isolation" the
+// same permission.
+func (s *Server) requireAdminToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.adminToken == "" {
+			writeError(w, http.StatusInternalServerError, "server misconfigured: admin token missing")
+			return
+		}
+		provided := r.Header.Get(adminTokenHeaderName)
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(s.adminToken)) != 1 {
+			s.logInvalidAuthAttempt(r, "admin token missing or mismatched")
+			writeError(w, http.StatusForbidden, "missing or invalid "+adminTokenHeaderName+" header")
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
 // originMiddleware blocks requests with a non-loopback Origin header to
 // mitigate DNS rebinding attacks against the local daemon.
 func (s *Server) originMiddleware(next http.Handler) http.Handler {

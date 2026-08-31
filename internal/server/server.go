@@ -140,6 +140,10 @@ type Server struct {
 	logger                *slog.Logger
 	http                  *http.Server
 	authToken             string // shared secret for API authentication
+	// adminToken is the P81.3/FIND-03 second, separately-stored credential
+	// required (in addition to authToken) on config PATCH endpoints that can
+	// weaken the daemon's security posture (see requireAdminToken in auth.go).
+	adminToken string
 
 	// tlsCert is the daemon's TLS certificate/key pair, loaded or generated in
 	// New when server.tls.enabled is true (FIND-32/P24.18); nil when TLS is
