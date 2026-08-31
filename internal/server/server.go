@@ -188,10 +188,28 @@ type Server struct {
 	// can't be replayed as a standing credential.
 	pageTokenMu sync.Mutex
 	pageTokens  map[string]pageTokenEntry
+	// pageTokenCapWarned suppresses a repeat of the maxPageTokens warning
+	// while the cap stays engaged, so a flood produces one diagnosable line
+	// per episode rather than one per request. Cleared as soon as a mint
+	// succeeds again. Guarded by pageTokenMu.
+	pageTokenCapWarned bool
+
+	// mintLimiters holds the P81.16 per-remote-address token buckets that sit
+	// *in front of* the maxPageTokens cap. The cap alone is a memory bound,
+	// not a fairness one: because refusing (rather than evicting) is the
+	// deliberate posture there, anything that can drive 1024 unexchanged
+	// mints inside pageTokenTTL locks the operator out of their own UI. The
+	// limiter makes that cost the flooder its own bucket instead of the
+	// shared cap. Bounded to maxMintLimiters entries and swept of idle ones,
+	// so the anti-DoS control cannot itself become the memory-growth DoS an
+	// attacker varying source addresses would otherwise get for free.
+	mintLimitMu  sync.Mutex
+	mintLimiters map[string]*mintLimiter
 
 	// sandboxFallback and sandboxFallbackReason record whether the configured
 	// sandbox backend failed to initialize and the daemon fell back to
-	// unsandboxed local execution (P7.4). Surfaced via /healthz so clients can
+	// unsandboxed local execution (P7.4). Surfaced via the authenticated
+	// /status (never /healthz, which needs no credential) so clients can
 	// warn the user instead of silently trusting a sandbox that isn't there.
 	sandboxFallback       bool
 	sandboxFallbackReason string

@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -203,14 +204,22 @@ func TestZeroSafeOnEmptyClient(t *testing.T) {
 	}
 }
 
-// TestStatusReturnsHealth verifies a healthy daemon's fields (including the
-// P7.4 sandbox-fallback flags) decode correctly.
+// TestStatusReturnsHealth verifies a healthy daemon's readiness decodes.
+//
+// The P7.4 sandbox-fallback flags and the model name used to ride on this
+// response and were moved to the authenticated /status: /healthz needs no
+// credential, so publishing "command isolation degraded" there handed the
+// fact to any local process. This test now also pins the negative — an
+// unknown field in the response body must not reappear as a HealthStatus
+// field, which is what would silently undo that move.
 func TestStatusReturnsHealth(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/healthz" {
 			t.Errorf("path = %q, want /healthz", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(api.HealthStatus{Status: "ok", Model: "test-model", SandboxFallback: true, SandboxFallbackReason: "docker unavailable"})
+		// Deliberately serves the *old* wire shape: a daemon that still
+		// published these must not repopulate them client-side.
+		fmt.Fprint(w, `{"status":"ok","model":"test-model","sandbox_fallback":true,"sandbox_fallback_reason":"docker unavailable"}`)
 	}))
 	defer srv.Close()
 
@@ -219,8 +228,13 @@ func TestStatusReturnsHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if st.Status != "ok" || st.Model != "test-model" || !st.SandboxFallback || st.SandboxFallbackReason != "docker unavailable" {
-		t.Errorf("Status = %+v", st)
+	if st.Status != "ok" {
+		t.Errorf("Status = %+v, want status ok", st)
+	}
+	if got := reflect.TypeOf(*st).NumField(); got != 1 {
+		t.Errorf("HealthStatus has %d fields, want exactly 1 (readiness only) — "+
+			"a field added here is readable by any local process with no credential; "+
+			"put it on api.StatusInfo (/status) instead", got)
 	}
 }
 

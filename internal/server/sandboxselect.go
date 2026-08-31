@@ -31,7 +31,7 @@ import (
 // A fallback to the unsandboxed local backend is a silent security downgrade
 // for an operator who believes sandboxing is active (P7.4): it is always
 // logged, reported back via the fallback/reason return values (surfaced by
-// the caller via /healthz for clients to warn the user), and — when
+// the caller via the authenticated /status for clients to warn the user), and — when
 // cfg.Strict is set — turned into a hard error instead of a silent fallback.
 //
 // cfg.Backend is expected to already be validated/aliased by

@@ -328,10 +328,16 @@ func startEmbeddedDaemon(cfg *config.Config) (stop func(), err error) {
 // takes over the terminal, when the daemon reports it fell back to
 // unsandboxed local execution (P7.4). Best-effort: a status-check failure is
 // silently ignored since Health() already gated entry to this point.
+//
+// Reads the authenticated /status rather than /healthz. It used to read
+// /healthz, which meant the sandbox-fallback state had to be published on the
+// one route that needs no credential — telling any local process that command
+// isolation had degraded. This client holds the bearer token, so it costs
+// nothing to ask the private endpoint instead; see api.HealthStatus.
 func warnSandboxFallback(cl *client.Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	status, err := cl.Status(ctx)
+	status, err := cl.StatusInfo(ctx)
 	if err != nil || !status.SandboxFallback {
 		return
 	}

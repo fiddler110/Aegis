@@ -542,6 +542,104 @@ func TestServerHealthEndpoint(t *testing.T) {
 	}
 }
 
+// TestHealthzDisclosesNothingBeyondReadiness is P81.19/FIND-19. /healthz is
+// exempt from authMiddleware, so whatever it returns is readable by any
+// process that can reach the loopback port with no credential at all. The
+// payload is now a readiness verdict and nothing else. It exists so that *adding* a version
+// string, a workspace path, a session or run count, a PID or a username to
+// that payload fails here rather than shipping: each of those turns a
+// negligible disclosure into a reconnaissance primitive for a local process
+// deciding whether this box is worth attacking. The assertion is on the full
+// decoded object, not a substring, precisely so a new field cannot slip
+// through.
+//
+// Richer diagnostics belong on the authenticated GET /status
+// (handleStatusInfo), which is where they already live — see
+// TestServerStatusEndpoint below for the workspace path, the allowlist and
+// the daily cost/token counters that /healthz deliberately omits.
+func TestHealthzDisclosesNothingBeyondReadiness(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Default: "anthropic", Model: "test-model"},
+		Permission: config.PermissionConfig{Mode: "plan"},
+		Server:     config.ServerConfig{SessionWorkdirAllowlist: []string{"/srv/projects"}},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
+	srv.authToken = "secret-token-123"
+	srv.workspace = "/srv/projects/secret-client"
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); store.Close() }()
+
+	// No Authorization header at all: this is the unauthenticated view.
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unauthenticated /healthz status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode /healthz body: %v", err)
+	}
+
+	// The readiness verdict itself must be there — that is the endpoint's
+	// entire job, and waitForDaemon depends on it.
+	if body["status"] != "ok" {
+		t.Errorf("status = %v, want \"ok\"", body["status"])
+	}
+
+	// And nothing else may be. Extend this set only with a deliberate decision
+	// that the new field is safe to hand an unauthenticated local process; the
+	// default answer is /status instead.
+	//
+	// This allowlist was briefly four entries. "model", "sandbox_fallback" and
+	// "sandbox_fallback_reason" moved to the authenticated /status once it was
+	// noticed that the last of them told an unauthenticated caller command
+	// isolation had degraded to unsandboxed host execution — the single fact a
+	// local attacker most benefits from, published on the one route that
+	// requires no credential. api.HealthStatus carries the full reasoning.
+	allowed := map[string]bool{
+		"status": true,
+	}
+	var unexpected []string
+	for k := range body {
+		if !allowed[k] {
+			unexpected = append(unexpected, k)
+		}
+	}
+	sort.Strings(unexpected)
+	if len(unexpected) > 0 {
+		t.Errorf("unauthenticated /healthz grew field(s) %v; richer diagnostics belong on the authenticated GET /status (FIND-19)", unexpected)
+	}
+
+	// Belt and braces against the specific values that would matter most:
+	// the workspace path must not appear anywhere in the payload, even
+	// embedded in a field this test's allowlist happens to permit.
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secret-client") {
+		t.Errorf("/healthz payload leaks the workspace path: %s", raw)
+	}
+
+	// The counterpart half of the invariant: /status, which carries all of
+	// that, is not reachable without the token.
+	unauth, err := http.Get(ts.URL + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauth.Body.Close()
+	if unauth.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated /status status = %d, want 401", unauth.StatusCode)
+	}
+}
+
 // TestServerStatusEndpoint is the P14.5 counterpart to
 // TestServerHealthEndpoint: /status reports provider/model plus the
 // cross-session daily spend the P9.5/P10.5 caps already track, which

@@ -38,15 +38,29 @@ type SessionMeta struct {
 	ArchivedAt   *time.Time `json:"archived_at,omitempty"`
 }
 
-// HealthStatus is the /healthz response. SandboxFallback signals that the
-// configured sandbox backend failed to initialize and the daemon fell back to
-// unsandboxed local execution (P7.4); clients should warn the user rather
-// than silently trusting a sandbox that isn't actually there.
+// HealthStatus is the /healthz response, and it is deliberately one field.
+//
+// /healthz is the only route exempt from authMiddleware whose response is not
+// part of a deliberate handshake, so everything it returns is readable by any
+// local process holding no credential at all. It previously also carried
+// Model, SandboxFallback and SandboxFallbackReason. Those moved to the
+// authenticated /status (StatusInfo carries the identical fields) because
+// sandbox_fallback_reason in particular told an unauthenticated caller that
+// command isolation had degraded to unsandboxed host execution — which is
+// precisely the moment an attacker most wants to know about, and a fact no
+// caller lacking a token has any business learning. Model leaked the
+// operator's provider/model choice on the same terms.
+//
+// Every in-repo client holds the bearer token, so nothing legitimate needed
+// these unauthenticated; internal/cli's warnSandboxFallback was reading the
+// public endpoint for data the private one already served.
+//
+// Keep this struct to readiness alone. A version string, workspace path or
+// session count added here turns a negligible disclosure into a useful
+// reconnaissance primitive, and TestHealthzDisclosesNothingBeyondReadiness
+// fails if one is.
 type HealthStatus struct {
-	Status                string `json:"status"`
-	Model                 string `json:"model"`
-	SandboxFallback       bool   `json:"sandbox_fallback,omitempty"`
-	SandboxFallbackReason string `json:"sandbox_fallback_reason,omitempty"`
+	Status string `json:"status"`
 }
 
 // StatusInfo is the /status response (P14.5) — richer daemon health info than

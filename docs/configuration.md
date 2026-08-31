@@ -1083,7 +1083,7 @@ sandbox:
   # daemon down), the default is to log a warning and fall back to running
   # unsandboxed on the host — a silent security downgrade an operator might
   # not notice (P7.4). Set strict=true to make that a hard startup failure
-  # instead. The daemon also reports an active fallback via /healthz, and the
+  # instead. The daemon also reports an active fallback via the authenticated /status, and the
   # TUI/CLI print a warning before entering a session when it's set.
   strict: false
 

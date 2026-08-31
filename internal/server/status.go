@@ -10,17 +10,16 @@ import (
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	resp := api.HealthStatus{
-		Status:                "ok",
-		Model:                 s.cfg.Provider.Model,
-		SandboxFallback:       s.sandboxFallback,
-		SandboxFallbackReason: s.sandboxFallbackReason,
-	}
-	writeJSON(w, http.StatusOK, resp)
+	// Readiness only, and nothing else — see api.HealthStatus' doc comment for
+	// why the model name and the sandbox-fallback state moved to the
+	// authenticated /status. This route needs no credential, so anything added
+	// here is readable by any local process.
+	writeJSON(w, http.StatusOK, api.HealthStatus{Status: "ok"})
 }
 
 // handleStatusInfo serves the P14.5 /status TUI surface: daemon/provider
-// identity, sandbox fallback state (same fields as /healthz), the
+// identity, sandbox fallback state (which /healthz deliberately does not
+// carry — see api.HealthStatus), the
 // cross-session daily spend the P9.5/P10.5 caps already track in the session
 // store, and (P28.7) a lightweight provider-reachability/latency probe.
 // Kept as a separate endpoint from /healthz rather than growing that one,
