@@ -100,3 +100,61 @@ func TestEmitFinalJSON(t *testing.T) {
 		t.Errorf("roundtrip mismatch: %+v", res)
 	}
 }
+
+// TestFoldAnswerEventWithdrawsARetriedAnswer is the EXEC-2 regression for the
+// aggregating output paths. The engine flags the KindGuard event whose answer
+// it is about to replace (P25.3); before the fix `chat --format json` and the
+// subprocess worker both ignored the flag and reported the rejected answer
+// glued to its replacement ("bananabanana").
+func TestFoldAnswerEventWithdrawsARetriedAnswer(t *testing.T) {
+	var sb strings.Builder
+	foldAnswerEvent(&sb, engine.Event{Kind: engine.KindText, Text: "banana"}, 0)
+	foldAnswerEvent(&sb, engine.Event{Kind: engine.KindGuard, GuardRetrying: true, GuardReason: "no verdict"}, 0)
+	foldAnswerEvent(&sb, engine.Event{Kind: engine.KindText, Text: "banana"}, 0)
+	if got := sb.String(); got != "banana" {
+		t.Errorf("answer = %q, want %q — the withdrawn answer was not dropped", got, "banana")
+	}
+}
+
+// TestFoldAnswerEventKeepsATerminalGuardFailure pins the other half: when
+// retries are exhausted the engine surfaces the answer anyway, with a
+// non-retrying KindGuard event. That answer must survive — dropping it would
+// turn a warning into an empty result.
+func TestFoldAnswerEventKeepsATerminalGuardFailure(t *testing.T) {
+	var sb strings.Builder
+	foldAnswerEvent(&sb, engine.Event{Kind: engine.KindText, Text: "best effort"}, 0)
+	foldAnswerEvent(&sb, engine.Event{Kind: engine.KindGuard, GuardReason: "still not satisfied"}, 0)
+	if got := sb.String(); got != "best effort" {
+		t.Errorf("answer = %q, want it kept after a terminal guard failure", got)
+	}
+}
+
+// TestFoldAnswerEventRespectsTheCap covers the worker's 1 MiB bound.
+func TestFoldAnswerEventRespectsTheCap(t *testing.T) {
+	var sb strings.Builder
+	foldAnswerEvent(&sb, engine.Event{Kind: engine.KindText, Text: "12345"}, 4)
+	foldAnswerEvent(&sb, engine.Event{Kind: engine.KindText, Text: "more"}, 4)
+	if got := sb.String(); got != "12345" {
+		t.Errorf("answer = %q, want accumulation to stop at the cap", got)
+	}
+}
+
+// TestEmitStreamEventGuard is the stream-json half of EXEC-2: the guard line
+// carried only {"type":"guard"}, so a consumer could not tell that the text
+// before it had been withdrawn.
+func TestEmitStreamEventGuard(t *testing.T) {
+	var buf bytes.Buffer
+	emitStreamEvent(&buf, engine.Event{
+		Kind:          engine.KindGuard,
+		GuardReason:   "guard reply did not contain a recognizable PASS/FAIL verdict",
+		GuardStatus:   "failed",
+		GuardRetrying: true,
+	})
+	var got streamEvent
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "guard" || !got.GuardRetrying || got.GuardStatus != "failed" || got.Text == "" {
+		t.Errorf("guard line lost its payload: %+v", got)
+	}
+}

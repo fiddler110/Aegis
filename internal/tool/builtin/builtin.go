@@ -72,6 +72,22 @@ type Options struct {
 	// Search selects the web_search provider (P5.3). Empty provider uses the
 	// zero-config DuckDuckGo scrape.
 	Search SearchOptions
+	// ScanFileReads runs read_file and grep results through the heuristic
+	// prompt-injection scan, attaching the untrusted-content envelope only
+	// when it fires (DR-1). Default on; see security.scan_file_reads.
+	//
+	// It is a bool rather than always-on because the scan is not free — ~14ms
+	// per maxed-out read on the benchmark in internal/trust — and because every
+	// other scanned channel already has an off switch (mcp.servers[].
+	// scan_output, search.scan_output). A channel an operator cannot turn off
+	// is one they cannot reason about.
+	//
+	// Unlike those channels, this switch governs the *marker* too, not just the
+	// scan: for MCP and web the envelope is unconditional and the scan is an
+	// extra, while for file contents the scan is what decides whether to wrap
+	// at all. Turning it off restores exactly the pre-DR-1 behavior — file
+	// contents reach the model bare.
+	ScanFileReads bool
 	// TeamTasks, when set, enables the agent-team coordination tools (P5.1):
 	// shared task list + peer messaging.
 	TeamTasks *swarm.TaskList
@@ -195,14 +211,14 @@ func Register(reg *tool.Registry, opts Options) error {
 	// Core tools are always exposed: file ops, search, shell, git, and the two
 	// meta-tools (skill, tool_search) that unlock the rest.
 	tools := []tool.Tool{
-		&readTool{root: root, tracker: ft},
+		&readTool{root: root, tracker: ft, scanContent: opts.ScanFileReads},
 		&writeTool{root: root, tracker: ft, lsp: opts.LSP},
 		&fillMarkerTool{root: root, tracker: ft, lsp: opts.LSP},
 		&editSectionTool{root: root, tracker: ft, lsp: opts.LSP},
 		&multieditTool{root: root, tracker: ft, lsp: opts.LSP},
 		&lsTool{root: root},
 		&globTool{root: root, cmds: opts.Commands},
-		&grepTool{root: root, cmds: opts.Commands},
+		&grepTool{root: root, cmds: opts.Commands, scanContent: opts.ScanFileReads},
 		&gitTool{root: root},
 		&gitCommitTool{root: root, preCommitTest: opts.GitPreCommitTestCommand, preCommitTestTimeout: opts.GitPreCommitTestTimeout},
 		newShellTool(root, opts.ShellTimeoutSec, opts.Tasks, opts.Sandbox),

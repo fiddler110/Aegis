@@ -3,6 +3,7 @@ package permission
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/tool"
@@ -36,7 +37,9 @@ type fakeOverrideTool struct {
 	overrideCap tool.Capability
 }
 
-func (f fakeOverrideTool) CapabilityFor(json.RawMessage) tool.Capability { return f.overrideCap }
+func (f fakeOverrideTool) CapabilityFor(context.Context, json.RawMessage) tool.Capability {
+	return f.overrideCap
+}
 
 func TestPolicyDecide(t *testing.T) {
 	tests := []struct {
@@ -107,5 +110,119 @@ func TestGateCheckUsesEffectiveCapability(t *testing.T) {
 	plainExec := fakeTool{name: "shell", cap: tool.CapExecute}
 	if ok, _ := New(ModeBuild, AutoDeny{}).Check(ctx, plainExec, nil); ok {
 		t.Error("expected an unclassified execute call to still require approval")
+	}
+}
+
+// TestGateRecordsCapabilityDowngrades is M7. A tool that reclassifies a call
+// below its static capability is the mechanism the three classifier findings
+// (CRIT-1/2/3) all ride on: shell is statically CapExecute, and a call
+// classified CapRead is allowed silently in every mode — so an operator
+// reviewing an audit trail saw an execute-capable tool run with no approval and
+// no record of why. Every other layer of the gate stack reports its decisions;
+// this one reported nothing.
+func TestGateRecordsCapabilityDowngrades(t *testing.T) {
+	var got []ContextualDecision
+	g := New(ModePlan, AutoDeny{})
+	g.OnDecision = func(d ContextualDecision) { got = append(got, d) }
+
+	downgraded := fakeOverrideTool{
+		fakeTool:    fakeTool{name: "shell", cap: tool.CapExecute},
+		overrideCap: tool.CapRead,
+	}
+	if allowed, reason := g.Check(context.Background(), downgraded, nil); !allowed {
+		t.Fatalf("a read-classified call must still be allowed in plan mode: %s", reason)
+	}
+	if len(got) != 1 {
+		t.Fatalf("decisions recorded = %d, want 1: %+v", len(got), got)
+	}
+	d := got[0]
+	if d.Rule != CapabilityDowngradeRule {
+		t.Errorf("Rule = %q, want %q", d.Rule, CapabilityDowngradeRule)
+	}
+	if d.Tool != "shell" || d.Cap != string(tool.CapRead) || d.Decision != Allow {
+		t.Errorf("record does not describe the downgrade: %+v", d)
+	}
+	if !strings.Contains(d.Reason, string(tool.CapExecute)) {
+		t.Errorf("Reason %q does not name the capability that was given up", d.Reason)
+	}
+
+	// A tool gated on its own declared capability is the ordinary case and
+	// must not add noise to the audit stream.
+	got = nil
+	plain := fakeTool{name: "read_file", cap: tool.CapRead}
+	if allowed, _ := g.Check(context.Background(), plain, nil); !allowed {
+		t.Fatal("a plain read must be allowed in plan mode")
+	}
+	if len(got) != 0 {
+		t.Errorf("a call gated on its static capability recorded %+v, want nothing", got)
+	}
+}
+
+// TestGateWithoutAnObserverStillDecides keeps the record optional: a Gate built
+// by a caller that wires no observer — a bare permission.New — behaves exactly
+// as it did before the record existed.
+func TestGateWithoutAnObserverStillDecides(t *testing.T) {
+	g := New(ModePlan, AutoDeny{})
+	downgraded := fakeOverrideTool{
+		fakeTool:    fakeTool{name: "shell", cap: tool.CapExecute},
+		overrideCap: tool.CapRead,
+	}
+	if allowed, reason := g.Check(context.Background(), downgraded, nil); !allowed {
+		t.Fatalf("allowed = false (%s), want true", reason)
+	}
+}
+
+// TestStrictPlanModeRefusesDowngrades is DR-2. Plan mode's documented guarantee
+// is that "the workspace may not be mutated or commands run at all", but
+// EffectiveCapability is consulted before Decide, so the shell tool runs
+// commands in plan mode whenever its classifier answers CapRead — which makes
+// every defect in ~1,080 lines of argument parsing a plan-mode defect. The
+// opt-in strict posture judges a tool on the capability it declares instead.
+func TestStrictPlanModeRefusesDowngrades(t *testing.T) {
+	downgraded := fakeOverrideTool{
+		fakeTool:    fakeTool{name: "shell", cap: tool.CapExecute},
+		overrideCap: tool.CapRead,
+	}
+
+	lenient := New(ModePlan, AutoDeny{})
+	if allowed, _ := lenient.Check(context.Background(), downgraded, nil); !allowed {
+		t.Error("the default posture is unchanged: a read-classified shell call is still allowed in plan mode")
+	}
+
+	strict := New(ModePlan, AutoDeny{})
+	strict.Policy.StrictPlanMode = true
+	allowed, reason := strict.Check(context.Background(), downgraded, nil)
+	if allowed {
+		t.Error("under the strict posture a shell call must be judged as CapExecute in plan mode")
+	}
+	if !strings.Contains(reason, string(tool.CapExecute)) {
+		t.Errorf("denial reason %q does not name the capability it was judged on", reason)
+	}
+
+	// Build and auto mode are unaffected: the ergonomics the downgrade buys are
+	// kept where they are wanted.
+	for _, mode := range []Mode{ModeBuild, ModeAuto} {
+		g := New(mode, AutoDeny{})
+		g.Policy.StrictPlanMode = true
+		if allowed, reason := g.Check(context.Background(), downgraded, nil); !allowed {
+			t.Errorf("%s mode: a read-classified call must still be allowed (%s)", mode, reason)
+		}
+	}
+}
+
+// TestStrictPlanModeKeepsUpwardReclassification pins that the strict posture
+// takes the *stricter* of the two capabilities rather than always the declared
+// one: a tool that reclassifies a specific call as more dangerous than its
+// declared capability must keep that verdict, or the knob would weaken exactly
+// the case it exists to protect.
+func TestStrictPlanModeKeepsUpwardReclassification(t *testing.T) {
+	upgraded := fakeOverrideTool{
+		fakeTool:    fakeTool{name: "fetch", cap: tool.CapRead},
+		overrideCap: tool.CapWrite,
+	}
+	g := New(ModePlan, AutoDeny{})
+	g.Policy.StrictPlanMode = true
+	if allowed, _ := g.Check(context.Background(), upgraded, nil); allowed {
+		t.Error("an upward reclassification must still bind under the strict posture")
 	}
 }

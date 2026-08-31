@@ -17,14 +17,23 @@ permissions:
 jobs:
   live-eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
-      # llama3.2 (3B) balances CI runtime against judge reliability: the same
-      # model both answers the prompt and judges its own answer against the
-      # rubric (ExpectRubric reuses Options.Adapter/Model), so a much smaller
-      # model (e.g. the 1B tag) risks flaky failures from a weak judge rather
-      # than a real regression. Override locally via the same env var.
-      AEGIS_EVAL_MODEL: "llama3.2"
+      # A *thinking* model, deliberately (EXEC-6). The tier's whole purpose is
+      # to exercise the population the local profile targets, and that
+      # population reasons before it answers — the previous default (llama3.2)
+      # did not, which is half of why an output-guard defect that only
+      # manifests on a reasoning model survived this workflow entirely. The
+      # other half was that the tier built an openai-compat adapter while
+      # production ships the native one; it now goes through
+      # providerfactory.Build (see liveAdapter).
+      #
+      # Size is still a CI-runtime tradeoff: the same model both answers the
+      # prompt and judges its own answer against the rubric (ExpectRubric
+      # reuses Options.Adapter/Model), so too small a tag risks flaky failures
+      # from a weak judge rather than a real regression. Override locally via
+      # the same env var.
+      AEGIS_EVAL_MODEL: "qwen3:8b"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -51,4 +60,4 @@ jobs:
         run: ollama pull "${AEGIS_EVAL_MODEL}"
 
       - name: Run live eval
-        run: go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v -timeout 25m
+        run: go test -tags live_eval ./internal/eval/... -run TestLiveModelQuality -v -timeout 45m

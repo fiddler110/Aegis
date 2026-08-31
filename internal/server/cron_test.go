@@ -540,3 +540,61 @@ func TestHandleListCronJobs(t *testing.T) {
 		t.Errorf("expected one auto_approve and one non-auto_approve job, got auto=%v plain=%v", sawAutoApprove, sawPlain)
 	}
 }
+
+// TestCronPermCheckClassifiesAgainstTheJobWorkdir is CRIT-3, against the real
+// Server.cronPermCheck rather than a test-local mirror of it.
+//
+// A cron job runs in Job.Workdir (P25.8) — the workdir of the session that
+// created it, which on a non-remote daemon may be any directory — while the
+// fire-time check classified the command against the daemon-wide workspace
+// baked into the shell tool at construction. So the gate validated workspace A
+// and the job then ran, unattended and on a schedule, in workspace B. In plan
+// mode, where CapRead is allowed silently and CapExecute is denied, the
+// disagreement is directly visible as a verdict.
+func TestCronPermCheckClassifiesAgainstTheJobWorkdir(t *testing.T) {
+	daemonRoot := t.TempDir()
+	sessionRoot := t.TempDir()
+
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: daemonRoot}); err != nil {
+		t.Fatal(err)
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, reg)
+
+	readInSession := "cat " + filepath.Join(sessionRoot, "notes.txt")
+	readInDaemon := "cat " + filepath.Join(daemonRoot, "notes.txt")
+
+	for _, tc := range []struct {
+		name    string
+		job     cron.Job
+		allowed bool
+	}{
+		// A read inside the job's own workdir is a read, and plan mode allows
+		// it. Judged against the daemon root it would be an out-of-root path,
+		// refused the downgrade, and denied.
+		{"read inside the job workdir", cron.Job{Command: readInSession, Workdir: sessionRoot}, true},
+		// And the mirror: a path under the *daemon's* workspace is outside the
+		// job's, so it must not be waved through as a read.
+		{"read outside the job workdir", cron.Job{Command: readInDaemon, Workdir: sessionRoot}, false},
+		// With no workdir the job runs in the daemon's own directory, and the
+		// check falls back to the same root — unchanged behavior.
+		{"no workdir falls back to the daemon root", cron.Job{Command: readInDaemon}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			allowed, reason := srv.cronPermCheck(context.Background(), tc.job)
+			if allowed != tc.allowed {
+				t.Errorf("cronPermCheck(%q, workdir=%q) = %v (%s), want %v",
+					tc.job.Command, tc.job.Workdir, allowed, reason, tc.allowed)
+			}
+		})
+	}
+}

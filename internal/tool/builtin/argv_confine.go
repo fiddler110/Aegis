@@ -111,12 +111,43 @@ func argvPathCandidates(arg string) []string {
 	return nil
 }
 
+// expandsToHome reports whether a path candidate begins with a tilde the shell
+// will expand to a home directory before the command ever runs.
+//
+// CRIT-1: sandbox.ValidatePath is a purely lexical check and performs no
+// expansion — its own doc says so — so it read "~/.ssh/id_rsa" as an ordinary
+// *relative* name, joined it under the root as "<root>/~/.ssh/id_rsa", found
+// that confined, and returned no error. The classifier therefore downgraded
+// `cat ~/.ssh/id_rsa` to CapRead, which permission.Policy.Decide allows
+// silently in every mode including plan, and `/bin/sh -c` (and PowerShell,
+// identically) then expanded the tilde and read the real key. It is the VULN-14
+// shape in a spelling the quoting splitter does not know about.
+//
+// The tilde is not a chaining metacharacter, so it does not belong in
+// permission.ShellChainMetaChars — that set also governs globToRegexpExec.
+// It is checked here instead, at the one place that decides whether a
+// model-chosen argv may skip the execute approval.
+//
+// The quoted spelling ('~/x'), which the shell would *not* expand, is refused
+// too: splitShellWords has already stripped the quotes by the time we see the
+// token, and re-deriving which quoting context each token came from to save a
+// legitimate `cat '~/notes.md'` its silent approval is not a trade this file
+// makes. Refusing a downgrade costs a call an approval prompt; granting one
+// wrongly costs a host read with no prompt at all.
+func expandsToHome(candidate string) bool {
+	return strings.HasPrefix(candidate, "~")
+}
+
 // firstArgvEscape returns the first argument in args carrying a path that
 // resolves outside root (via sandbox.ValidatePath, the same root confinement
-// read_file/grep/glob use), or "" when every one is confined.
+// read_file/grep/glob use) or that the shell will expand out of root before
+// resolution happens at all, or "" when every one is confined.
 func firstArgvEscape(root string, args []string) string {
 	for _, a := range args {
 		for _, c := range argvPathCandidates(a) {
+			if expandsToHome(c) {
+				return a
+			}
 			if _, err := sandbox.ValidatePath(root, c); err != nil {
 				return a
 			}

@@ -36,12 +36,16 @@ var toolCategory = map[string]humorCategory{
 	"git_commit": catWrite, "render_diagram": catWrite, "remember": catWrite,
 	"save_skill": catWrite, "entity_remember": catWrite, "todo_add": catWrite,
 	"todo_update": catWrite, "team_task_add": catWrite, "team_task_claim": catWrite,
-	"team_task_complete": catWrite, "team_send": catWrite, "cron_delete": catWrite,
-	"cron_toggle": catWrite, "latex_new_document": catWrite, "task_update": catWrite,
+	"team_task_complete": catWrite, "team_send": catWrite,
+	"latex_new_document": catWrite, "task_update": catWrite,
 
 	// Execute
 	"shell": catExecute, "security_scan": catExecute, "latex_build": catExecute,
 	"cron_create": catExecute, "task_create": catExecute, "task_stop": catExecute,
+	// cron_delete/cron_toggle write a scheduler row, but what they retire or
+	// restore is a job that runs commands unattended (DR-3) — they are
+	// CapExecute in cron.go and read as execute here too.
+	"cron_delete": catExecute, "cron_toggle": catExecute,
 
 	// Network
 	"web_fetch": catNetwork, "web_search": catNetwork, "git_pr": catNetwork,

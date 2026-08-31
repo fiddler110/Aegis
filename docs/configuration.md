@@ -406,6 +406,29 @@ permission:
   # environment (e.g. a CI container).
   allow_unsandboxed_auto_exec: false
 
+  # Whether the shell tool's read-only classification applies in plan mode.
+  #
+  # true (the default) is the shipped behavior: `shell("git log")` in plan mode
+  # is recognized as a read and allowed without a prompt, rather than being
+  # denied as an execute call. That recognition is a ~1,080-line argument
+  # parser spanning 40+ commands and three shell dialects, so plan mode's
+  # "no commands run at all" guarantee is mediated by it — every defect in
+  # that parser is a plan-mode defect.
+  #
+  # Set it to false to make the guarantee unconditional: the shell tool is then
+  # judged on its declared execute capability in plan mode whatever the parser
+  # says. Note what that means in practice — plan mode *denies* execute rather
+  # than prompting for it, so `shell` becomes unusable in plan mode entirely,
+  # including `git log` and `ls`. That is the guarantee, not a side effect: no
+  # command runs. Use the read-only tools (read_file, grep, glob, git) for
+  # exploration instead, or add an explicit `allow bash(...)` rule for the
+  # handful of commands you want back.
+  #
+  # Build and auto mode are unaffected either way. Worth turning off for the
+  # case plan mode is usually chosen for — reviewing a repository you do not
+  # trust — and worth leaving on if you use plan mode as "explore safely".
+  plan_mode_shell_reads: true
+
   # Fine-grained allow/deny rules evaluated before the mode gate.
   # Syntax: "allow <tool>(<pattern>)" or "deny <tool>(<pattern>)"
   # <tool>: tool name, capability alias (bash, write, read, network), or *
@@ -1106,6 +1129,27 @@ security:
   # Exposure & Redaction".
   redact_secrets: true
 
+  # Runs read_file and grep results through the heuristic prompt-injection
+  # scan, and attaches the untrusted-content provenance marker only when it
+  # fires. Defaults to true.
+  #
+  # Workspace file contents are the highest-volume channel reaching the model
+  # without passing through you, and were the only major one carrying no
+  # marker — while a project's persona.md, planted by the same adversary in
+  # the same act, was marked. Making the marker conditional on a scan hit is
+  # what keeps ordinary source free of the ~150-byte envelope.
+  #
+  # The scan costs roughly 14ms per maxed-out read, per read_file and per
+  # grep: noise against a model turn, real on a recon-heavy one. Set it to
+  # false to opt out — unlike mcp.servers[].scan_output and
+  # search.scan_output, which turn off only the scan and keep the marker,
+  # this turns off both, because here the scan is what decides whether to
+  # wrap at all. File contents then reach the model bare.
+  #
+  # It is a heuristic, not a boundary: a file crafted to dodge the patterns
+  # arrives unmarked either way. See docs/mcp-trust-boundary.md.
+  scan_file_reads: true
+
   # Security-scanner availability (P11.11): controls `aegis scan`/security_scan.
   # "auto" | "host" (never fall back to a container) | "container" (always
   # prefer it).
@@ -1464,15 +1508,30 @@ mcp:
 mcp_server:
   # New sessions default to plan mode (read-only) — a lower-trust posture than
   # the local TUI/CLI's own "build" default, since the caller here is an
-  # external harness. Override per-call with the `mode` tool argument, or here
-  # to change the server-wide default.
+  # external harness. A caller may pick a mode per call with the `mode` tool
+  # argument, but only one at or *below* this value: an MCP client is a program
+  # holding a token read from a file, not the local user, so it cannot escalate
+  # itself past what you configured here. An attempt to is clamped and logged.
   default_mode: plan
+  # Restores the pre-clamp behavior, where a caller's `mode` argument won
+  # outright. Off by default. Leaving it off is what makes default_mode and
+  # auto_approve below mean anything: under `auto` the permission policy allows
+  # every capability without asking, so a caller that could request `auto`
+  # would never raise an approval request for auto_approve to answer.
+  allow_caller_mode_escalation: false
   # An MCP tools/call is a synchronous request/response with no human in the
   # loop to ask, so a tool call needing approval (e.g. a session explicitly
   # requested in build/auto mode) is denied by default. Set true only for a
   # fully trusted caller/sandbox — equivalent to permission.auto_approve_exec
   # but scoped to sessions created through mcp-serve.
   auto_approve: false
+  # Narrows auto_approve to named tools. Empty (the default) keeps it blanket:
+  # every approval the run raises is granted. A list grants only these and
+  # denies the rest, which is the middle setting the on/off switch never had —
+  # letting a build-mode session read files unattended without also handing the
+  # caller arbitrary shell for the length of the run. Every granted approval is
+  # logged either way, since no human saw the prompt.
+  auto_approve_tools: []
 
 
 # ── Process plugins ───────────────────────────────────────────────────────────

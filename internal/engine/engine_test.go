@@ -205,7 +205,7 @@ func (c *capOverrideTool) Name() string                 { return c.name }
 func (c *capOverrideTool) Description() string          { return "" }
 func (c *capOverrideTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (c *capOverrideTool) Capability() tool.Capability  { return c.static }
-func (c *capOverrideTool) CapabilityFor(input json.RawMessage) tool.Capability {
+func (c *capOverrideTool) CapabilityFor(_ context.Context, input json.RawMessage) tool.Capability {
 	return c.perCall(input)
 }
 func (c *capOverrideTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {

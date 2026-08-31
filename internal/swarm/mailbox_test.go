@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -264,5 +265,57 @@ func TestOpenMailboxHardensRootDirectory(t *testing.T) {
 	}
 	if err := mb2.Send(Message{Type: MsgResult, Sender: id2.AgentID, Text: "hi"}); err != nil {
 		t.Fatalf("Send after root hardening: %v", err)
+	}
+}
+
+// TestSendPreservesOrderUnderClockCollisions pins the monotonic send clock.
+//
+// Ordering is carried entirely by the message filename (`<unixnano>_<uuid>`),
+// read back in name order, so two sends sharing a nanosecond fall back to
+// comparing random uuids and the later one can be read first. Consecutive
+// time.Now values move in ~500ns steps on Windows while a send takes less than
+// that, which made this a real ~1-in-200 failure in two separate mailbox tests
+// rather than a theoretical one.
+//
+// Sending in a tight loop is what provokes the collision; the assertion is the
+// invariant that makes it harmless — within one process, messages come back in
+// the order they were sent.
+func TestSendPreservesOrderUnderClockCollisions(t *testing.T) {
+	root := t.TempDir()
+	mb, err := OpenMailbox(root, NewIdentity("worker", "default", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 500
+	sent := make([]string, 0, n)
+	for i := range n {
+		m := Message{Type: MsgPeer, Sender: "peer", Text: fmt.Sprintf("msg-%04d", i)}
+		if err := mb.Send(m); err != nil {
+			t.Fatal(err)
+		}
+		sent = append(sent, m.Text)
+	}
+
+	got, err := mb.ReadAll(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != n {
+		t.Fatalf("read %d messages, want %d", len(got), n)
+	}
+	for i, m := range got {
+		if m.Text != sent[i] {
+			t.Fatalf("message %d read back as %q, want %q — send order was not preserved", i, m.Text, sent[i])
+		}
+	}
+
+	// The mechanism, asserted directly: no two stamps collide, so the filename
+	// ordering never has to fall back to the uuid.
+	for i := 1; i < len(got); i++ {
+		if !got[i].Timestamp.After(got[i-1].Timestamp) {
+			t.Fatalf("messages %d and %d share a timestamp (%s); the send clock did not advance",
+				i-1, i, got[i].Timestamp)
+		}
 	}
 }

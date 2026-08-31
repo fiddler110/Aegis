@@ -4,12 +4,10 @@ package eval
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/engine"
-	"github.com/fiddler110/aegis/internal/provider/openai"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -33,16 +31,7 @@ import (
 //
 // AEGIS_EVAL_BASE_URL/AEGIS_EVAL_MODEL override the target server/model.
 func TestLiveModelQuality(t *testing.T) {
-	baseURL := os.Getenv("AEGIS_EVAL_BASE_URL")
-	if baseURL == "" {
-		baseURL = "http://localhost:11434/v1"
-	}
-	model := os.Getenv("AEGIS_EVAL_MODEL")
-	if model == "" {
-		model = "llama3.2"
-	}
-
-	adapter := openai.New("ollama", openai.WithBaseURL(baseURL))
+	adapter, model := liveAdapter(t)
 	reg := tool.NewRegistry()
 
 	tests := []struct {

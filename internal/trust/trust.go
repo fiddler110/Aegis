@@ -95,10 +95,24 @@ func ScanForInjection(content string) []string {
 		hits = append(hits, s)
 	}
 
+	// The invisible-stripped copy is only worth scanning when stripping
+	// actually removed something, which for ordinary content it never does.
+	// Without this check every clean input pays the full pattern sweep twice —
+	// once on the original, then again on a byte-identical copy, since a miss
+	// on the original is what sends each pattern to the second FindString. That
+	// doubled a scan measured at ~13ms per 22KB of source, on a path that now
+	// runs over every read_file and grep result as well as MCP and web output.
+	// Comparing the two strings costs a memcmp against a pattern sweep, and
+	// content with no Cf runes cannot match differently in the two copies, so
+	// this is a pure saving rather than a coverage trade.
 	cleaned := stripInvisible(content)
+	scanCleaned := cleaned != content
 	for _, re := range injectionPatterns {
 		if m := re.FindString(content); m != "" {
 			addHit(fmt.Sprintf("matched %q", m))
+			continue
+		}
+		if !scanCleaned {
 			continue
 		}
 		if m := re.FindString(cleaned); m != "" {

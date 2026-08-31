@@ -1521,3 +1521,148 @@ func TestStreamWithoutNumCtxLeavesMaxTokensAlone(t *testing.T) {
 		t.Errorf("num_predict = %+v, want the unclamped 32768 when no window is known", gotBody.Options)
 	}
 }
+
+// TestStreamSuppressesThinkForClassificationPurposes is the adapter half of
+// EXEC-1. Native Ollama defaults `think` on (P77.1), which is right for a
+// conversational turn and wrong for the output guard: the guard asks for a
+// two-token PASS/FAIL under a small num_predict, and a reasoning model spent
+// the entire budget on its preamble and returned empty content, so the guard
+// fell closed on every single turn. A purpose that declares itself a short
+// classification call must reach the wire with think=false regardless of the
+// adapter's own setting, and every other purpose must be left alone.
+func TestStreamSuppressesThinkForClassificationPurposes(t *testing.T) {
+	var got *bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Think *bool `json:"think"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got = body.Think
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"PASS"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	trueVal := true
+	a := New(WithBaseURL(srv.URL), WithThink(&trueVal))
+	for _, tc := range []struct {
+		name      string
+		purpose   provider.Purpose
+		wantThink bool
+	}{
+		{"guard suppresses", provider.PurposeGuard, false},
+		{"foreground keeps the adapter default", provider.PurposeForeground, true},
+		{"untagged keeps the adapter default", provider.PurposeUnspecified, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got = nil
+			stream, err := a.Stream(context.Background(), provider.Request{
+				Model:    "qwen3.5:9b",
+				Purpose:  tc.purpose,
+				Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+			})
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			for range stream {
+			}
+			if got == nil {
+				t.Fatal("think was omitted entirely; want an explicit value")
+			}
+			if *got != tc.wantThink {
+				t.Errorf("think = %v, want %v", *got, tc.wantThink)
+			}
+		})
+	}
+}
+
+// TestStreamSuppressesThinkFromContextPurpose covers the run-scoped spelling of
+// the same declaration: a caller that tags its context rather than its request
+// (provider.WithPurpose) must get the same suppression, since EffectivePurpose
+// is what the adapter consults.
+func TestStreamSuppressesThinkFromContextPurpose(t *testing.T) {
+	var got *bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Think *bool `json:"think"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got = body.Think
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"PASS"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	trueVal := true
+	a := New(WithBaseURL(srv.URL), WithThink(&trueVal))
+	ctx := provider.WithPurpose(context.Background(), provider.PurposeGuard)
+	stream, err := a.Stream(ctx, provider.Request{
+		Model:    "qwen3.5:9b",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+	if got == nil || *got {
+		t.Errorf("think = %v, want false for a context-declared guard call", got)
+	}
+}
+
+// TestStreamHonorsPerRequestThinkSuppression covers the P79.3 seam: a caller
+// whose *kind* of call normally wants thinking, asking for one specific
+// request without it. The compaction summarizer is the reason it exists —
+// PurposeCompaction is deliberately absent from SuppressesExtendedThinking,
+// because a summary is exactly the long unstructured reply thinking helps, but
+// on a reasoning model the preamble can consume the whole completion budget
+// and leave the content empty (measured: aegis-qwen35-9b:32k, num_predict
+// 1024, done_reason "length", zero content bytes, on every compaction cycle of
+// a live_workflow run). The summarizer notices that and asks again with this
+// flag; the adapter must put think=false on the wire without the purpose
+// changing.
+func TestStreamHonorsPerRequestThinkSuppression(t *testing.T) {
+	var got *bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Think *bool `json:"think"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got = body.Think
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"summary"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+
+	trueVal := true
+	a := New(WithBaseURL(srv.URL), WithThink(&trueVal))
+	for _, tc := range []struct {
+		name      string
+		suppress  bool
+		wantThink bool
+	}{
+		{"compaction keeps thinking by default", false, true},
+		{"compaction can ask for one call without it", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got = nil
+			stream, err := a.Stream(context.Background(), provider.Request{
+				Model:            "qwen3.5:9b",
+				Purpose:          provider.PurposeCompaction,
+				SuppressThinking: tc.suppress,
+				Messages:         []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "summarize"}}}},
+			})
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			for range stream {
+			}
+			if got == nil {
+				t.Fatal("think was omitted entirely; want an explicit value")
+			}
+			if *got != tc.wantThink {
+				t.Errorf("think = %v, want %v", *got, tc.wantThink)
+			}
+		})
+	}
+}

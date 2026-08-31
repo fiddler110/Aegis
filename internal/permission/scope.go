@@ -142,7 +142,7 @@ func (g *ScopeGate) Check(ctx context.Context, t tool.Tool, input json.RawMessag
 	// (P63.3, following P32.2 for ContextualGate): a tool that reclassifies
 	// into CapWrite for a specific call via CapabilityFor must still be
 	// confined by the scope, which is the outermost containment gate.
-	if sc.Active() && tool.EffectiveCapability(t, input) == tool.CapWrite {
+	if sc.Active() && tool.EffectiveCapability(ctx, t, input) == tool.CapWrite {
 		for _, p := range scopeWritePaths(input) {
 			if !sc.Allowed(p) {
 				reason := t.Name() + " blocked: path " + p + " is outside the declared task scope (" + strings.Join(sc.Patterns(), ", ") + ")"

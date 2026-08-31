@@ -54,6 +54,12 @@ func TestReadOnlyGitArgvAgreesAcrossBothPaths(t *testing.T) {
 		// Operand confinement (the check the git tool had none of).
 		{"pathspec escape", []string{"diff", "HEAD", "--", outside}, false},
 		{"traversal pathspec", []string{"diff", "--", "../../etc/passwd"}, false},
+		// CRIT-1: sandbox.ValidatePath is lexical and expands nothing, so a
+		// tilde path read as an ordinary relative name and validated as
+		// confined under the root — while the shell expanded it and read the
+		// real home directory. Both paths refuse it, so they keep agreeing.
+		{"tilde pathspec", []string{"diff", "--", "~/.ssh/id_rsa"}, false},
+		{"tilde in an attached flag value", []string{"log", "--grep=x", "--", "~/.ssh/id_rsa"}, false},
 
 		// Ordinary read-only inspection must survive all of the above.
 		{"status short", []string{"status", "--short"}, true},
@@ -133,7 +139,7 @@ func TestReadOnlyTierRefusesEscapesInPlanMode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cap := tool.EffectiveCapability(st, json.RawMessage(input))
+			cap := tool.EffectiveCapability(context.Background(), st, json.RawMessage(input))
 			if got := plan.Decide(cap); got != permission.Deny {
 				t.Errorf("shell %q classified %s, plan mode decided %v; want Deny", command, cap, got)
 			}
@@ -220,5 +226,88 @@ func TestFlagMatchesAttachedShortValue(t *testing.T) {
 		if got := flagMatches(c.arg, c.flag); got != c.want {
 			t.Errorf("flagMatches(%q, %q) = %v, want %v", c.arg, c.flag, got, c.want)
 		}
+	}
+}
+
+// TestReadOnlyClassifierRefusesPathQualifiedArgv0 pins CRIT-2. baseBinaryName
+// reduces an argv0 to its last path segment so the read-only table can be
+// keyed on a command name — and argvStaysInRoot is only ever handed fields[1:],
+// so token zero was never validated as a path at all. `./scripts/ls` in a
+// cloned repository (git preserves the executable bit, so no write is needed
+// and plan mode is no obstacle) therefore classified as CapRead, which
+// permission.Policy.Decide allows silently in every mode: arbitrary host code
+// ran with no approval prompt, no checkpoint — captureShellWrites is keyed on
+// the same capability — and no exec lock, since toolRound reads that capability
+// to decide whether a call serializes.
+//
+// The posture is rejection, not confinement: a workspace-resident executable is
+// exactly the attack, so passing argv0 through argvStaysInRoot would have
+// admitted it. The read-only tier is for a bare command name resolved through
+// PATH — a binary the operator installed, not one the model chose.
+//
+// Asserted in both quoting dialects because the classifier takes the dialect as
+// a parameter and a hole in either one is a hole.
+func TestReadOnlyClassifierRefusesPathQualifiedArgv0(t *testing.T) {
+	root := t.TempDir()
+	for _, c := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"relative in a subdirectory", "./scripts/ls", false},
+		{"relative with arguments", "./scripts/cat notes.txt", false},
+		{"parent-relative", "../ls", false},
+		{"absolute", "/tmp/x/ls", false},
+		{"system binary by absolute path", "/bin/cat notes.txt", false},
+		{"tilde-qualified", "~/x/cat notes.txt", false},
+		{"dot-slash", "./ls", false},
+		// The bare name — the only shape the read-only tier is for — still
+		// classifies, in both dialects, or the fix would have closed the
+		// feature rather than the hole.
+		{"bare name", "cat notes.txt", true},
+		{"bare name no arguments", "pwd", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, powershell := range []bool{false, true} {
+				if got := readOnlyShellCommandIn(root, c.command, powershell); got != c.want {
+					t.Errorf("readOnlyShellCommandIn(%q, powershell=%v) = %v, want %v",
+						c.command, powershell, got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestReadOnlyClassifierRefusesTildeExpansion pins CRIT-1 as a property of the
+// classifier rather than of one command. sandbox.ValidatePath is purely lexical
+// and expands nothing, so every tilde spelling below resolved as a *relative*
+// name, joined under the root, and validated as confined — after which the
+// shell (POSIX and PowerShell alike) expanded it and read the real home
+// directory, silently, under a capability plan mode allows without a prompt.
+func TestReadOnlyClassifierRefusesTildeExpansion(t *testing.T) {
+	root := t.TempDir()
+	for _, command := range []string{
+		"cat ~/.ssh/id_rsa",
+		"head -n 5 ~/.aws/credentials",
+		"ls ~",
+		"cat ~root/.bashrc",
+		"grep --file=~/.ssh/id_rsa foo",
+		"grep -f~/.ssh/id_rsa foo",
+		"grep -f ~/.ssh/id_rsa foo",
+		"git diff -- ~/.ssh/id_rsa",
+		// Quoted, which the shell would not expand: refused anyway, because
+		// splitShellWords has already stripped the quotes by the time the
+		// classifier sees the token and the conservative direction costs only
+		// an approval prompt.
+		"cat '~/.ssh/id_rsa'",
+	} {
+		t.Run(command, func(t *testing.T) {
+			for _, powershell := range []bool{false, true} {
+				if readOnlyShellCommandIn(root, command, powershell) {
+					t.Errorf("readOnlyShellCommandIn(%q, powershell=%v) = true, want false",
+						command, powershell)
+				}
+			}
+		})
 	}
 }

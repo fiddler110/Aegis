@@ -190,13 +190,14 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	// persona of its own, so the persona layers stay inert here — but they are
 	// now inert by the stack's own rule rather than by absence.
 	gate, engineHooks := enginecfg.BuildGate(enginecfg.GateOptions{
-		Mode:     spec.Config.Mode,
-		Approver: approver,
-		Security: cfg.Security,
-		Registry: reg,
-		Rules:    enginecfg.ConfigRules(cfg, logger),
-		Hooks:    enginecfg.EngineHooks(enginecfg.ExecHooks(cfg, logger)),
-		Logger:   logger,
+		Mode:           spec.Config.Mode,
+		StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(),
+		Approver:       approver,
+		Security:       cfg.Security,
+		Registry:       reg,
+		Rules:          enginecfg.ConfigRules(cfg, logger),
+		Hooks:          enginecfg.EngineHooks(enginecfg.ExecHooks(cfg, logger)),
+		Logger:         logger,
 	})
 
 	tracker := cost.NewTracker()
@@ -241,9 +242,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	const maxOutput = 1 << 20 // 1 MiB
 	var sb strings.Builder
 	runErr := eng.Run(ctx, conv, func(ev engine.Event) {
-		if ev.Kind == engine.KindText && sb.Len() < maxOutput {
-			sb.WriteString(ev.Text)
-		}
+		foldAnswerEvent(&sb, ev, maxOutput)
 	})
 	return strings.TrimSpace(sb.String()), tracker.Snapshot(), runErr
 }

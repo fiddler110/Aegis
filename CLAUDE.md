@@ -128,6 +128,32 @@ is a deliberate, documented hole. See [docs/configuration.md](docs/configuration
   profile `edit_file` is deferred and the handle-based editors are not — a test
   pins that direction. A tool's `Description()` or error must never name a tool
   the active profile defers.
+- **Plan mode's guarantee runs through a parser.** "Plan mode is read-only" is
+  true only because `classifyShellCommand` (~1,080 lines, 40+ commands, three
+  shell dialects) says a given `shell` call is a read: `Gate.Check` consults
+  `tool.EffectiveCapability` *before* `Policy.Decide`, so a downgraded call is
+  allowed silently in every mode. Every defect in that parser is therefore a
+  plan-mode defect — CRIT-1 (an unexpanded `~`) and CRIT-2 (an unconfined
+  `argv[0]`) both were. Two things follow. A change to that file is a change to
+  a security boundary, and `FuzzClassifyShellCommand` states the invariant it
+  must keep: *a `CapRead` verdict implies nothing outside root is touched and no
+  binary from inside root is executed*. And `permission.plan_mode_shell_reads:
+  false` exists for operators who want the guarantee unmediated; when you touch
+  the gate, keep both postures working.
+- **A per-call capability is asked once per call.** `tool.CapabilityOverrider`
+  takes a `context.Context` and must classify against the root the call will
+  execute in (`effectiveRoot`), not a construction-time one — the two disagreed
+  for cron jobs and for any session outside the daemon workspace. The engine
+  installs `tool.WithCapabilityMemo` in `toolCtx`, so the gate, the round
+  scheduler, the checkpoint decision and the written/read-path bookkeeping all
+  see one verdict rather than re-running filesystem I/O across the approval
+  round-trip.
+- **Registry clones overlay exposure, they do not copy it.** A clone records
+  only the exposure decisions it has made; every other name falls through to its
+  parent, and its schema cache is discarded when the parent chain's version
+  moves. Copying the maps meant a tool the parent registered later (MCP's
+  `tools/list_changed`) was neither exposed nor deferred through the clone — 
+  invisible for the life of the session — while a replaced schema stayed stale.
 - **One engine constructor's worth of decisions.** The permission gate stack,
   the run limits, `builtin.Options`' config-derived half, the output guard and
   the hook chain live in `internal/enginecfg` and are built there, not at each
@@ -194,6 +220,24 @@ is a deliberate, documented hole. See [docs/configuration.md](docs/configuration
   summarizer refuse compactions the engine had asked for. Anything per-*run*
   reaching the Summarizer travels on the context, never a setter: it is built once
   per server and shared by every session.
+- **A reasoning model's preamble and its answer share one budget.** `MaxTokens`
+  bounds the whole completion, thinking included, so a call with a modest budget
+  can spend all of it thinking and return empty content — EXEC-1 for the guard,
+  P79.3 for compaction (1,024 tokens, `done_reason: length`, zero content, on
+  every cycle of a live run). Two seams, and they are not interchangeable:
+  `provider.SuppressesExtendedThinking(Purpose)` for a call *kind* whose reply is
+  always a small fixed schema (the guard, and nothing else so far), and
+  `provider.Request.SuppressThinking` for the same call made twice — compaction
+  asking again after an empty reply *from a model that thought*, and the P34.1
+  empty-answer nudge, which existed to recover this failure and used to re-ask
+  over the channel that caused it. Never add a long unstructured reply to the
+  Purpose list; retry it instead.
+- **Teardown belongs to `Server.Close`, not to an exit path.** `ListenAndServe`
+  defers it before its first `return`, so a refused address and a serve error
+  release the same handles a graceful shutdown does (P79.2 — cron, swarm, tasks,
+  sandbox and LSP children used to be torn down only under `ctx.Done`). It is
+  exported and idempotent because an embedder driving a `Server` through
+  `Handler()` (the eval harness, tests) otherwise leaks every store `New` opened.
 - **Interrupted tool calls.** `repairOrphanedToolUses` reports a started call as
   *possibly* completed (tracked in `Engine.startedTools`), never as not run.
 - **Embedded assets.** Containerfile, scanner scripts, built-in skills, personas

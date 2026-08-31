@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/guard"
@@ -43,6 +44,20 @@ type Scenario struct {
 	System  string
 	Options engine.Options
 	Turns   []string // user messages, sent one after another on the same conversation
+	// Decorators wraps Options.Adapter, outermost last, before the engine is
+	// built (M10).
+	//
+	// Without it a scenario talked to its scripted adapter directly, so the
+	// whole provider decorator chain — retry, failover, num_ctx, admission
+	// control, the harness profile, prose-tool-call salvage — was untested *in
+	// composition with the engine*, which is the only place its behavior
+	// matters. CRIT-4 lived exactly there: a decorator that buffered a whole
+	// turn instead of forwarding events, disabling the engine's stall heartbeat
+	// and its early tool dispatch, with every unit test in both packages green.
+	// Pass providerfactory's real chain here to test the composition that
+	// ships, and pair it with providertest.Adapter's WithEventDelay so stream
+	// *timing* is observable.
+	Decorators []func(provider.Adapter) provider.Adapter
 }
 
 // GuardResult captures one output-guard verdict emitted during a turn (a
@@ -55,12 +70,17 @@ type GuardResult struct {
 
 // TurnResult captures one user turn's outcome.
 type TurnResult struct {
-	FinalText   string
-	ToolCalls   []string // tool names invoked this turn, in call order
-	Steers      []string // steer texts the engine injected this turn, in order
-	Notices     []string // KindNotice texts emitted this turn, in order
-	GuardEvents []GuardResult
-	Err         error
+	// FirstEventAfter is how long after the turn started its first engine event
+	// reached the consumer. Meaningful only against an adapter that spaces its
+	// events out (providertest.Adapter's WithEventDelay); see
+	// ExpectStreamsIncrementally.
+	FirstEventAfter time.Duration
+	FinalText       string
+	ToolCalls       []string // tool names invoked this turn, in call order
+	Steers          []string // steer texts the engine injected this turn, in order
+	Notices         []string // KindNotice texts emitted this turn, in order
+	GuardEvents     []GuardResult
+	Err             error
 }
 
 // Result is the full outcome of running a Scenario.
@@ -118,6 +138,18 @@ func (r *Result) FinalText() string {
 // s.Turns in sequence on a single conversation, collecting a Result. It does
 // not fail the test itself — pair it with Check/RunAndCheck or AssertGolden.
 func Run(ctx context.Context, s Scenario) (*Result, error) {
+	// Scenario.Decorators wraps the adapter before the engine sees it, so a
+	// scenario can run against the real provider decorator chain
+	// (providerfactory.Decorate) instead of talking to its scripted adapter
+	// directly. Applied here rather than inside engine.New because it is the
+	// scenario's own composition, not an engine-construction decision.
+	opts := s.Options
+	for _, wrap := range s.Decorators {
+		if wrap == nil {
+			continue
+		}
+		opts.Adapter = wrap(opts.Adapter)
+	}
 	// Gate, Limits and Backend: deliberately none of this package's business. A
 	// scenario is handed its engine.Options whole by the fixture that defines
 	// it, so all three — like the adapter and the tool set — are whatever that
@@ -126,7 +158,7 @@ func Run(ctx context.Context, s Scenario) (*Result, error) {
 	// written for (P66.13), and the bounds especially: a scenario that pins
 	// MaxIterations to 2 to reproduce a step-limit path would silently start
 	// running to the operator's configured 40.
-	eng, err := engine.New(s.Options)
+	eng, err := engine.New(opts)
 	if err != nil {
 		return nil, fmt.Errorf("eval: build engine for scenario %q: %w", s.Name, err)
 	}
@@ -137,7 +169,15 @@ func Run(ctx context.Context, s Scenario) (*Result, error) {
 		conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: userText}}})
 
 		var tr TurnResult
+		turnStart := time.Now()
 		tr.Err = eng.Run(ctx, conv, func(ev engine.Event) {
+			// M10: when the first event of a turn *arrives* is a property worth
+			// asserting, not just what the events are. A decorator that buffers
+			// the whole stream produces byte-identical output and an entirely
+			// different turn; see ExpectStreamsIncrementally.
+			if tr.FirstEventAfter == 0 {
+				tr.FirstEventAfter = time.Since(turnStart)
+			}
 			switch ev.Kind {
 			case engine.KindText:
 				tr.FinalText += ev.Text
@@ -280,6 +320,32 @@ func ExpectGuardFailureContains(substr string) Check {
 			}
 		}
 		return fmt.Errorf("expected a failed guard verdict containing %q, got: %v", substr, r.AllGuardEvents())
+	}
+}
+
+// ExpectStreamsIncrementally requires every turn's first engine event to arrive
+// no later than limit after the turn began (M10).
+//
+// It is the assertion a scripted adapter alone cannot support: with the whole
+// script delivered into a buffered channel at once, a decorator that forwards
+// events live and one that swallows the turn and replays it at the end produce
+// identical output. Pair it with providertest.Adapter's WithEventDelay, which
+// spaces the script out, and the difference becomes a measurement — the
+// difference CRIT-4 turned on, where a buffering decorator silently disabled
+// the engine's stall heartbeat and its early tool dispatch for every local
+// model while both packages' tests stayed green.
+//
+// Pick limit generously relative to the adapter's delay: this is a check for
+// "does the turn stream at all", not a latency budget.
+func ExpectStreamsIncrementally(limit time.Duration) Check {
+	return func(r *Result) error {
+		for i, tr := range r.Turns {
+			if tr.FirstEventAfter > limit {
+				return fmt.Errorf("turn %d: first event arrived after %s (limit %s) — the stream is being buffered rather than forwarded",
+					i, tr.FirstEventAfter, limit)
+			}
+		}
+		return nil
 	}
 }
 

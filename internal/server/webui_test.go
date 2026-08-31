@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -414,5 +416,55 @@ func TestWebUIAssetsServedWithLongCache(t *testing.T) {
 	}
 	if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "immutable") {
 		t.Errorf("Cache-Control = %q, want immutable", cc)
+	}
+}
+
+// TestMintPageTokenSweepsAndCaps is M3. GET /ui is exempt from
+// authMiddleware and mints a page token on every load, while the only sweep of
+// the map lived in exchangePageToken — so a local process that loads the page
+// and never exchanges grew the map for the daemon's lifetime and never
+// triggered the cleanup. That is the memory-growth DoS the invalidAuthAttempts
+// design deliberately avoids, on the one endpoint needing no credential.
+func TestMintPageTokenSweepsAndCaps(t *testing.T) {
+	srv := newTestWebUIServer(t)
+
+	// A token nobody exchanges is swept by the next mint once it expires,
+	// rather than living until some later exchange happens to run.
+	stale, staleCSRF, err := srv.mintPageToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.pageTokenMu.Lock()
+	srv.pageTokens[stale] = pageTokenEntry{expiry: time.Now().Add(-time.Second), csrf: staleCSRF}
+	srv.pageTokenMu.Unlock()
+
+	if _, _, err := srv.mintPageToken(); err != nil {
+		t.Fatal(err)
+	}
+	srv.pageTokenMu.Lock()
+	_, stillThere := srv.pageTokens[stale]
+	srv.pageTokenMu.Unlock()
+	if stillThere {
+		t.Error("an expired token survived a later mint; minting must sweep")
+	}
+
+	// And the bound: unexpired tokens cannot accumulate past the cap. Refusing
+	// rather than evicting is deliberate — evicting would let a flood
+	// invalidate the page tokens of legitimate loads.
+	srv.pageTokenMu.Lock()
+	srv.pageTokens = make(map[string]pageTokenEntry, maxPageTokens)
+	for i := range maxPageTokens {
+		srv.pageTokens[strconv.Itoa(i)] = pageTokenEntry{expiry: time.Now().Add(pageTokenTTL), csrf: "x"}
+	}
+	srv.pageTokenMu.Unlock()
+
+	if _, _, err := srv.mintPageToken(); !errors.Is(err, errTooManyPageTokens) {
+		t.Errorf("mint past the cap returned %v, want errTooManyPageTokens", err)
+	}
+	srv.pageTokenMu.Lock()
+	n := len(srv.pageTokens)
+	srv.pageTokenMu.Unlock()
+	if n != maxPageTokens {
+		t.Errorf("map grew past the cap: %d entries, want %d", n, maxPageTokens)
 	}
 }

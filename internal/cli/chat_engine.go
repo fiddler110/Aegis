@@ -43,14 +43,15 @@ func buildChatGate(cfg *config.Config, p persona.Persona, reg *tool.Registry, mo
 		approver = permission.AutoApprove{}
 	}
 	return enginecfg.BuildGate(enginecfg.GateOptions{
-		Mode:     mode,
-		Approver: approver,
-		Persona:  p,
-		Security: cfg.Security,
-		Registry: reg,
-		Rules:    enginecfg.ConfigRules(cfg, logger),
-		Hooks:    enginecfg.EngineHooks(enginecfg.ExecHooks(cfg, logger)),
-		Logger:   logger,
+		Mode:           mode,
+		StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(),
+		Approver:       approver,
+		Persona:        p,
+		Security:       cfg.Security,
+		Registry:       reg,
+		Rules:          enginecfg.ConfigRules(cfg, logger),
+		Hooks:          enginecfg.EngineHooks(enginecfg.ExecHooks(cfg, logger)),
+		Logger:         logger,
 	})
 }
 

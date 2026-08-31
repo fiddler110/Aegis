@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+
+	"github.com/fiddler110/aegis/internal/fsguard"
 )
 
 // WorkerSpec is the JSON contract between the SubprocessBackend and the headless
@@ -273,6 +275,21 @@ func writeSpec(spec WorkerSpec) (string, error) {
 		f.Close()
 		os.Remove(f.Name())
 		return "", fmt.Errorf("swarm: chmod spec file: %w", err)
+	}
+	// 0o600 is the whole story on POSIX and cosmetic on Windows, where a new
+	// file inherits its parent directory's ACL — and the parent here is the
+	// world-writable system temp directory (C1). This file is the only carrier
+	// of the child's permission mode: the parent clamps Mode against its own
+	// before writing (agent.go's clampMode), and `aegis worker` then trusts
+	// spec.Config.Mode as given, because by then the clamp has already
+	// happened somewhere it cannot see. Another local account able to rewrite
+	// the file between this write and the child's read therefore promotes the
+	// teammate to `auto`; one able merely to read it gets the task and system
+	// prompts. Same idiom as the daemon auth token and the MCP token.
+	if err := fsguard.RestrictToOwner(f.Name()); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", fmt.Errorf("swarm: restrict spec file to owner: %w", err)
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()

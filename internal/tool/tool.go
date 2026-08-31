@@ -65,18 +65,89 @@ type OutputSchemer interface {
 // diff, …) should be gated as CapRead instead — gating every invocation as
 // execute forces a full approval prompt even for commands that mutate
 // nothing.
+//
+// The context is the one the call will actually execute under — the same value
+// Execute receives — because the classification and the execution have to agree
+// about the *session*, not just the input. CRIT-3: it used to take only the
+// input, so the shell tool classified against the daemon-wide root baked in at
+// construction while the call ran under WorkdirFromContext's session-scoped
+// one. A cron job created from a session rooted at B was checked against
+// workspace A and executed in B, unattended; interactive sessions were
+// mis-scoped in both directions by the same gap. A tool whose verdict genuinely
+// does not depend on the context is free to ignore it.
 type CapabilityOverrider interface {
-	CapabilityFor(input json.RawMessage) Capability
+	CapabilityFor(ctx context.Context, input json.RawMessage) Capability
 }
 
 // EffectiveCapability returns the capability that should gate a specific
 // call: t's static Capability(), unless t implements CapabilityOverrider and
-// reports a different capability for this input.
-func EffectiveCapability(t Tool, input json.RawMessage) Capability {
-	if o, ok := t.(CapabilityOverrider); ok {
-		return o.CapabilityFor(input)
+// reports a different capability for this input. ctx must be the context the
+// call would execute under; see CapabilityOverrider.
+//
+// When ctx carries a memo (WithCapabilityMemo), the first verdict for a given
+// tool and input is the verdict every later caller under that context sees.
+func EffectiveCapability(ctx context.Context, t Tool, input json.RawMessage) Capability {
+	o, ok := t.(CapabilityOverrider)
+	if !ok {
+		return t.Capability()
 	}
-	return t.Capability()
+	m := capabilityMemoFrom(ctx)
+	if m == nil {
+		return o.CapabilityFor(ctx, input)
+	}
+	key := t.Name() + "\x00" + string(input)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cap, ok := m.verdicts[key]; ok {
+		return cap
+	}
+	cap := o.CapabilityFor(ctx, input)
+	if m.verdicts == nil {
+		m.verdicts = make(map[string]Capability, 4)
+	}
+	m.verdicts[key] = cap
+	return cap
+}
+
+// capabilityMemo holds one tool call's effective-capability verdicts for the
+// lifetime of that call (M5).
+//
+// A per-call capability classification is not free and it is not stable: the
+// shell tool's runs filesystem I/O — an EvalSymlinks and a Stat walk — for
+// every argv token, and it ran at least twice per call, once at the gate and
+// once for the checkpoint decision, with the entire approval round-trip in
+// between. That is duplicated work in a hot path and a TOCTOU window in a
+// security check: a symlink swapped while the operator reads the prompt made
+// the decision that authorized the call and the decision that ran it two
+// different decisions. Memoizing per call makes them one decision by
+// construction.
+//
+// It is deliberately scoped to a single call's context — installed by the
+// engine in toolCtx and discarded when the call ends — rather than being a
+// cache on the tool, so there is no eviction policy to get wrong and no way
+// for one call's verdict to reach another.
+type capabilityMemo struct {
+	mu       sync.Mutex
+	verdicts map[string]Capability
+}
+
+type capabilityMemoKeyType struct{}
+
+var capabilityMemoKey capabilityMemoKeyType
+
+// WithCapabilityMemo returns a context in which every EffectiveCapability call
+// for the same tool and input answers with the first verdict computed. Install
+// it once per tool call, never per session or per run.
+func WithCapabilityMemo(ctx context.Context) context.Context {
+	return context.WithValue(ctx, capabilityMemoKey, &capabilityMemo{})
+}
+
+func capabilityMemoFrom(ctx context.Context) *capabilityMemo {
+	if ctx == nil {
+		return nil
+	}
+	m, _ := ctx.Value(capabilityMemoKey).(*capabilityMemo)
+	return m
 }
 
 // ReplayClass says whether re-issuing a tool call with the same input, after
@@ -261,9 +332,34 @@ type Registry struct {
 	// belong in a clone-local overlay, not in the shared table.
 	local map[string]Tool
 
+	// parent is the registry this one was cloned from, nil in a root registry.
+	//
+	// exposed and deferred below are an *overlay* on the parent's, not a copy
+	// of them (CRIT-5): a clone records only the exposure decisions it has
+	// actually made, and every name it has never spoken about falls through to
+	// the parent. Copying was the bug — the copy was taken before a tool
+	// existed, so a tool the parent registered later (MCP's tools/list_changed,
+	// above all) reached the shared table and was found by lookup, but the
+	// clone's exposed map said false and Schemas() skipped it. tool_search
+	// could not recover it either, since the clone's deferred map did not have
+	// it either: the tool was neither exposed nor deferred, i.e. invisible, for
+	// the life of the session. Falling through is what lookupLocked already
+	// does for the tools themselves; this makes exposure agree with it.
+	//
+	// Lock order: this registry's mu before the parent's, never the reverse. A
+	// parent never reaches into a clone.
+	parent *Registry
+
 	exposed     map[string]bool
 	deferred    map[string]bool       // tool is known but loaded on demand via tool_search
 	schemaCache []provider.ToolSchema // nil means dirty; rebuilt on next Schemas call
+	// schemaCacheParentVersion is the parent chain's version at the moment
+	// schemaCache was built. A parent registration or exposure change bumps
+	// that number, and a clone that finds it moved discards its cache and
+	// rebuilds — which is how a clone notices a mid-session MCP refresh, both
+	// for a tool that appeared and for one whose schema was replaced, without
+	// any cross-registry notification plumbing.
+	schemaCacheParentVersion uint64
 
 	// schemaVersion counts invalidations of schemaCache, i.e. every change to
 	// the exposed set or to a registration behind it. It exists so a caller that
@@ -291,12 +387,54 @@ func (r *Registry) invalidateSchemasLocked() {
 }
 
 // SchemaVersion reports a counter that changes whenever Schemas() would return
-// something different for this registry. See the field comment for what it does
-// and does not cover.
+// something different for this registry — including when the change happened on
+// a parent this registry was cloned from.
 func (r *Registry) SchemaVersion() uint64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.schemaVersion
+	return r.schemaVersion + r.parentVersion()
+}
+
+// parentVersion sums the schema versions of the whole parent chain, so a change
+// made on any ancestor is visible as a change here. Zero for a root registry.
+// r.mu must be held; it takes each ancestor's lock in turn, which is the
+// documented lock order (clone before parent).
+func (r *Registry) parentVersion() uint64 {
+	if r.parent == nil {
+		return 0
+	}
+	p := r.parent
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.schemaVersion + p.parentVersion()
+}
+
+// isExposedLocked reports whether name is offered to the model, consulting this
+// registry's own decision first and falling through to the parent chain for a
+// name this registry has never spoken about. r.mu must be held.
+func (r *Registry) isExposedLocked(name string) bool {
+	if v, ok := r.exposed[name]; ok {
+		return v
+	}
+	if r.parent == nil {
+		return false
+	}
+	r.parent.mu.RLock()
+	defer r.parent.mu.RUnlock()
+	return r.parent.isExposedLocked(name)
+}
+
+// isDeferredLocked is isExposedLocked for the deferred set.
+func (r *Registry) isDeferredLocked(name string) bool {
+	if v, ok := r.deferred[name]; ok {
+		return v
+	}
+	if r.parent == nil {
+		return false
+	}
+	r.parent.mu.RLock()
+	defer r.parent.mu.RUnlock()
+	return r.parent.isDeferredLocked(name)
 }
 
 // NewRegistry creates an empty registry.
@@ -521,13 +659,25 @@ func (r *Registry) ScopeExposed(allow []string) (restore func()) {
 		keep[n] = true
 	}
 	r.mu.Lock()
-	prev := make(map[string]bool, len(r.exposed))
-	for name, was := range r.exposed {
-		prev[name] = was
+	// Every *visible* tool, not just the ones this registry has an explicit
+	// entry for: on a clone the exposure decision may live on the parent
+	// (CRIT-5), and narrowing has to cover those too or the scope leaks
+	// exactly the tools the clone inherited.
+	type prior struct {
+		was      bool
+		explicit bool // there was a local entry to restore, rather than a fallthrough
+	}
+	prev := map[string]prior{}
+	var names []string
+	r.rangeToolsLocked(func(name string, _ Tool) { names = append(names, name) })
+	for _, name := range names {
+		was := r.isExposedLocked(name)
+		_, explicit := r.exposed[name]
+		prev[name] = prior{was: was, explicit: explicit}
 		switch {
 		case was && !keep[name]:
 			r.exposed[name] = false
-		case !was && keep[name] && r.deferred[name]:
+		case !was && keep[name] && r.isDeferredLocked(name):
 			// Load a named deferred tool for this scope only; restore returns
 			// it to deferred because prev recorded false above.
 			r.exposed[name] = true
@@ -541,10 +691,18 @@ func (r *Registry) ScopeExposed(allow []string) (restore func()) {
 		once.Do(func() {
 			r.mu.Lock()
 			defer r.mu.Unlock()
-			for name, was := range prev {
-				if _, still := r.lookupLocked(name); still {
-					r.exposed[name] = was
+			for name, p := range prev {
+				if _, still := r.lookupLocked(name); !still {
+					continue
 				}
+				if p.explicit {
+					r.exposed[name] = p.was
+					continue
+				}
+				// It had no local entry before the scope, so restoring it as
+				// one would freeze the parent's later decisions for that name.
+				// Drop back to falling through.
+				delete(r.exposed, name)
 			}
 			r.invalidateSchemasLocked()
 		})
@@ -576,7 +734,7 @@ func (r *Registry) Deferred() []Info {
 	defer r.mu.RUnlock()
 	var out []Info
 	r.rangeToolsLocked(func(name string, t Tool) {
-		if r.deferred[name] && !r.exposed[name] {
+		if r.isDeferredLocked(name) && !r.isExposedLocked(name) {
 			out = append(out, Info{Name: t.Name(), Description: t.Description(), Summary: Summarize(t)})
 		}
 	})
@@ -596,7 +754,7 @@ func (r *Registry) Load(names ...string) []Tool {
 		if !ok {
 			continue
 		}
-		if !r.exposed[n] {
+		if !r.isExposedLocked(n) {
 			r.exposed[n] = true
 			r.invalidateSchemasLocked()
 		}
@@ -614,7 +772,7 @@ func (r *Registry) SearchDeferred(query string) []Tool {
 	terms := strings.Fields(strings.ToLower(query))
 	var out []Tool
 	r.rangeToolsLocked(func(name string, t Tool) {
-		if !r.deferred[name] || r.exposed[name] {
+		if !r.isDeferredLocked(name) || r.isExposedLocked(name) {
 			return
 		}
 		if len(terms) == 0 {
@@ -637,8 +795,9 @@ func (r *Registry) SearchDeferred(query string) []Tool {
 // exposure (P9): the underlying registration table is shared — a tool
 // registered or dynamically upserted on the original (e.g. MCP's
 // tools/list_changed refresh) is visible through every clone — but the
-// exposed/deferred maps are independent copies, and so is the clone-local
-// overlay a clone's own Register/Upsert writes into. Calling Load (via
+// clone's exposure decisions are an overlay on the parent's rather than a copy
+// of them, and the clone-local registration overlay a clone's own
+// Register/Upsert writes into is its own. Calling Load (via
 // tool_search) on a clone only exposes a tool for whoever holds that clone,
 // instead of the process-global Registry a session's tool_search call
 // previously mutated permanently for every other concurrent or future session
@@ -650,23 +809,18 @@ func (r *Registry) SearchDeferred(query string) []Tool {
 func (r *Registry) Clone() *Registry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	exposed := make(map[string]bool, len(r.exposed))
-	for k, v := range r.exposed {
-		exposed[k] = v
-	}
-	deferred := make(map[string]bool, len(r.deferred))
-	for k, v := range r.deferred {
-		deferred[k] = v
-	}
 	local := make(map[string]Tool, len(r.local))
 	for k, v := range r.local {
 		local[k] = v
 	}
 	return &Registry{
-		table:    r.table,
-		local:    local,
-		exposed:  exposed,
-		deferred: deferred,
+		table:  r.table,
+		local:  local,
+		parent: r,
+		// Empty, not copied: exposure is an overlay on the parent's decisions
+		// (see the parent field's comment for why copying was CRIT-5).
+		exposed:  map[string]bool{},
+		deferred: map[string]bool{},
 	}
 }
 
@@ -791,7 +945,7 @@ func (r *Registry) All() []Tool {
 // Results are cached until the registry is mutated.
 func (r *Registry) Schemas() []provider.ToolSchema {
 	r.mu.RLock()
-	if r.schemaCache != nil {
+	if r.schemaCache != nil && r.schemaCacheParentVersion == r.parentVersion() {
 		out := r.schemaCache
 		r.mu.RUnlock()
 		return out
@@ -800,12 +954,18 @@ func (r *Registry) Schemas() []provider.ToolSchema {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.schemaCache != nil { // double-check after acquiring write lock
+	// Double-check after acquiring the write lock, and re-check the parent
+	// chain: a clone's own invalidation never fires for a change made on the
+	// parent, so without this a session kept serving the tool list it built
+	// before an MCP refresh — missing a tool that appeared, and serving the old
+	// schema for one that was replaced — for the rest of its life (CRIT-5).
+	parentVersion := r.parentVersion()
+	if r.schemaCache != nil && r.schemaCacheParentVersion == parentVersion {
 		return r.schemaCache
 	}
 	out := make([]provider.ToolSchema, 0, r.countToolsLocked())
 	r.rangeToolsLocked(func(name string, t Tool) {
-		if !r.exposed[name] {
+		if !r.isExposedLocked(name) {
 			return
 		}
 		ts := provider.ToolSchema{
@@ -820,5 +980,6 @@ func (r *Registry) Schemas() []provider.ToolSchema {
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	r.schemaCache = out
+	r.schemaCacheParentVersion = parentVersion
 	return out
 }

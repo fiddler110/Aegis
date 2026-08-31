@@ -100,6 +100,25 @@ func urgencyOf(p Purpose) urgency {
 	}
 }
 
+// SuppressesExtendedThinking reports whether p is a classification call whose
+// entire value is in its content — a short, structured verdict — and for which
+// a reasoning model's thinking preamble is pure cost.
+//
+// This exists because of EXEC-1: the output guard asked a reasoning model for
+// "PASS" under a small token cap, the model spent the whole cap thinking, the
+// content came back empty, and the guard fell closed on every turn. Thinking
+// buys a two-token enum verdict nothing, and the caller — not the model, and
+// not the adapter — is the only party that knows the call has that shape.
+//
+// Adapters that can turn extended thinking off per request honor it; the rest
+// ignore it, which is safe: it is a cost and truncation mitigation, never a
+// correctness requirement. Keep the list to purposes whose reply is a fixed
+// small schema. The guard is one; a sub-agent's turn or a compaction summary
+// emphatically is not.
+func SuppressesExtendedThinking(p Purpose) bool {
+	return p == PurposeGuard
+}
+
 // purposeKey is the context key carrying a run-scoped default Purpose.
 type purposeKeyType struct{}
 

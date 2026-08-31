@@ -17,6 +17,18 @@ type MCPServerModeConfig struct {
 	// needs approval) rather than the daemon's own configured default, since
 	// an external MCP client is a lower-trust caller than the local TUI/CLI.
 	DefaultMode string `koanf:"default_mode"`
+	// AutoApproveTools narrows AutoApprove to these tool names. Empty leaves
+	// AutoApprove blanket (its historical meaning); a non-empty list grants
+	// only the tools named and denies every other approval request, which is
+	// the middle setting the on/off switch never had (C1/F2).
+	AutoApproveTools []string `koanf:"auto_approve_tools"`
+	// AllowCallerModeEscalation lets an MCP client's `mode` tool argument
+	// exceed DefaultMode. Off by default: an MCP client is a program holding a
+	// token from a file, not the local user, so it may pick any mode at or
+	// below what the operator configured and no more. Turning this on restores
+	// the pre-C1/F1 behavior, where a caller asking for `auto` got it whatever
+	// this config said.
+	AllowCallerModeEscalation bool `koanf:"allow_caller_mode_escalation"`
 }
 
 // EmbeddingsConfig enables the optional semantic recall layer (P5.8) over the

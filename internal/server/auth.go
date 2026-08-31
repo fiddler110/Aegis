@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -302,13 +303,42 @@ func (s *Server) mintPageToken() (token, csrf string, err error) {
 	}
 	csrf = hex.EncodeToString(cbuf[:])
 	s.pageTokenMu.Lock()
+	defer s.pageTokenMu.Unlock()
 	if s.pageTokens == nil {
 		s.pageTokens = make(map[string]pageTokenEntry)
 	}
-	s.pageTokens[token] = pageTokenEntry{expiry: time.Now().Add(pageTokenTTL), csrf: csrf}
-	s.pageTokenMu.Unlock()
+	// M3: sweep here too, and refuse to mint past a cap. GET /ui is exempt from
+	// authMiddleware and mints on every load, while the only sweep lived in
+	// exchangePageToken — so a local process that loads the page and never
+	// exchanges grows this map without bound and never triggers the cleanup.
+	// That is the memory-growth DoS the invalidAuthAttempts design deliberately
+	// avoids, reachable on the one endpoint that needs no credential.
+	now := time.Now()
+	for t, e := range s.pageTokens {
+		if now.After(e.expiry) {
+			delete(s.pageTokens, t)
+		}
+	}
+	// Every entry lives at most pageTokenTTL (60s), so reaching the cap after
+	// the sweep means a minting rate no browser produces. Refusing is the right
+	// answer rather than evicting: evicting would let a flood invalidate the
+	// page tokens of legitimate loads, turning a memory bound into a working
+	// denial of the UI.
+	if len(s.pageTokens) >= maxPageTokens {
+		return "", "", errTooManyPageTokens
+	}
+	s.pageTokens[token] = pageTokenEntry{expiry: now.Add(pageTokenTTL), csrf: csrf}
 	return token, csrf, nil
 }
+
+// maxPageTokens bounds the unexchanged page tokens held at once. Entries expire
+// after pageTokenTTL, so this is a bound on the *rate* of unauthenticated /ui
+// loads, far above any real browser's.
+const maxPageTokens = 1024
+
+// errTooManyPageTokens is returned by mintPageToken when maxPageTokens
+// unexpired tokens are already outstanding.
+var errTooManyPageTokens = errors.New("too many outstanding page tokens; retry shortly")
 
 // exchangePageToken redeems a page token minted by mintPageToken: it must
 // exist, not be expired, and csrf must match the nonce minted alongside it.

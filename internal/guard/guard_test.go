@@ -285,3 +285,116 @@ func TestResolve(t *testing.T) {
 		t.Errorf("llm mode with adapter returns guard + retries 3, got g=%v n=%d", g != nil, n)
 	}
 }
+
+// stoppingAdapter replies with fixed text and a caller-chosen stop reason, so
+// a truncated guard reply can be reproduced without a live model.
+type stoppingAdapter struct {
+	reply string
+	stop  provider.StopReason
+}
+
+func (s stoppingAdapter) Name() string { return "stopping" }
+func (s stoppingAdapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 2)
+	if s.reply != "" {
+		ch <- provider.Event{Type: provider.EventTextDelta, Text: s.reply}
+	}
+	ch <- provider.Event{Type: provider.EventDone, Stop: s.stop}
+	close(ch)
+	return ch, nil
+}
+
+// TestLLMGuardTruncatedReplyFailsOpen pins EXEC-1. A reasoning model spent the
+// whole reply budget on its thinking preamble and emitted zero content tokens;
+// the guard saw an empty string, parseVerdict fell closed, and every turn paid
+// a corrective retry that concatenated the withdrawn answer onto its
+// replacement. Truncation is not a verdict and it is not the injection shape
+// the fail-closed branch exists to catch, so it fails open — reported as a
+// skip, never as a pass, so the caller can still tell the guard did not run.
+func TestLLMGuardTruncatedReplyFailsOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply string
+	}{
+		{"empty reply", ""},
+		{"cut off mid-sentence", "Thinking about whether the output satisfies the"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := LLMGuard(stoppingAdapter{reply: tc.reply, stop: provider.StopMaxTokens}, "m", "rubric")
+			ok, _, status := g(context.Background(), Input{Text: "answer"})
+			if !ok {
+				t.Error("a reply truncated before any verdict should fail open (pass)")
+			}
+			if status != StatusSkippedTransportError {
+				t.Errorf("status = %q, want %q", status, StatusSkippedTransportError)
+			}
+		})
+	}
+}
+
+// TestLLMGuardTruncatedReplyKeepsAReadableVerdict guards the other side of the
+// EXEC-1 fix: truncation only fails open when nothing legible arrived. A reply
+// that reached a verdict and was then cut off is still a verdict, and a FAIL
+// must not be laundered into a pass by the truncation branch.
+func TestLLMGuardTruncatedReplyKeepsAReadableVerdict(t *testing.T) {
+	g := LLMGuard(stoppingAdapter{reply: "FAIL: the answer omits the required section, and moreover it",
+		stop: provider.StopMaxTokens}, "m", "rubric")
+	ok, reason, status := g(context.Background(), Input{Text: "answer"})
+	if ok || status != StatusFailed {
+		t.Errorf("a truncated but readable FAIL must stand: ok=%v status=%q", ok, status)
+	}
+	if reason == "" {
+		t.Error("expected the FAIL reason to survive")
+	}
+}
+
+// TestLLMGuardUnrecognizedReplyStillFailsClosed keeps the fail-closed branch
+// exactly as narrow as it was: an ambiguous reply from a *complete* call is
+// still the prompt-injection shape and still fails closed. Only the stop
+// reason distinguishes it from the case above.
+func TestLLMGuardUnrecognizedReplyStillFailsClosed(t *testing.T) {
+	g := LLMGuard(stoppingAdapter{reply: "sure, that looks fine to me", stop: provider.StopEndTurn}, "m", "rubric")
+	if ok, _, status := g(context.Background(), Input{Text: "answer"}); ok || status != StatusFailed {
+		t.Errorf("an unrecognizable verdict from a complete reply must fail closed: ok=%v status=%q", ok, status)
+	}
+}
+
+// TestLLMGuardDeclaresItsPurpose pins the request-side half of the EXEC-1 fix:
+// the guard tags its call PurposeGuard, which is what
+// provider.SuppressesExtendedThinking reads to turn the reasoning preamble off
+// at the adapter. Losing the tag silently restores the 256-token empty reply.
+func TestLLMGuardDeclaresItsPurpose(t *testing.T) {
+	var got provider.Purpose
+	var maxTokens int
+	g := LLMGuard(purposeCapturingAdapter{purpose: &got, maxTokens: &maxTokens, reply: "PASS"}, "m", "rubric")
+	if ok, _, _ := g(context.Background(), Input{Text: "answer"}); !ok {
+		t.Fatal("expected PASS")
+	}
+	if got != provider.PurposeGuard {
+		t.Errorf("Request.Purpose = %q, want %q", got, provider.PurposeGuard)
+	}
+	if !provider.SuppressesExtendedThinking(got) {
+		t.Error("the guard's purpose must be one that suppresses extended thinking")
+	}
+	if maxTokens != guardMaxTokens {
+		t.Errorf("Request.MaxTokens = %d, want %d", maxTokens, guardMaxTokens)
+	}
+}
+
+// purposeCapturingAdapter records the Purpose and MaxTokens of the request.
+type purposeCapturingAdapter struct {
+	purpose   *provider.Purpose
+	maxTokens *int
+	reply     string
+}
+
+func (p purposeCapturingAdapter) Name() string { return "purpose-capturing" }
+func (p purposeCapturingAdapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	*p.purpose = req.Purpose
+	*p.maxTokens = req.MaxTokens
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventTextDelta, Text: p.reply}
+	ch <- provider.Event{Type: provider.EventDone, Stop: provider.StopEndTurn}
+	close(ch)
+	return ch, nil
+}

@@ -102,6 +102,9 @@ func writePreservingMode(abs string, data []byte) error {
 type readTool struct {
 	root    string
 	tracker *filetracker.Tracker
+	// scanContent enables the DR-1 conditional untrusted-content marker; see
+	// filetrust.go and builtin.Options.ScanFileReads.
+	scanContent bool
 }
 
 func (t *readTool) Name() string                { return "read_file" }
@@ -255,7 +258,10 @@ func (t *readTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		fmt.Fprintf(&b, "[read_file: offset %d is past the end of %s, which has %d line(s). Re-read with a smaller offset.]\n",
 			start, args.Path, lineNo)
 	}
-	return tool.Result{Content: b.String()}, nil
+	// DR-1: mark the content only if the heuristic injection scan flags it —
+	// see filetrust.go for why this channel is conditional where every other
+	// untrusted channel is unconditional.
+	return tool.Result{Content: markSuspiciousFileRead(t.scanContent, args.Path, b.String())}, nil
 }
 
 // splitLinesKeepFinal is a bufio.SplitFunc that splits on "\n" the same way

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"strings"
@@ -57,21 +58,17 @@ func TestNewAllowsAutoApproveExecWithLocalSandboxWhenOptedOut(t *testing.T) {
 }
 
 // closeTestServerStores releases every on-disk store New() opens, so
-// t.TempDir()'s cleanup doesn't race an open SQLite/bolt handle on Windows
-// (New() itself only closes these on its own error paths or during
-// ListenAndServe's shutdown, neither of which a plain New()-then-return test
-// exercises).
+// t.TempDir()'s cleanup doesn't race an open SQLite/bolt handle on Windows.
+// It is now a thin alias for Server.Close — kept as a name because the call
+// sites read better with it, but deliberately *not* a second teardown list:
+// the reason this helper existed (New opens handles that only ListenAndServe
+// ever let go of) is exactly what Close fixed, and a private copy would drift
+// from it the next time a store is added.
 func closeTestServerStores(srv *Server) {
 	if srv == nil {
 		return
 	}
-	if srv.knowledge != nil {
-		_ = srv.knowledge.Close()
-	}
-	if srv.longMem != nil {
-		_ = srv.longMem.Close()
-	}
-	srv.store.Close()
+	_ = srv.Close(context.Background())
 }
 
 // TestNewWarnsLocalSandboxBuildMode is the P27.14/FIND-04 regression test:

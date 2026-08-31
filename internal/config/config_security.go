@@ -23,6 +23,24 @@ type SecurityConfig struct {
 	// docs/providers.md "Data Exposure & Redaction".
 	RedactSecrets bool `koanf:"redact_secrets"`
 
+	// ScanFileReads runs read_file and grep results through the heuristic
+	// prompt-injection scan, attaching the untrusted-content provenance marker
+	// only when it fires (DR-1). Defaults to true.
+	//
+	// Workspace file contents are the highest-volume channel that reaches the
+	// model without passing through the user, and were the only major one with
+	// no marker at all — while a project's persona.md, planted by the same
+	// adversary in the same act, was marked. Making the marker conditional on a
+	// scan hit is what keeps the common case free of the ~150-byte envelope.
+	//
+	// The scan itself is not free: roughly 14ms per maxed-out read on the
+	// benchmark in internal/trust, paid per read_file and per grep. That is
+	// noise against a model turn and real on a recon-heavy one, so it is
+	// switchable — as every other scanned channel already is
+	// (mcp.servers[].scan_output, search.scan_output). Turning it off restores
+	// exactly the pre-DR-1 behavior: file contents reach the model unmarked.
+	ScanFileReads bool `koanf:"scan_file_reads"`
+
 	// Tools configures per-scanner behavior for `aegis scan`/the security_scan
 	// tool (P11.11): whether it's enabled, how it runs (host binary vs
 	// container image), and its digest-pinned image override. Keyed by

@@ -74,7 +74,7 @@ func TestConcurrentSkillActivationAcrossSessions(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			srv.tools.Upsert(&preloadFakeTool{name:"mcp__srv__refresh"})
+			srv.tools.Upsert(&preloadFakeTool{name: "mcp__srv__refresh"})
 			_, _ = srv.tools.Get("skill")
 		}
 	}()
@@ -127,7 +127,7 @@ func TestSubAgentToolSearchDoesNotWidenTheDaemon(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	if err := srv.tools.RegisterDeferred(&preloadFakeTool{name:"expensive_tool"}); err != nil {
+	if err := srv.tools.RegisterDeferred(&preloadFakeTool{name: "expensive_tool"}); err != nil {
 		t.Fatal(err)
 	}
 	parent, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan"})

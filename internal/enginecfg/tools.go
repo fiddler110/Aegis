@@ -38,7 +38,11 @@ import (
 
 func BuiltinOptions(cfg *config.Config, root string) builtin.Options {
 	if cfg == nil {
-		return builtin.Options{Root: root}
+		// ScanFileReads mirrors the config default rather than the zero value:
+		// with no config to consult, the DR-1 marker's default-on posture is the
+		// safe direction, and a bool's zero value would silently be the opposite
+		// of what every configured caller gets.
+		return builtin.Options{Root: root, ScanFileReads: true}
 	}
 	return builtin.Options{
 		Root:    root,
@@ -73,5 +77,6 @@ func BuiltinOptions(cfg *config.Config, root string) builtin.Options {
 			BaseURL:    cfg.Search.BaseURL,
 			ScanOutput: cfg.Search.ScanOutput,
 		},
+		ScanFileReads: cfg.Security.ScanFileReads,
 	}
 }

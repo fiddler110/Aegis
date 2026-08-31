@@ -453,7 +453,7 @@ List all cron jobs with ID, schedule, enabled state, and title.
 
 ### `cron_delete`
 
-**Capability:** write
+**Capability:** execute
 
 Delete a cron job by ID.
 
@@ -467,7 +467,7 @@ Delete a cron job by ID.
 
 ### `cron_toggle`
 
-**Capability:** write
+**Capability:** execute
 
 Enable or disable a cron job without deleting it.
 

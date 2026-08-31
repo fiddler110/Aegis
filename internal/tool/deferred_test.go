@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/fiddler110/aegis/internal/provider"
 )
 
 type fakeTool struct {
@@ -143,4 +145,125 @@ func TestCloneUpsertStaysLocal(t *testing.T) {
 	if got, _ := sessionA.Get("skill"); got != sessionScoped {
 		t.Error("a sub-agent's Upsert must not reach back into its parent session")
 	}
+}
+
+// TestCloneExposesToolsRegisteredAfterTheClone is CRIT-5, and the direction
+// TestCloneSharesLaterRegistrations left untested: it checked that the clone
+// could *look up* a tool the parent registered later, which worked, but not
+// that the clone would *offer* it. It would not. The clone's exposed map was a
+// copy taken before the tool existed, so Schemas() skipped the tool, and
+// tool_search could not recover it either — the clone's deferred map did not
+// have it either, so the tool was neither exposed nor deferred, i.e. invisible
+// for the rest of the session. The reachable trigger is an MCP server sending
+// notifications/tools/list_changed mid-conversation, which Upserts on the
+// parent registry every live session shares.
+func TestCloneExposesToolsRegisteredAfterTheClone(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(&fakeTool{name: "early", desc: "registered before the clone"}); err != nil {
+		t.Fatal(err)
+	}
+	clone := r.Clone()
+	if got := len(clone.Schemas()); got != 1 {
+		t.Fatalf("clone schemas before the refresh = %d, want 1", got)
+	}
+
+	// The MCP refresh: a new tool appears on the parent.
+	r.Upsert(&fakeTool{name: "late", desc: "added by an MCP list_changed refresh"})
+
+	names := schemaNames(clone.Schemas())
+	if len(names) != 2 || names[1] != "late" {
+		t.Errorf("clone schemas after the refresh = %v, want [early late]", names)
+	}
+}
+
+// TestCloneSeesAReplacedSchema is the stale-cache half of CRIT-5: a clone's
+// schemaCache is only invalidated by its own writes, so a tool whose schema the
+// refresh *replaced* kept serving the old one to that session forever.
+func TestCloneSeesAReplacedSchema(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(&fakeTool{name: "search", desc: "original description"}); err != nil {
+		t.Fatal(err)
+	}
+	clone := r.Clone()
+	before := clone.Schemas()
+	if len(before) != 1 || before[0].Description != "original description" {
+		t.Fatalf("clone schemas = %+v", before)
+	}
+	version := clone.SchemaVersion()
+
+	r.Upsert(&fakeTool{name: "search", desc: "replaced by the refresh"})
+
+	after := clone.Schemas()
+	if len(after) != 1 || after[0].Description != "replaced by the refresh" {
+		t.Errorf("clone served a stale schema after the parent replaced it: %+v", after)
+	}
+	if clone.SchemaVersion() == version {
+		t.Error("SchemaVersion did not move, so a consumer caching a derivation of Schemas() would never rebuild it")
+	}
+}
+
+// TestCloneDeferredFallsThroughToTheParent covers the tool_search recovery
+// path: a deferred tool the parent registers after the clone must be findable,
+// and loading it on the clone must still be a clone-local decision.
+func TestCloneDeferredFallsThroughToTheParent(t *testing.T) {
+	r := NewRegistry()
+	clone := r.Clone()
+	sibling := r.Clone()
+
+	if err := r.RegisterDeferred(&fakeTool{name: "late_deferred", desc: "deferred, added after the clone"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(clone.Deferred()); got != 1 {
+		t.Fatalf("clone Deferred() = %d, want 1", got)
+	}
+	if got := clone.SearchDeferred("late"); len(got) != 1 {
+		t.Fatalf("clone SearchDeferred = %d, want 1", len(got))
+	}
+	clone.Load("late_deferred")
+	if got := len(clone.Schemas()); got != 1 {
+		t.Errorf("clone schemas after loading = %d, want 1", got)
+	}
+	if got := len(sibling.Schemas()); got != 0 {
+		t.Errorf("the load leaked to a sibling clone: schemas = %d, want 0", got)
+	}
+	if got := len(r.Schemas()); got != 0 {
+		t.Errorf("the load leaked to the parent: schemas = %d, want 0", got)
+	}
+}
+
+// TestCloneScopeExposedRestoresFallthrough pins that ScopeExposed on a clone
+// narrows inherited exposure and, on restore, goes back to *inheriting* rather
+// than freezing the parent's decision at scope-entry time.
+func TestCloneScopeExposedRestoresFallthrough(t *testing.T) {
+	r := NewRegistry()
+	for _, n := range []string{"read_file", "shell"} {
+		if err := r.Register(&fakeTool{name: n, desc: n}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clone := r.Clone()
+
+	restore := clone.ScopeExposed([]string{"read_file"})
+	if got := schemaNames(clone.Schemas()); len(got) != 1 || got[0] != "read_file" {
+		t.Errorf("scoped clone schemas = %v, want [read_file]", got)
+	}
+	restore()
+	if got := len(clone.Schemas()); got != 2 {
+		t.Errorf("clone schemas after restore = %d, want 2", got)
+	}
+
+	// After the restore the clone holds no opinion of its own, so a parent
+	// change still reaches it.
+	r.SetExposed("shell", false)
+	if got := schemaNames(clone.Schemas()); len(got) != 1 || got[0] != "read_file" {
+		t.Errorf("clone schemas after a parent change = %v, want [read_file]", got)
+	}
+}
+
+func schemaNames(schemas []provider.ToolSchema) []string {
+	out := make([]string, 0, len(schemas))
+	for _, s := range schemas {
+		out = append(out, s.Name)
+	}
+	return out
 }

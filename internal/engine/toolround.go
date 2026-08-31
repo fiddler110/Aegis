@@ -131,7 +131,7 @@ func (r *toolRound) add(tu provider.ToolUseBlock) {
 	r.mu.Lock()
 	s := &toolSlot{
 		tu:        tu,
-		serialize: r.e.serializeTool(tu.Name, tu.Input),
+		serialize: r.e.serializeTool(r.ctx, tu.Name, tu.Input),
 		path:      toolTargetPath(tu.Input),
 		done:      make(chan struct{}),
 	}

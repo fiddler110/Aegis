@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -52,6 +53,16 @@ func TestDeleteSessionFreesPerSessionRunState(t *testing.T) {
 	srv.sessionPermCache.Store(meta.ID+"\x00write_file", struct{}{})
 	// A second session's grant must survive the first one's delete.
 	srv.sessionPermCache.Store("other-session\x00shell", struct{}{})
+	// M6: toolCallWarned is the third map keyed by session, and was the one
+	// still missing from this list — it records that a session was told its
+	// model cannot call tools, and nothing ever removed the entry.
+	srv.toolCallWarnedMu.Lock()
+	srv.toolCallWarned = map[string]struct{}{
+		meta.ID + "\x00qwen3:14b":    {},
+		meta.ID + "\x00llama3.2:3b":  {},
+		"other-session\x00qwen3:14b": {},
+	}
+	srv.toolCallWarnedMu.Unlock()
 
 	if err := cl.DeleteSession(ctx, meta.ID); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
@@ -65,6 +76,15 @@ func TestDeleteSessionFreesPerSessionRunState(t *testing.T) {
 	}
 	if got := countKeys(&srv.sessionPermCache, "other-session\x00"); got != 1 {
 		t.Errorf("another session's grants were dropped too: %d remain, want 1", got)
+	}
+	srv.toolCallWarnedMu.Lock()
+	remaining := make([]string, 0, len(srv.toolCallWarned))
+	for k := range srv.toolCallWarned {
+		remaining = append(remaining, k)
+	}
+	srv.toolCallWarnedMu.Unlock()
+	if len(remaining) != 1 || !strings.HasPrefix(remaining[0], "other-session\x00") {
+		t.Errorf("toolCallWarned after delete = %q, want only the other session's entry", remaining)
 	}
 }
 

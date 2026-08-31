@@ -27,14 +27,25 @@ type proseToolCallAdapter struct {
 // before being handed to the caller. Returns base unchanged when base is nil.
 //
 // This is a response-side decorator, the mirror of the request-side ones
-// beside it (numctx.go, retry.go): it needs the whole assembled reply before
-// it can tell a genuine text answer from a mis-emitted call, so — unlike
-// every other decorator in this package — it does not forward events as they
-// arrive. It buffers one turn's stream, decides, and then either replays it
-// unchanged or replaces the buffered text with the parsed call plus whatever
-// prose survives it. That trades live token-by-token display for correctness
-// on the turns it actually rewrites, which is acceptable here because P74.17
-// is expected to gate this per model rather than leaving it a blanket default.
+// beside it (numctx.go, retry.go): it needs the whole assembled *text* before
+// it can tell a genuine answer from a mis-emitted call, so it holds text
+// deltas and the terminal EventDone until it has decided, then either replays
+// them unchanged or replaces the text with the parsed call plus whatever prose
+// survives it.
+//
+// It holds nothing else. Thinking and every other event go out as they arrive,
+// and the moment the turn emits a real structured call the decorator has
+// already decided to keep out of the way, so it flushes and becomes a plain
+// passthrough for the rest of the turn. That matters because two engine
+// invariants are watching this channel: the stall heartbeat beats on each
+// event received, and P67.7 dispatches a tool call the instant it is announced.
+// Buffering the whole stream — which this used to do — silently disabled both
+// for exactly the local-model population the decorator exists for (CRIT-4).
+//
+// The cost that remains is the intended one: for a text-only turn the answer
+// is delivered when generation ends rather than token by token, which is what
+// buys the ability to rewrite it. P74.17 is expected to gate this per model
+// rather than leaving it a blanket default.
 func WithProseToolCallSalvage(base Adapter) Adapter {
 	if base == nil {
 		return base
@@ -55,6 +66,12 @@ func (a *proseToolCallAdapter) Stream(ctx context.Context, req Request) (<-chan 
 	return out, nil
 }
 
+// maxSalvageTextBytes bounds the text one turn may accumulate before the
+// decorator gives up on salvaging it and becomes a passthrough. A tool call
+// written as prose is a few hundred bytes; a reply past this cap is a long
+// answer, not a mis-emitted call, and holding it serves nothing (CRIT-4d).
+const maxSalvageTextBytes = 1 << 20 // 1 MiB
+
 func (a *proseToolCallAdapter) run(req Request, in <-chan Event, out chan<- Event) {
 	defer close(out)
 
@@ -65,50 +82,100 @@ func (a *proseToolCallAdapter) run(req Request, in <-chan Event, out chan<- Even
 		return
 	}
 
-	var buffered []Event
+	// CRIT-4: this used to run the whole loop to channel close before
+	// forwarding a single event. Two invariants depended on that not happening
+	// and nothing reconciled them: the engine's only in-turn liveness signal is
+	// beat(ctx) inside `for ev := range stream`, so a turn under salvage looked
+	// completely idle to stallWatch and a legitimate long local generation was
+	// killed at MaxTurnStall as a run-fatal ErrTurnStalled; and P67.7's early
+	// tool dispatch, whose own comment says it pays precisely on local models,
+	// was inert because every EventToolUse arrived after generation finished.
+	//
+	// The decorator never needed to withhold *events* to decide — it needs to
+	// withhold *text*, which is the only thing it might rewrite. So everything
+	// else goes out the instant it arrives, and the buffer holds text deltas
+	// and the terminal EventDone (whose Stop reason the rewrite branch changes)
+	// and nothing more.
+	var textEvents []Event
 	var text strings.Builder
-	sawToolUse := false
-	doneIdx := -1
+	var doneEv Event
+	haveDone := false
+	// flushed latches "the decision is already made, forward everything" — set
+	// the moment the turn emits a real structured call (nothing left to
+	// salvage), or the moment the text outgrows the cap.
+	flushed := false
+	flush := func() {
+		if flushed {
+			return
+		}
+		flushed = true
+		replay(textEvents, out)
+		textEvents = nil
+	}
+
 	for ev := range in {
-		buffered = append(buffered, ev)
+		if flushed {
+			out <- ev
+			continue
+		}
 		switch ev.Type {
 		case EventTextDelta:
+			textEvents = append(textEvents, ev)
 			text.WriteString(ev.Text)
+			if text.Len() > maxSalvageTextBytes {
+				flush()
+			}
 		case EventToolUseStart, EventToolUse:
-			sawToolUse = true
-		case EventDone, EventError:
-			doneIdx = len(buffered) - 1
+			// The turn made a real call, so this decorator is done deciding:
+			// a turn that made even one structured call is left completely
+			// alone. Flush and get out of the way, which is what restores
+			// P67.7 for every model good enough to emit structured calls.
+			flush()
+			out <- ev
+		case EventDone:
+			doneEv, haveDone = ev, true
+		case EventError:
+			// A failed turn is replayed as it happened; there is no reply to
+			// salvage from.
+			flush()
+			out <- ev
+		default:
+			// Thinking and anything added later: liveness the engine beats on,
+			// forwarded untouched and in order.
+			out <- ev
 		}
 	}
 
-	if sawToolUse || doneIdx == -1 || buffered[doneIdx].Type == EventError {
-		replay(buffered, out)
+	if flushed {
+		if haveDone {
+			out <- doneEv
+		}
+		return
+	}
+	if !haveDone {
+		// The stream ended without a terminal event (a cancelled context, a
+		// transport that closed early). Nothing to rewrite onto.
+		replay(textEvents, out)
 		return
 	}
 
 	call, remaining, ok := salvageToolCall(text.String(), req.Tools)
 	if !ok {
-		replay(buffered, out)
+		replay(textEvents, out)
+		out <- doneEv
 		return
 	}
 
-	// Everything that isn't the assistant's plain text content (thinking,
-	// notably) replays untouched; the text content itself is replaced by
-	// whatever prose survives the parsed-out call, and a synthesized pair of
-	// tool-use events carries the call the model actually meant to make.
-	for _, ev := range buffered {
-		if ev.Type == EventTextDelta || ev.Type == EventDone {
-			continue
-		}
-		out <- ev
-	}
+	// The text content is replaced by whatever prose survives the parsed-out
+	// call, and a synthesized pair of tool-use events carries the call the
+	// model actually meant to make. Everything that isn't the assistant's
+	// plain text content has already been forwarded above, untouched.
 	if strings.TrimSpace(remaining) != "" {
 		out <- Event{Type: EventTextDelta, Text: remaining}
 	}
 	out <- Event{Type: EventToolUseStart, ToolUse: &ToolUseBlock{ID: call.ID, Name: call.Name}}
 	out <- Event{Type: EventToolUse, ToolUse: call}
 
-	doneEv := buffered[doneIdx]
 	doneEv.Stop = StopToolUse
 	out <- doneEv
 }
@@ -154,7 +221,16 @@ func salvageToolCall(reply string, tools []ToolSchema) (*ToolUseBlock, string, b
 
 	if loc := toolCallTag.FindStringSubmatchIndex(reply); loc != nil {
 		body := reply[loc[4]:loc[5]]
-		if call, ok := parseCallObject(body, names); ok {
+		if call, ok := parseCallBody(body, names); ok {
+			remaining := reply[:loc[0]] + reply[loc[1]:]
+			return call, remaining, true
+		}
+	}
+
+	// EXEC-3: the XML form is also emitted *without* the <tool_call> wrapper,
+	// so it gets a pass of its own rather than riding only on the tag above.
+	if loc := functionCallXML.FindStringSubmatchIndex(reply); loc != nil {
+		if call, ok := parseFunctionXML(reply[loc[0]:loc[1]], names); ok {
 			remaining := reply[:loc[0]] + reply[loc[1]:]
 			return call, remaining, true
 		}
@@ -162,38 +238,92 @@ func salvageToolCall(reply string, tools []ToolSchema) (*ToolUseBlock, string, b
 
 	if loc := toolCallFence.FindStringSubmatchIndex(reply); loc != nil {
 		body := reply[loc[2]:loc[3]]
-		if call, ok := parseCallObject(body, names); ok {
+		if call, ok := parseCallBody(body, names); ok {
 			remaining := reply[:loc[0]] + reply[loc[1]:]
 			return call, remaining, true
 		}
 	}
 
-	if call, span, ok := scanBareCallObject(reply, names); ok {
-		remaining := reply[:span[0]] + reply[span[1]:]
-		return call, remaining, true
+	// The bare-object branch is deliberately the narrowest of the three: it
+	// only fires when the *entire* reply is the object.
+	//
+	// It used to accept an object anywhere in the prose, which made salvage an
+	// injection amplifier (M2). A model that read a poisoned file and echoed
+	// its contents back — quoting it, describing it, refusing it — handed this
+	// branch a JSON object it never chose to call, and the object became a real
+	// tool call. The gate still applies, but CapWrite and CapNetwork are
+	// allowed silently in build mode, so the gate is not what stops it. A model
+	// that genuinely means to call a tool and cannot emit a structured call
+	// still has the two explicit spellings above; narrating a call inside prose
+	// and having that narration executed is the case worth losing.
+	if trimmed := strings.TrimSpace(reply); strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+		if call, ok := parseCallObject(trimmed, names); ok {
+			return call, "", true
+		}
 	}
 
 	return nil, reply, false
 }
 
-// scanBareCallObject walks every '{' in reply looking for the first balanced
-// JSON object that parses as a call naming one of names, returning its byte
-// span so the caller can strip exactly that substring.
-func scanBareCallObject(reply string, names map[string]bool) (*ToolUseBlock, [2]int, bool) {
-	for i := 0; i < len(reply); i++ {
-		if reply[i] != '{' {
-			continue
-		}
-		dec := json.NewDecoder(strings.NewReader(reply[i:]))
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			continue
-		}
-		if call, ok := parseCallObject(string(raw), names); ok {
-			return call, [2]int{i, i + int(dec.InputOffset())}, true
-		}
+// functionCallXML matches Qwen3's own documented tool-call body — a non-JSON
+// XML form its chat template instructs it to emit:
+//
+//	<function=shell>
+//	<parameter=command>
+//	ls -la
+//	</parameter>
+//	</function>
+//
+// EXEC-3: the <tool_call> wrapper matched, but its body was handed straight to
+// parseCallObject, which does json.Unmarshal — and this body is XML. It failed,
+// fell through to the fenced and bare branches, and they found nothing. The
+// most common local tool-call syntax outside JSON was the one shape this
+// salvage net could not catch. Ollama's Jinja renderer normally parses it back
+// into structured tool_calls before Aegis sees it, which is why the probe still
+// passed; salvage matters exactly when that parse does *not* happen — a
+// truncated call, a malformed parameter block, a template change — which is the
+// circumstance this decorator exists for.
+var functionCallXML = regexp.MustCompile(`(?is)<function\s*=\s*([A-Za-z0-9_.-]+)\s*>(.*?)</function\s*>`)
+
+// xmlParameter matches one <parameter=key>value</parameter> inside a
+// functionCallXML body.
+var xmlParameter = regexp.MustCompile(`(?is)<parameter\s*=\s*([A-Za-z0-9_.-]+)\s*>(.*?)</parameter\s*>`)
+
+// parseCallBody decodes a tool-call body in whichever of the two spellings a
+// model used: the JSON object, or the XML function form above.
+func parseCallBody(body string, names map[string]bool) (*ToolUseBlock, bool) {
+	if call, ok := parseCallObject(body, names); ok {
+		return call, true
 	}
-	return nil, [2]int{}, false
+	return parseFunctionXML(body, names)
+}
+
+// parseFunctionXML decodes the <function=NAME><parameter=KEY>value</parameter>
+// form, requiring the resolved name to be one of names exactly, as every other
+// branch does.
+//
+// Parameter values are carried as JSON strings. The XML form has no types, so
+// the string is what the model wrote, trimmed of the newlines the template puts
+// around it; a schema-aware coercion belongs in the argument-shape repair
+// decorator, which already owns that question, not here.
+func parseFunctionXML(body string, names map[string]bool) (*ToolUseBlock, bool) {
+	loc := functionCallXML.FindStringSubmatch(body)
+	if loc == nil {
+		return nil, false
+	}
+	name := loc[1]
+	if !names[name] {
+		return nil, false
+	}
+	args := map[string]string{}
+	for _, m := range xmlParameter.FindAllStringSubmatch(loc[2], -1) {
+		args[m[1]] = strings.Trim(m[2], "\r\n")
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return nil, false
+	}
+	return &ToolUseBlock{ID: callSalvageID, Name: name, Input: encoded}, true
 }
 
 // callSalvageID is the synthesized tool-call ID for a salvaged call — there is

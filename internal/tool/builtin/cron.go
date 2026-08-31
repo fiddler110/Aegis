@@ -114,8 +114,17 @@ func (t *cronListTool) Execute(ctx context.Context, _ json.RawMessage) (tool.Res
 
 type cronDeleteTool struct{ sched *cron.Scheduler }
 
-func (t *cronDeleteTool) Name() string                { return "cron_delete" }
-func (t *cronDeleteTool) Capability() tool.Capability { return tool.CapWrite }
+func (t *cronDeleteTool) Name() string { return "cron_delete" }
+
+// Capability is CapExecute, not the CapWrite the row-in-a-database reading
+// would suggest (DR-3). The question a capability answers is how much authority
+// the call needs, and the object being written here is a scheduler entry that
+// runs commands unattended: deleting one silently retires an operator's
+// scheduled security scan, backup or audit job. CapWrite is allowed *silently*
+// in build mode, so a prompt-injected model could do that with no prompt and no
+// record beyond a tool trace, while cron_create — the inverse operation —
+// correctly costs an approval.
+func (t *cronDeleteTool) Capability() tool.Capability { return tool.CapExecute }
 func (t *cronDeleteTool) Description() string {
 	return "Delete a cron job by id."
 }
@@ -142,8 +151,13 @@ func (t *cronDeleteTool) Execute(ctx context.Context, input json.RawMessage) (to
 
 type cronToggleTool struct{ sched *cron.Scheduler }
 
-func (t *cronToggleTool) Name() string                { return "cron_toggle" }
-func (t *cronToggleTool) Capability() tool.Capability { return tool.CapWrite }
+func (t *cronToggleTool) Name() string { return "cron_toggle" }
+
+// Capability is CapExecute for cron_delete's reason (DR-3), and the enable
+// direction makes the case sharper still: re-enabling a job the operator
+// deliberately switched off is a privilege-*restoring* operation, and a job
+// created earlier with auto_approve runs unattended once it is back on.
+func (t *cronToggleTool) Capability() tool.Capability { return tool.CapExecute }
 func (t *cronToggleTool) Description() string {
 	return "Toggle a cron job's enabled/disabled state by id."
 }

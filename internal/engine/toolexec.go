@@ -174,7 +174,11 @@ func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.Too
 // capability — e.g. a read-only shell command — isn't serialized behind
 // concurrent writes/execs for no reason. Unknown tools are treated as serial
 // out of caution.
-func (e *Engine) serializeTool(name string, input json.RawMessage) bool {
+//
+// It classifies under toolCtx, the same context executeTool builds and hands
+// the gate, because a per-call capability can depend on the session's workdir
+// (CRIT-3) and the scheduling decision must be the decision the gate made.
+func (e *Engine) serializeTool(ctx context.Context, name string, input json.RawMessage) bool {
 	if e.tools == nil {
 		return true
 	}
@@ -182,7 +186,7 @@ func (e *Engine) serializeTool(name string, input json.RawMessage) bool {
 	if !ok {
 		return true
 	}
-	switch tool.EffectiveCapability(t, input) {
+	switch tool.EffectiveCapability(e.toolCtx(ctx), t, input) {
 	case tool.CapWrite, tool.CapExecute:
 		return true
 	default:
@@ -423,6 +427,13 @@ func registeredToolNames(reg *tool.Registry) string {
 // custom workdir, the guard silently validated nothing (ARCH-03). Any future
 // direct tool invocation must go through here too.
 func (e *Engine) toolCtx(ctx context.Context) context.Context {
+	// One call, one capability verdict (M5). The gate, the scheduler, the
+	// checkpoint decision and the written/read-path bookkeeping all ask
+	// tool.EffectiveCapability for the same call, and the shell tool answers by
+	// doing filesystem I/O per argv token — so without this the question is
+	// asked repeatedly, with the approval round-trip sitting in the middle of
+	// it. The memo lives exactly as long as this call's context.
+	ctx = tool.WithCapabilityMemo(ctx)
 	ctx = tool.WithRegistry(ctx, e.tools)
 	if e.workdir != "" {
 		ctx = tool.WithWorkdir(ctx, e.workdir)
@@ -493,7 +504,7 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	// ContextualGate (P32.2) and ScopeGate (P63.3) off the static capability,
 	// and it makes this branch agree with the redaction branch below, which
 	// reads the same tool and the same input.
-	if !isErr && tool.EffectiveCapability(t, tu.Input) == tool.CapWrite {
+	if !isErr && tool.EffectiveCapability(ctx, t, tu.Input) == tool.CapWrite {
 		paths := writtenPathsFromInput(tu.Input)
 		if len(paths) == 0 {
 			// P32.6: writtenPathsFromInput only recognizes "path"/"file_path"/
@@ -510,10 +521,10 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	// recorded the way a read_file call would be. Errors are excluded: a failed
 	// read tells the model nothing about the file and would put a path the
 	// session never saw into the carried set.
-	if !isErr && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
+	if !isErr && tool.EffectiveCapability(ctx, t, tu.Input) == tool.CapRead {
 		e.recordReadPaths(writtenPathsFromInput(tu.Input))
 	}
-	if !isErr && e.redactSecrets && tool.EffectiveCapability(t, tu.Input) == tool.CapRead {
+	if !isErr && e.redactSecrets && tool.EffectiveCapability(ctx, t, tu.Input) == tool.CapRead {
 		// P24.12 / FIND-09: opt-in scrub of tool-read file content for secret
 		// patterns before it's appended to the conversation sent to whichever
 		// provider is configured (a cloud API by default has no visibility

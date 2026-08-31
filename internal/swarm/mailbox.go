@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,12 +96,49 @@ func hardenMailboxRoot(root string) {
 }
 
 // Send appends a message atomically. ID and Timestamp are filled if unset.
+// sendClock makes the timestamps this process stamps on outgoing messages
+// strictly increasing.
+//
+// Message ordering is carried entirely by the filename, `<unixnano>_<uuid>`,
+// and read back in name order — so two messages sharing a nanosecond fall back
+// to comparing random uuids, and the later send can be read first. That is not
+// hypothetical: consecutive time.Now values move in ~500ns steps on Windows
+// while a send takes less than that, and it produced a ~1-in-200 failure in two
+// separate mailbox tests before this existed. A reader has no way to recover
+// the true order once it is lost, because nothing else records it.
+//
+// The guard is per-process, which is the honest scope: two processes writing to
+// one mailbox in the same tick genuinely are concurrent and no local clock can
+// order them. Within a process, "b was sent after a" is a fact worth keeping.
+//
+// The cost is that a timestamp can be advanced by a few nanoseconds past the
+// real send time when the clock has not ticked. That is far below the
+// resolution anything here reports, and strictly preferable to a message order
+// that is correct on Linux and random on Windows.
+var sendClock struct {
+	mu   sync.Mutex
+	last int64 // unix nanos of the most recent stamp issued
+}
+
+// nextSendTime returns now, or one nanosecond past the previous stamp when the
+// clock has not advanced since.
+func nextSendTime() time.Time {
+	sendClock.mu.Lock()
+	defer sendClock.mu.Unlock()
+	now := time.Now().UTC()
+	if n := now.UnixNano(); n <= sendClock.last {
+		now = time.Unix(0, sendClock.last+1).UTC()
+	}
+	sendClock.last = now.UnixNano()
+	return now
+}
+
 func (m *Mailbox) Send(msg Message) error {
 	if msg.ID == "" {
 		msg.ID = uuid.NewString()
 	}
 	if msg.Timestamp.IsZero() {
-		msg.Timestamp = time.Now().UTC()
+		msg.Timestamp = nextSendTime()
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -173,7 +211,16 @@ func (m *Mailbox) ReadAll(unreadOnly bool) ([]Message, error) {
 		}
 		out = append(out, processed...)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
+	// Stable, so the order the listings arrive in survives a tie.
+	//
+	// Within one process ties no longer happen — nextSendTime guarantees
+	// strictly increasing stamps — but a mailbox can have several writers, and
+	// the merge above concatenates two separately-ordered listings, so "the
+	// input is already sorted" is an assumption rather than a guarantee. A
+	// stable sort costs nothing to hold it, and a cross-process tie is genuine
+	// concurrency: neither order is more correct, but the same read should not
+	// answer differently twice.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
 	return out, nil
 }
 

@@ -291,6 +291,19 @@ func (s *Server) forgetSessionRunState(id string) {
 		}
 		return true
 	})
+	// M6: toolCallWarned is keyed the same way (sessionID + "\x00" + model) and
+	// was the third entry with no cleanup — a map growing with the daemon's
+	// lifetime session count rather than its live sessions. Bounded in practice
+	// (only a model that fails the tool-calling probe is ever recorded), which
+	// is why it went unnoticed, but it is the same leak as the two above and it
+	// belongs on the same list.
+	s.toolCallWarnedMu.Lock()
+	for key := range s.toolCallWarned {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.toolCallWarned, key)
+		}
+	}
+	s.toolCallWarnedMu.Unlock()
 }
 
 func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request) {

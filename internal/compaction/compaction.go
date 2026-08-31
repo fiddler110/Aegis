@@ -704,20 +704,28 @@ func (s *Summarizer) summarize(ctx context.Context, prefix []provider.Message) (
 		// distinguishable from the conversation it is compacting.
 		Purpose: provider.PurposeCompaction,
 	}
-	stream, err := s.adapter.Stream(ctx, req)
+	out, thought, err := s.runSummaryRequest(ctx, req)
 	if err != nil {
 		return "", err
 	}
-	var b strings.Builder
-	for ev := range stream {
-		switch ev.Type {
-		case provider.EventTextDelta:
-			b.WriteString(ev.Text)
-		case provider.EventError:
-			return "", ev.Err
+	if out == "" && thought {
+		// P79.3: the reply was all preamble and no summary. Measured against
+		// aegis-qwen35-9b: a 1,024-token completion budget was spent entirely
+		// on thinking (done_reason "length", zero content bytes), on every
+		// compaction cycle of a live run — the summarizer never once produced
+		// output, and the engine fell back to deterministic compaction after
+		// latching the LLM summarizer off (P39.8). Thinking is not the problem
+		// in general: a summary is exactly the kind of long, unstructured reply
+		// it helps, which is why compaction is not in
+		// SuppressesExtendedThinking. The problem is only that a preamble and a
+		// summary share one budget. So ask once more without it, and keep the
+		// empty-output error for a model that has nothing to say either way.
+		req.SuppressThinking = true
+		out, _, err = s.runSummaryRequest(ctx, req)
+		if err != nil {
+			return "", err
 		}
 	}
-	out := strings.TrimSpace(b.String())
 	if out == "" {
 		return "", fmt.Errorf("summarizer returned empty output")
 	}
@@ -780,4 +788,31 @@ func truncateForSummary(s string, limit int) string {
 	return string(r[:head]) +
 		fmt.Sprintf("\n…[truncated by compaction: %d characters elided]…\n", len(r)-limit) +
 		string(r[len(r)-tail:])
+}
+
+// runSummaryRequest streams one summarization request and reports the trimmed
+// content along with whether the model emitted any extended-thinking preamble.
+// The second return value is what makes the P79.3 retry decidable: an empty
+// summary from a model that thought is a budget problem worth one more try,
+// while an empty summary from a model that produced nothing at all is a model
+// that cannot do the task, and retrying it just spends another call to reach
+// the same fallback.
+func (s *Summarizer) runSummaryRequest(ctx context.Context, req provider.Request) (string, bool, error) {
+	stream, err := s.adapter.Stream(ctx, req)
+	if err != nil {
+		return "", false, err
+	}
+	var b strings.Builder
+	thought := false
+	for ev := range stream {
+		switch ev.Type {
+		case provider.EventTextDelta:
+			b.WriteString(ev.Text)
+		case provider.EventThinkingDelta:
+			thought = true
+		case provider.EventError:
+			return "", thought, ev.Err
+		}
+	}
+	return strings.TrimSpace(b.String()), thought, nil
 }

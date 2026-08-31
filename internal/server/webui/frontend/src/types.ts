@@ -322,4 +322,8 @@ export interface Event {
   error?: string;
   approval_reason?: string;
   approval_id?: string;
+  // guard_retrying marks a "guard" event whose answer the engine is about to
+  // replace with a corrective retry (P25.3). A client that ignores it renders
+  // the withdrawn answer concatenated with the one that replaced it.
+  guard_retrying?: boolean;
 }

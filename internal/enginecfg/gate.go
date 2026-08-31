@@ -36,6 +36,12 @@ type GateOptions struct {
 	// Mode is the permission mode name ("plan", "build", "auto"). Any clamping
 	// (resolveSessionMode / clampMode on the daemon) happens above this call.
 	Mode string
+	// StrictPlanMode refuses per-call capability downgrades in plan mode
+	// (DR-2, `permission.plan_mode_shell_reads: false`). It rides on the gate
+	// options rather than being read from config at each call site for the
+	// usual reason this package exists: a posture knob every entry point must
+	// apply identically belongs in the one constructor, not in four.
+	StrictPlanMode bool
 	// Approver answers a prompt-worthy call. Required — a nil approver would
 	// make the mode gate panic rather than fail closed.
 	Approver permission.Approver
@@ -93,6 +99,12 @@ type GateOptions struct {
 // kept its own hooks would build a policy that never fires.
 func BuildGate(o GateOptions) (engine.Gate, engine.Hooks) {
 	baseGate := permission.New(permission.ParseMode(o.Mode), o.Approver)
+	baseGate.Policy.StrictPlanMode = o.StrictPlanMode
+	// M7: every layer above reports its decisions to o.OnDecision; the mode
+	// gate reported nothing, so the one decision no layer explained was the
+	// silent capability downgrade — the thing that lets an execute-capable tool
+	// run with no approval. Same sink, one stream.
+	baseGate.OnDecision = o.OnDecision
 
 	var gate engine.Gate = baseGate
 	engineHooks := o.Hooks

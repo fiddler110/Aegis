@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"runtime"
@@ -314,7 +315,7 @@ func TestShellCommandCapabilityClassification(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := tool.EffectiveCapability(st, json.RawMessage(input)); got != c.wantCap {
+			if got := tool.EffectiveCapability(context.Background(), st, json.RawMessage(input)); got != c.wantCap {
 				t.Errorf("EffectiveCapability(%q) = %s, want %s", c.command, got, c.wantCap)
 			}
 
@@ -362,7 +363,7 @@ func TestPlanModeStillRefusesTheWideningEdges(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cap := tool.EffectiveCapability(st, json.RawMessage(input))
+			cap := tool.EffectiveCapability(context.Background(), st, json.RawMessage(input))
 			if got := plan.Decide(cap); got != permission.Deny {
 				t.Errorf("shell %q classified %s, plan mode decided %v; want Deny", command, cap, got)
 			}
@@ -375,7 +376,7 @@ func TestPlanModeStillRefusesTheWideningEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := plan.Decide(tool.EffectiveCapability(st, json.RawMessage(input))); got != permission.Ask {
+	if got := plan.Decide(tool.EffectiveCapability(context.Background(), st, json.RawMessage(input))); got != permission.Ask {
 		t.Errorf("plan mode decided %v for `gh pr list`; want Ask", got)
 	}
 }
@@ -414,15 +415,23 @@ func TestReadOnlyShellPowerShellFlags(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := readOnlyShellCommand(root, c.command); got != c.want {
-				t.Errorf("readOnlyShellCommand(%q) = %v, want %v", c.command, got, c.want)
+			if got := readOnlyShellCommandIn(root, c.command, true); got != c.want {
+				t.Errorf("readOnlyShellCommandIn(%q, powershell) = %v, want %v", c.command, got, c.want)
 			}
 		})
 	}
 }
 
 // TestReadOnlyShellPowerShellPathConfinement is the windows-only half: a
-// drive-letter path is only recognized as absolute on windows itself.
+// drive-letter path is only recognized as absolute on windows itself
+// (sandbox.IsRooted documents why filepath.IsAbs is the wrong test there).
+//
+// It asks the PowerShell question explicitly. It used to inherit the helper's
+// hardcoded POSIX dialect, under which a backslash escapes the next character
+// and `C:\Users\x\.ssh\id_rsa` collapsed to the relative token
+// `C:Usersx.sshid_rsa` — confined, so the assertion failed. Since the test is
+// also skipped on Linux, that made it a test that had never passed anywhere
+// while appearing to pin the P32.1 escape (EXEC-4).
 func TestReadOnlyShellPowerShellPathConfinement(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("drive-letter absolute paths only apply on windows")
@@ -438,8 +447,8 @@ func TestReadOnlyShellPowerShellPathConfinement(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.command, func(t *testing.T) {
-			if got := readOnlyShellCommand(root, c.command); got != c.want {
-				t.Errorf("readOnlyShellCommand(%q) = %v, want %v", c.command, got, c.want)
+			if got := readOnlyShellCommandIn(root, c.command, true); got != c.want {
+				t.Errorf("readOnlyShellCommandIn(%q, powershell) = %v, want %v", c.command, got, c.want)
 			}
 		})
 	}

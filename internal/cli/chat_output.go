@@ -110,6 +110,39 @@ type streamEvent struct {
 	CacheCreationTokens  int     `json:"cache_creation_tokens,omitempty"`
 	PromptEvalDurationMS int64   `json:"prompt_eval_duration_ms,omitempty"`
 	CostUSD              float64 `json:"cost_usd,omitempty"`
+	// Guard fields, populated on a "guard" line (EXEC-2). Without them a
+	// stream-json consumer saw a bare {"type":"guard"} between two "text"
+	// lines and had no way to know the first of those answers had been
+	// withdrawn — so it concatenated the two, exactly as the human-facing
+	// paths did.
+	GuardPassed   bool   `json:"guard_passed,omitempty"`
+	GuardStatus   string `json:"guard_status,omitempty"`
+	GuardRetrying bool   `json:"guard_retrying,omitempty"`
+}
+
+// foldAnswerEvent accumulates one engine event into the final answer a
+// non-streaming caller reports — `chat --format json` and the subprocess
+// worker, both of which return a single string rather than a live stream.
+//
+// It exists so those two paths cannot disagree about EXEC-2: a KindGuard
+// event flagged GuardRetrying means the engine is about to *replace* the
+// answer written so far with a corrective retry (P25.3), not append to it.
+// The TUI withdraws the rendered answer in place; an aggregating caller has to
+// drop what it accumulated, or it returns the rejected answer concatenated
+// with the one that replaced it — which is exactly what both did.
+//
+// maxBytes caps accumulation (0 = unbounded); the cap is checked before
+// appending, so the last chunk may cross it.
+func foldAnswerEvent(sb *strings.Builder, ev engine.Event, maxBytes int) {
+	switch {
+	case ev.Kind == engine.KindText:
+		if maxBytes > 0 && sb.Len() >= maxBytes {
+			return
+		}
+		sb.WriteString(ev.Text)
+	case ev.Kind == engine.KindGuard && ev.GuardRetrying:
+		sb.Reset()
+	}
 }
 
 func emitStreamEvent(w io.Writer, ev engine.Event) {
@@ -135,6 +168,11 @@ func emitStreamEvent(w io.Writer, ev engine.Event) {
 			se.PromptEvalDurationMS = ev.Usage.PromptEvalDurationMS
 		}
 		se.CostUSD = ev.CostUSD
+	case engine.KindGuard:
+		se.Text = ev.GuardReason
+		se.GuardPassed = ev.GuardPassed
+		se.GuardStatus = ev.GuardStatus
+		se.GuardRetrying = ev.GuardRetrying
 	case engine.KindTrace:
 		return // server-internal; never emit
 	}

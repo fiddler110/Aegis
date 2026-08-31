@@ -28,9 +28,15 @@ type Backend interface {
 // Options configures the server's safety posture. An MCP tools/call is a
 // synchronous request/response with no human in the loop to ask, so the
 // defaults are deliberately conservative: new sessions start in plan mode
-// (read + network only, nothing needs approval) and any approval request that
-// does arise (e.g. a caller explicitly asked for build/auto mode) is denied
+// (read + network only, nothing needs approval), a caller cannot ask for a
+// mode more permissive than DefaultMode, and any approval request that does
+// arise (e.g. the operator configured a more permissive DefaultMode) is denied
 // unless the operator opts in.
+//
+// The middle clause is the one this package used to promise and not keep: the
+// mode came straight from the caller's arguments, so "sessions start in plan
+// mode" held only for a caller that declined to say otherwise. See
+// AllowCallerModeEscalation.
 type Options struct {
 	// DefaultMode is applied to a new session when the caller doesn't specify
 	// one. Defaults to "plan" if empty.
@@ -38,6 +44,35 @@ type Options struct {
 	// AutoApprove lets a tool call needing approval proceed automatically
 	// instead of being denied. Off by default.
 	AutoApprove bool
+	// AutoApproveTools narrows AutoApprove to a set of tool names. Empty (the
+	// default) leaves AutoApprove blanket — every approval the run raises is
+	// granted — which is what it has always meant; a non-empty list grants only
+	// those tools and denies the rest (C1/F2).
+	//
+	// The distinction matters because both ends of the old switch are
+	// unsatisfying: off, and a build-mode session's one CapExecute request is
+	// denied with no way to allow just it; on, and an MCP client has, in
+	// effect, permission.auto_approve_exec for arbitrary shell for the whole
+	// run. There is no human watching either way, which is exactly why the
+	// grant should be able to name what it covers.
+	AutoApproveTools []string
+	// AllowCallerModeEscalation lets a caller's `mode` tool argument exceed
+	// DefaultMode. Off by default (C1/F1).
+	//
+	// The daemon's HTTP API deliberately treats an explicit request mode as the
+	// user's own decision — resolveSessionMode clamps a *persona's* mode and
+	// nothing else — because its authenticated caller *is* the user. An MCP
+	// client is not: it is a program (an editor plugin, another agent) holding
+	// a token it read from a file, relaying instructions from wherever it got
+	// them. Without this clamp such a caller could ask for `auto` and get it
+	// whatever mcp_server.default_mode and permission.mode said — and under
+	// `auto`, permission.Policy.Decide allows every capability outright, so no
+	// approval is ever raised and AutoApprove above becomes vacuous.
+	//
+	// A caller may still ask for anything *at or below* DefaultMode; the clamp
+	// only stops escalation, and the downgrade is logged rather than refused so
+	// a client that asks for more still gets a working session.
+	AllowCallerModeEscalation bool
 	// Version is reported as the server's version in the initialize response.
 	// Defaults to "0.1" if empty.
 	Version string
@@ -64,8 +99,12 @@ type Server struct {
 	logger      *slog.Logger
 	defaultMode string
 	autoApprove bool
-	version     string
-	authToken   string
+	// autoApproveTools is nil for a blanket grant and otherwise the set of tool
+	// names AutoApprove covers.
+	autoApproveTools map[string]struct{}
+	allowEscalation  bool
+	version          string
+	authToken        string
 
 	authMu        sync.Mutex
 	authenticated bool
@@ -84,7 +123,82 @@ func NewServer(backend Backend, opts Options, logger *slog.Logger) *Server {
 	if version == "" {
 		version = "0.1"
 	}
-	return &Server{backend: backend, logger: logger, defaultMode: mode, autoApprove: opts.AutoApprove, version: version, authToken: opts.AuthToken}
+	var tools map[string]struct{}
+	if len(opts.AutoApproveTools) > 0 {
+		tools = make(map[string]struct{}, len(opts.AutoApproveTools))
+		for _, name := range opts.AutoApproveTools {
+			tools[name] = struct{}{}
+		}
+	}
+	return &Server{
+		backend:          backend,
+		logger:           logger,
+		defaultMode:      mode,
+		autoApprove:      opts.AutoApprove,
+		autoApproveTools: tools,
+		allowEscalation:  opts.AllowCallerModeEscalation,
+		version:          version,
+		authToken:        opts.AuthToken,
+	}
+}
+
+// modeRankUnknown sorts above every known mode, so an unrecognized
+// caller-supplied string counts as an escalation and is clamped rather than
+// sailing through a lookup that happened to return zero.
+const modeRankUnknown = 99
+
+// permModeRank orders the permission modes from least to most permissive. It
+// is a small deliberate duplicate of internal/server's own ranking: this
+// package talks to the daemon over api.CreateSessionRequest and does not
+// import internal/server.
+func permModeRank(mode string) int {
+	switch mode {
+	case "", "plan":
+		return 0
+	case "build":
+		return 1
+	case "auto":
+		return 2
+	default:
+		return modeRankUnknown
+	}
+}
+
+// resolveMode picks the mode for a session this server creates: the caller's
+// choice when it made one, the configured default otherwise, clamped so a
+// caller can never ask for more than the operator configured (C1/F1). The
+// clamp is skipped only when the operator opted into caller escalation.
+func (s *Server) resolveMode(reqMode string) string {
+	if reqMode == "" {
+		return s.defaultMode
+	}
+	if s.allowEscalation || permModeRank(reqMode) <= permModeRank(s.defaultMode) {
+		return reqMode
+	}
+	s.logger.Warn("mcp-serve: caller requested a more permissive mode than the configured default; clamping",
+		"requested", reqMode, "default_mode", s.defaultMode)
+	return s.defaultMode
+}
+
+// approvalFor answers one approval request. A blanket AutoApprove keeps its
+// old meaning; a configured tool list narrows it to those tools. Every granted
+// approval is logged at Info because there is no human in the loop to have
+// seen the prompt — the log is the only record that a tool ran on nobody's
+// explicit say-so.
+func (s *Server) approvalFor(ev api.Event) bool {
+	if !s.autoApprove {
+		return false
+	}
+	if s.autoApproveTools != nil {
+		if _, ok := s.autoApproveTools[ev.Tool]; !ok {
+			s.logger.Info("mcp-serve: denying approval for a tool outside auto_approve_tools",
+				"tool", ev.Tool, "reason", ev.ApprovalReason)
+			return false
+		}
+	}
+	s.logger.Info("mcp-serve: auto-approving a tool call with no human in the loop",
+		"tool", ev.Tool, "input", string(ev.ToolInput), "reason", ev.ApprovalReason)
+	return true
 }
 
 // authenticateParams is the payload for the custom "aegis/authenticate"
@@ -275,11 +389,7 @@ func (s *Server) callNewSession(ctx context.Context, raw json.RawMessage) (any, 
 			return nil, &rpcErr{Code: codeInvalidParams, Message: "invalid arguments: " + err.Error()}
 		}
 	}
-	mode := a.Mode
-	if mode == "" {
-		mode = s.defaultMode
-	}
-	meta, err := s.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: mode, Persona: a.Persona})
+	meta, err := s.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: s.resolveMode(a.Mode), Persona: a.Persona})
 	if err != nil {
 		return errResult(fmt.Errorf("create session: %w", err)), nil
 	}
@@ -316,11 +426,7 @@ func (s *Server) callPrompt(ctx context.Context, raw json.RawMessage) (any, *rpc
 
 	sessionID := a.SessionID
 	if sessionID == "" {
-		mode := a.Mode
-		if mode == "" {
-			mode = s.defaultMode
-		}
-		meta, err := s.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: mode, Persona: a.Persona})
+		meta, err := s.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: s.resolveMode(a.Mode), Persona: a.Persona})
 		if err != nil {
 			return errResult(fmt.Errorf("create session: %w", err)), nil
 		}
@@ -342,7 +448,7 @@ func (s *Server) callPrompt(ctx context.Context, raw json.RawMessage) (any, *rpc
 		case api.KindToolCall:
 			toolCalls++
 		case api.KindApprovalRequest:
-			if aerr := s.backend.SendApproval(ctx, sessionID, ev.ApprovalID, s.autoApprove, false); aerr != nil {
+			if aerr := s.backend.SendApproval(ctx, sessionID, ev.ApprovalID, s.approvalFor(ev), false); aerr != nil {
 				s.logger.Warn("mcp-serve: send approval failed", "err", aerr)
 			}
 		case api.KindError:

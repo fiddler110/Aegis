@@ -98,15 +98,16 @@ func (s *Server) buildGate(mode string, approver permission.Approver, p persona.
 	s.permMu.Unlock()
 
 	return enginecfg.BuildGate(enginecfg.GateOptions{
-		Mode:       mode,
-		Approver:   approver,
-		Persona:    p,
-		Security:   s.cfg.Security,
-		Registry:   s.tools,
-		Rules:      rules,
-		Hooks:      s.hooks,
-		OnDecision: s.recordPolicyDecision,
-		Logger:     s.logger,
+		Mode:           mode,
+		StrictPlanMode: !s.cfg.Permission.PlanModeShellReadsEnabled(),
+		Approver:       approver,
+		Persona:        p,
+		Security:       s.cfg.Security,
+		Registry:       s.tools,
+		Rules:          rules,
+		Hooks:          s.hooks,
+		OnDecision:     s.recordPolicyDecision,
+		Logger:         s.logger,
 	})
 }
 

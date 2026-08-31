@@ -27,6 +27,7 @@ import (
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/sysprompt"
 	"github.com/fiddler110/aegis/internal/task"
+	"github.com/fiddler110/aegis/internal/tool"
 )
 
 // The two local-profile byte caps now live in internal/sysprompt so the CLI's
@@ -502,6 +503,18 @@ func (s *Server) cronPermCheck(ctx context.Context, j cron.Job) (bool, string) {
 	shellTool, ok := s.tools.Get("shell")
 	if !ok {
 		return false, "shell tool is not registered"
+	}
+	// CRIT-3: check the job against the directory it will actually run in.
+	// cronShellRunner executes with Job.Workdir (P25.8), which is the workdir
+	// of the session that created the job and may be any directory on a
+	// non-remote daemon — while this check used to classify the command
+	// against the daemon-wide workspace baked into the shell tool at
+	// construction. So the gate validated workspace A and the job then ran,
+	// unattended and on a schedule, in workspace B. Putting the job's workdir
+	// on the context makes shellTool.CapabilityFor resolve the same root the
+	// runner will use.
+	if j.Workdir != "" {
+		ctx = tool.WithWorkdir(ctx, j.Workdir)
 	}
 	input, err := json.Marshal(struct {
 		Command string `json:"command"`

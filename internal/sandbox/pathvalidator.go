@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,7 +84,12 @@ func ValidatePathIn(roots []Root, path string, access Access) (string, error) {
 	// Resolve symlinks on the real filesystem. If the full path exists, resolve
 	// it directly; otherwise walk up to the nearest existing ancestor, resolve
 	// that, and re-append the remaining segments (a write to a new file).
-	resolved, tail := resolveExisting(abs)
+	resolved, tail, err := resolveExisting(abs)
+	if err != nil {
+		// Fail closed: with nothing resolvable to compare against, the only
+		// honest answer is "cannot confirm this is inside root" (M8).
+		return "", fmt.Errorf("path %q cannot be resolved for confinement against %q: %w", path, primary, err)
+	}
 	full := filepath.Join(resolved, tail)
 
 	// Track whether a read-only root would have matched, so the write case can
@@ -151,7 +157,12 @@ func validateAgainstRoot(root, abs, orig string) (string, error) {
 	// Resolve symlinks on the real filesystem. If the full path exists, resolve
 	// it directly. Otherwise, walk up to the nearest existing ancestor and
 	// resolve that, then re-append the remaining segments.
-	resolved, tail := resolveExisting(abs)
+	resolved, tail, err := resolveExisting(abs)
+	if err != nil {
+		// Fail closed (M8): comparing an unresolved path against a resolved
+		// root is a confinement answer computed across two namespaces.
+		return "", fmt.Errorf("path %q cannot be resolved for confinement against %q: %w", orig, root, err)
+	}
 
 	// Check the resolved real path is still within root.
 	realRoot, err := filepath.EvalSymlinks(root)
@@ -223,14 +234,28 @@ func escapesRoot(root, target string) bool {
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// errNoExistingAncestor reports that resolveExisting reached the filesystem
+// root without finding any existing directory to resolve against. See M8 on
+// resolveExisting for why this is an error rather than a fallback.
+var errNoExistingAncestor = errors.New("no existing ancestor directory to resolve against")
+
 // resolveExisting walks up from path until it finds an existing directory,
 // resolves symlinks on that ancestor, and returns (resolvedAncestor,
 // remainingTail). For a fully existing path, tail is empty.
-func resolveExisting(path string) (resolved, tail string) {
+//
+// M8: it used to return the *unresolved* path when the walk reached the
+// filesystem root without finding anything that exists. The caller then
+// compared that unresolved path against a symlink-resolved root — the exact
+// namespace mismatch ResolveForCompare's doc comment warns gives a wrong answer
+// "in whichever direction the link points" — and the wrong answer here is a
+// confinement verdict. It is a should-not-happen case (every real path has an
+// existing ancestor; the root itself exists), so failing closed costs nothing
+// and saying so is better than silently comparing across namespaces.
+func resolveExisting(path string) (resolved, tail string, err error) {
 	// Try the full path first.
 	real, err := filepath.EvalSymlinks(path)
 	if err == nil {
-		return real, ""
+		return real, "", nil
 	}
 
 	// Walk up until we find something that exists.
@@ -239,8 +264,7 @@ func resolveExisting(path string) (resolved, tail string) {
 	for {
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			// Reached filesystem root without finding an existing path.
-			return path, ""
+			return "", "", errNoExistingAncestor
 		}
 		segments = append(segments, filepath.Base(dir))
 		dir = parent
@@ -258,7 +282,7 @@ func resolveExisting(path string) (resolved, tail string) {
 	for i, j := 0, len(segments)-1; i < j; i, j = i+1, j-1 {
 		segments[i], segments[j] = segments[j], segments[i]
 	}
-	return real, filepath.Join(segments...)
+	return real, filepath.Join(segments...), nil
 }
 
 // --- shared path containment (CLN-1) ---
@@ -328,7 +352,15 @@ func ResolveForCompare(p string) string {
 	if p == "" {
 		return p
 	}
-	resolved, tail := resolveExisting(filepath.Clean(p))
+	resolved, tail, err := resolveExisting(filepath.Clean(p))
+	if err != nil {
+		// Nothing on the path exists, so there is nothing to resolve: the
+		// lexically cleaned path is the best available comparison form. Unlike
+		// the validators above this is not a gate — it normalizes both sides of
+		// a comparison a caller then makes — so there is no verdict to fail
+		// closed on here.
+		return filepath.Clean(p)
+	}
 	if tail == "" {
 		return filepath.Clean(resolved)
 	}

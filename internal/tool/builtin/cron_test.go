@@ -298,3 +298,31 @@ func extractCronID(s string) string {
 	}
 	return s[:j]
 }
+
+// TestCronMutationToolsRequireExecuteAuthority pins DR-3. cron_delete and
+// cron_toggle were CapWrite, which permission.Policy.Decide allows *silently*
+// in build mode — so a prompt-injected model could retire an operator's
+// scheduled security scan, or switch a previously created auto_approve job back
+// on, with no approval prompt at all. What these calls write is a scheduler
+// entry that runs commands unattended, so they carry cron_create's authority,
+// not write_file's.
+func TestCronMutationToolsRequireExecuteAuthority(t *testing.T) {
+	tools := CronTools(cronTestScheduler(t))
+	for name, want := range map[string]tool.Capability{
+		"cron_create": tool.CapExecute,
+		"cron_delete": tool.CapExecute,
+		"cron_toggle": tool.CapExecute,
+		// The read-only pair is unchanged: listing and history disclose the
+		// schedule but change nothing about what runs.
+		"cron_list":    tool.CapRead,
+		"cron_history": tool.CapRead,
+	} {
+		tl := cronToolByName(tools, name)
+		if tl == nil {
+			t.Fatalf("%s not registered", name)
+		}
+		if got := tl.Capability(); got != want {
+			t.Errorf("%s.Capability() = %q, want %q", name, got, want)
+		}
+	}
+}

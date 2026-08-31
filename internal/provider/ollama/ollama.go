@@ -670,6 +670,10 @@ func translateTools(tools []provider.ToolSchema) []wireTool {
 	})
 }
 
+// suppressThinking is the addressable `false` sent as `think` for calls whose
+// Purpose reports provider.SuppressesExtendedThinking.
+var suppressThinking = false
+
 // Stream implements provider.Adapter.
 func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
 	// P52.5: once a model has proven it rejects `think`, skip the doomed first
@@ -677,6 +681,19 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	// adapter re-sent `think`, took another 400, and warned again on every turn
 	// of the session.
 	think := a.think
+	// EXEC-1: a classification call (the output guard) wants a two-token
+	// verdict, not a reasoning preamble. `think` defaults to nil — omitted —
+	// which leaves the model's own default in force, and for a reasoning model
+	// that default is thinking *on*: the preamble then consumed the whole
+	// num_predict budget and the guard got an empty reply. The caller declares
+	// the shape of its call through Purpose; honor it here, where the native
+	// endpoint can actually turn thinking off.
+	// A per-request override (P79.3) covers the case Purpose cannot: the
+	// compaction summarizer asking again, without thinking, after a first
+	// attempt whose whole budget went to the preamble.
+	if req.SuppressThinking || provider.SuppressesExtendedThinking(provider.EffectivePurpose(ctx, req)) {
+		think = &suppressThinking
+	}
 	if think != nil {
 		if a.thinkIsRejected(req.Model) {
 			think = nil

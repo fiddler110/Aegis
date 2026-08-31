@@ -2,10 +2,12 @@ package builtin
 
 import (
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/permission"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -729,6 +731,21 @@ func classifyShellCommand(root, command string, powershell bool) (tool.Capabilit
 	if !ok || len(fields) == 0 {
 		return tool.CapExecute, false
 	}
+	// CRIT-2: baseBinaryName below reduces "./scripts/ls" to "ls", which hits
+	// readOnlyShellCommands and classifies as CapRead — while argvStaysInRoot
+	// is only ever handed fields[1:], so token zero is never validated as a
+	// path at all. `shell({"command":"./scripts/ls"})` against a cloned repo
+	// (git preserves the executable bit, so this needs no write and works in
+	// plan mode) therefore executed attacker-chosen code with no approval, no
+	// checkpoint (captureShellWrites is keyed on the same capability), and no
+	// exec lock. Refuse the downgrade for a path-qualified argv0 — the read-only
+	// tier is for a bare command name resolved through PATH, which is a binary
+	// the *operator* installed. Do not "fix" this by confining argv0 to the
+	// workspace instead: a workspace-resident executable is precisely the
+	// attack, so rejection rather than confinement is the correct posture.
+	if pathQualifiedBinary(fields[0]) {
+		return tool.CapExecute, false
+	}
 	bin := strings.ToLower(baseBinaryName(fields[0]))
 	if bin == "git" {
 		if readOnlyGitCommand(root, fields[1:]) {
@@ -882,11 +899,26 @@ func (s *commandSpec) confinementArgs(args []string) []string {
 // a command classified as tool.CapNetwork (gh) is not a *read*, so it neither
 // gets plan mode's silent allow nor counts as read-only anywhere else.
 //
-// It asks the POSIX-shell question. That is the right default for a helper with
-// no tool to ask: every non-Windows host runs `/bin/sh -c`, and a Windows host
-// reaches classifyShellCommand through shellTool.usesPowerShell() instead.
+// The quoting dialect is the host's own, which is what production resolves to:
+// a Windows host reaches classifyShellCommand through shellTool.usesPowerShell()
+// and every other host runs `/bin/sh -c`. It used to hardcode POSIX, and that
+// was EXEC-4 — on Windows the POSIX backslash-escape rule collapsed
+// `C:\Users\x\.ssh\id_rsa` into the relative token `C:Usersx.sshid_rsa`, which
+// confined happily inside the root. Four tests failed on Windows because of it,
+// two of them skipped on Linux as well, so those two had never passed on any
+// platform while pinning the P32.1 drive-letter escape. Use
+// readOnlyShellCommandIn where a test means one specific dialect regardless of
+// where it runs.
 func readOnlyShellCommand(root, command string) bool {
-	cap, ok := classifyShellCommand(root, command, false)
+	return readOnlyShellCommandIn(root, command, runtime.GOOS == "windows")
+}
+
+// readOnlyShellCommandIn is readOnlyShellCommand with the quoting dialect named
+// explicitly, for the cases that are about one dialect rather than about the
+// host: getting the dialect backwards is a hole in either direction, so it is
+// never guessed. See splitShellWords.
+func readOnlyShellCommandIn(root, command string, powershell bool) bool {
+	cap, ok := classifyShellCommand(root, command, powershell)
 	return ok && cap == tool.CapRead
 }
 
@@ -1062,6 +1094,23 @@ func readOnlyGitCommand(root string, args []string) bool {
 		return false
 	}
 	return validateReadOnlyGitArgv(root, args) == nil
+}
+
+// pathQualifiedBinary reports whether argv0 names a *file* rather than a bare
+// command the host would resolve through PATH: it carries a path separator, is
+// rooted (sandbox.IsRooted, the single authority on "the OS resolves this from
+// a filesystem root" — including the Windows spellings filepath.IsAbs answers
+// false for), or begins with a tilde the shell will expand to a home directory.
+// See the CRIT-2 note in classifyShellCommand for why such a binary is refused
+// the read-only downgrade outright.
+func pathQualifiedBinary(argv0 string) bool {
+	if argv0 == "" {
+		return false
+	}
+	if strings.ContainsAny(argv0, `/\`) || strings.HasPrefix(argv0, "~") {
+		return true
+	}
+	return sandbox.IsRooted(argv0)
 }
 
 // baseBinaryName strips a path prefix and, on Windows, a .exe/.cmd/.bat

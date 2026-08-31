@@ -67,14 +67,10 @@ const bigRepoMapCapBytes = 4000
 func TestLiveWorkflow(t *testing.T) {
 	pythonExe := findPython(t)
 
-	baseURL := os.Getenv("AEGIS_EVAL_BASE_URL")
-	if baseURL == "" {
-		baseURL = "http://localhost:11434"
-	}
-	model := os.Getenv("AEGIS_EVAL_MODEL")
-	if model == "" {
-		model = "llama3.2"
-	}
+	// Same server and same default model as every other live tier — see
+	// liveModel on why the default is a thinking model (EXEC-6).
+	baseURL := liveBaseURL()
+	model := liveModel()
 
 	// The task itself — fixture, prompt and outcome check — lives in
 	// workflowtask.go, harness-independent (P60.4), so the cross-harness
@@ -645,6 +641,19 @@ func newLiveWorkflowDaemonTweaked(t *testing.T, baseURL, model, promptProfile st
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
+	// Release what server.New opened before the data dir is removed. This
+	// harness drives a real daemon through Handler() and never calls
+	// ListenAndServe, which is where teardown used to live exclusively; the
+	// first live_workflow run therefore left audit.jsonl, longmem.db and
+	// knowledge.db open in every subtest and could not delete a single data
+	// dir on Windows (C2). Cleanups run last-registered-first, so registering
+	// Close before ts.Close stops the server first and closes the stores
+	// second, and the data-dir removal registered above runs after both.
+	t.Cleanup(func() {
+		if closeErr := srv.Close(context.Background()); closeErr != nil {
+			t.Logf("cleanup: daemon Close: %v", closeErr)
+		}
+	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 

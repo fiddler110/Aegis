@@ -272,6 +272,19 @@ func (a *Agent) streamEvents(ctx context.Context, sessionID string, events <-cha
 			if err := a.backend.SendApproval(ctx, sessionID, ev.ApprovalID, approved, false); err != nil {
 				a.logger.Warn("acp: send approval failed", "err", err)
 			}
+		case api.KindGuard:
+			// EXEC-2: the answer just streamed is being withdrawn and replaced
+			// by a corrective retry (P25.3). ACP chunks are already in the
+			// editor and cannot be recalled, so say so in line rather than
+			// letting the retry read as a second answer appended to the first.
+			if ev.GuardRetrying {
+				note := "\n\n[output guard: the answer above was withdrawn"
+				if ev.Text != "" {
+					note += " (" + ev.Text + ")"
+				}
+				note += " and is being retried]\n\n"
+				a.notifyUpdate(sessionID, messageChunk{SessionUpdate: updAgentMessageChunk, Content: textBlock(note)})
+			}
 		case api.KindError:
 			// Surface the error text to the user; the turn still ends normally.
 			if ev.Error != "" {

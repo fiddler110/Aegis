@@ -408,7 +408,7 @@ func TestCalibratedEngineAndRealSummarizerAgree(t *testing.T) {
 	}
 	raw := conv.estimatedTokens()
 	engineGate := float64(compactionTrigger(window, maxTokens)) / scale // raw tokens the engine fires at, once corrected
-	summarizerGate := window * 80 / 100                                // raw tokens the pre-P66.14 flat rule fired at
+	summarizerGate := window * 80 / 100                                 // raw tokens the pre-P66.14 flat rule fired at
 	if float64(raw) <= engineGate || raw >= summarizerGate {
 		t.Fatalf("fixture conversation is %d raw tokens, outside the disagreement band "+
 			"(%.0f..%d) — adjust the filler", raw, engineGate, summarizerGate)

@@ -107,11 +107,15 @@ func newDebateCmd() *cobra.Command {
 			// kept deliberately: a debate role is an analysis run that should
 			// never sit waiting for an approval nobody is watching for.
 			gate, engineHooks := enginecfg.BuildGate(enginecfg.GateOptions{
-				Mode:     string(permission.ModeBuild),
-				Approver: permission.AutoDeny{},
-				Security: cfg.Security,
-				Registry: reg,
-				Rules:    enginecfg.ConfigRules(cfg, nil),
+				// A debate role runs in build mode, where StrictPlanMode is
+				// inert by definition — passed anyway so a future mode change
+				// here does not silently drop the operator's posture.
+				Mode:           string(permission.ModeBuild),
+				StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(),
+				Approver:       permission.AutoDeny{},
+				Security:       cfg.Security,
+				Registry:       reg,
+				Rules:          enginecfg.ConfigRules(cfg, nil),
 			})
 			debateCfg := debate.WithDefaults(debate.Config{
 				Domain:          domain,

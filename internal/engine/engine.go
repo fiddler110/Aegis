@@ -1881,6 +1881,15 @@ func resultsHadError(results []provider.Block) bool {
 // lastUserText returns the text content of the most recent user message in
 // msgs that carries a text block — the triggering request for the current
 // turn — skipping any trailing tool-result-only messages.
+// isEmptyAnswerNudge reports whether text is the P34.1 empty-answer nudge.
+// It matches on the prefix rather than the whole constant so that a future
+// suffix change (or a caller that appends to it) does not silently stop the
+// P79.4 thinking suppression, which would fail as an empty reply rather than
+// as a test.
+func isEmptyAnswerNudge(text string) bool {
+	return text != "" && strings.HasPrefix(text, emptyAnswerNudgePrefix)
+}
+
 func lastUserText(msgs []provider.Message) string {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role != provider.RoleUser {
@@ -1924,6 +1933,16 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 		// still decides — so this never becomes a correctness dependency on a
 		// backend feature.
 		Format: format,
+		// P79.4: the P34.1 empty-answer nudge exists because a reasoning model
+		// put its whole reply in the thinking channel and stopped. Asking again
+		// over the same channel reproduces the same turn — measured on
+		// aegis-qwen35-9b, where the nudge came back empty too and the run ended
+		// with "model produced no text even after being asked". So the *nudge*
+		// turn, and only it, asks for the answer with thinking off: the model
+		// has already done the reasoning it was going to do, and what is left is
+		// to say it. Adapters that cannot control thinking ignore the field, in
+		// which case this is the same nudge it always was.
+		SuppressThinking: isEmptyAnswerNudge(lastUserText(conv.Messages)),
 	}
 	if e.tools != nil {
 		req.Tools = e.tools.Schemas()
@@ -1987,7 +2006,7 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 				// latency dominates, the fifth call of a round can be many
 				// seconds behind the first.
 				if round != nil && dispatchEarly {
-					if e.serializeTool(ev.ToolUse.Name, ev.ToolUse.Input) {
+					if e.serializeTool(ctx, ev.ToolUse.Name, ev.ToolUse.Input) {
 						// A write or execute call, and the point at which early
 						// dispatch stops for this turn — for two reasons, both
 						// of which would be defects rather than inefficiencies.

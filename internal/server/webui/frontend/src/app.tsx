@@ -545,8 +545,37 @@ export function App() {
             updateAsst((blocks) => [...blocks, { kind: "notice", text: ev.text as string }]);
           }
           break;
+        case "guard":
+          // EXEC-2: the daemon says this answer is being withdrawn and
+          // replaced by a corrective retry (P25.3). Withdraw it here too, so
+          // the retry renders as *the* answer rather than as a second one
+          // below the rejected one — which is what the TUI already does and
+          // what this front-end silently did not. A terminal guard failure
+          // (retries exhausted) keeps its answer and only annotates it.
+          finishThinking();
+          streamMode = "idle";
+          if (ev.guard_retrying) {
+            updateAsst((blocks) => {
+              // Only the *trailing* run of text blocks is the answer being
+              // withdrawn; prose the model wrote earlier in the turn, before a
+              // tool call, is not part of it and stays.
+              const kept = blocks.slice();
+              while (kept.length > 0 && kept[kept.length - 1].kind === "text") kept.pop();
+              const note =
+                "⚠ output guard: answer withdrawn" +
+                (ev.text ? " (" + ev.text + ")" : "") +
+                " — retrying…";
+              return [...kept, { kind: "notice", text: note } as RenderBlock];
+            });
+          } else if (ev.text) {
+            updateAsst((blocks) => [
+              ...blocks,
+              { kind: "notice", text: "⚠ output guard: " + ev.text },
+            ]);
+          }
+          break;
         default:
-          break; // turn_done/done/steer/guard: parity no-ops for now
+          break; // turn_done/done/steer: parity no-ops for now
       }
     };
 

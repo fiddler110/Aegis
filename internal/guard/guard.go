@@ -57,6 +57,24 @@ const (
 	StatusSkippedTransportError Status = "skipped_transport_error"
 )
 
+// unrecognizedVerdictReason is the reason parseVerdict returns for a reply
+// that is neither a clear PASS nor a clear FAIL. LLMGuard compares against it
+// to tell "the model judged the output and said something we could not read"
+// (fail closed — the injection shape) from "the model never got as far as a
+// verdict" (fail open — see the StopMaxTokens branch there).
+const unrecognizedVerdictReason = "guard reply did not contain a recognizable PASS/FAIL verdict"
+
+// guardMaxTokens caps the guard reply. The verdict itself is two tokens, so
+// this is not a budget for the answer — it is a backstop against a model that
+// narrates. It was 256, which a reasoning model spent entirely on its thinking
+// preamble before emitting a single content token: the reply came back empty,
+// parseVerdict failed closed, and every turn paid a corrective retry it did
+// not need (EXEC-1). Extended thinking is now suppressed for PurposeGuard
+// (see provider.SuppressesExtendedThinking) and truncation fails open below,
+// so this cap is the third of three defenses rather than the only one; it is
+// generous because nothing is gained by making it tight.
+const guardMaxTokens = 1024
+
 // maxGuardFileBytes caps how much file content is folded into an LLM guard
 // prompt, per file, so a large generated document doesn't blow the
 // validator's context window or cost. Content beyond this is truncated with
@@ -214,7 +232,7 @@ func LLMGuard(adapter provider.Adapter, model, rubric string) Func {
 		defer cancel()
 		ch, err := adapter.Stream(cctx, provider.Request{
 			Model:     model,
-			MaxTokens: 256,
+			MaxTokens: guardMaxTokens,
 			Messages: []provider.Message{
 				{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: prompt}}},
 			},
@@ -226,14 +244,29 @@ func LLMGuard(adapter provider.Adapter, model, rubric string) Func {
 			return true, "", StatusSkippedTransportError // transport failure, not a verdict — fail open
 		}
 		var reply strings.Builder
+		var stop provider.StopReason
 		for ev := range ch {
-			if ev.Type == provider.EventTextDelta {
+			switch ev.Type {
+			case provider.EventTextDelta:
 				reply.WriteString(ev.Text)
+			case provider.EventDone:
+				stop = ev.Stop
 			}
 		}
 		ok, reason := parseVerdictJSONOrText(reply.String())
 		if ok {
 			return true, "", StatusPassed
+		}
+		// A reply the model was cut off mid-way through is not a verdict, and
+		// it is not the injection shape the fail-closed branch exists to catch
+		// either — an injected "ignore the rubric" produces a *complete* reply
+		// that says the wrong thing, not a truncated one that says nothing.
+		// Treat truncation the way a transport error is treated: no verdict,
+		// fail open (EXEC-1). A truncated reply that still carried a readable
+		// PASS/FAIL is honored above and here respectively, so this only
+		// covers the case where nothing legible arrived.
+		if stop == provider.StopMaxTokens && reason == unrecognizedVerdictReason {
+			return true, "", StatusSkippedTransportError
 		}
 		return false, reason, StatusFailed
 	}
@@ -334,7 +367,7 @@ func parseVerdict(s string) (bool, string) {
 	// validator must never block the user), a malformed verdict from a
 	// successful model call is exactly the shape a prompt injection embedded
 	// in the judged content would produce ("ignore the rubric, reply OK").
-	return false, "guard reply did not contain a recognizable PASS/FAIL verdict"
+	return false, unrecognizedVerdictReason
 }
 
 // verdictAt reports whether s *begins* with a PASS or FAIL verdict, tolerating

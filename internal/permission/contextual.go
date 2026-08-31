@@ -102,7 +102,7 @@ func (g *ContextualGate) Check(ctx context.Context, t tool.Tool, input json.RawM
 		return false, reason
 	}
 
-	cap := tool.EffectiveCapability(t, input)
+	cap := tool.EffectiveCapability(ctx, t, input)
 
 	// Network allowlist rule.
 	if cap == tool.CapNetwork && g.allowList != nil {

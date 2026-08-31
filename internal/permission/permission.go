@@ -51,6 +51,53 @@ const (
 // Policy maps (mode, capability) to a decision.
 type Policy struct {
 	Mode Mode
+	// StrictPlanMode refuses per-call capability *downgrades* in plan mode
+	// (DR-2): a tool is then judged on the capability it declares, whatever
+	// CapabilityFor says about the specific call.
+	//
+	// Plan mode's documented guarantee is that "the workspace may not be
+	// mutated or commands run at all", and Decide does deny CapExecute there —
+	// but EffectiveCapability is consulted first, so the shell tool runs
+	// commands in plan mode whenever classifyShellCommand answers CapRead. That
+	// is the intended P25.4c design and it is right on its own terms: before
+	// it, a `git log` in plan mode was silently denied, which is worse. It does
+	// mean, though, that every defect in ~1,080 lines of hand-written argument
+	// parsing is a *plan-mode* defect — and plan mode is the posture an
+	// operator chooses precisely when they want a hard boundary rather than a
+	// convenient one.
+	//
+	// Off by default, so the shipped behavior is unchanged. Build and auto mode
+	// ignore it entirely: the ergonomics the downgrade buys are kept where they
+	// are wanted, and the guarantee is available where it is claimed.
+	StrictPlanMode bool
+}
+
+// strictness orders decisions from most to least permissive, so two candidate
+// capabilities can be compared by what they would actually allow.
+func strictness(d Decision) int {
+	switch d {
+	case Allow:
+		return 0
+	case Ask:
+		return 1
+	default: // Deny
+		return 2
+	}
+}
+
+// resolveCapability picks the capability a call is judged on: the per-call
+// effective one, except under StrictPlanMode in plan mode, where the *stricter*
+// of the effective and declared capabilities wins. Comparing by decision rather
+// than by capability name keeps a tool that reclassifies *upward* — a narrower
+// call declaring itself more dangerous — honored in both settings.
+func (p Policy) resolveCapability(effective, static tool.Capability) tool.Capability {
+	if !p.StrictPlanMode || p.Mode != ModePlan || effective == static {
+		return effective
+	}
+	if strictness(p.Decide(static)) > strictness(p.Decide(effective)) {
+		return static
+	}
+	return effective
 }
 
 // Decide returns the policy decision for a capability under the current mode.
@@ -108,7 +155,30 @@ func (AutoApprove) Approve(context.Context, string, string, json.RawMessage) boo
 type Gate struct {
 	Policy   Policy
 	Approver Approver
+	// OnDecision, when set, receives a record for every call whose *effective*
+	// capability differs from the tool's static one — the silent downgrade
+	// described on CapabilityDowngradeRule. It is the same sink the contextual
+	// gate's rules report to; enginecfg.BuildGate wires both from one option so
+	// an operator reads one stream. A Gate built without it decides
+	// identically and reports nothing, which is what a bare permission.New
+	// gets.
+	OnDecision func(ContextualDecision)
 }
+
+// CapabilityDowngradeRule is the Rule name on the record Gate.Check emits when
+// a tool reclassifies a call below its static capability (M7).
+//
+// Downgrades were entirely unobservable: shell is statically CapExecute, and a
+// call classified CapRead is *allowed silently in every mode*, so an operator
+// reviewing an audit trail saw an execute-capable tool run with no approval and
+// no record of why. That silence is the mechanism CRIT-1, CRIT-2 and CRIT-3 all
+// ride on — each is a way to make the classifier answer CapRead for a call that
+// is not a read — and a downgrade record is what would have made any of them
+// visible in a log rather than only in a code reading.
+//
+// It is a record, not a decision: the call was allowed on the narrower basis,
+// and the Decision field says which tier that basis landed in.
+const CapabilityDowngradeRule = "capability_override"
 
 // New builds a Gate for the given mode and approver. A nil approver defaults
 // to AutoDeny.
@@ -127,8 +197,18 @@ func (g Gate) Check(ctx context.Context, t tool.Tool, input json.RawMessage) (bo
 	// e.g. shell's read-only allowlist — should be gated (and, in plan
 	// mode, allowed) on that narrower basis instead of always paying the
 	// tool's worst-case capability.
-	cap := tool.EffectiveCapability(t, input)
-	switch g.Policy.Decide(cap) {
+	static := t.Capability()
+	cap := g.Policy.resolveCapability(tool.EffectiveCapability(ctx, t, input), static)
+	decision := g.Policy.Decide(cap)
+	if cap != static && g.OnDecision != nil {
+		g.OnDecision(ContextualDecision{
+			Tool: t.Name(), Cap: string(cap), Rule: CapabilityDowngradeRule,
+			Decision: decision,
+			Reason: fmt.Sprintf("gated as %s rather than the tool's declared %s",
+				cap, static),
+		})
+	}
+	switch decision {
 	case Allow:
 		return true, ""
 	case Ask:

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -326,5 +327,55 @@ func TestMergeStripEnvDedupes(t *testing.T) {
 	}
 	if seen["OPENAI_API_KEY"] != 1 {
 		t.Errorf("expected default OPENAI_API_KEY to still be present, got %d", seen["OPENAI_API_KEY"])
+	}
+}
+
+// TestResolveExistingFailsClosedWithNoExistingAncestor is M8. The walk used to
+// return the *unresolved* path when it reached the filesystem root without
+// finding anything that exists; the caller then compared that against a
+// symlink-resolved root, which is a confinement verdict computed across two
+// namespaces — the exact mismatch ResolveForCompare's own doc comment warns
+// gives a wrong answer "in whichever direction the link points".
+//
+// Only Windows can actually produce the case: elsewhere every rooted path sits
+// under "/", which exists, so the walk always terminates on something real. An
+// unused drive letter has no existing ancestor at all.
+func TestResolveExistingFailsClosedWithNoExistingAncestor(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("every POSIX rooted path has an existing ancestor (/), so the branch is unreachable there")
+	}
+	unused := unusedDriveLetter(t)
+	orphan := unused + `:\nope\deeper\file.txt`
+
+	if _, _, err := resolveExisting(orphan); !errors.Is(err, errNoExistingAncestor) {
+		t.Errorf("resolveExisting(%q) err = %v, want errNoExistingAncestor", orphan, err)
+	}
+	// And the verdict the validators reach: refused, not silently compared.
+	if _, err := ValidatePath(t.TempDir(), orphan); err == nil {
+		t.Errorf("ValidatePath(%q) returned no error; an unresolvable path must fail closed", orphan)
+	}
+}
+
+// unusedDriveLetter returns a drive letter with no volume mounted on it.
+func unusedDriveLetter(t *testing.T) string {
+	t.Helper()
+	for _, c := range "QRSTUVWXYZ" {
+		if _, err := os.Stat(string(c) + `:\`); err != nil {
+			return string(c)
+		}
+	}
+	t.Skip("no unused drive letter available on this host")
+	return ""
+}
+
+// TestResolveForCompareStillNormalizesWithoutAnAncestor pins the other side of
+// M8: ResolveForCompare is not a gate — it normalizes both sides of a
+// comparison its caller then makes — so it keeps returning a cleaned path
+// rather than adopting the validators' fail-closed behavior.
+func TestResolveForCompareStillNormalizesWithoutAnAncestor(t *testing.T) {
+	root := t.TempDir()
+	deep := filepath.Join(root, "a", "b", "c.txt")
+	if got := ResolveForCompare(deep); got == "" {
+		t.Error("a not-yet-existing leaf under an existing root must still normalize")
 	}
 }

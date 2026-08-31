@@ -8,7 +8,28 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-26 (twenty-sixth record) — **P78.1–P78.9 shipped: a nine-item code-quality
+**Last updated:** 2026-08-30 (twenty-seventh record) — **the comprehensive architecture and security
+audit is closed out in full, and `Review.md` is gone.** A five-phase principal-level pass over the whole
+tree (~109,700 non-test Go lines) had produced 28 findings across 26 rows plus two coverage-debt
+entries; 24 rows were already closed, and this sitting closed the remainder. Running the `live_workflow`
+tier for the first time — the only tier that drives a real model through the daemon's own HTTP/SSE seam
+— found three product defects, all fixed and re-verified live: **P79.2** (the daemon released nothing
+unless it exited through `ListenAndServe`, and even there teardown was split across two exits, so a
+daemon that failed to bind left LSP children and a sandbox container running), **P79.3** (compaction's
+summarizer returned empty on every cycle, its entire 1,024-token budget spent on a thinking preamble —
+measured, not inferred), and **P79.4** (the empty-answer nudge re-asked over the channel that had just
+swallowed the answer; fixing it took `SecurityTriage` from 3/12 to 12/12 on the same model and fixture,
+so what looked like a weak 9B failing a security task was the harness losing the reply). The
+unreviewed-surface pass closed `internal/mcpserver` — a caller could escalate its own permission mode
+past `mcp_server.default_mode`, which also made `auto_approve` vacuous — and the `internal/swarm`
+subprocess backend, whose spec file carried the child's clamped mode through a Windows ACL that did not
+restrict it. `internal/server/server.go` went 1,814 → 535 lines as a lossless split. What the audit did
+*not* finish is filed as **P80.1–P80.4** in [roadmap.md](roadmap.md) rather than left in a deleted
+document. Full record, including the audit's own register and all five phases of evidence:
+[Comprehensive architecture and security audit, remediated in full,
+2026-08-30](#comprehensive-architecture-and-security-audit-remediated-in-full-2026-08-30).
+
+**Last updated (previous):** 2026-08-26 (twenty-sixth record) — **P78.1–P78.9 shipped: a nine-item code-quality
 batch, filed and shipped the same day.** A five-track audit (sprawl/duplication/gaps, not security —
 that axis is `CodeReview.md`'s and P76.1's) read the whole tree in parallel by package group and filed
 nine Tier 4 items; rather than leave them parked, all nine were picked up the same sitting as seven
@@ -510,6 +531,1287 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### Comprehensive architecture and security audit, remediated in full, 2026-08-30
+
+**What it was.** A five-phase principal-level architecture and security pass over the whole tree at
+`88cea69` — ~109,700 non-test lines of Go across ~70 `internal/` packages, one `cmd/aegis`, and the
+~3,700-line Preact web UI — run as a static review (Phases 1–4) plus a live execution pass against
+`aegis-qwen35-9b:32k` (Phase 5). It produced **28 findings across 26 register rows**, plus two
+coverage-debt entries (`C1`, `C2`) that were not findings but bounded how much the rest could be
+trusted. The working document lived at the repository root as `Review.md`; it is reproduced below in
+full and the file is gone.
+
+**The shape every finding shared, which is the part worth carrying forward.** Almost none of these
+were a wrong line of code. They were a mechanism built for one path that a second path silently
+bypassed — and the second path was usually the one nothing exercised. CRIT-1 and CRIT-2 were defects in
+`classifyShellCommand`, which is a plan-mode defect by construction because `Gate.Check` consults
+`tool.EffectiveCapability` *before* `Policy.Decide`. P66.13 was a bare `permission.New` at an
+`engine.New`. The MCP server's F1 was a caller-supplied mode reaching a resolver that returns an
+explicit request mode unchanged *by design*, because on the HTTP API the authenticated caller is the
+user — and on this ingress it is a program holding a token from a file. P79.2, found on the last day,
+was the same shape in the daemon's own shutdown: two exits, one running half the teardown.
+
+**Waves 1–5 and most of Wave 6 were closed before 2026-08-30**, 24 of 26 rows, and are recorded in the
+register below with the evidence behind each. **The 2026-08-30 sitting closed the rest**, which is what
+this record adds:
+
+- **C2 — the `live_workflow` tier had never been run**, and was the only thing that exercises
+  compaction under real context pressure through the daemon's own HTTP/SSE seam rather than a bare
+  engine or a scripted adapter. Running it found three product defects, all fixed and re-verified live
+  the same day, filed as **P79.2**, **P79.3** and **P79.4**:
+  - **P79.2** — the daemon released nothing unless it exited through `ListenAndServe`, and even there
+    teardown was split: cron, the swarm, the task manager, the sandbox and the LSP child processes were
+    stopped only inside the `ctx.Done()` branch, so a daemon that failed to bind returned without
+    stopping any of them. `Server.Close` is now one idempotent teardown, deferred before the first
+    `return`, and exported so an embedder driving a `Server` through `Handler()` can use it. Found
+    because every subtest failed to delete its data directory on Windows.
+  - **P79.3** — compaction's LLM summarizer returned empty output on **every** cycle of every session.
+    Measured directly rather than inferred: 1,024-token budget, `done_reason: "length"`,
+    `eval_count: 1024`, zero content bytes — the whole budget spent on the thinking preamble. The fix is
+    not to forbid thinking for summaries (compaction is deliberately absent from
+    `SuppressesExtendedThinking` because a summary is exactly the long unstructured reply it helps); it
+    is a new per-request `provider.Request.SuppressThinking` and one retry, taken only when the reply
+    was empty *from a model that thought*.
+  - **P79.4** — the P34.1 empty-answer nudge, which exists precisely because a reasoning model puts its
+    reply in the thinking channel and stops, was re-asking over that same channel. **This was the
+    tier's headline result and it was not a model-quality problem**: before the fix `SecurityTriage`
+    scored 3/12 and `TestLiveWorkflow` failed; after it, the same model on the same fixture scores
+    **12/12** and the whole tier passes. Three tiers of eval were green throughout, because none of
+    them drives a real model through the seam where a reply that never reaches the user is observable.
+- **C1 — the unreviewed surface.** `internal/mcpserver` was reviewed first, as the audit itself
+  recommended, on the grounds that it is a second ingress with its own permission defaults. That was
+  the right guess. **F1**: the session mode came from the caller's tool arguments, so a client could
+  ask for `auto` and get it whatever `mcp_server.default_mode` and `permission.mode` said — and under
+  `auto` the policy allows every capability outright, so no approval is ever raised, which made
+  `mcp_server.auto_approve: false`, the package's headline safety control, **vacuous**. Decided and
+  fixed in `mcpserver` rather than in `resolveSessionMode`, with `allow_caller_mode_escalation` as the
+  operator's way back. **F2**: auto-approve was one undiscriminated yes; `auto_approve_tools` now
+  narrows it and every auto-grant is logged, since no human saw the prompt. **F3** (an MCP client can
+  list and post into sessions it did not create) was written up rather than fixed and is now
+  **[P80.1](roadmap.md)**. The `internal/swarm` subprocess lead resolved with one real fix: the worker
+  spec file is created in shared temp with `chmod 0600`, cosmetic on Windows, and it is the only
+  carrier of the child's clamped permission mode — it now gets `fsguard.RestrictToOwner`, the idiom the
+  auth token (FIND-06/P27.4) and mailbox root (FIND-20/P27.11) already had.
+- **L4's file half** shipped: `internal/server/server.go` 1,814 → 535 lines across `wiring.go`,
+  `lifecycle.go`, `sessionscope.go`, `sandboxselect.go`, `subagent.go`, `approval.go` and `status.go`,
+  as a pure move verified lossless by diffing the top-level declaration set before and after (identical,
+  plus the new `Close`). The struct half is **[P80.3](roadmap.md)**.
+- **DR-2** was left as the decision it already was: `permission.plan_mode_shell_reads` exists and still
+  defaults to `true`, because plan mode *denies* `CapExecute` rather than prompting for it, so flipping
+  the default makes `shell` unusable in plan mode outright — `git log` and `ls` included.
+
+**Verified the same day:** full `go test ./...` green, `go vet ./...` clean, `gofmt` clean,
+`go test -race` green on every touched package, and the `live_workflow` tier re-run against the real
+model three times — the last run passing all four `TestLiveWorkflow` subtests, deleting every data and
+fixture directory cleanly (P79.2), and reporting successful LLM compaction where it had previously
+reported `summarizer returned empty output` four times and fallen back (P79.3).
+
+**Two invariants were added to `CLAUDE.md`** out of this, because both are the kind of thing the next
+person will otherwise rediscover: that a reasoning model's preamble and its answer share one
+`MaxTokens` budget (and which of the two suppression seams to reach for), and that teardown belongs to
+`Server.Close` rather than to an exit path.
+
+---
+
+**Reviewer:** Principal architecture / security pass
+**Target:** working tree at repository root, branch `main` @ `88cea69`, including the one uncommitted file (`comprehensive_review_prompt.md`, a prompt document with no code impact).
+**Scale:** ~109,700 lines of non-test Go across ~70 `internal/` packages, one `cmd/aegis` entry point, and a ~3,700-line Preact/TypeScript web UI.
+**Excluded, as instructed:** `.claude/worktrees/**`, `node_modules/**`, `**/dist/**`, `vendor/**`. Every path cited below was confirmed to resolve outside those. `*_test.go` files were read as *evidence* (to establish whether behavior is pinned) but never reviewed as subjects.
+
+> **Archived 2026-08-30.** This was a working document (`Review.md` at the repository root) until every
+> finding in it was closed; it is reproduced here in full because the phase sections are the *evidence*
+> for changes that are now in the tree, and that reasoning is worth more than the summary of it.
+> **Line numbers and quoted snippets throughout describe the code as reviewed, not as it now stands** —
+> deliberately so. The four things the audit did not finish are not here: they were refiled as
+> [P80.1–P80.4](roadmap.md) the day this was archived, because open work belongs in the roadmap.
+> The "What is left" table below is kept as the audit's own final accounting and points at those items.
+
+> **How to read this document.** The **Consolidated Findings Register** below is the original worklist: every finding from all five phases, deduplicated, ranked, with a recommended work order. The phase sections that follow are the evidence behind each entry — Phases 1–4 are the static review, Phase 5 is the live execution pass against `aegis-qwen35-9b:32k`. The Executive Summary sits between Phase 4 and Phase 5.
+
+---
+
+#### Implementation status — 2026-08-30
+
+**26 of 26 findings closed; both coverage-debt entries worked.** Everything in
+Waves 1–6 except the two entries that were never tasks with a finish line
+(DR-2, decided; L4, structural — a first pass has now landed). The suite is
+green on Windows and Linux, `go vet` is clean, `gofmt` is clean, and
+`go test -race` passes on every touched package.
+
+**Legend in the register below:** ✅ done · ◐ decision made, see note · ☐ open ·
+— superseded.
+
+##### What is left
+
+| | Item | Where it stands |
+|---|---|---|
+| ◐ | **C1 — unreviewed surface** | `internal/mcpserver` reviewed and fixed (F1/F2 below). The `internal/swarm` subprocess lead resolved: the worker *does* build its gate through `enginecfg`, and the one real gap — the spec file's Windows ACL — is closed. `internal/tui`, `internal/drive` and the sandbox container backends remain unreviewed; none sits on a permission decision. → **[P80.2](roadmap.md)**, and F3 below → **[P80.1](roadmap.md)**. |
+| ◐ | **C2 — `live_workflow`** | Run, three times. It found three product defects (P79.2/P79.3/P79.4, below), all fixed and re-verified against the live model. What the tier still cannot measure on this machine's models → **[P80.4](roadmap.md)**. |
+| ☐ | **L4 — split `internal/server`** | First pass landed: `server.go` 1,814 → 535 lines across seven topic files. The `Server` struct half → **[P80.3](roadmap.md)**. |
+| ◐ | **DR-2 — plan-mode downgrade** | Mechanism shipped (`permission.plan_mode_shell_reads`), default deliberately unchanged. See below. |
+| — | **L5 — `CapabilityDecision` type** | Superseded: M7 landed on the existing `permission.ContextualDecision`, so every gate layer reports to one sink. A dedicated type would be a refactor, not a gap. |
+
+##### C1 — what the review of the remaining ingresses found
+
+###### F1 — an MCP caller could escalate its own permission mode (fixed)
+
+The lead was right. `callNewSession` and `callPrompt` took the session mode from
+the caller's tool arguments and used `mcp_server.default_mode` only as a
+fallback; `Server.resolveSessionMode` then returns an explicit request mode
+unchanged by design, clamping only a *persona's*. So an authenticated MCP client
+could ask for `auto` and get it whatever `mcp_server.default_mode` and
+`permission.mode` said.
+
+The consequence is larger than one mode: under `auto`, `permission.Policy.Decide`
+allows every capability outright, so no approval request is ever raised — which
+made `mcp_server.auto_approve: false`, this package's headline safety control,
+**vacuous for any caller that asked for `auto`**. The package doc promised the
+opposite ("new sessions start in plan mode … denied unless the operator opts
+in"), and `docs/configuration.md` promised the permissive reading ("Override
+per-call with the `mode` tool argument"). The two docs contradicted each other
+and the code followed the permissive one.
+
+**Decided:** clamp in `mcpserver`, not in `resolveSessionMode`. The daemon's
+HTTP API deliberately treats an authenticated caller as the user; an MCP client
+is a *program* holding a token it read from a file, relaying instructions from
+wherever it got them, so it is the one ingress where that equivalence does not
+hold. A caller may still choose any mode at or *below* `default_mode` — asking
+for less is never an escalation — and an attempt to exceed it is clamped and
+logged rather than refused, so a client that asks for more still gets a working
+session. `mcp_server.allow_caller_mode_escalation: true` restores the old
+behavior for an operator who wants it. Both docs now say the same thing.
+
+Pinned by `TestCallerRequestedModeIsClampedToDefault` (eight cases across both
+tools, including an unknown mode string, which ranks above every known mode so
+it clamps rather than sailing through a lookup that returned zero).
+
+###### F2 — `auto_approve` was one undiscriminated yes (fixed)
+
+Every approval request the run produced was answered with the same boolean, with
+no per-tool or per-capability discrimination. Both ends of that switch are
+unsatisfying: off, and a `build`-mode session's single `CapExecute` request is
+denied with no way to allow just it; on, and the MCP client effectively holds
+`permission.auto_approve_exec` for arbitrary `shell` for the length of the run.
+
+`mcp_server.auto_approve_tools` now narrows the grant to named tools (empty
+keeps the historical blanket behavior), and **every** auto-granted approval is
+logged at Info with the tool and its arguments — with no human in the loop, that
+log is the only record the call happened. Pinned by
+`TestAutoApproveIsScopedToConfiguredTools`.
+
+###### F3 — cross-session reach (open, needs a product decision)
+
+`aegis_list_sessions` proxies *all* daemon sessions, including ones the human
+created in the TUI, and `callPrompt` accepts any `session_id` verbatim. An MCP
+client can therefore enumerate an interactive `auto`-mode session and post a
+turn into it, inheriting that session's mode, persona and workdir — which also
+means F1's clamp binds only sessions the MCP server itself creates.
+
+Not fixed here because the obvious fix (track the IDs this server created;
+reject others) breaks a legitimate use — an editor plugin resuming a session
+across `mcp-serve` restarts — and choosing between them is the operator's call,
+not a defect fix. The narrower option is to tag sessions with an origin at
+creation and filter on that, which survives a restart.
+
+###### `internal/swarm` subprocess backend — one real gap, and the lead resolved
+
+`aegis worker` builds its gate through `enginecfg.BuildGate` like every other
+engine call site (P10.1/P66.13 already closed that), so the "second front door
+bypasses a mechanism" shape is not present. It does trust `spec.Config.Mode`
+verbatim — and it must: the parent clamps against its own mode before writing
+the spec, and the session mode a parent legitimately runs under can exceed
+`cfg.Permission.Mode`, so re-deriving the clamp in the worker would break honest
+teammates rather than catch dishonest ones.
+
+The real gap was the spec file itself. It is created in the shared system temp
+directory and `chmod`ed `0o600` — the whole story on POSIX, cosmetic on Windows,
+where a new file inherits its parent's ACL. That file is the only carrier of the
+child's permission mode, so another local account able to rewrite it between the
+write and the child's read promotes the teammate to `auto`; one able merely to
+read it gets the task and system prompts. `writeSpec` now applies
+`fsguard.RestrictToOwner`, the same idiom the daemon auth token (FIND-06/P27.4)
+and the swarm mailbox root (FIND-20/P27.11) already use — the spec file was the
+one carrier of this class that never got it. Pinned by
+`TestWriteSpecRestrictsACL` (Windows-only, asserting a single non-inherited
+owner ACE).
+
+###### Still unreviewed
+
+`internal/tui` (17.6k non-test lines), `internal/drive`, and the sandbox
+container backends. None sits on a permission decision the way the two above do;
+review them for correctness, not posture.
+
+##### C2 — what running `live_workflow` found
+
+Run against `aegis-qwen35-9b:32k`. As predicted, the first run found harness and
+product defects rather than model-quality ones — three, all fixed and re-verified
+against the live model on a second and third run.
+
+###### P79.2 — the daemon released nothing unless it went through `ListenAndServe`
+
+Every subtest failed to delete its data directory: `audit.jsonl`, `longmem.db`
+and `knowledge.db` were all still open. The harness builds a real daemon through
+`server.New` + `httptest` and never calls `ListenAndServe`, which is where
+teardown lived *exclusively* — and there was no exported way to let go of any of
+it. On Windows that is not merely untidy; the open handles make the directory
+undeletable, which is how it surfaced.
+
+Reading the shutdown path for the fix turned up the larger half: teardown was
+split. The deferred closes covered the stores; cron, the swarm, the task
+manager, the sandbox and the language-server child processes were torn down only
+inside the `ctx.Done()` branch. A daemon that exited because its port was taken,
+or because it refused a non-loopback address, returned without stopping any of
+them — the codebase's characteristic shape (two exits, one bypassing a
+mechanism) in the shutdown path itself.
+
+`Server.Close` is now one idempotent teardown, deferred before the first exit
+`ListenAndServe` can take, and exported so an embedder driving a `Server`
+through `Handler()` can release what `New` acquired. `TestCloseReleasesEveryHandleNewOpened`
+and `TestListenAndServeTearsDownOnEveryExit` (four exits) pin it; the eval
+harness now calls it, and the re-run deleted every data and fixture directory
+cleanly.
+
+###### P79.3 — compaction's summarizer never worked on a reasoning model
+
+`summarizer returned empty output`, on every compaction cycle of every session,
+twice over. The engine's own mitigations behaved correctly around it — two
+failures fell back to deterministic compaction, four latched the LLM summarizer
+off for the run (P39.8) — but the summarizer itself produced nothing, ever.
+
+Measured directly against the model rather than inferred: a 1,024-token
+completion budget (`SummaryTokens`), `done_reason: "length"`, `eval_count: 1024`,
+**zero content bytes** — the entire budget spent on the thinking preamble. This
+is EXEC-1's failure mode recurring in compaction, which
+`SuppressesExtendedThinking` deliberately excludes, on the correct reasoning
+that a summary is exactly the long unstructured reply thinking helps. The defect
+was never that thinking is wrong for a summary; it is that a preamble and a
+summary share one budget.
+
+So the fix is not to forbid it: `provider.Request.SuppressThinking` is a new
+per-request seam for the case `Purpose` cannot express — the same call made
+twice, differently — and the summarizer, on an empty reply *from a model that
+thought*, asks once more with it set. A model that emitted nothing at all is not
+retried: it has no budget problem, and a second call would just spend another
+round trip to reach the same fallback. Pinned by
+`TestSummarizerRetriesWithoutThinkingWhenThePreambleAteTheBudget`,
+`TestSummarizerDoesNotRetryAModelThatSaidNothingAtAll`, and
+`TestStreamHonorsPerRequestThinkSuppression` on the adapter.
+
+Verified live: the same run that produced `summarizer returned empty output`
+four times now reports `context ~62% full — compacted 9→9 messages`. The LLM
+summarizer succeeds, and the deterministic fallback no longer fires.
+
+###### P79.4 — the empty-answer nudge re-asked over the channel that failed
+
+Every subtest ended `model produced no text even after being asked for a
+plain-text answer — the reply is empty`. The P34.1 nudge exists precisely
+because a reasoning model puts its reply in the thinking channel and stops — but
+the nudge turn was sent with thinking still on, so it reproduced the same turn.
+That turn, and only that turn, now sets `SuppressThinking`: the model has
+already done whatever reasoning it was going to do, and what is left is to say
+it. Every other turn keeps the preamble, which is where it earns its keep.
+Pinned by `TestEmptyAnswerNudgeTurnSuppressesThinking`.
+
+**This was the tier's headline result, and it was not a model-quality problem.**
+Before the fix, `FixSeededBug` and `SecurityTriage` failed and `SecurityTriage`
+scored **3/12** — a number that reads like a weak 9B model failing a security
+triage task. It was not. The model was doing the work and then losing the reply:
+the nudge, its one recovery path, was re-asking over the channel that had just
+swallowed the answer. With the nudge turn asking without thinking, the same
+model on the same fixture scores **12/12** and the whole of `TestLiveWorkflow`
+passes.
+
+That is the reason this tier existed and had never been run. Three tiers of eval
+were green throughout, because every one of them measures a bare engine or a
+scripted adapter — none drives a real model through the daemon's own SSE seam,
+which is the only place a reply that never reaches the user is observable at
+all. The finding also generalizes past this model: it is a property of any
+reasoning model whose completion budget is shared between preamble and answer,
+which is most of them.
+
+###### What is left in the tier
+
+`TestLiveWorkflow`'s four subtests all pass. The two standalone tests are honest
+about their own limits rather than green, and both are limited by the model, not
+by the code under test:
+
+- `TestLiveWorkflowCompactionPrefixCacheGate` had **two** complaints before the
+  fixes and has **one** now. "No compaction actually ran, so this run measures
+  nothing about the gate" is gone — P79.3 means compaction now runs and succeeds
+  (three cycles per arm: 62%, 78%, 79%). What remains is that
+  `aegis-qwen35-9b:32k` abandons the 14-file read chain after five files, so the
+  conversation never grows the way the fixture designs, and the test refuses to
+  report a gate comparison from it. That refusal is the test working; a number
+  from that run would be worse than no number. It needs a model that will follow
+  a long mechanical chain.
+- `TestLiveWorkflowForcedContextOverflow` skipped on its most recent run — the
+  model's `write_file` call was not long enough to hit the 8,192-token ceiling
+  the test needs, so it declined to measure rather than passing vacuously. On an
+  earlier run the same test reached the overflow and passed. That is run-to-run
+  variance in how much a live model chooses to emit, which the test detects
+  correctly; forcing it reliably means raising the requested line count or
+  lowering the window.
+
+##### L4 — first pass
+
+`server.go` went from 1,814 lines to 535, along the seams the review pointed at,
+as a pure move: `wiring.go` (the `wire*` constructor stages), `lifecycle.go`
+(routes, listen-address validation, `ListenAndServe`, and now `Close`),
+`sessionscope.go` (the per-session views — the reason several of `Server`'s
+`sync.Map`s exist), `sandboxselect.go`, `subagent.go`, `approval.go` and
+`status.go`. `server.go` now holds the package doc, the `Server` struct, `New`
+and `newWithDeps` — what the daemon *is*, without the subsystems scrolling past.
+The 60-field struct is untouched; grouping its fields is the next pass, and a
+larger one.
+
+##### DR-2 is a decision, not an omission
+
+`permission.plan_mode_shell_reads` exists and defaults to `true` — today's
+behavior. The default was **not** flipped, on evidence the review did not have:
+plan mode *denies* `CapExecute` rather than prompting for it, so turning the
+knob on makes `shell` unusable in plan mode outright, `git log` and `ls`
+included. That is the guarantee working as designed, but it is a large change
+to impose by default on a mode most people use as "explore safely".
+
+The concern behind DR-2 is now mitigated from three other directions anyway:
+CRIT-1 and CRIT-2 are closed, `FuzzClassifyShellCommand` (L1) states the
+invariant mechanically, and M7 means a silent downgrade leaves an audit record.
+Recommended posture: leave the default, and turn it on for untrusted-repo
+review.
+
+##### Work done beyond the register
+
+Found while implementing the above, all with regression tests:
+
+- **`internal/swarm` message ordering.** `Mailbox.Send` stamped `time.Now()`,
+  and message order is carried entirely by the filename `<unixnano>_<uuid>`.
+  Two sends inside one clock tick (~500ns steps on Windows, less than a send
+  takes) fell back to comparing random uuids, so the later message could be read
+  first — a ~1-in-200 failure in two separate mailbox tests. `Send` now stamps
+  through a monotonic per-process clock.
+- **`internal/trust` scan cost.** `ScanForInjection` ran every pattern twice on
+  clean input — once on the content, once on a byte-identical
+  invisible-stripped copy. Gating the second pass halved it (27.2ms → 14.3ms per
+  22KB), which also speeds up the pre-existing MCP and web paths. Benchmarked in
+  `scan_bench_test.go`.
+- **`security.scan_file_reads`.** An off switch for DR-1's scan, which every
+  other scanned channel already had.
+- **`docs/cli-reference.md` was stale on a security control.** It described
+  `mcp-serve` authentication as optional and off by default ("any process able
+  to write to this subprocess's stdin can drive sessions"). Since FIND-06/P27.4
+  the command *always* resolves a token, generating one into
+  `<data_dir>/mcp.token` when the harness sets no `AEGIS_MCP_TOKEN`. The doc
+  both understated the posture and omitted the step a harness now has to take.
+
+---
+
+#### Consolidated Findings Register & Remediation Plan
+
+**28 distinct findings** across 26 rows (row 11 carries three related IDs), plus two coverage-debt entries (`C1`, `C2`) that are not findings but bound how much the rest can be trusted.
+
+IDs are stable across the document — `CRIT-*` and `DR-*` come from Phase 2, `M-*` from the Phase 3/4 matrix, `L-*` from the longevity roadmap, `EXEC-*` from the Phase 5 execution pass. Every ID below appears again in its evidence section; use it to jump between the worklist and the reasoning.
+
+**Status column:**
+- **Executed** — reproduced by running code in this session; the evidence is a measurement, not a reading.
+- **Traced** — followed line by line through the actual code path, but not reproduced at runtime.
+
+**Effort column** (implementation only — excludes review and the regression test each fix should carry):
+- **S** — a contained change to one function or file; under an hour.
+- **M** — a change crossing a seam or several call sites, or one needing a new test harness; half a day to a day.
+- **L** — structural; multi-day, and better done incrementally than as one commit.
+
+Two IDs were duplicates and are merged: **M4 ≡ DR-3** (cron tool capabilities) is carried as DR-3. **M9/M10** overlap heavily with EXEC-6 and are grouped with it.
+
+##### The full register, ranked
+
+| # | ✔ | ID | Sev | Status | Finding | Primary location | Effort |
+|---|---|---|---|---|---|---|---|
+| 1 | ✅ | **EXEC-1** | Critical | Executed | Output guard is on by default and structurally broken on every thinking model: 256-token cap is consumed by reasoning, content is empty, guard fails **closed**. Doubles cost per turn and corrupts the answer. | `internal/guard/guard.go:217`, `:227-236` | S |
+| 2 | ✅ | **CRIT-1** | Critical | Executed | `~` never expanded by the read-only shell classifier → `cat ~/.ssh/id_rsa` gated as `CapRead`, silently allowed **in every mode incl. plan**. | `internal/tool/builtin/shell_readonly.go:754` | S |
+| 3 | ✅ | **CRIT-2** | Critical | Executed | `argv[0]` never confined → `./scripts/ls` executes a workspace binary with no approval, no checkpoint, no exec lock. | `internal/tool/builtin/shell_readonly.go:732` | S |
+| 4 | ✅ | **EXEC-2** | High | Executed | Guard-retry answer withdrawal implemented in the TUI only; CLI and web UI render the withdrawn answer concatenated with its replacement. | `internal/cli/chat.go:352-360`; `webui/.../Transcript.tsx` | S |
+| 5 | ✅ | **DR-3** (=M4) | High | Traced | `cron_delete`/`cron_toggle` are `CapWrite`, so an injected instruction can silently delete or re-enable unattended scheduled jobs. | `internal/tool/builtin/cron.go:118,146` | S |
+| 6 | ✅ | **CRIT-3** | Critical | Traced | Cron fire-time permission check classifies against the daemon workspace while the job executes in the session workdir. Root cause: `CapabilityOverrider` takes no `context.Context`. | `internal/server/helpers.go:497-512`; `internal/tool/tool.go:75-80` | M |
+| 7 | ✅ | **CRIT-4** | Critical | Executed | Prose-salvage buffers the entire turn (measured: first event 241 ms vs 60 ms undecorated), nullifying the stall heartbeat and P67.7 early tool dispatch for local models. | `internal/provider/prosetoolcall.go:66-80` | M |
+| 8 | ✅ | **EXEC-3** | Medium | Executed | Salvage cannot parse this model's own `<function=…><parameter=…>` XML tool-call format — only JSON spellings. | `internal/provider/prosetoolcall.go:160-176` | S |
+| 9 | ✅ | **M1** | Medium | Traced | `scanBareCallObject` attempts a JSON decode at every `{` byte of a whole turn — O(n·m) on unbounded input. | `internal/provider/prosetoolcall.go:182-196` | S |
+| 10 | ✅ | **M2** | Medium | Traced | Salvage promotes a *quoted* JSON object anywhere in prose into a real tool call — an injection amplifier. | `internal/provider/prosetoolcall.go:171` | S |
+| 11 | ✅ | **EXEC-6** (+M9, M10) | Medium | Executed | Live tiers build `openai.New` while production ships `ollama.New`; `Format` and `think` are honored only by the native adapter. Scenarios also bypass the whole decorator chain, and there is no exported deterministic adapter. | `internal/eval/live_test.go:45`; `internal/eval/eval.go:37-45` | M |
+| 12 | ✅ | **EXEC-4** | Medium | Executed | 4 failing tests on `main` (Windows); two of them are Linux-skipped **and** Windows-failing, so they have never passed anywhere. Test helper hardcodes the POSIX dialect. Production verified unaffected. | `internal/tool/builtin/shell_readonly.go:888` + its 16 test call sites | S |
+| 13 | ✅ | **CRIT-5** | High* | Traced | A tool registered on the parent registry after a clone exists is never *exposed* through that clone; the clone's schema cache never invalidates. | `internal/tool/tool.go:650-671` vs `:806-810` | M |
+| 14 | ✅ | **M3** | Medium | Traced | `pageTokens` grows unbounded from the unauthenticated `GET /ui`; the only sweep is in `exchangePageToken`. | `internal/server/auth.go:293-311` | S |
+| 15 | ✅ | **M5** | Medium | Traced | `classifyShellCommand` runs twice per shell call, each doing filesystem I/O per argv token, with a TOCTOU window spanning the approval round-trip. | `internal/tool/builtin/shell.go:63`, `:142` | M |
+| 16 | ✅ | **M7** | Medium | Traced | Capability *downgrades* are entirely unlogged — an operator cannot see from any audit record that a `CapExecute` tool was gated as `CapRead`. | `internal/tool/tool.go:75-80` | S |
+| 17 | ✅ | **M8** | Medium | Traced | `resolveExisting` returns the unresolved path when no existing ancestor is found, so confinement compares across namespaces. | `internal/sandbox/pathvalidator.go:236-240` | S |
+| 18 | ✅ | **M6** | Low | Traced | `toolCallWarned` never pruned, including on session deletion. | `internal/server/toolcalling.go:49` | S |
+| 19 | ✅ | **EXEC-5** | Low | Executed | `provider.think`'s doc comment says `nil/false = disable`; `nil` actually **omits**, leaving the model's default (thinking **on**). This is EXEC-1's enabling condition. | `internal/config/config_provider.go:45` | S |
+| 20 | ✅ | **L1** | — | — | No fuzz target over `classifyShellCommand` — ~1,080 lines of security-critical parsing. Would have caught CRIT-1 and CRIT-2 mechanically. | new test | M |
+| 21 | ◐ | **DR-2** | — | Traced | Plan mode is not read-only while the classifier can downgrade an execute call. Every classifier defect is a plan-mode defect. | `internal/permission/permission.go:11-13` | M |
+| 22 | ✅ | **DR-1** | — | Traced | Workspace file contents (`read_file`/`grep`/`ls`) are the highest-volume untrusted channel and the only major one with no `trust.Wrap` provenance marker. | `internal/trust` call sites | M |
+| 23 | ✅ | **L3** | — | — | `CLAUDE.md` does not record that plan mode's guarantee is mediated by a 1,080-line parser. | `CLAUDE.md` | S |
+| 24 | ✅ | **L2** | — | — | `docs/mcp-trust-boundary.md` does not state which channels are deliberately unmarked. | `docs/` | S |
+| 25 | — | **L5** | — | — | A `permission.CapabilityDecision` type would make M7's logging natural and CRIT-3's fix assertable. | `internal/permission` | M |
+| 26 | ◐ | **L4** | — | — | `internal/server` at 1,814 lines / 60-field struct is where the "second path bypasses a mechanism" shape has most room to recur. | `internal/server` | L |
+| C1 | ◐ | — | — | — | **Unreviewed surface**: `internal/mcpserver` (inbound MCP ingress with its own `default_mode`/`auto_approve`), `internal/swarm` subprocess backend, sandbox container backends, `internal/tui`, `internal/drive`. | — | L |
+| C2 | ◐ | — | — | — | **Unexecuted tiers**: `live_workflow` (multi-phase drive, compaction under real context pressure, checkpoint/rewind). | — | M |
+
+\* **CRIT-5 re-ranked.** It carries a `CRIT-` ID from Phase 2 but its own severity rationale placed it below the other four ("availability/consistency, not a permission bypass"). Ranked here as High to match reality; the ID is kept stable for cross-referencing.
+
+---
+
+##### Recommended work order
+
+Ordered by *impact ÷ effort*, then grouped so consecutive items touch the same file and can share a PR. Six waves.
+
+###### Wave 1 — Default-on defects users are hitting right now — ✅ DONE
+**Rationale:** all three are live in a default install, all are visibly wrong, all are small. EXEC-1 alone doubles model cost on every turn and corrupts the answer.
+
+1. **EXEC-1** — guard truncation. Three parts, in order: capture `ev.Stop` and return `StatusSkippedTransportError` on `StopMaxTokens` (fail **open** — a truncated reply is not the injection shape the fail-closed branch exists for); disable extended thinking for `PurposeGuard` calls; raise the cap as a backstop.
+2. **EXEC-5** — one-line doc fix on `provider.think`. Do it with EXEC-1; it is the same mechanism and the wrong comment is what makes the default surprising.
+3. **EXEC-2** — handle `KindGuard`/`GuardRetrying` in `internal/cli/chat.go` and `Transcript.tsx`. The TUI already shows the correct behavior to copy.
+
+*Exit criterion:* `aegis chat "Reply with exactly the word: banana"` returns `banana`, `turns: 1`.
+
+###### Wave 2 — The shell-classifier security gaps — ✅ DONE
+**Rationale:** both are reachable from a cloned repo plus one injected instruction, both are silently allowed in plan mode, and both are a few lines in one function. Same file — one PR.
+
+4. **CRIT-1** — refuse the downgrade for any token beginning with `~` (or, better, extend `sandbox.IsRooted`, which already documents itself as the single authority this caller fails to use).
+5. **CRIT-2** — refuse the downgrade when `fields[0]` contains a path separator or is `IsRooted`. Reject, do not confine: a workspace-resident executable *is* the attack.
+6. **DR-3** — raise `cron_delete`/`cron_toggle` to `CapExecute`.
+7. **EXEC-4** — fix the test helper's dialect so the confinement suite goes green, and add Windows to CI. Do this *with* items 4–5 so the new assertions land on a green suite rather than a red one.
+   > **Closed.** The helper now asks the host's dialect, with `readOnlyShellCommandIn` for tests that mean one specific dialect. Windows was *already* in `ci.yml`'s matrix — so the Windows job had been failing on `main`, which is how two tests stayed both Linux-skipped and Windows-failing.
+
+*Exit criterion:* `go test ./internal/tool/builtin/` green on Windows and Linux; the CRIT-1/CRIT-2 cases pinned in `argv_confine_test.go`.
+
+###### Wave 3 — The `prosetoolcall.go` cluster — ✅ DONE
+**Rationale:** four findings in one 300-line file. Fixing them separately means reading the same buffering logic four times.
+
+8. **CRIT-4** — forward non-text events immediately; flush to passthrough at the first real `EventToolUseStart`; cap the buffer.
+9. **EXEC-3** — add a parser for the `<function=NAME><parameter=KEY>` body beside `parseCallObject`.
+10. **M1** — bound the bare-object scan (length cap + require a name-like key before allocating a decoder).
+11. **M2** — restrict the bare branch to a reply that is *only* the object, or gate it behind a per-model opt-in.
+
+###### Wave 4 — The capability seam — ✅ DONE
+**Rationale:** one interface change fixes a Critical and unblocks two Mediums. Do it as one deliberate refactor rather than three patches.
+
+12. **CRIT-3** — widen `CapabilityOverrider` to take `context.Context`; `EffectiveCapability` passes the context `Gate.Check` already holds; `shellTool.CapabilityFor` then uses `effectiveRoot(ctx, t.root)`. Add `tool.WithWorkdir(ctx, j.Workdir)` in `cronPermCheck`. The compiler finds every implementer.
+13. **M5** — with the seam fixed, classify once and carry the verdict, closing the double-I/O and the TOCTOU window.
+14. **M7** — emit a decision record whenever effective ≠ static capability. This is the observability that would have made CRIT-2 visible in a log. Optionally introduce **L5** (`CapabilityDecision`) here as the carrier.
+
+###### Wave 5 — Prevention: make the test architecture able to catch this class — ✅ DONE
+**Rationale:** deliberately *after* the fixes, so the new tiers are written against known-good behavior. This wave is why the Wave 1–4 defects survived a green suite and a nightly eval.
+
+15. **EXEC-6 / M9 / M10** — build live tiers through `providerfactory.Build` so they exercise the adapter that ships; default the live model to a *thinking* model; add a `Scenario.Decorators` hook plus inter-event delay and observation-time assertions; promote the test adapter into `provider/providertest`.
+16. **L1** — fuzz `classifyShellCommand` on the invariant *"a `CapRead` verdict implies nothing outside root is touched and nothing inside root is executed"*.
+
+*Note:* item 15 alone would have surfaced EXEC-1, EXEC-3 and EXEC-6 on its first run; item 16 would have surfaced CRIT-1 and CRIT-2.
+
+###### Wave 6 — Correctness, hygiene, and the arguments worth having — ✅ DONE (21 decided; 24 has a first pass, ongoing by design)
+17. **CRIT-5** — clone exposure as an overlay; `toolTable` version counter for schema-cache invalidation.
+18. **M3** — sweep and cap `pageTokens`.
+19. **M8** — fail closed when `resolveExisting` finds no existing ancestor.
+20. **M6** — prune `toolCallWarned` alongside `sessionWorkdirs.Delete`.
+21. **DR-2** — decide whether the plan-mode downgrade should be opt-in. This is a product judgment, not a bug fix: it trades ergonomics for a guarantee the docs already claim.
+22. **DR-1** — decide on provenance-marking file reads. The cheap version (`ScanForInjection`, envelope only on a hit) costs nothing in the common case.
+23. **L2, L3** — write down both decisions, whichever way they go.
+24. **L4** — split `internal/server` along the seams its mutexes already suggest. Ongoing, not a task.
+
+###### Not scheduled — coverage debt — ◐ BOTH WORKED
+
+25. Review `internal/mcpserver` first among the unreviewed packages: it is a second ingress with its own permission defaults, and every finding in this report concerns an ingress and the core disagreeing. — **Done.** It was the right guess: F1 (a caller could escalate its own mode past `default_mode`, which also made `auto_approve` vacuous) is that exact shape. F2 fixed alongside it; F3 (cross-session reach) is written up as needing a product decision. The `internal/swarm` subprocess lead resolved with one real fix (the spec file's Windows ACL). `internal/tui`, `internal/drive` and the sandbox container backends remain unreviewed.
+26. Run the `live_workflow` tier to exercise compaction, checkpointing and the phased drive, none of which this review touched at runtime. — **Done, three runs.** Found P79.2 (the daemon released nothing unless it exited through `ListenAndServe`, and its teardown was split across two exits), P79.3 (compaction's summarizer produced empty output on every cycle, its whole budget spent on a thinking preamble) and P79.4 (the empty-answer nudge re-asked over the same channel). All three fixed and re-verified live. See **C2** above.
+
+---
+
+##### Dependencies and sequencing notes
+
+- **Wave 4 before Wave 6 item 14** — M7's logging hangs off the same call the CRIT-3 seam change touches.
+- **EXEC-4 with Wave 2** — land the classifier fixes on a green suite; otherwise the new assertions are indistinguishable from the four pre-existing failures.
+- **Wave 5 after Waves 1–4** — a live tier written before the fixes will encode the broken behavior as expected.
+- **EXEC-1 and EXEC-2 are independent.** EXEC-2 reproduces on any legitimate guard failure, so fixing EXEC-1 hides the symptom without fixing the bug. Do both.
+- **CRIT-1 and CRIT-2 are independent** despite living in the same function: `~/x/ls` exercises both at once, so a fix for either alone still leaves that case open.
+
+##### One-line summary of the ordering logic
+
+Fix what is broken in every default install today (Wave 1), then what is silently reachable from a cloned repo (Wave 2), then the file-local clusters where fixing one means reading all of them (Waves 3–4), then build the tests that would have caught all of it (Wave 5), then the hygiene and the two genuine product arguments (Wave 6).
+
+---
+
+##### Phase 1 — Global Topology & Module Interaction
+
+###### 1.1 System archetype
+
+Aegis is a **single-binary daemon + client** built around a strict "one engine constructor's worth of decisions" discipline (`internal/enginecfg`). The archetype is best described as *layered, with a decorator-heavy provider seam and an event-driven streaming core*:
+
+- **Ingress is plural, the core is singular.** Five independent front doors — the Bubbletea TUI (`internal/tui` → `internal/client` → HTTP), the CLI (`internal/cli`: `aegis chat`/`debate`/`worker`), the ACP JSON-RPC bridge for Zed/Neovim (`internal/acp`), the inbound MCP server (`internal/mcpserver`, `aegis mcp-serve`), and the browser UI (`internal/server/webui`) — converge on `internal/server`'s HTTP daemon or, for the CLI paths, on `engine.Run` directly.
+- **The engine is a synchronous loop over an asynchronous stream.** `engine.Run` → `runIteration` → `turn` consumes a `<-chan provider.Event` and dispatches tool calls into a `toolRound` scheduler that can start work *while the assistant message is still generating* (`internal/engine/toolround.go`).
+- **Persistence is a single SQLite store** (`internal/session` over `internal/sqlitestore`), with per-turn checkpoints (`internal/checkpoint`) and a durable started-tool register (`internal/opregister`) beside it.
+
+###### 1.2 Subsystem topology
+
+```mermaid
+graph TD
+    A["Ingress: TUI / CLI / ACP / mcp-serve / Web UI"]
+    A --> B["internal/server<br/>HTTP daemon · auth · SSE · sessions"]
+    B --> C["internal/enginecfg<br/>gate stack · limits · builtin.Options · guard · hooks"]
+    C --> D["internal/engine<br/>agent loop · tool rounds · compaction · stall/loop guards"]
+    D --> E["internal/provider<br/>Adapter seam + retry/failover/numctx/admission/harness"]
+    E --> F["anthropic · openai · ollama"]
+    D --> G["internal/tool + tool/builtin<br/>Registry · 50+ tools"]
+    G --> H["internal/permission · fsguard · sandbox · netblock<br/>enforcement surfaces"]
+    G --> I["internal/mcp · swarm · skills · security scanners"]
+    D --> J["internal/session · checkpoint · opregister<br/>SQLite persistence"]
+    D --> K["internal/compaction · tokenest · repomap · memory/knowledge<br/>context budget"]
+    B --> L["internal/config · workspacetrust<br/>layered config + per-directory trust"]
+    L --> C
+```
+
+###### 1.3 Engine ↔ provider ↔ tool-registry loop
+
+```mermaid
+graph LR
+    R["engine.Run"] --> IT["runIteration"]
+    IT --> TN["turn()"]
+    TN -->|Request| AD["adapter.Stream"]
+
+    subgraph chain["provider decorators (outermost → innermost)"]
+        AD --> FO["WithFailover"]
+        FO --> HN["WithHarness<br/>per-model profile.Resolver"]
+        HN --> SV["WithProseToolCallSalvage<br/>BUFFERS THE WHOLE TURN"]
+        SV --> AR["WithArgumentShapeRepair"]
+        AR --> RT["WithRetry"]
+        RT --> AC["WithAdmissionControl"]
+        AC --> NC["WithNumCtx"]
+        NC --> BASE["ollama / openai / anthropic"]
+    end
+
+    AD -.->|"chan Event"| TN
+    TN -->|"beat(ctx) on every event"| SW["stallWatch (MaxTurnStall)"]
+    TN -->|"EventToolUse: early dispatch"| TR["toolRound.add()"]
+    TR --> SLOT["toolSlot goroutine<br/>waitFor graph · sem · execLock"]
+    SLOT --> EX["engine.executeTool"]
+    EX --> TC["toolCtx: WithRegistry / WithWorkdir / WithExtraRoots"]
+    TC --> GATE["Gate.Check<br/>Scope → PersonaTool → Rules → Contextual → Mode"]
+    GATE --> TOOL["tool.Execute"]
+    TOOL --> CAP["builtin.CapRound + truncate caps"]
+    CAP --> TN
+    TN --> CMP["compaction @ tokenest.CompactionTrigger"]
+    CMP --> IT
+```
+
+###### 1.4 Inter-module dependency assessment
+
+**`internal/enginecfg` genuinely centralizes, and the discipline holds.** All eight `engine.New` call sites in non-test code were enumerated:
+
+```
+internal/cli/chat_engine.go:128     internal/server/debate.go:185
+internal/cli/debate.go:166          internal/server/engine_build.go:349
+internal/cli/worker.go:228          internal/server/server.go:1504
+internal/eval/eval.go:129           internal/toolcallprobe/deepprobe.go:190
+```
+
+and only three `permission.New` references exist outside tests — one is the real constructor inside `enginecfg.BuildGate` (`internal/enginecfg/gate.go:95`); the other two are *comments* at `internal/cli/chat_engine.go:25` and `internal/cli/debate.go:104` recording the P66.13 bypass that was removed. `TestEveryEngineCallSiteDecidesItsGate` and `TestEveryRegisterCallSiteDecidesTheLocalProfile` pin this. **No drift found.** This is the strongest structural property in the codebase and it is working as advertised.
+
+The substantive gap is not *in* `enginecfg` but in the seam beneath it. `tool.CapabilityOverrider.CapabilityFor(input json.RawMessage)` (`internal/tool/tool.go:110` region, used at `tool.go:75`) takes **no `context.Context`**, so per-call capability classification structurally cannot see the session-scoped workdir that `Engine.toolCtx` puts on the context for *execution* (`internal/engine/toolexec.go:425-431`). The gate stack is centralized; one of its inputs is computed against a different root than the call runs in. See **CRIT-2**.
+
+**Leaky abstraction, contained.** `internal/tool` imports `internal/sandbox` so that `WithExtraRoots` can carry `[]sandbox.Root`. That makes the confinement model part of the tool interface's public shape rather than an implementation detail of the builtins. It is documented and deliberate (`internal/tool/tool.go:721`), and the alternative — an `any`-typed context value — is strictly worse. Noted, not filed.
+
+**No circular dependencies** were found in the reviewed graph. `internal/config` imports `internal/workspacetrust` and never the reverse; `internal/workspacetrust/workspacetrust.go:36` records that constraint explicitly and it is why `Entry.Fingerprint` is an opaque string rather than a typed config digest. `internal/netblock` is a true leaf with no internal imports, which is precisely why it succeeded at de-duplicating the SSRF range table that had drifted in two copies (`web.go` and `mcp/http.go`).
+
+**Fragile boundary worth naming:** `internal/server` is a 1,814-line `server.go` plus ~30 sibling files sharing one `Server` struct with 15+ mutexes and caches (`reachCacheMu`, `permMu`, `repoMapMu`, `pageTokenMu`, `authLockMu`, `toolCallWarnedMu`, two `rootCache`s, …). Nothing here is wrong, but it is the package where a future "second path bypasses a mechanism" defect is most likely to appear, because it is the only place where per-session state, daemon-wide singletons, and per-root caches all coexist.
+
+###### 1.5 Local LLM lifecycle orchestration
+
+The concern is distributed across nine packages, and the distribution is principled: `internal/provider`'s decorator chain owns *transport-and-shape* resilience, `internal/tokenest` owns the single token estimate, `internal/compaction` owns the summary, and `internal/profile` (P74.17) owns per-model quirk routing so a 14B local model and a cloud fallback in the same daemon get different repair behavior.
+
+**Payload optimization — sound.** `tokenest.CompactionTrigger(window, maxTokens)` is genuinely the only threshold. A repo-wide grep returns exactly two non-test consumers — `internal/engine/engine.go:592` and `internal/compaction/budget.go:90` — with the engine additionally passing the number it used down per call via `BudgetedCompactor` → `compaction.WithTokenBudget`. The P66.14 invariant holds; there is no second rule.
+
+**Resilience — mostly sound, one real defect.** `WithNumCtx` correctly defers to an explicit per-request value rather than overriding a caller that knows better (`internal/provider/numctx.go:41-45`). `netblock.SafeDialer` resolves once and dials the resolved literal IP, defeating rebinding between check and connect. `stallWatch` is a genuine liveness backstop, deliberately distinct from the wall-clock budget, and `beat(ctx)` fires on *every* stream event rather than only the emitting ones (`internal/engine/engine.go:1962-1966`).
+
+The defect is the interaction between that beat and `proseToolCallAdapter`, which drains its entire upstream channel into a slice before forwarding a single event. That nullifies both the per-event heartbeat and P67.7 early tool dispatch, for exactly the local-model population both mechanisms were built for. See **CRIT-4**.
+
+**State & session persistence — sound.** `internal/session` uses parameterized SQL throughout; a repo-wide grep for format-string SQL construction returns a single hit, `internal/tui/search.go:191`, which is a UI label and not a query. `internal/opregister` is the cross-process half of the engine's in-memory `startedTools`, consulted per turn in `newEngine` so a session resumed after a daemon restart classifies an orphaned `tool_use` as "may have run" rather than "never started" — the P65.1 direction, correctly applied across the process boundary.
+
+---
+
+##### Phase 2 — Zero-Trust Security & Inference Vulnerability Audit
+
+###### 2.1 Threat matrix — boundaries where untrusted data crosses into privileged logic
+
+| # | Boundary | Untrusted input | Gate that exists | Enforcing or advisory? |
+|---|---|---|---|---|
+| B1 | HTTP daemon | Any local process; a browser page via `/ui` | Bearer token (`subtle.ConstantTimeCompare`), loopback-only bind, `Origin` check, exponential auth lockout, HttpOnly+SameSite double-submit CSRF on the page-token exchange | **Enforcing.** Residual risk (a raw local process driving the flow) is explicitly accepted in `internal/server/auth.go:270-276`. |
+| B2 | Project config `.aegis/config.yaml` | A cloned repository | `workspacetrust` grant pinned to `config.SecurityFingerprint`; inverted freeze list defaults an *unlisted* key to frozen; two `baselineOnly` keys never settable by a project at all | **Enforcing**, and the fail-closed default is the right one. |
+| B3 | Project `.aegis/.env` | A cloned repository | Trust grant only (`internal/config/config.go:545`) | Enforcing; deliberate documented hole. |
+| B4 | Persona / skill `.md` files | Project or user directory | `trust.Wrap` provenance marker; allow-rules from a *loaded* persona are dropped (`enginecfg.filterPersonaRules`); persona `tools:` list | Wrap + rule filter **enforcing**; `tools:` **advisory by design** (P7.5). |
+| B5 | MCP server responses | Third-party process/endpoint | `trust.Wrap("mcp_untrusted_output", …)` + opt-in heuristic scan; per-server capability | Enforcing marker, heuristic scan. |
+| B6 | `web_fetch` / `web_search` | The public internet | `netblock` SSRF blocklist + `SafeDialer` (resolve-once-then-dial) + redirect hook; `trust.Wrap` | **Enforcing.** |
+| B7 | Swarm mailbox / sub-agent results | A peer agent that may itself be poisoned | `trust.Wrap("team_untrusted_output"/"agent_untrusted_output")`, 20 KB cap, never spilled | Enforcing. |
+| B8 | **Workspace file contents via `read_file`/`grep`/`ls`** | A cloned repository, a dependency, a generated file | **None.** No `trust.Wrap` call site covers these tools. | **No gate.** See DR-1. |
+| B9 | Model output to shell | The model, itself steerable by B4–B8 | `permission.Gate` stack + `classifyShellCommand` capability downgrade | **Two confirmed holes.** CRIT-1, CRIT-2. |
+| B10 | Model output to web UI DOM | The model | `DOMPurify.sanitize` + strict CSP (`script-src 'self'`, `img-src 'self' data:`) | **Enforcing**, and notably good — see 2.3. |
+| B11 | Cron job fire | A job the model created | `cronPermCheck` through the full gate stack | **Enforcing in shape, defeated in substance.** CRIT-3. |
+
+###### 2.2 Prompt-injection path, traced end to end
+
+The candidate path required by the brief, traced completely:
+
+1. **Ingress (B8).** A repository contains a source file, README, or generated artifact carrying attacker text. The model calls `read_file` on it. `read_file` is `tool.CapRead`; `permission.Policy.Decide` returns `Allow` for `CapRead` in **every** mode including plan (`internal/permission/permission.go:71-84`). No approval, no provenance marker — a repo-wide grep for `trust.Wrap` returns 13 non-test call sites and **none of them is a file-read tool**.
+2. **The instruction lands as trusted prose.** MCP output, web fetches, personas, skills, memory, mailbox and sub-agent results all arrive inside a `<*_untrusted_content>` envelope telling the model not to obey it. A file read arrives naked.
+3. **Egress under the default mode.** The shipped default is `permission.mode: build` (`internal/config/config.go:171`). In build mode `CapRead`, `CapWrite`, `CapNetwork` and `CapSpawn` are all `Allow` — silent. Only `CapExecute` is `Ask`. So an injected instruction can already read the workspace, rewrite files, spawn sub-agents and make network calls with no human in the loop.
+4. **Escaping the one remaining gate.** `CapExecute` is the sole approval-bearing capability in the default posture, and `classifyShellCommand` is the function that decides whether a given `shell` call gets to skip it. Both CRIT-1 and CRIT-2 below are ways to make that function answer `CapRead` for a call that is not a read.
+
+That is the complete path: workspace content → unmarked model context → `shell` call classified `CapRead` → executed with no approval. Steps 1–3 are individually defensible design choices; step 4 is a defect.
+
+###### 2.3 Output handling — the concrete sinks
+
+Enumerated, with the gate at each:
+
+- **Shell** — `internal/tool/builtin/shell.go` into `sandbox.Backend.ExecStreaming`. Gate: the permission stack plus `classifyShellCommand`. **Defective, see CRIT-1/CRIT-2.**
+- **File write** — every write site was checked. `resolveWrite` (`internal/tool/builtin/builtin.go:328`) is used by `write_file`, `edit_file`, `multiedit`, `edit_section`, `diagram` (`diagram.go:55`), `latex_template` (`latex_template.go:80`) and the LaTeX helpers. No unvalidated `os.WriteFile`/`os.Create` on a model-supplied path was found.
+- **JSON parse** — `parseArgs` (`builtin.go:459`) is a plain `json.Unmarshal` into a typed struct; no `map[string]any` reflection path.
+- **Web UI DOM** — `markdown.ts` runs every model string through `DOMPurify.sanitize` with a hardened `FORBID_TAGS`/`FORBID_ATTR` list *before* `dangerouslySetInnerHTML` (`Transcript.tsx:41,49`). Independently, `internal/server/webui.go:72` sets `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'`. The `img-src` restriction is what closes the residual channel a sanitizer alone leaves open: a markdown image pointing at an attacker URL survives DOMPurify but is blocked by CSP. **This surface is correct.** The only unsanitized `src` is `Transcript.tsx:60`, whose `RenderBlock.image` variant is produced from daemon-attached images, not from model text.
+- **Subprocess argv** — 40 spawn sites were enumerated. Every one uses `exec.Command`/`CommandContext` with an argv slice. The only shell-string sites are `internal/hooks/exec.go:98` (operator-configured hook command, payload delivered on **stdin** as JSON, no interpolation) and `internal/security/install.go:150`. No command-injection sink was found outside the `shell` tool itself.
+- **SQL** — parameterized throughout. The single grep hit for format-string query construction resolves to `internal/tui/search.go:191`, a UI label.
+
+---
+
+##### High-Priority Critical Register
+
+###### CRIT-1 — `~` is never expanded by the read-only shell classifier, so any home-directory path is silently auto-approved as a read
+
+**Severity rationale:** Reachable from untrusted input (B8 into B9) with **no** enforcing gate. It is a host-filesystem read outside every workspace root that `permission.Policy.Decide` allows *silently in every mode, plan included*. It is precisely the VULN-14 failure shape the quoting splitter was written to close, in a spelling the splitter does not know about.
+
+**Location:** `internal/tool/builtin/shell_readonly.go:754`, via `internal/tool/builtin/argv_confine.go:115-124` and `internal/sandbox/pathvalidator.go:126-146`.
+
+```go
+	if !argvStaysInRoot(root, spec.confinementArgs(fields[1:])) {
+		return tool.CapExecute, false
+	}
+	return cap, true
+```
+
+and the validator it delegates to (`absCandidate`):
+
+```go
+	default:
+		abs = filepath.Join(root, abs)
+	}
+	return filepath.Clean(abs)
+```
+
+**Failure trigger.** `shell({"command": "cat ~/.ssh/id_rsa"})`.
+
+- `permission.ShellChainMetaChars` is `;&|` plus backtick plus `$()<>` plus `\n\r` (`internal/permission/rules.go:521`) — **`~` is not in it**, so the command is not refused up front.
+- `splitShellWords` treats `~` as an ordinary byte (`shell_readonly.go:840-843`, the `default:` arm). It is a *quoting* splitter and performs no expansion; its own doc comment says so.
+- `cat` is in `readOnlyShellCommands`; the operand carries no flag, so `classify` accepts it.
+- `argvPathCandidates("~/.ssh/id_rsa")` returns the token itself; `sandbox.ValidatePath(root, "~/.ssh/id_rsa")` sees a non-absolute, non-Windows-rooted path, joins it under `root`, finds `<root>/~/.ssh/id_rsa` confined, and returns **no error**.
+- Classification therefore returns `CapRead`. `Policy.Decide(CapRead)` is `Allow` in plan, build and auto.
+- `/bin/sh -c "cat ~/.ssh/id_rsa"` then performs tilde expansion and reads `$HOME/.ssh/id_rsa`. PowerShell expands `~` identically, so the Windows path is not a mitigation.
+
+A repository-wide grep for `~` across `shell_readonly.go`, `argv_confine.go` and `pathvalidator.go` returns **zero hits** — there is no handling and no pinning test.
+
+**Impact:** Silent, unapproved read of any file under the daemon user's home directory — SSH keys, cloud credentials, `.aws/credentials`, browser cookie stores, the operator's own `~/.config/aegis/config.yaml`. In plan mode, which the package doc describes as read-only exploration, this is the strongest possible violation of the stated posture. Combined with build mode's silent `CapNetwork`, the read and its exfiltration both happen without a prompt.
+
+**Label: CONFIRMED.**
+
+**Refactoring blueprint.** Two changes, both small:
+
+1. In `classifyShellCommand`, fail closed on any token beginning with `~`. It is not a chaining character, so it does not belong in `ShellChainMetaChars` (which also governs `globToRegexpExec`); it needs a separate check. Refusing the *downgrade* costs a legitimate `cat ~/notes.md` its silent approval and nothing more — the cheap direction this file already argues for ("when in doubt, leave the flag out").
+2. Better: make `sandbox.IsRooted` the single authority the way `pathvalidator.go:159-183` already intends, and extend it to report `true` for a leading `~` under a POSIX shell or PowerShell. That helper's doc comment already says *"any caller that pre-joins a caller-supplied path before validating it needs this test first; use it rather than writing a fourth spelling of the rule"* — and `absCandidate` is exactly such a caller and does not use it.
+3. Add the case to `argv_confine_test.go` beside the existing `{git-tool argv, equivalent shell string}` table.
+
+---
+
+###### CRIT-2 — the read-only shell classifier never confines `argv[0]`, so a workspace-supplied executable named `ls` runs with no approval
+
+**Severity rationale:** Reachable from untrusted input with no enforcing gate; it converts the one approval-bearing capability in the default posture (`CapExecute`) into a silent `CapRead`, yielding arbitrary code execution.
+
+**Location:** `internal/tool/builtin/shell_readonly.go:732` and `:754`.
+
+```go
+	bin := strings.ToLower(baseBinaryName(fields[0]))
+	if bin == "git" {
+		if readOnlyGitCommand(root, fields[1:]) {
+			return tool.CapRead, true
+		}
+		return tool.CapExecute, false
+	}
+	spec := readOnlyShellCommands[bin]
+	if spec == nil {
+		return tool.CapExecute, false
+	}
+	cap, classified := spec.classify(fields[1:])
+```
+
+```go
+	if !argvStaysInRoot(root, spec.confinementArgs(fields[1:])) {
+```
+
+and the name reduction at `shell_readonly.go:1069-1072`:
+
+```go
+func baseBinaryName(s string) string {
+	if i := strings.LastIndexAny(s, `/\`); i >= 0 {
+		s = s[i+1:]
+	}
+```
+
+**Failure trigger.** `shell({"command": "./scripts/ls"})`, where `scripts/ls` is an executable file in the cloned repository. Git preserves the executable bit, so this needs no write at all and works in plan mode.
+
+- `baseBinaryName("./scripts/ls")` strips everything up to the last separator and returns `ls`.
+- `readOnlyShellCommands["ls"]` hits; `classify(nil)` accepts an empty argument list.
+- `argvStaysInRoot(root, fields[1:])` is called on the **empty slice** — `argv[0]` is never passed to it and is never validated as a path at all.
+- Result: `CapRead`, which is `Allow` in every mode. `/bin/sh -c "./scripts/ls"` executes attacker-controlled code.
+
+The absolute form works identically: `/tmp/x/ls`, `~/x/cat` (compounding CRIT-1), and `.\x\ls.exe` on Windows, since `baseBinaryName` strips `.exe`/`.cmd`/`.bat` too.
+
+Three further consequences follow from the same misclassification, each independently undesirable. The call **skips `captureShellWrites`** (`shell.go:141-147`), so no checkpoint is taken and `/rewind` cannot undo whatever it did. It is scheduled as a **non-serializing** call in `toolRound` (`serializeTool` reads the same `EffectiveCapability`), so it runs concurrently with real writes without taking `execLock`. And its failure will not cancel the round.
+
+**Impact:** Arbitrary host code execution with the daemon's privileges, from a repository clone plus one injected instruction, with no approval prompt in any permission mode.
+
+**Label: CONFIRMED.** No test in `shell_readonly_test.go`, `shell_readonly_flags_test.go` or `argv_confine_test.go` references `baseBinaryName`, argv0, or a path-qualified binary.
+
+**Refactoring blueprint.** The classifier's own stated rule — *"flag parsing decides whether a command can be read-only; path confinement decides whether this invocation is"* — is simply not applied to token zero.
+
+1. In `classifyShellCommand`, before the `baseBinaryName` reduction, refuse the downgrade outright when `fields[0]` contains a path separator or satisfies `sandbox.IsRooted`. A read-only classification should apply only to a **bare command name resolved through `PATH`**; a path-qualified argv0 is by definition a binary the model chose rather than one the operator installed.
+2. Do *not* "fix" this by passing `fields[0]` through `argvStaysInRoot`: confining argv0 to the workspace is not sufficient, because a workspace-resident executable is exactly the attack. Rejection, not confinement, is the correct posture here.
+3. Add the case to `argv_confine_test.go` so the two read-only argv paths keep agreeing.
+
+---
+
+###### CRIT-3 — a cron job's fire-time permission check is classified against the daemon workspace while the job executes in the session's workdir
+
+**Severity rationale:** A security control that does not do what its callers assume. `cronPermCheck` is documented as running *"the exact same gate stack buildGate assembles for every interactive engine run"*, and structurally it does — but it feeds that stack a capability computed against the wrong root, and the job then runs unattended with no human able to answer a prompt.
+
+**Location:** `internal/server/helpers.go:497-512`, with the execution side at `internal/server/helpers.go:320-329`.
+
+```go
+func (s *Server) cronPermCheck(ctx context.Context, j cron.Job) (bool, string) {
+	approver := permission.Approver(permission.AutoDeny{})
+	if j.AutoApprove {
+		approver = permission.AutoApprove{}
+	}
+	gate, _ := s.buildGate(s.cfg.Permission.Mode, approver, persona.Persona{})
+	shellTool, ok := s.tools.Get("shell")
+```
+
+```go
+	return gate.Check(ctx, shellTool, input)
+```
+
+versus the runner that actually executes it:
+
+```go
+		if dir == "" {
+			dir = defaultCwd
+		}
+		return sb.ExecStreaming(ctx, command, sandbox.ExecOpts{Dir: dir}, emit)
+```
+
+**Failure trigger and reachable path.**
+
+- `gate.Check` calls `tool.EffectiveCapability(t, input)` (`internal/permission/permission.go:120`), which dispatches to `shellTool.CapabilityFor(input)`.
+- `CapabilityFor` takes **no context** — the `CapabilityOverrider` interface has no `ctx` parameter (`internal/tool/tool.go:75-80`) — so it classifies against `t.root`, the daemon-wide workspace baked in at `newShellTool`. The comment at `shell.go:52-53` states this plainly: *"CapabilityOverrider carries no context, so this uses the tool's construction-time root rather than a session-scoped override."*
+- The job's `Workdir` comes from the session that created it (`internal/tool/builtin/cron.go:67`, via `tool.WorkdirFromContext`), and a session may name **any existing directory** on a non-remote daemon: `Server.workdirAllowed` returns `true` unconditionally when `!cfg.Server.AllowRemote` (`internal/server/server.go:471-473`), which is the shipped default.
+- So the check confines against workspace A while `cronShellRunner` executes in directory B.
+
+Composed with CRIT-2 this yields fully unattended arbitrary execution from a **single** approval. The model asks to create a cron job whose `command` is `./ls`; the operator sees a harmless-looking command and approves the one `cron_create` call (`CapExecute`, therefore `Ask`). At every subsequent fire, `cronPermCheck` classifies `./ls` as `CapRead` and the approver is **never consulted at all** — `auto_approve` is not even required, because the `Ask` tier is never reached.
+
+**Impact:** Persistent, scheduled, unattended code execution in a directory the check believed it was validating and was not. The same root mismatch also mis-scopes *interactive* sessions in both directions: a session rooted at B gets a silent `CapRead` downgrade for absolute paths under A, and is refused the downgrade for legitimate reads inside its own workspace B.
+
+**Label: CONFIRMED.**
+
+**Refactoring blueprint.** The root cause is a seam, not a call site, so fix the seam:
+
+1. Widen `tool.CapabilityOverrider` to `CapabilityFor(ctx context.Context, input json.RawMessage) tool.Capability`, and have `tool.EffectiveCapability` pass the context `Gate.Check` already holds. `shellTool.CapabilityFor` then uses `effectiveRoot(ctx, t.root)` — the exact helper its own `Execute` uses one function later — which removes the divergence rather than papering over it. Implementers are few and the compiler finds all of them.
+2. Have `cronPermCheck` build `tool.WithWorkdir(ctx, j.Workdir)` before calling `gate.Check`, so the fire-time check and the fire-time execution finally agree on one directory.
+3. Add a `TestCronPermCheckClassifiesAgainstTheJobWorkdir`. This is exactly the "a second path bypasses a mechanism" shape `internal/enginecfg` exists to prevent, and it deserves the same class of call-site test.
+
+---
+
+###### CRIT-4 — `proseToolCallSalvage` buffers the entire model turn, silently disabling the engine's stall heartbeat and P67.7 early tool dispatch for local models
+
+**Severity rationale:** A resilience control that does not do what its callers assume, engaged **by default for exactly the model population it breaks**. Not remotely exploitable, which is why it sits at the bottom of the Critical register — but it disables two named invariants (P39.17, P67.7) with nothing anywhere reconciling them.
+
+**Location:** `internal/provider/prosetoolcall.go:66-80`.
+
+```go
+	var buffered []Event
+	var text strings.Builder
+	sawToolUse := false
+	doneIdx := -1
+	for ev := range in {
+		buffered = append(buffered, ev)
+		switch ev.Type {
+		case EventTextDelta:
+			text.WriteString(ev.Text)
+```
+
+The loop runs to channel close before **any** event is forwarded — both `replay(buffered, out)` and the rewrite branch come after it.
+
+**Failure trigger.**
+
+- `profile.NewResolver` sets `base = Harness{ProseToolCallSalvage: true, ArgumentShapeRepair: true}` whenever `local` is true (`internal/profile/profile.go:67-69`), i.e. for every model served by a local provider unless an operator writes a per-model override. `harnessAdapter.Stream` then routes through `a.salvage` or `a.salvageAndRepair` (`internal/provider/harness.go:47-53`).
+- The engine's **only** in-turn liveness signal is `beat(ctx)` at `internal/engine/engine.go:1966`, inside `for ev := range stream`. A repo-wide grep confirms the complete beat set: `engine.go:1966`, `toolexec.go:154,157`, `toolround.go:315,327` — every one of the latter is in the *tool* phase, not the model phase.
+- With the salvage decorator engaged, that loop receives nothing until generation completes. `stallWatch` therefore observes zero activity for the whole model phase, and `cost.max_turn_stall` defaults to `DefaultMaxTurnStallSec = 900` (`internal/config/config_cost.go:125`). Any single local turn that exceeds fifteen minutes — a large prompt eval plus a long generation on a 14B model at 32k context is not an exotic case — is killed as `ErrTurnStalled`, which `CLAUDE.md` records as **fatal to a drive**, not resettable.
+- The same buffering defeats P67.7 unconditionally. `turn`'s `EventToolUse` case dispatches each call into `toolRound` *"rather than making it wait for the rest of the turn to finish generating — on a local model, where generation latency dominates, the fifth call of a round can be many seconds behind the first"* (`engine.go:1984-1989`). Under salvage every `EventToolUse` arrives after generation has already finished, so the optimization is inert precisely where its own comment says it pays.
+
+**Impact:** (a) a false-positive, run-fatal stall abort on legitimate long local turns; (b) P67.7's latency win silently zeroed for local models; (c) no token-by-token display in the TUI or web UI for those models; (d) an unbounded `[]Event` slice holding one whole turn in memory. The decorator's doc comment acknowledges (c) — *"trades live token-by-token display for correctness on the turns it actually rewrites"* — but not (a), (b) or (d), and (c) is understated: it is paid on **every** turn, not only the turns actually rewritten.
+
+**Label: CONFIRMED.**
+
+**Refactoring blueprint.**
+
+1. **Forward liveness immediately.** The decorator does not need to withhold *events* to decide; it needs to withhold *text*. Forward every non-text event as it arrives (and, for a long text-only generation, a zero-length keepalive the engine beats on but does not render), buffering only `EventTextDelta`. That restores the heartbeat with no change to the salvage logic at all.
+2. **Stop buffering the moment the turn makes a real call.** `sawToolUse` is known at the first `EventToolUseStart`; from that instant the decorator has already decided to replay unchanged, so it should flush and become a passthrough. That alone restores P67.7 for every turn where the model *did* emit structured calls — the common case for any model good enough to be worth running.
+3. Cap `buffered` and fall back to passthrough past the cap, so a runaway generation cannot grow it without bound.
+4. Add a provider-level test asserting that at least one event reaches the consumer before the upstream channel closes.
+
+---
+
+###### CRIT-5 — a tool registered on the parent registry after a session cloned it is never offered to that session, and the clone's schema cache is never invalidated
+
+**Severity rationale:** A correctness defect in the mechanism `CLAUDE.md` names as an invariant, in the direction the invariant claims to protect. Below the four above because it is availability/consistency, not a permission bypass.
+
+**Location:** `internal/tool/tool.go:650-671` (`Clone`) against `internal/tool/tool.go:806-810` (`Schemas`) and `internal/tool/tool.go:288-291` (`invalidateSchemasLocked`).
+
+```go
+	exposed := make(map[string]bool, len(r.exposed))
+	for k, v := range r.exposed {
+		exposed[k] = v
+	}
+```
+
+```go
+	r.rangeToolsLocked(func(name string, t Tool) {
+		if !r.exposed[name] {
+			return
+		}
+```
+
+**Failure trigger.** An MCP server sends `notifications/tools/list_changed` while a session is live. `RegisterServers`' handler calls `reg.Upsert(...)` on the **parent** registry (`internal/mcp/tool.go:318`), which sets `parent.exposed[name] = true` and calls `parent.invalidateSchemasLocked()`.
+
+For an existing session clone:
+
+- The **shared `toolTable` does** carry the new tool, so `rangeToolsLocked` sees it — this is the half `CLAUDE.md` describes and it works.
+- But `clone.exposed` is an independent copy taken before the tool existed, so `clone.exposed[name]` is `false` and `Schemas()` skips it. The model is never offered the tool.
+- `tool_search` cannot recover it either: `SearchDeferred` filters on `if !r.deferred[name] || r.exposed[name] { return }` (`tool.go:617`), and `clone.deferred[name]` is also absent, so the tool is neither exposed nor deferred — it is invisible.
+- Separately, `invalidateSchemasLocked` bumps only the registry it was called on. The clone's `schemaCache` and `schemaVersion` never move, so an **existing** tool whose implementation, description or input schema the refresh replaced keeps serving its stale schema to that session for the session's lifetime, and any consumer polling `SchemaVersion()` to detect a change sees none.
+
+`internal/server/helpers.go:169` states the intended behavior in prose — *"MCP's tools/list_changed rewrites the parent registry that every clone shares"* — which is the assumption this breaks.
+
+**Impact:** A live session silently never sees tools an MCP server added mid-conversation, and never sees a changed schema for one it replaced. The user's mental model is that the refresh took effect; the model's tool array says otherwise, with no error anywhere.
+
+**Label: CONFIRMED.**
+
+**Refactoring blueprint.** Make exposure fall through to the table the same way lookup already does:
+
+1. Change `exposed`/`deferred` on a clone from a *copy* to an *overlay*: `map[string]bool` of explicit local decisions, consulted first, falling back to the parent's map for names the clone has never spoken about. `lookupLocked` already establishes exactly this overlay-then-shared pattern for tools; extending it to exposure is the consistent fix and it removes the class rather than the instance.
+2. Give `toolTable` a version counter bumped by `set`, and have `Schemas()` discard `schemaCache` when the table version it was built against has moved. That fixes the stale-schema half for clones without any cross-registry notification plumbing.
+3. Extend the existing clone tests (`internal/server/registry_race_test.go` and the `tool` package's clone tests) with a "parent registers after clone, clone exposes it" case, which is the direction currently untested.
+
+---
+
+##### Documented Risks
+
+Behaviors that look dangerous, are documented in `CLAUDE.md`/`docs/` (or in code) as intentional, and that I nonetheless believe warrant revisiting — with the argument.
+
+**DR-1 — Workspace file contents are the only major untrusted-input channel with no provenance marker, and it is the highest-volume one.**
+
+`docs/mcp-trust-boundary.md` builds a careful, consistent story: MCP output, `web_fetch`/`web_search`, project/user personas and skills, the swarm mailbox, sub-agent results, memory entries, and `AGENTS.md`-style context files all get a `<*_untrusted_content>` envelope. Thirteen `trust.Wrap` call sites implement it. **None of them is `read_file`, `grep`, `ls`, `read_section` or `repomap`.**
+
+The tradeoff is understandable: file reads are the single highest-volume tool result, the envelope costs ~150 bytes each (`internal/memory/context.go:40` prices it), and under the local prompt profile that is real context budget. The document simply never states it, so the boundary reads as complete when it is not.
+
+**Why it warrants revisiting.** The threat model already accepts that a cloned repository is untrusted — that premise is what `workspacetrust`, `enginecfg.filterPersonaRules` and the skill/persona wrapping are all built on. A project's `persona.md` is wrapped because "a malicious dependency, template repo, or cloned project could plant one"; a project's `src/handler.go` is planted by the same adversary through the same act and arrives unmarked. The asymmetry is not defensible on threat grounds, only on cost grounds. A cheap middle path exists: run `trust.ScanForInjection` — already written, already used — over file-read results and attach the envelope **only on a hit**, so the common case pays nothing and the case that matters is marked. At minimum, `docs/mcp-trust-boundary.md` should state which channels are deliberately unmarked and why; an accepted risk that is not written down is indistinguishable from an oversight.
+
+**DR-2 — Plan mode is not read-only while `classifyShellCommand` can downgrade an execute call.**
+
+`internal/permission/permission.go:11-13` promises plan mode is read-only and that "the workspace may not be mutated or commands run at all". `Policy.Decide` does deny `CapExecute` in plan mode — but `EffectiveCapability` is consulted first (`permission.go:113-120`), so the `shell` tool runs commands in plan mode whenever the classifier answers `CapRead`.
+
+That is the intended P25.4c design and it is a good one on its own terms: a `git log` should not need an execute approval, and before P25.4c it was *silently denied*, which is worse. But it means every defect in the classifier is a **plan-mode** defect, and both CRIT-1 and CRIT-2 land there. The classifier is ~1,080 lines of hand-written argument parsing spanning 40+ commands and three shell dialects; it is the largest piece of security-critical parsing in the tree, and its blast radius is the sentence "plan mode is read-only".
+
+**Why it warrants revisiting.** Users choose plan mode precisely when they want a hard boundary rather than a convenient one — reviewing an untrusted repository is the canonical case, and it is exactly the case where CRIT-1 and CRIT-2 are reachable. Consider making the plan-mode downgrade opt-in (`permission.plan_mode_shell_reads`, default `false`) so the parser's correctness is not load-bearing for the posture users select *because* they want it to be strict. Build mode keeps the downgrade and keeps the ergonomics; plan mode gets the guarantee its documentation already claims.
+
+**DR-3 — `cron_delete` and `cron_toggle` are `CapWrite`, so an injected instruction can silently disable an operator's scheduled jobs.**
+
+`cron_create` is correctly `CapExecute` (`internal/tool/builtin/cron.go:31`), so creating a job costs an approval in build mode. But `cronDeleteTool.Capability()` and `cronToggleTool.Capability()` both return `tool.CapWrite` (`cron.go:118` and `cron.go:146`), which `Policy.Decide` allows **silently** in build mode. A prompt-injected model can therefore delete or disable an operator's scheduled security scan, backup, or audit job with no prompt and no record beyond a tool trace, and can *re-enable* a previously created `auto_approve` job that the operator had deliberately switched off. The capability classification is defensible as "it writes a row in a database"; it is wrong as "how much authority does this need", since the object being written is a scheduler entry that runs commands unattended. `cron_toggle`'s enable direction in particular is a privilege-restoring operation and belongs at `CapExecute`.
+
+---
+
+##### Phase 3 — High-Context Optimization & Redundancy Register
+
+###### 3.1 Algorithmic complexity
+
+**The one genuine superlinear hazard on unbounded input is `scanBareCallObject`.**
+
+`internal/provider/prosetoolcall.go:182-196`:
+
+```go
+func scanBareCallObject(reply string, names map[string]bool) (*ToolUseBlock, [2]int, bool) {
+	for i := 0; i < len(reply); i++ {
+		if reply[i] != '{' {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(reply[i:]))
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			continue
+		}
+```
+
+This attempts a full JSON decode starting at **every `{` byte in the reply**, and each attempt may scan forward to the end of the string. Input is a whole model turn's text, which is bounded only by `MaxGeneratedTokensPerRun` (unset by default). The pathological case is not exotic: a local model asked to produce a JSON artifact in a text-only turn emits tens of kilobytes that are mostly `{`, and the scan becomes O(n·m). Reached on every text-only turn of a tool-enabled request under the local profile — i.e. the default local path. A cheap fix is a length cap on the bare-object branch plus a requirement that the candidate object contain a `"name"`-like key before a decoder is allocated.
+
+Everything else checked came back clean:
+
+- **`repomap`** is fingerprint-cached on disk with a cache-shape version constant that forces a rebuild when extraction changes (`internal/repomap/repomap.go:45-49`), and byte-budgeted. The full `WalkDir` is paid on fingerprint computation, not per turn — the daemon holds the rendered block in `s.repoMap` behind `repoMapMu`, with a per-workdir `rootCache` for non-default sessions.
+- **`Conversation.estimatedTokens`** recomputes only when `invalidate()` has been called (`internal/engine/engine.go:74-84`), which is the P8.4 fix and is correct.
+- **`Registry.Schemas`** caches behind a double-checked lock and invalidates on mutation. (Its clone-side invalidation is broken — see CRIT-5 — but that is a correctness bug, not a complexity one.)
+- **Blocking I/O on decision paths:** `firstArgvEscape` (`internal/tool/builtin/argv_confine.go:117-121`) calls `sandbox.ValidatePath` per argv token, and each call does an `EvalSymlinks` plus a `Stat` walk. This is filesystem I/O inside a *permission decision*. It is bounded (a handful of tokens) but it happens **twice per shell call** — once through `CapabilityFor` at the gate and again at `shell.go:142` for the checkpoint decision — and the two calls are separated by the whole approval round-trip, which is a TOCTOU window in a security check as well as duplicated work.
+
+###### 3.2 Architectural redundancy — mostly a false alarm, and worth saying so
+
+I checked the three highest-signal duplicate candidates and **all three had already been consolidated**; reporting them would have been exactly the false positive the brief warns about.
+
+- Three `func withinRoot` definitions exist (`internal/checkpoint/checkpoint.go:263`, `internal/drive/verify.go:406`, `internal/server/server.go:495`). All three are three-line named wrappers delegating to `sandbox.WithinRoot` / `WithinRootResolved` / `StrictlyWithinRootResolved`, each with a comment explaining which question its caller is asking. This is CLN-1 done correctly: the *answer* is shared, the three genuinely different *questions* keep their names.
+- The SSRF private-range table was previously duplicated in `web.go` and `mcp/http.go`; `internal/netblock` now owns it as a dependency-free leaf, and `internal/security/target.go` keeps a separate table on purpose because it answers a different question.
+- The git read-only flag denylist was duplicated across the `git` tool and the shell classifier; `internal/tool/builtin/argv_confine.go` now owns the union, with `argv_confine_test.go` pinning agreement between the two argv paths.
+
+The 16 `truncate*` helpers across packages are **not** redundancy: each caps a different thing against a different budget with different keep-which-end semantics, and `internal/tool/builtin/truncate.go` already carries the posture table for the ones that matter.
+
+The one place duplication is still real is **shell-command classification**, which now exists in three related-but-distinct forms: `classifyShellCommand` (the 1,080-line table), `readOnlyGitCommand`, and `validateReadOnlyGitArgv`. The comment at the top of `argv_confine.go` is candid that "all three escapes the review found were that divergence rather than any single missing entry". CRIT-1 and CRIT-2 are the fourth and fifth, and both are in the part that is *not* shared.
+
+###### 3.3 Caching & concurrency
+
+**Sound.** The parallel tool round is the most delicate concurrency in the tree and it is carefully built: each call owns a `*toolSlot` whose address never moves (so appending to `r.slots` cannot race a goroutine holding an index), the `waitFor` graph only points backwards (so it is acyclic by construction and survives incremental arrival), the dependency wait happens *before* the semaphore acquire (which is what makes the round deadlock-free), and `serializedEmit` wraps the consumer's `EmitFunc` exactly once at the top of `Run`. A panic in one tool call is recovered per-goroutine rather than taking down the daemon.
+
+Locking checked and correct: `toolTable` carries its own mutex shared across clones (the P66.4/ARCH-01 fix); `s.permRules` is only mutated at startup and under `permMu` thereafter; `s.sessionWorkdirs` is a `sync.Map` with a matching `Delete` on session deletion (`sessions.go:266`).
+
+**Two unbounded maps found:**
+
+1. `s.pageTokens` (`internal/server/auth.go:293-311`). `mintPageToken` inserts without sweeping; the **only** sweep is inside `exchangePageToken`. `GET /ui` is exempt from `authMiddleware` (`auth.go:53`), so any local process — or any page causing a browser prefetch — can mint entries indefinitely and never redeem one. This is precisely the failure mode the code reasons carefully about elsewhere: `invalidAuthAttempts` is a single counter rather than a per-address map specifically "so that the audit fix itself can't be turned into a memory-growth DoS". The same reasoning was not applied here.
+2. `s.toolCallWarned` (`internal/server/server.go:94`, written at `internal/server/toolcalling.go:49`). Keyed by `(session, model)` and never pruned, including on session deletion. Bounded by lifetime session count rather than live session count. Small per entry, but monotonic for the life of the daemon.
+
+---
+
+##### Phase 4 — Observability & Testability
+
+###### 4.1 Structured logging on failure paths
+
+Coverage is good and the *cadence* reasoning is unusually thoughtful — `invalidAuthLogEvery` deliberately logs one failure in five so a probe produces steady signal without flooding, and it is deliberately decoupled from `authLockThreshold` because "logging cadence and lockout are independent controls with independent tuning". Failure paths that matter carry `slog` with structured fields: `internal/server/sessions.go` (29 warn/error sites), `server.go` (25), `messages.go` (13). Silent error swallowing is rare — a grep for `_ = err` / `_, _ =` patterns across `internal/engine`, `internal/server` and `internal/tool/builtin` returns four hits, each a deliberate best-effort write.
+
+Durable audit trails exist where they should: `internal/hooks/Audit`, the `cron_runs` table recording every fire attempt including gate-blocked ones (FIND-34/P24.9), and `internal/opregister` for started-but-unfinished tool calls across a restart. `maxTraceToolError = 2000` (`internal/engine/toolround.go:19`) keeps a failing call's error body in the trace rather than a character count — a good fix (P68.1) that most codebases never make.
+
+**The gap:** the two capability-classification decisions that CRIT-1, CRIT-2 and CRIT-3 exploit are **entirely unlogged**. `classifyShellCommand` returns `(CapRead, true)` and the call proceeds with no record that a `CapExecute` tool was downgraded, no record of which root it was confined against, and no record of which command spec matched. `permission.ContextualDecision` / `OnDecision` exists and is wired through `enginecfg.GateOptions` for the rule and contextual layers — but the capability *override* happens below all of them, inside `tool.EffectiveCapability`, where no observer is passed. An operator reviewing an audit trail cannot distinguish "the model ran `ls`" from "the model ran a binary it supplied, named `ls`". Emitting a decision record for every non-identity `CapabilityFor` result would have made CRIT-2 visible in a log rather than requiring a code review to find.
+
+###### 4.2 Can the provider/model layer be faked cleanly?
+
+Partly, and the shortfall is directly implicated in CRIT-4.
+
+`internal/eval` drives a fully-wired `engine.Engine` through scripted turns against a deterministic adapter, and that is the right shape: it catches interaction defects between mechanisms that per-mechanism unit tests miss. Three concrete limits:
+
+1. **The fake adapter is test-only and lives in another package.** `internal/eval/eval.go:9-10` points readers at "internal/engine's test adapters for the pattern" — there is no exported deterministic adapter in any non-test file (`grep "type .*Adapter struct" internal/eval/*.go` excluding tests returns nothing). Every new consumer re-implements it, and no consumer outside `go test` can use one at all.
+2. **Scenarios set `Options.Adapter` directly, so the entire decorator chain is bypassed.** `WithFailover`, `WithHarness`, `WithProseToolCallSalvage`, `WithArgumentShapeRepair`, `WithRetry`, `WithAdmissionControl` and `WithNumCtx` are assembled in `internal/providerfactory` and are *never* present in a scenario run. This is why CRIT-4 is invisible to the whole suite: no test anywhere exercises the composition of a stream-timing decorator with the engine's per-event heartbeat, because no test ever puts the two in the same process.
+3. **Stream *timing* is untestable by construction.** A scripted adapter that returns a pre-filled channel cannot distinguish "forwards events as they arrive" from "buffers and replays", which are exactly the two behaviors that differ for `stallWatch` and P67.7. A `Scenario` option that injects delays between scripted events — and an assertion on when the consumer observed each — would close this and is the single highest-value testing addition on this list.
+
+The live tiers (`live_eval`, `live_probe`, `live_workflow`) are correctly gated behind build tags with mandatory `-count=1`, and the reasoning for that (Go's test cache cannot see that the model server changed) is right.
+
+###### 4.3 Behavior that is pinned, and behavior that is not
+
+Worth recording, since it determines where regressions will actually be caught. **Well pinned:** the engine-construction discipline (`TestEveryEngineCallSiteDecidesItsGate`, `TestEveryRegisterCallSiteDecidesTheLocalProfile`), the timeout hierarchy (`TestToolTimeoutsStayUnderTheStallBound` enumerates every per-call bound in one table), search-backend equivalence, the prompt budget ceiling, registry clone races, the two read-only git argv paths' agreement.
+
+**Not pinned, and each is where a finding landed:** argv0 handling in the shell classifier (zero test references); tilde/shell-expansion in path confinement (zero occurrences of `~` in any of the three relevant files); the root a capability override is computed against versus the root the call executes in; decorator stream timing; clone exposure of a post-clone parent registration.
+
+---
+
+##### Medium-Priority Optimization Matrix
+
+| # | Issue | Location | Cost / consequence | Proposed change |
+|---|---|---|---|---|
+| M1 | `scanBareCallObject` attempts a JSON decode at every `{` byte of a whole model turn — O(n·m) on unbounded input | `internal/provider/prosetoolcall.go:182-196` | Quadratic CPU on any text-only local turn that contains a large JSON block; reached on the default local path | Cap the bare-object branch by length; require a `"name"`/`"tool"`/`"function"` key to appear within a short window before allocating a decoder |
+| M2 | Salvage promotes a *quoted* JSON object anywhere in prose into a real tool call | `internal/provider/prosetoolcall.go:171` (bare branch) | A model echoing injected workspace content back as text can have that text executed as a call it never chose; the gate still applies, but `CapWrite`/`CapNetwork` are silent in build mode | Restrict the bare branch to a reply that is *only* the object (after trimming), keeping the tagged and fenced branches for the narrated case; or gate the bare branch behind an explicit per-model opt-in |
+| M3 | `pageTokens` grows without bound from an unauthenticated endpoint | `internal/server/auth.go:293-311`; `GET /ui` exempt at `auth.go:53` | Memory-growth DoS by any local process; the same class the `invalidAuthAttempts` design explicitly avoids | Sweep expired entries in `mintPageToken` too, and cap the map (evict oldest past N, or refuse to mint past N) |
+| M4 | `cron_delete`/`cron_toggle` classified `CapWrite`, allowed silently in build mode | `internal/tool/builtin/cron.go:118,146` | An injected instruction can disable an operator's scheduled scans, or re-enable a disabled `auto_approve` job, with no prompt | Raise both to `CapExecute`, matching `cron_create`; the object being written schedules unattended commands |
+| M5 | `classifyShellCommand` runs twice per shell call, each doing filesystem I/O per argv token | `internal/tool/builtin/shell.go:63` and `:142`; `argv_confine.go:117-121` | Duplicated `EvalSymlinks`+`Stat` work, and a TOCTOU window spanning the whole approval round-trip between the two classifications | Classify once and carry the verdict on the context (or in the `tool.Result` pipeline) so the gate decision and the checkpoint decision are the same decision |
+| M6 | `toolCallWarned` is never pruned, including on session deletion | `internal/server/server.go:94`, written at `internal/server/toolcalling.go:49` | Monotonic growth keyed by lifetime session count rather than live sessions | Delete the session's keys in the same handler that calls `s.sessionWorkdirs.Delete(id)` (`sessions.go:266`) |
+| M7 | Capability *downgrades* are entirely unlogged | `internal/tool/tool.go:75-80`; `internal/permission/permission.go:113-127` | An operator cannot tell from any audit record that a `CapExecute` tool was silently gated as `CapRead`, which is the mechanism CRIT-1/2/3 exploit | Pass the existing `OnDecision func(permission.ContextualDecision)` down to `EffectiveCapability` and emit a record whenever the effective capability differs from the static one |
+| M8 | `resolveExisting` returns the unresolved path when it reaches the filesystem root without finding any existing ancestor | `internal/sandbox/pathvalidator.go:236-240` | Confinement then compares an unresolved path against a resolved root — the exact namespace mismatch `ResolveForCompare`'s doc comment warns produces wrong answers "in whichever direction the link points" | Return an explicit error for this case and have `ValidatePathIn` fail closed rather than validate against a half-resolved path |
+| M9 | No exported deterministic `provider.Adapter` | `internal/eval/eval.go:9-10` | Every consumer re-implements the fake; nothing outside `go test` can use one | Promote the engine's test adapter into a small non-test `provider/providertest` package |
+| M10 | Scenario runs bypass the whole provider decorator chain | `internal/eval/eval.go:37-45` (`Options` passed straight to `engine.New`) | Stream-shape and stream-timing decorators are untested in composition with the engine; CRIT-4 was invisible to the suite for this reason | Add a `Scenario.Decorators` field so a scenario can wrap its adapter with the real `providerfactory` chain, plus an inter-event delay option and an assertion on observation time |
+
+---
+
+##### Low-Priority Longevity Roadmap
+
+*(IDs `L1`–`L5` below are referenced from the Consolidated Findings Register at the top.)*
+
+**L1.** **Give the shell classifier a fuzz target.** `shell_readonly.go` is ~1,080 lines of hand-written argument parsing across three shell dialects, and it is the single largest piece of security-critical parsing in the tree. `internal/server/messages_fuzz_test.go` shows the project already knows how to do this. A fuzzer over `classifyShellCommand` asserting the invariant *"if this returns `CapRead`, then executing the command in `root` touches nothing outside `root` and executes no binary from `root`"* would have found both CRIT-1 and CRIT-2 mechanically.
+
+**L2.** **Document the unmarked trust channels.** `docs/mcp-trust-boundary.md` is one of the better documents of its kind and its omission of `read_file`/`grep`/`ls` reads as an oversight rather than the cost decision it presumably is. One paragraph fixes that. (See DR-1.)
+
+**L3.** **Write down the plan-mode/`CapabilityOverrider` interaction.** `CLAUDE.md`'s invariant list is the project's institutional memory and it does not mention that plan mode's read-only guarantee is mediated by a 1,080-line parser. It should, in one line, so the next reviewer starts where this one had to arrive.
+
+**L4.** **Split `internal/server`.** `server.go` at 1,814 lines with a 60-field `Server` struct is the package where the codebase's characteristic defect shape ("a mechanism built for one path that a second path silently bypasses") has the most room to recur. The `*_build.go` / `helpers.go` extractions already started; continuing them (auth, cron wiring, session state) along the seams the mutexes already suggest would make the remaining coupling visible.
+
+**L5.** **Consider a `permission.CapabilityDecision` type.** Right now a capability is a bare string and a downgrade leaves no artifact. A small struct carrying `{static, effective, reason, root}` would make M7's logging natural, make the classifier's verdict testable in isolation, and give CRIT-3's fix an obvious place to assert the root it used.
+
+---
+
+##### Coverage & Gaps
+
+**Read in full or near-full (the basis for everything above):**
+`CLAUDE.md`; `docs/mcp-trust-boundary.md`; `internal/enginecfg/{gate,limits}.go`; `internal/permission/permission.go` and the relevant parts of `rules.go`; `internal/tool/tool.go` (registry, capability, context seams); `internal/tool/builtin/{shell.go, shell_readonly.go, argv_confine.go, builtin.go (path helpers), skillscript.go, cron.go, diagram.go, latex_template.go}`; `internal/sandbox/pathvalidator.go`; `internal/netblock/netblock.go`; `internal/server/{auth.go, webui.go, sessions.go (workdir), helpers.go (cron)}` and the `Server` struct; `internal/engine/{toolround.go, toolexec.go (toolCtx), stall.go, turn loop in engine.go}`; `internal/provider/{provider.go, numctx.go, harness.go, prosetoolcall.go}`; `internal/profile/profile.go`; `internal/trust/trust.go`; `internal/hooks/exec.go`; `internal/workspacetrust/workspacetrust.go`; `internal/config/{config.go (trust gate), fingerprint.go}` (doc comments); the entire web UI source (`api.ts`, `markdown.ts`, `Transcript.tsx`, and the component inventory).
+
+**Sampled — read enough to form a judgment, not enough to certify:**
+`internal/compaction` (verified the single-trigger invariant by grep and read `budget.go`'s reasoning; did **not** verify the section-skeleton wire format or `FallbackCompact`); `internal/session` (verified parameterized SQL by grep; did not read the schema or migration paths); `internal/mcp` (read `tool.go`'s registration and refresh; did not audit the JSON-RPC framing or `http.go`'s transport); `internal/security` (enumerated all container-invocation sites and confirmed argv-form; did not audit the scanners' output parsing or the two-phase gosec logic); `internal/repomap`, `internal/memory`, `internal/knowledge`, `internal/skills`, `internal/persona` (structure and trust-wrapping only).
+
+**Not reviewed at all — treat as unassessed:**
+`internal/tui` (~5,000 lines across `tui.go`, `slash.go`, `transcript.go`, `toolview.go`, `view.go`, `stream.go`, `wizard.go`, `securityconfig.go`); `internal/drive` (1,448 lines) beyond its `withinRoot` helper and its `WithoutContextTokenCap` interaction; `internal/acp`; `internal/mcpserver` (the *inbound* MCP surface — this is a genuine gap, since it is a second ingress with its own `mcp_server.default_mode` and `auto_approve` knobs and I did not verify how they compose with the gate stack); `internal/swarm`'s subprocess backend and mailbox file locking; `internal/checkpoint`'s restore path beyond its containment helper; `internal/lsp`; `internal/cli`'s ~5,000 lines (`doctor.go`, `init.go`, `security.go`); `internal/debate`; `internal/guard`; `internal/sqlitestore`; `internal/fsguard`'s Windows ACL implementation (I confirmed it is *called* from `generateAndWriteToken` but did not verify the ACL it applies is correct); the entire `internal/sandbox` container/WSL/OS backend implementations (I read only `pathvalidator.go`).
+
+**Known limits of this review.** No code was executed and no test was run — every finding is derived from reading. The three exploitation chains (CRIT-1, CRIT-2, CRIT-3) are traced line by line through the actual code paths, and I am confident in the logic, but none was reproduced against a running daemon; a reader validating them should start by writing the three failing tests named in the blueprints. `internal/mcpserver` being unreviewed is the gap I would close first: it is an ingress with its own permission defaults, and every finding in this report concerns what happens when an ingress and the core disagree.
+
+---
+
+##### Executive Summary
+
+**Overall posture: strong architecture, one soft spot, and it is load-bearing.**
+
+Aegis is an unusually well-governed codebase. Its central structural idea — that the dominant defect shape is *"a mechanism built for one path that a second path silently bypasses"*, and that the answer is a constructor plus a call-site test rather than four patched copies — is not just documented in `internal/enginecfg`, it is **true in the code**. I enumerated all eight `engine.New` sites and all three `permission.New` references; there is no drift, and two of the three `permission.New` hits are comments memorializing a bypass that was actually removed. The single-compaction-trigger invariant holds under grep. The parallel tool round is the most delicate concurrency in the tree and is correct in every detail I checked, including the non-obvious ones (dependency wait before semaphore acquire; per-slot addresses stable under append). The web UI's XSS posture is genuinely good: DOMPurify *and* a strict CSP whose `img-src 'self' data:` closes the exfiltration channel a sanitizer alone leaves open. Three duplicate-helper candidates I chased had all already been consolidated correctly.
+
+**The soft spot is `classifyShellCommand`.** In the shipped default posture (`permission.mode: build`), reads, writes, network egress and sub-agent spawning are all silently allowed; `CapExecute` is the *only* capability that costs an approval. `classifyShellCommand` is the ~1,080-line hand-written parser that decides when a `shell` call is exempt from that one gate — and it is therefore the whole of the boundary. Two independent defects live in it, both confirmed by line-by-line tracing and both unpinned by any test:
+
+- **CRIT-1:** the classifier never accounts for tilde expansion. `cat ~/.ssh/id_rsa` is confined against the workspace as a *relative* path, validates, is downgraded to `CapRead`, and is then executed by a shell that expands `~`. Silent host-filesystem read outside every root, **in plan mode included**.
+- **CRIT-2:** the classifier never confines `argv[0]`. `./scripts/ls` reduces to the name `ls`, matches the allowlist, and executes attacker-supplied code with no approval, no checkpoint capture, and no exec-lock serialization.
+
+**CRIT-3** compounds both into an unattended path: a cron job's fire-time permission check classifies the command against the *daemon* workspace while the job executes in the *session's* workdir, because `tool.CapabilityOverrider` has no `context.Context` and so cannot see the workdir the executing side uses. One approval of a benign-looking `cron_create` yields recurring, unprompted execution.
+
+**CRIT-4** is a different failure of the same kind — a control that does not do what its callers assume. The prose-tool-call salvage decorator, on by default for every local model, drains the entire upstream stream before forwarding anything, which silently deletes the engine's only in-turn liveness beat (risking a run-fatal false stall at the 900s default) and nullifies P67.7's early tool dispatch precisely where its own comment says it pays.
+
+**Readiness.** For the intended deployment — a loopback daemon, a single trusted operator, a workspace they wrote themselves — the security model holds and the daemon surface (auth, CSRF, SSRF, path confinement, config trust) is well above the norm for a tool of this kind. What is not yet ready is the posture the project explicitly advertises and that users will select deliberately: **plan mode is not read-only, and build mode's one approval gate is bypassable**, in both cases from nothing more than a cloned repository plus a prompt injection through the one untrusted-content channel (workspace file contents) that carries no provenance marker at all.
+
+The remediations are small and local. CRIT-1 and CRIT-2 are a few lines each in one function. CRIT-3 is a one-parameter widening of `CapabilityOverrider` that the compiler will drive to completion. CRIT-4 is a restructuring of one goroutine that keeps the salvage logic untouched. The higher-leverage change is the one in the roadmap: a fuzz target over `classifyShellCommand` asserting *"a `CapRead` verdict implies nothing outside root is touched and nothing inside root is executed"*. That invariant, mechanically enforced, would have caught both critical findings — and is the right long-term answer for a parser this size sitting on this much authority.
+
+---
+
+#### Phase 5 — Execution Testing Pass (live model: `aegis-qwen35-9b:32k`)
+
+**Method.** Everything below was produced by running code, not by reading it. Ollama 0.30.10 was started locally; the target model is `aegis-qwen35-9b:32k` (Qwen3.5-9B-MTP, Q4_K_M, `PARAMETER num_ctx 32768`, Jinja chat template, capabilities `tools, thinking, completion, vision`). `llama3.2:3b` was used as a non-thinking control.
+
+Work performed: a full `go test ./...` baseline; temporary in-package harnesses to exercise the shell classifier and the provider decorator chain directly; the `live_probe` and `live_eval` build-tag tiers against the 9b; raw transport-level requests against both Ollama's native `/api/chat` and its OpenAI-compatible `/v1/chat/completions`; and end-to-end runs of the built `aegis` binary in a scratch workspace.
+
+**Tree state.** All diagnostic edits were reverted and all temporary files deleted. `git diff` is empty; the only untracked files are `Review.md` and the pre-existing `comprehensive_review_prompt.md`. One diagnostic edit (`guard.go`'s token cap, plus a stderr probe) was made deliberately to isolate a root cause and has been reverted via `git checkout`.
+
+**A note on method.** My first reading of this model was wrong in both directions and I want that on the record, because it bears on how much weight to give unverified inference. `/api/tags` reports the 9b's capabilities as `["completion","vision"]` — no `tools` — and `ollama show --modelfile` renders its Jinja template as a mangled fragment that appears to drop the user turn entirely. Both are display artifacts. `/api/show` returns the real template (7,992 bytes of valid Jinja, with a `{%- if tools %}` block) and the real capability list including `tools`. Had I filed from the first reading I would have reported two serious defects that do not exist.
+
+---
+
+##### 5.1 Verification of the Phase 1–4 findings
+
+| Finding | Method | Result |
+|---|---|---|
+| **CRIT-1** (tilde) | Direct call to `classifyShellCommand` in-package | **CONFIRMED.** `cat ~/.ssh/id_rsa` → `CapRead`. Also `cat ~/.aws/credentials` and PowerShell `Get-Content ~/.ssh/id_rsa`. |
+| **CRIT-2** (argv0) | Same harness | **CONFIRMED.** `./scripts/ls`, `scripts/ls`, `/tmp/evil/ls`, `./scripts/ls -la` → all `CapRead`. |
+| **CRIT-4** (salvage buffering) | Timed adapter, 60 ms between upstream events | **CONFIRMED by measurement.** Undecorated: first event 60 ms, last 241 ms. Under salvage: first event **241 ms** — identical to last. Whole turn buffered; `beat(ctx)` cannot fire. |
+| **CRIT-3** (cron root mismatch) | Not executed | Unchanged — traced by reading only. Reproducing it needs a live daemon plus a scheduled fire; still **CONFIRMED** on code path, not on observed behavior. |
+| **CRIT-5** (clone exposure) | Not executed | Unchanged — needs an MCP server emitting `tools/list_changed` mid-session. |
+
+Controls behaved correctly throughout — `cat /etc/passwd` and `cat notes.txt; rm -rf /` were both refused the downgrade — which is the evidence that CRIT-1 and CRIT-2 are genuine gaps in a working mechanism rather than a misreading of one.
+
+---
+
+##### 5.2 EXEC-1 (Critical) — the output guard is on by default and structurally broken on every thinking model
+
+This is the highest-impact defect found in the entire review, security findings included, because it is **on by default**, fires on **every turn**, and fails **closed**.
+
+**The default.** `internal/config/config.go:227-230`:
+
+```
+"output_guard.enabled":     true,
+"output_guard.mode":        "llm",
+"output_guard.max_retries": 1,
+"output_guard.rubric":      DefaultGuardRubric,
+```
+
+**The defect.** `internal/guard/guard.go:217` caps the guard call at `MaxTokens: 256`. On a thinking model that budget covers reasoning *and* content together, and the reasoning consumes all of it. Measured against the live model, production request shape (native `/api/chat`, `format` = `verdictFormat`, `num_predict` 256, thinking enabled):
+
+```
+done_reason  : "length"
+eval_count   : 256
+content      : ""            <-- empty
+thinking     : "Thinking Process: ... Result: PASS. ..."
+```
+
+The model *had already reached the correct verdict inside its reasoning* and was cut off before emitting a single content token. `LLMGuard` accumulates only `EventTextDelta`, so `reply` is the empty string, and `parseVerdict("")` returns the deliberate fail-closed branch: `"guard reply did not contain a recognizable PASS/FAIL verdict"`.
+
+Confirmed through the real code path with a temporary stderr probe inside `LLMGuard`:
+
+```
+[GUARDDBG] stop="max_tokens" textlen=0 thinklen=1966 text=""
+```
+
+**Not a tuning problem.** Raising the cap to 512 does not fix it — the eval's longer rubric produced 1,966 characters of reasoning and still zero content. At the transport level 384 tokens sufficed for a *short* rubric, but the margin scales with rubric and output length, so no fixed small cap is safe. `think:false` on the native endpoint fixes it completely and cheaply — the model answered `"PASS"` in **2 tokens** (`eval_count: 2`) instead of burning 256 — but the same flag is **silently ignored** by Ollama's `/v1` compatibility layer.
+
+**Blast radius.** Confirmed end-to-end with the shipped binary. `aegis chat "Reply with exactly the word: banana"`:
+
+```
+{"type":"text","text":"banana"}      <- turn 1
+{"type":"guard"}                     <- guard fails (empty verdict)
+{"type":"text","text":"banana"}      <- turn 2, corrective retry
+{"type":"result","answer":"bananabanana","turns":2,...}
+```
+
+Every turn against a local thinking model pays two model turns and two guard calls instead of one and one, and the user's answer is corrupted. `output_guard` — a quality *and* prompt-injection control — is not merely inert but actively harmful for the exact model population Aegis is built for.
+
+**Why no test caught it.** Three independent reasons, each worth fixing on its own: `go test ./...` uses scripted adapters and never contacts a thinking model; the `live_eval` tier constructs `openai.New(...)` while production ships `ollama.New(...)` (`internal/providerfactory/factory.go:337`), so the tier does not exercise the adapter that ships; and that tier's default model is `llama3.2`, which does not think.
+
+**Fix.** Three changes, in priority order:
+1. **Treat truncation as a non-verdict.** The adapter already maps `finish_reason: "length"` → `provider.StopMaxTokens` (`internal/provider/openai/openai.go:680`), and `LLMGuard`'s event loop discards `ev.Stop`. Capture it and return `StatusSkippedTransportError` (fail **open**) on truncation. A truncated reply is not the injection shape the fail-closed branch exists to catch. `internal/toolcallprobe` already draws exactly this distinction with its `Truncated` field — port it.
+2. **Suppress thinking for guard calls.** `provider.PurposeGuard` already exists (P67.3) and is already passed on this very request; it is the natural place to hang "this is a classification call, disable extended thinking". This turns a 256-token call into a 2-token one.
+3. Raise the cap as a backstop, and add a live tier that runs the guard against a thinking model.
+
+---
+
+##### 5.3 EXEC-2 (High) — guard-retry answer withdrawal is implemented in the TUI only; the CLI and web UI show the withdrawn answer
+
+The engine correctly signals that a rejected answer is about to be replaced (`internal/engine/guardretry.go:172`, `GuardRetrying: true`), and the signal is plumbed all the way out — `internal/api/api.go:278`, serialized by `internal/server/messages.go:936`.
+
+**The TUI consumes it** (`internal/tui/stream.go:329-337`):
+
+```go
+case ev.GuardRetrying:
+	// The engine is about to replace this answer with a corrective
+	// retry (P25.3): withdraw the failed answer in place so the retry
+	// renders as *the* answer, not as a second one below it.
+```
+
+**The CLI does not.** `internal/cli/chat.go:352-360` accumulates every `KindText` unconditionally, in both the JSON and text paths, and handles no `KindGuard` case at all:
+
+```go
+		case outputJSON:
+			if ev.Kind == engine.KindText {
+				answer.WriteString(ev.Text)
+			}
+```
+
+**The web UI does not either** — a grep for `guard_retrying`/`guardRetrying` across `internal/server/webui/frontend/src/` returns nothing, though the daemon sends it.
+
+This is independent of EXEC-1: any *legitimate* guard failure produces the same corrupted output on two of three front-ends. It is also, precisely, the defect shape `internal/enginecfg`'s package doc names as this codebase's dominant one — a mechanism built for one path that a second path silently bypasses — recurring in the presentation layer, where no call-site test exists to catch it. `TestEveryEngineCallSiteDecidesItsGate` has no counterpart for "every front-end handles every engine event kind".
+
+**Fix.** Handle `KindGuard`/`GuardRetrying` in `internal/cli/chat.go` (reset `answer` for the JSON path; emit a withdrawal notice for the text path) and in `Transcript.tsx`. Longer term, a table test over `engine.EventKind` asserting each front-end has a case for every kind would make the next added event kind fail loudly instead of silently.
+
+---
+
+##### 5.4 EXEC-3 (Medium) — prose-tool-call salvage cannot parse this model's own tool-call format
+
+The 9b's chat template instructs it to emit a **non-JSON XML** form (verified in the template returned by `/api/show`):
+
+```
+<tool_call>
+<function=shell>
+<parameter=command>
+ls -la
+</parameter>
+</function>
+</tool_call>
+```
+
+Measured against `WithProseToolCallSalvage`:
+
+| Spelling | Result |
+|---|---|
+| **qwen3.5 native XML (this model's documented format)** | **NOT SALVAGED** |
+| qwen3.5 native XML, no prose | **NOT SALVAGED** |
+| Hermes/Qwen JSON-in-tag | SALVAGED |
+| fenced JSON | SALVAGED |
+| bare JSON in prose | SALVAGED |
+
+The cause is that `toolCallTag` matches the `<tool_call>` wrapper but hands its body to `parseCallObject`, which does `json.Unmarshal` — and the body is XML, not JSON, so it fails and falls through to the fenced and bare-JSON branches, which find nothing.
+
+**Severity is bounded** by a fact I confirmed rather than assumed: `live_probe` passes **5/5** against this model, because Ollama's Jinja renderer parses the XML back into structured `tool_calls` before Aegis ever sees it. So salvage is not normally needed here. It matters when that native parse fails — a truncated call, a malformed parameter block, a template change — which is exactly the circumstance salvage exists for. The decorator is a safety net with a hole in it shaped like the most common local tool-call syntax outside JSON.
+
+**Fix.** Add a parser for the `<function=NAME><parameter=KEY>value</parameter></function>` body alongside `parseCallObject`. It is a small, well-defined format, and the `<tool_call>` tag match already gets you to the right bytes.
+
+---
+
+##### 5.5 EXEC-4 (Medium) — four test failures on `main`, and two tests that have never passed on any platform
+
+`go test ./...` on this Windows host is **red** on a clean tree (reproduced with my temporary files removed):
+
+```
+--- FAIL: TestReadOnlyGitArgvAgreesAcrossBothPaths
+--- FAIL: TestReadOnlyShellAttachedValueConfinement   (8 subtests)
+--- FAIL: TestReadOnlyShellPowerShellPathConfinement  (2 subtests)
+--- FAIL: TestReadOnlyShellCommandWindowsPaths        (2 subtests)
+FAIL github.com/fiddler110/aegis/internal/tool/builtin
+```
+
+**Root cause: the test helper picks the wrong shell dialect.** `readOnlyShellCommand(root, command)` (`shell_readonly.go:888`) hardcodes `powershell=false`, so on Windows the POSIX backslash-escape rule collapses `C:\Users\x\.ssh\id_rsa` into the relative token `C:Usersx.sshid_rsa`, which confines happily inside the root.
+
+**Production is not affected**, and I verified that rather than assuming it. `readOnlyShellCommand` has **zero non-test callers**; production reaches the classifier through `shellTool.usesPowerShell()`. Running both dialects side by side:
+
+| command | POSIX (what the helper asks) | PowerShell (what production asks on Windows) |
+|---|---|---|
+| `Get-Content C:\Users\x\.ssh\id_rsa` | CLASSIFIED read — leak | CapExecute — approval required |
+| `Get-Content -Path:C:\Windows\...\hosts` | CLASSIFIED read — leak | CapExecute — approval required |
+| `cat C:\Users\x\.ssh\id_rsa` | CLASSIFIED read — leak | CapExecute — approval required |
+
+**The sharper problem is coverage, not correctness.** `TestReadOnlyShellCommandWindowsPaths` and `TestReadOnlyShellPowerShellPathConfinement` both begin `if runtime.GOOS != "windows" { t.Skip(...) }`. They are skipped on Linux CI and fail on Windows — so **they have never passed anywhere**. The P32.1 drive-letter escape and VULN-02's third spelling (`-Path:C:\...`) are pinned by assertions that have never once executed successfully. Meanwhile a developer on this machine sees a red suite as the normal state, which is how the other two failures stay unexamined.
+
+**Fix.** Have the helper take the dialect (or call `classifyShellCommand(root, cmd, true)` directly in the PowerShell tests), and add Windows to CI so these stop being write-only assertions.
+
+---
+
+##### 5.6 EXEC-5 (Low, documentation) — `provider.think`'s documented default is the opposite of its behavior
+
+`internal/config/config_provider.go:45` says:
+
+```go
+Think *bool `koanf:"think"` // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
+```
+
+`nil` does **not** disable. `internal/provider/ollama/ollama.go:147`: *"Nil (the default) omits the parameter."* Omitting it leaves the model's own default in force, which for Qwen3.5 is thinking **on**. So the shipped default is the opposite of what the config comment tells an operator — and it is the condition EXEC-1 depends on.
+
+Observed corroboration on the control model: `WARN ollama: model rejected the think parameter; retried without it and will omit it for this model from now on model=llama3.2:3b`. The P38.5 retry/latch machinery works exactly as designed here; only the documented default is wrong.
+
+---
+
+##### 5.7 EXEC-6 (Medium, testability) — the live tier does not test the adapter that ships
+
+`internal/eval/live_test.go:45` builds `openai.New("ollama", openai.WithBaseURL(baseURL))`. Production builds `ollama.New(...)` for `provider.default: ollama` (`internal/providerfactory/factory.go:337`). The two differ in ways that matter and that I measured:
+
+- **`Request.Format` is honored only by the native adapter** (`internal/provider/ollama/ollama.go:817`); the openai adapter drops it. So the eval tier exercises the guard's *unconstrained* path while production gets the constrained one.
+- **`think` is honored only on the native endpoint.** The `/v1` layer accepted and ignored `"think": false` in my transport test; the native endpoint honored it and cut the guard reply from 256 tokens to 2.
+- **Keep-alive, `num_ctx`, and the P53.5 capability latch** are native-adapter concerns absent from the tier entirely.
+
+This compounds Phase 4's finding that scenarios bypass the decorator chain: the live tier bypasses the *adapter* as well. Together they are why EXEC-1 — a default-on control, broken on the flagship local model, visible in the first sentence of output — survived a green suite and a nightly eval.
+
+**Fix.** Have the live tiers build their adapter through `providerfactory.Build` from a config, so the tier tests the composition that ships. Point the default model at a thinking model, since that is the population the local profile targets.
+
+---
+
+##### 5.8 What the execution pass did *not* cover
+
+Stated plainly, because it bounds the above. I did not run the `live_workflow` tier (the multi-phase drive), so nothing here speaks to compaction under real context pressure, checkpoint/rewind, or the phased-drive machinery in `internal/drive`. I did not exercise `internal/swarm` (sub-agents), `internal/mcpserver` (the inbound MCP ingress, still the largest unreviewed surface), the sandbox container backends, or `internal/debate`. CRIT-3 and CRIT-5 remain read-only findings. Single-turn runs only: no long-context, no multi-hour drive, so CRIT-4's predicted false-positive stall abort at 900 s was demonstrated in mechanism (zero events forwarded until close) but not observed in the wild.
+
+---
+
+##### 5.9 Revised priorities after execution
+
+> **Superseded for planning purposes.** This section records how execution *changed* the ranking, and is kept for that reasoning. The authoritative worklist is the **Consolidated Findings Register & Remediation Plan** at the top of this document, which merges these six items with the Phase 2–4 findings into one sequenced set of waves.
+
+Execution reordered the list. The two shell-classifier findings remain the most serious *security* defects and are now confirmed by running code rather than by reading it. But **EXEC-1 is the most consequential defect overall**: it is on by default, it fires on every turn, it doubles model cost, it corrupts the visible answer, and it silently disables a control that is simultaneously a quality gate and a prompt-injection defense.
+
+1. **EXEC-1** — output guard broken on all thinking models (default-on, fails closed, 2× cost, corrupted output).
+2. **CRIT-1 / CRIT-2** — shell classifier: tilde expansion and unconfined `argv[0]`. Both executionally confirmed; both silently allowed in plan mode.
+3. **EXEC-2** — withdrawn guard answers rendered by CLI and web UI.
+4. **CRIT-3** — cron fire-time classification against the wrong root.
+5. **CRIT-4** — salvage buffering defeats the stall heartbeat and early tool dispatch (confirmed by timing).
+6. **EXEC-6 / EXEC-4** — the test architecture gaps that let all of the above through: the live tier does not test the shipping adapter, and the Windows confinement tests have never run green.
+
+The single highest-leverage structural change remains the one from the Phase 4 roadmap, now with a second reason behind it: build the live tiers through `providerfactory` against a thinking model. That one change would have surfaced EXEC-1, EXEC-3 and EXEC-6 on the first run.
+
+---
 
 ### P78.1–P78.9 shipped, 2026-08-26
 

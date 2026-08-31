@@ -46,7 +46,7 @@ func (r *readWriteTool) Name() string                 { return "touch_file" }
 func (r *readWriteTool) Description() string          { return "reads or writes a path" }
 func (r *readWriteTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (r *readWriteTool) Capability() tool.Capability  { return tool.CapRead }
-func (r *readWriteTool) CapabilityFor(input json.RawMessage) tool.Capability {
+func (r *readWriteTool) CapabilityFor(_ context.Context, input json.RawMessage) tool.Capability {
 	var args struct {
 		Mode string `json:"mode"`
 	}

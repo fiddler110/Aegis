@@ -1,7 +1,9 @@
 package builtin
 
 import (
+	"context"
 	"encoding/json"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -25,7 +27,30 @@ func TestReadOnlyShellCommand(t *testing.T) {
 		{"tail", "tail -f log.txt", true},
 		{"wc", "wc -l file.txt", true},
 		{"pwd", "pwd", true},
-		{"path-qualified binary", "/bin/cat file.txt", true},
+		// CRIT-2: a path-qualified argv0 is refused the downgrade outright.
+		// baseBinaryName reduces "./scripts/ls" to "ls", which hits the
+		// read-only table, while argvStaysInRoot is only ever handed
+		// fields[1:] — so token zero was never validated as a path at all and
+		// a workspace-resident executable ran with no approval, no checkpoint
+		// and no exec lock, in every mode including plan. The read-only tier
+		// is for a bare name resolved through PATH; even "/bin/cat", which is
+		// genuinely the system binary, loses its downgrade, because the
+		// classifier cannot tell that spelling from "./scripts/cat".
+		{"path-qualified binary", "/bin/cat file.txt", false},
+		{"relative path-qualified binary", "./scripts/ls", false},
+		{"workspace binary in a subdirectory", "./scripts/cat notes.txt", false},
+		{"parent-relative binary", "../ls", false},
+		{"home-relative binary", "~/x/ls", false},
+		{"bare name still classifies", "cat file.txt", true},
+		// CRIT-1: the classifier performs no expansion (sandbox.ValidatePath
+		// is lexical), so "~/.ssh/id_rsa" read as a relative name, joined
+		// under the root as "<root>/~/.ssh/id_rsa", and validated as confined
+		// — while the shell expanded the tilde and read the real key, silently,
+		// under plan mode's read gate.
+		{"tilde home path", "cat ~/.ssh/id_rsa", false},
+		{"bare tilde operand", "ls ~", false},
+		{"tilde in an attached flag value", "grep --file=~/.ssh/id_rsa foo", false},
+		{"named-user tilde", "cat ~root/.bashrc", false},
 		{"grep", "grep -n foo file.txt", true},
 		{"which", "which python3", true},
 		{"whoami", "whoami", true},
@@ -107,6 +132,8 @@ func TestReadOnlyShellCommand(t *testing.T) {
 // TestReadOnlyShellCommandWindowsPaths covers P32.1's windows-drive-letter
 // case, which filepath.IsAbs only recognizes as absolute on windows itself
 // (on unix/darwin a backslash string is just an opaque relative filename).
+// Like TestReadOnlyShellPowerShellPathConfinement it names the PowerShell
+// dialect rather than inheriting one, for the EXEC-4 reason documented there.
 func TestReadOnlyShellCommandWindowsPaths(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("windows-drive-letter absolute paths only apply on windows")
@@ -122,8 +149,8 @@ func TestReadOnlyShellCommandWindowsPaths(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := readOnlyShellCommand(root, c.command); got != c.want {
-				t.Errorf("readOnlyShellCommand(%q) = %v, want %v", c.command, got, c.want)
+			if got := readOnlyShellCommandIn(root, c.command, true); got != c.want {
+				t.Errorf("readOnlyShellCommandIn(%q, powershell) = %v, want %v", c.command, got, c.want)
 			}
 		})
 	}
@@ -136,24 +163,24 @@ func TestShellToolCapabilityFor(t *testing.T) {
 	st := newShellTool(t.TempDir(), 5, nil, nil)
 
 	readInput := json.RawMessage(`{"command":"git status"}`)
-	if got := st.CapabilityFor(readInput); got != tool.CapRead {
+	if got := st.CapabilityFor(context.Background(), readInput); got != tool.CapRead {
 		t.Errorf("expected CapRead for read-only command, got %s", got)
 	}
-	if got := tool.EffectiveCapability(st, readInput); got != tool.CapRead {
+	if got := tool.EffectiveCapability(context.Background(), st, readInput); got != tool.CapRead {
 		t.Errorf("EffectiveCapability: expected CapRead, got %s", got)
 	}
 
 	execInput := json.RawMessage(`{"command":"rm -rf /tmp/x"}`)
-	if got := st.CapabilityFor(execInput); got != tool.CapExecute {
+	if got := st.CapabilityFor(context.Background(), execInput); got != tool.CapExecute {
 		t.Errorf("expected CapExecute for non-read-only command, got %s", got)
 	}
-	if got := tool.EffectiveCapability(st, execInput); got != tool.CapExecute {
+	if got := tool.EffectiveCapability(context.Background(), st, execInput); got != tool.CapExecute {
 		t.Errorf("EffectiveCapability: expected CapExecute, got %s", got)
 	}
 
 	// A tool with no CapabilityOverrider falls back to its static Capability.
 	other := &readTool{root: t.TempDir()}
-	if got := tool.EffectiveCapability(other, nil); got != other.Capability() {
+	if got := tool.EffectiveCapability(context.Background(), other, nil); got != other.Capability() {
 		t.Errorf("EffectiveCapability: expected fallback to static Capability(), got %s want %s", got, other.Capability())
 	}
 
@@ -164,4 +191,105 @@ func TestShellToolCapabilityFor(t *testing.T) {
 	if st.Capability() != tool.CapExecute {
 		t.Errorf("expected static Capability() to remain CapExecute, got %s", st.Capability())
 	}
+}
+
+// TestShellToolCapabilityForUsesTheSessionWorkdir is CRIT-3 at the tool. The
+// classification has to be made against the root the call will run in, which is
+// tool.WorkdirFromContext when a session set one — the same value Execute
+// resolves through effectiveRoot. Before CapabilityOverrider took a context it
+// could only see the daemon-wide construction-time root, so a session rooted
+// elsewhere was mis-scoped in both directions at once: absolute reads under the
+// *daemon's* workspace were silently downgraded for it, and ordinary reads
+// inside its own workspace were refused the downgrade.
+func TestShellToolCapabilityForUsesTheSessionWorkdir(t *testing.T) {
+	daemonRoot := t.TempDir()
+	sessionRoot := t.TempDir()
+	st := newShellTool(daemonRoot, 5, nil, nil)
+
+	// A path inside the session's own workspace: a read, but only if the
+	// classifier is looking at the session's root.
+	inSession := shellInput("cat " + filepath.Join(sessionRoot, "notes.txt"))
+	sessionCtx := tool.WithWorkdir(context.Background(), sessionRoot)
+	if got := st.CapabilityFor(sessionCtx, inSession); got != tool.CapRead {
+		t.Errorf("read inside the session workspace = %s, want %s", got, tool.CapRead)
+	}
+	if got := st.CapabilityFor(context.Background(), inSession); got != tool.CapExecute {
+		t.Errorf("the same read is outside the daemon root and must not downgrade there: got %s", got)
+	}
+
+	// And the mirror: a path inside the *daemon's* workspace is outside the
+	// session's, so the session must not get the silent downgrade for it.
+	inDaemon := shellInput("cat " + filepath.Join(daemonRoot, "secret.txt"))
+	if got := st.CapabilityFor(sessionCtx, inDaemon); got != tool.CapExecute {
+		t.Errorf("read outside the session workspace = %s, want %s", got, tool.CapExecute)
+	}
+}
+
+// shellInput encodes a shell tool call. Built with json.Marshal rather than
+// string concatenation because a Windows path's backslashes are not valid JSON
+// escapes, and a hand-spliced literal fails to parse — which the tool reports
+// as CapExecute, i.e. as a passing-looking result for the wrong reason.
+func shellInput(command string) json.RawMessage {
+	b, err := json.Marshal(struct {
+		Command string `json:"command"`
+	}{Command: command})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// TestEffectiveCapabilityMemoAsksTheToolOnce is M5. The shell classifier does
+// filesystem I/O per argv token and the same call's capability is asked for by
+// the gate, the round scheduler, the checkpoint decision and the written-path
+// bookkeeping — with the whole approval round-trip sitting between the first
+// two. Under the per-call memo the tool is consulted once, so those are one
+// decision rather than four that a symlink swapped mid-prompt could split.
+func TestEffectiveCapabilityMemoAsksTheToolOnce(t *testing.T) {
+	counted := &countingCapabilityTool{cap: tool.CapRead}
+	ctx := tool.WithCapabilityMemo(context.Background())
+	input := json.RawMessage(`{"command":"git status"}`)
+	for range 4 {
+		if got := tool.EffectiveCapability(ctx, counted, input); got != tool.CapRead {
+			t.Fatalf("capability = %s, want %s", got, tool.CapRead)
+		}
+	}
+	if counted.calls != 1 {
+		t.Errorf("CapabilityFor called %d times under one call's memo, want 1", counted.calls)
+	}
+
+	// A different input is a different call and is classified on its own.
+	tool.EffectiveCapability(ctx, counted, json.RawMessage(`{"command":"rm -rf /"}`))
+	if counted.calls != 2 {
+		t.Errorf("a second distinct input must be classified: calls = %d, want 2", counted.calls)
+	}
+
+	// Without a memo nothing is cached — a context that never passed through
+	// the engine's toolCtx behaves exactly as it did before M5.
+	bare := &countingCapabilityTool{cap: tool.CapRead}
+	tool.EffectiveCapability(context.Background(), bare, input)
+	tool.EffectiveCapability(context.Background(), bare, input)
+	if bare.calls != 2 {
+		t.Errorf("without a memo, calls = %d, want 2", bare.calls)
+	}
+}
+
+// countingCapabilityTool counts how often its per-call classification runs.
+type countingCapabilityTool struct {
+	cap   tool.Capability
+	calls int
+}
+
+func (c *countingCapabilityTool) Name() string                { return "counting" }
+func (c *countingCapabilityTool) Capability() tool.Capability { return tool.CapExecute }
+func (c *countingCapabilityTool) Description() string         { return "counting" }
+func (c *countingCapabilityTool) InputSchema() json.RawMessage {
+	return schema(`{"type":"object"}`)
+}
+func (c *countingCapabilityTool) Execute(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{}, nil
+}
+func (c *countingCapabilityTool) CapabilityFor(context.Context, json.RawMessage) tool.Capability {
+	c.calls++
+	return c.cap
 }

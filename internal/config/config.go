@@ -220,6 +220,7 @@ func defaults() map[string]any {
 		"sandbox.session_ttl_sec":      int(sandbox.DefaultSessionTTL / time.Second),
 		"security.egress_then_write":   false,
 		"security.redact_secrets":      true,
+		"security.scan_file_reads":     true,
 		"security.default_method":      "auto",
 		"security.dast.allow_active":   false,
 		"security.debate.threat_model": false,

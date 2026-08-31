@@ -2,6 +2,7 @@ package server
 
 import (
 	"embed"
+	"errors"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -52,6 +53,13 @@ func (s *Server) handleWebUI(w http.ResponseWriter, r *http.Request) {
 	}
 	pageToken, csrf, err := s.mintPageToken()
 	if err != nil {
+		// M3: the cap is a rate bound, so 503 with a Retry-After is the honest
+		// answer — the next load a second later succeeds.
+		if errors.Is(err, errTooManyPageTokens) {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "too many page loads in flight; retry shortly", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "web UI not available", http.StatusInternalServerError)
 		return
 	}

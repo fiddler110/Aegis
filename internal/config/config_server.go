@@ -146,6 +146,37 @@ type PermissionConfig struct {
 	// this only when that's a deliberate, understood choice (e.g. an
 	// already-isolated CI container running Aegis itself).
 	AllowUnsandboxedAutoExec bool `koanf:"allow_unsandboxed_auto_exec"`
+
+	// PlanModeShellReads controls whether the shell tool's read-only
+	// classification (P25.4c) applies in plan mode. Default true, which is the
+	// shipped behavior: `shell("git log")` in plan mode is gated as CapRead and
+	// allowed without a prompt, rather than being denied as an execute call.
+	//
+	// It exists because plan mode's documented guarantee — "the workspace may
+	// not be mutated or commands run at all" — is mediated by
+	// classifyShellCommand, ~1,080 lines of hand-written argument parsing
+	// across 40+ commands and three shell dialects (DR-2). That design is right
+	// on its own terms; before it, a `git status` in plan mode was *silently
+	// denied*, which is worse. But it means every defect in that parser is a
+	// plan-mode defect, and plan mode is the posture an operator picks
+	// precisely when they want a hard boundary rather than a convenient one —
+	// reviewing an untrusted repository being the canonical case.
+	//
+	// Set it to false to make plan mode's guarantee unconditional: the shell
+	// tool is then CapExecute in plan mode whatever the classifier says, and
+	// the parser's correctness stops being load-bearing for that posture.
+	// Plan mode *denies* execute rather than asking, so this makes `shell`
+	// unusable in plan mode outright — which is the guarantee ("no commands
+	// run"), not a side effect of it. Build and auto mode are unaffected
+	// either way, so the ergonomics the downgrade buys are kept where they
+	// are wanted.
+	PlanModeShellReads *bool `koanf:"plan_mode_shell_reads"`
+}
+
+// PlanModeShellReadsEnabled resolves PlanModeShellReads, defaulting to true
+// (the shipped behavior) when the operator has expressed no preference.
+func (p PermissionConfig) PlanModeShellReadsEnabled() bool {
+	return p.PlanModeShellReads == nil || *p.PlanModeShellReads
 }
 
 // GitConfig configures the git-facing built-in tools (currently just the

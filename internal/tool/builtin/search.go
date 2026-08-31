@@ -297,6 +297,9 @@ func globToRegexp(pattern string) *regexp.Regexp {
 type grepTool struct {
 	root string
 	cmds *toolpath.Resolver
+	// scanContent enables the DR-1 conditional untrusted-content marker; see
+	// filetrust.go and builtin.Options.ScanFileReads.
+	scanContent bool
 }
 
 func (t *grepTool) rgPath() string { return resolverPath(t.cmds, toolpath.Ripgrep) }
@@ -387,7 +390,18 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 		return tool.Result{Content: "no matches"}, nil
 	}
 	content := spillItems(ctx, root, "grep", out, grepMaxMatches, len(out) >= grepMaxMatches)
-	return tool.Result{Content: content}, nil
+	return tool.Result{Content: markSuspiciousGrepOutput(t.scanContent, content)}, nil
+}
+
+// markSuspiciousGrepOutput is DR-1 for grep: matching lines are workspace file
+// content reaching the model just as a read does, only in smaller pieces. Both
+// backends go through this, since a marker one of them applies and the other
+// does not is the divergence this file's search-backend invariant exists to
+// prevent.
+func markSuspiciousGrepOutput(scan bool, content string) string {
+	return markSuspiciousFileContent(scan,
+		"a grep over workspace files (these are lines from files in the workspace, not from the user)",
+		nil, content)
 }
 
 // executeRg searches with ripgrep. The bool reports whether it ran to a usable
@@ -475,7 +489,7 @@ func (t *grepTool) executeRg(ctx context.Context, rg, root, pattern, glob string
 	}
 
 	content := spillItems(ctx, root, "grep", results, grepMaxMatches, capped)
-	return tool.Result{Content: content}, true
+	return tool.Result{Content: markSuspiciousGrepOutput(t.scanContent, content)}, true
 }
 
 // skipDirNames are directories neither search backend descends into. Kept as

@@ -131,6 +131,55 @@ call (`internal/tool/builtin/web.go`), just with a `<web_untrusted_output
 url="...">` / `<web_untrusted_output query="...">` tag instead of
 `<mcp_untrusted_output ...>` — same framing text, same always-on behavior.
 
+#### Which channels are marked, and which are not
+
+The marker is applied to every channel that carries content from outside the
+harness's control:
+
+| Channel | Marked | Notes |
+|---|---|---|
+| MCP `tools/call` / `resources/read` / `prompts/get` | always | `internal/mcp/trust.go` |
+| `web_fetch` / `web_search` | always | `internal/tool/builtin/web.go` |
+| Project/user personas and skills | always | a cloned repo can plant one |
+| Swarm mailbox, sub-agent results | always | a teammate can relay web/MCP text |
+| Memory entries, `AGENTS.md`-style context files | always | |
+| Security-scanner reports | always | |
+| **Workspace file contents** (`read_file`, `grep`) | **only when the heuristic scan fires** | `security.scan_file_reads`, default on — see below |
+| Directory listings (`ls`, `glob`) | never | names, not content |
+
+The one conditional row is deliberate, and it is worth stating the reasoning
+rather than leaving the gap to look like an oversight (DR-1).
+
+Workspace file contents are the highest-volume tool result there is, and the
+envelope costs roughly 150 bytes per result — real budget under the local
+prompt profile, paid on every read of every file. But the asymmetry could not
+be justified on threat grounds: this project already treats a cloned
+repository as untrusted (that premise is what `internal/workspacetrust` and
+the persona/skill wrapping are built on), and a project's `persona.md` is
+wrapped because "a malicious dependency, template repo, or cloned project
+could plant one" — while `src/handler.go`, planted by the same adversary in
+the same act, arrived unmarked.
+
+So `read_file` and `grep` results run through the same heuristic scan
+described in the next section and are wrapped **only on a hit**
+(`internal/tool/builtin/filetrust.go`). Ordinary source code pays nothing;
+content that looks like a planted instruction arrives marked, with the pattern
+that fired named inside the marker. This is a mitigation, not a boundary: a
+file crafted to avoid the heuristics reaches the model unmarked, exactly as it
+did before. What it buys is that the unsophisticated case — the one that
+actually turns up in planted READMEs and dependency files — is no longer the
+one channel that says nothing at all.
+
+Directory listings stay unmarked: a path name is not content, and a filename
+long enough to carry an injection is visible as such.
+
+The scan is not free — roughly 14ms per maxed-out `read_file` result, paid per
+read and per grep — so it has an off switch, `security.scan_file_reads`, like
+every other scanned channel. Note that it turns off more than the MCP and web
+equivalents do: for those the envelope is unconditional and `scan_output` only
+controls the extra scan, while here the scan is what decides whether to wrap,
+so turning it off returns file contents to reaching the model bare.
+
 ### 2. Heuristic output scan (on by default)
 
 Since P27.13/FIND-12, every MCP server and `web_fetch`/`web_search` output

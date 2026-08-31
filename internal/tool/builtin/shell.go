@@ -49,9 +49,18 @@ func (t *shellTool) Capability() tool.Capability { return tool.CapExecute }
 // governs anything readOnlyShellCommand doesn't recognize as safe — which
 // now includes any command reading outside the workspace root, so it falls
 // back to requiring the normal execute approval instead of being silently
-// auto-allowed. CapabilityOverrider carries no context, so this uses the
-// tool's construction-time root rather than a session-scoped override.
-func (t *shellTool) CapabilityFor(input json.RawMessage) tool.Capability {
+// auto-allowed.
+//
+// It classifies against effectiveRoot(ctx, t.root) — the same helper Execute
+// uses one function below, which is the point. CapabilityOverrider used to
+// carry no context, so this classified against the daemon-wide construction-
+// time root while the call executed under the session's own workdir (CRIT-3):
+// a cron job created from a session rooted at B was permission-checked against
+// workspace A and then run, unattended, in B, and interactive sessions rooted
+// outside the daemon workspace were mis-scoped in both directions — silently
+// downgrading absolute reads under A, and refusing the downgrade for legitimate
+// reads inside their own root.
+func (t *shellTool) CapabilityFor(ctx context.Context, input json.RawMessage) tool.Capability {
 	var args struct {
 		Command string `json:"command"`
 	}
@@ -60,7 +69,7 @@ func (t *shellTool) CapabilityFor(input json.RawMessage) tool.Capability {
 		// recognized `gh` subcommand is read-only on the *filesystem* but is
 		// still network egress, and plan mode Asks for CapNetwork where it
 		// silently Allows CapRead.
-		if cap, ok := classifyShellCommand(t.root, args.Command, t.usesPowerShell()); ok {
+		if cap, ok := classifyShellCommand(effectiveRoot(ctx, t.root), args.Command, t.usesPowerShell()); ok {
 			return cap
 		}
 	}
@@ -139,7 +148,13 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	// see shell_checkpoint.go — unless the command is already known safe.
 	var text string
 	var err error
-	if _, classified := classifyShellCommand(root, args.Command, t.usesPowerShell()); classified {
+	// Ask the same question the gate asked, through the same seam, so the
+	// checkpoint decision and the permission decision cannot disagree (M5):
+	// under the per-call memo installed by the engine this returns the verdict
+	// already computed at the gate rather than re-walking the filesystem across
+	// the approval round-trip. Only CapRead and CapNetwork are ever classified,
+	// so anything still CapExecute is a command that was not recognized.
+	if tool.EffectiveCapability(ctx, t, input) != tool.CapExecute {
 		// Any classified command is non-mutating (CapRead or, for gh,
 		// CapNetwork), so there is nothing for the checkpoint snapshot to
 		// capture.

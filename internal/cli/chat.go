@@ -351,13 +351,22 @@ func runChat(cmd *cobra.Command, args []string, o *chatOptions) error {
 		case outputStreamJSON:
 			emitStreamEvent(out, ev)
 		case outputJSON:
-			if ev.Kind == engine.KindText {
-				answer.WriteString(ev.Text)
-			}
+			foldAnswerEvent(&answer, ev, 0)
 		default: // text
 			switch ev.Kind {
 			case engine.KindText:
 				rend.Text(ev.Text)
+			case engine.KindGuard:
+				// Streamed text is already on the user's terminal and cannot
+				// be unprinted, so say plainly that what was just shown is
+				// being withdrawn rather than letting the retry read as a
+				// second answer (EXEC-2).
+				switch {
+				case ev.GuardRetrying:
+					rend.Notice("⚠ output guard: answer withdrawn (" + ev.GuardReason + ") — retrying…")
+				case !ev.GuardPassed && ev.GuardReason != "":
+					rend.Notice("⚠ output guard: " + ev.GuardReason)
+				}
 			case engine.KindNotice:
 				// Advisories (empty answer, cold load, a model that
 				// can't call tools) were dropped entirely here, so the

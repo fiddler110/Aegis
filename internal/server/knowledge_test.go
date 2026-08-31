@@ -8,13 +8,14 @@ import (
 	"path/filepath"
 	"testing"
 
+	"net/http/httptest"
+
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/knowledge"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/tool"
-	"net/http/httptest"
 )
 
 // newKnowledgeTestServer builds a daemon with its workspace pinned to a fresh

@@ -154,6 +154,26 @@ type Request struct {
 	// policy, so an untagged call path behaves exactly as it did before this
 	// field existed. See purpose.go.
 	Purpose Purpose
+	// SuppressThinking asks an adapter that can control extended thinking to
+	// turn it off for this one request, regardless of what Purpose implies.
+	//
+	// Purpose answers "what shape is this call" and is the right seam when the
+	// answer is a property of the call *kind* — the guard's two-token verdict
+	// never wants a reasoning preamble, so SuppressesExtendedThinking says so
+	// once, for every guard call there will ever be. This field exists for the
+	// case Purpose cannot express: the same call made twice, differently. The
+	// compaction summarizer is the first such caller (P79.3). A summary is a
+	// long, unstructured reply and thinking genuinely helps it, so compaction
+	// is deliberately absent from SuppressesExtendedThinking — but on a
+	// reasoning model with a modest completion budget the preamble can consume
+	// the entire budget and the summary comes back empty. That is not a reason
+	// to forbid thinking for every summary; it is a reason to notice and ask
+	// again without it.
+	//
+	// Adapters that cannot control thinking ignore this, which is safe: like
+	// Purpose-driven suppression it is a cost and truncation mitigation, never
+	// a correctness requirement.
+	SuppressThinking bool
 }
 
 // StopReason explains why the model stopped generating.

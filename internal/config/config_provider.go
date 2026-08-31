@@ -40,11 +40,19 @@ type ProviderConfig struct {
 	// reproducible turn for turn. nil (unset) leaves the backend to pick.
 	// Only meaningful alongside Temperature: a seed at temperature 0.8 fixes
 	// which of many paths is taken, not that there is only one.
-	Seed            *int              `koanf:"seed"`
-	Headers         map[string]string `koanf:"headers"`          // extra HTTP headers sent with every request (e.g. gateway auth)
-	Think           *bool             `koanf:"think"`            // controls extended thinking for Ollama reasoning models (nil/false = disable; true = enable)
-	ReasoningEffort string            `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
-	ContextWindow   int               `koanf:"context_window"`   // model context window in tokens; 0 = auto (skips compaction for local models)
+	Seed    *int              `koanf:"seed"`
+	Headers map[string]string `koanf:"headers"` // extra HTTP headers sent with every request (e.g. gateway auth)
+	// Think controls extended thinking. Its three states are not two: true
+	// enables, false disables, and nil — the default — means "the provider's
+	// default", which is *not* the same as off (EXEC-5). Anthropic defaults
+	// off (thinking is billed); native Ollama defaults **on** (P77.1, see
+	// providerfactory); openai-compat targets stay off. Set it to false
+	// explicitly to disable. Individual call sites may still override it: a
+	// short classification call suppresses thinking regardless of this
+	// setting (see provider.SuppressesExtendedThinking).
+	Think           *bool  `koanf:"think"`
+	ReasoningEffort string `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
+	ContextWindow   int    `koanf:"context_window"`   // model context window in tokens; 0 = auto (skips compaction for local models)
 	// VRAMBudgetGB is how much memory, in GiB, the operator is willing to let
 	// the model server hold across *every* concurrently resident model (P69.6).
 	// It is what makes a co-resident plan possible: since P69.1 each debate seat

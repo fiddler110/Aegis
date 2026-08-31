@@ -83,11 +83,7 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 	if err != nil {
 		return nil, err
 	}
-	policy := provider.DefaultRetryPolicy()
-	policy.MaxRetries = cfg.Provider.MaxRetries
-	resolve := profile.NewResolver(cfg.Provider.LocalPromptProfile(), cfg.Provider.ModelHarness)
-	primary := provider.WithRetry(admit(cfg, cfg.Provider.Default, cfg.Provider.BaseURL, primaryBase, logger), policy, logger)
-	primary = provider.WithHarness(primary, resolve)
+	primary := decorate(primaryBase, cfg, cfg.Provider.Default, cfg.Provider.BaseURL, logger)
 
 	if len(cfg.Provider.Fallback) == 0 {
 		return primary, nil
@@ -122,11 +118,45 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 			continue
 		}
 		targets = append(targets, provider.FallbackTarget{
-			Adapter: provider.WithHarness(provider.WithRetry(admit(cfg, fb.Provider, fb.BaseURL, fbBase, logger), policy, logger), resolve),
+			Adapter: decorate(fbBase, cfg, fb.Provider, fb.BaseURL, logger),
 			Model:   fb.Model,
 		})
 	}
 	return provider.WithFailover(primary, cfg.Provider.Model, targets, logger), nil
+}
+
+// Decorate applies the shipping decorator chain to a caller-supplied base
+// adapter, exactly as Build applies it to the adapter it constructs.
+//
+// It exists so a test can exercise the composition that ships rather than a
+// hand-assembled approximation of it (M10/EXEC-6). An eval scenario handed its
+// scripted adapter straight to engine.New, so every decorator between the
+// engine and the backend — retry, admission control, the per-model harness
+// profile and the prose-tool-call salvage inside it — was untested in
+// composition with the engine, which is the only place their behavior is
+// observable. Wrapping a providertest.Adapter with this closes that.
+//
+// The failover layer is deliberately not part of it: failover is about a
+// *second* backend and belongs to Build, which knows the fallback list.
+func Decorate(base provider.Adapter, cfg *config.Config, logger *slog.Logger) provider.Adapter {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return decorate(base, cfg, cfg.Provider.Default, cfg.Provider.BaseURL, logger)
+}
+
+// decorate is the one place the per-backend decorator stack is spelled. Build
+// applies it to the primary adapter and to every fallback target, and Decorate
+// exposes it for tests — three callers, one spelling, so a decorator added here
+// reaches all of them.
+func decorate(base provider.Adapter, cfg *config.Config, providerName, baseURL string, logger *slog.Logger) provider.Adapter {
+	policy := provider.DefaultRetryPolicy()
+	policy.MaxRetries = cfg.Provider.MaxRetries
+	resolve := profile.NewResolver(cfg.Provider.LocalPromptProfile(), cfg.Provider.ModelHarness)
+	return provider.WithHarness(
+		provider.WithRetry(admit(cfg, providerName, baseURL, base, logger), policy, logger),
+		resolve,
+	)
 }
 
 // admit wraps base in the P59.9 admission-control decorator when the resolved

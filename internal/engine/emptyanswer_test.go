@@ -163,3 +163,57 @@ func TestEmptyAnswerNudgeSkippedWhenTextPresent(t *testing.T) {
 		t.Fatalf("expected 1 model call, got %d", adapter.calls)
 	}
 }
+
+// TestEmptyAnswerNudgeTurnSuppressesThinking is the P79.4 regression test.
+//
+// The P34.1 nudge above exists because a reasoning model put its whole reply
+// in the thinking channel and stopped. Re-asking over the same channel
+// reproduces the same turn — measured against aegis-qwen35-9b on the first
+// live_workflow run (C2), where the nudge came back empty too and the run
+// ended on "model produced no text even after being asked". Only the nudge
+// turn suppresses thinking: the model has already done whatever reasoning it
+// was going to do, and what is left is to say it. Every other turn keeps the
+// preamble, because that is where thinking earns its keep.
+func TestEmptyAnswerNudgeTurnSuppressesThinking(t *testing.T) {
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		// Turn 1: thinking only, no visible text — this is what triggers the nudge.
+		{
+			{Type: provider.EventThinkingDelta, Text: "The answer is clearly foo."},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{IsEstimated: true}},
+		},
+		// Turn 2: the nudge turn, which must have arrived with thinking off.
+		{
+			{Type: provider.EventTextDelta, Text: "The answer is foo."},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{IsEstimated: true}},
+		},
+	}}
+
+	capture := &reqCapturingAdapter{inner: adapter}
+	eng, err := New(Options{Adapter: capture, Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{
+		provider.TextBlock{Text: "what does the parser do?"},
+	}})
+	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(capture.reqs) != 2 {
+		t.Fatalf("got %d requests, want 2 (the empty turn and its nudge)", len(capture.reqs))
+	}
+	if capture.reqs[0].SuppressThinking {
+		t.Error("the user's own turn suppressed thinking; only the nudge turn may")
+	}
+	if !capture.reqs[1].SuppressThinking {
+		t.Error("the nudge turn did not suppress thinking, so it re-asks over the channel that produced the empty reply")
+	}
+	// Guard against matching by accident: the second request must actually be
+	// the nudge.
+	if last := lastUserText(capture.reqs[1].Messages); !strings.HasPrefix(last, emptyAnswerNudgePrefix) {
+		t.Errorf("second request's last user message = %q, want the empty-answer nudge", last)
+	}
+}

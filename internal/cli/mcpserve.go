@@ -87,12 +87,19 @@ func newMCPServeCmd() *cobra.Command {
 				return err
 			}
 
-			logger.Info("mcp-serve starting", "default_mode", resolvedMode, "auto_approve", resolvedAutoApprove, "addr", cfg.Server.Addr)
+			logger.Info("mcp-serve starting",
+				"default_mode", resolvedMode,
+				"auto_approve", resolvedAutoApprove,
+				"auto_approve_tools", cfg.MCPServer.AutoApproveTools,
+				"allow_caller_mode_escalation", cfg.MCPServer.AllowCallerModeEscalation,
+				"addr", cfg.Server.Addr)
 			srv := mcpserver.NewServer(cl, mcpserver.Options{
-				DefaultMode: resolvedMode,
-				AutoApprove: resolvedAutoApprove,
-				Version:     Version,
-				AuthToken:   authToken,
+				DefaultMode:               resolvedMode,
+				AutoApprove:               resolvedAutoApprove,
+				AutoApproveTools:          cfg.MCPServer.AutoApproveTools,
+				AllowCallerModeEscalation: cfg.MCPServer.AllowCallerModeEscalation,
+				Version:                   Version,
+				AuthToken:                 authToken,
 			}, logger)
 			return srv.Serve(ctx, os.Stdin, os.Stdout)
 		},
