@@ -937,8 +937,9 @@ returned (P11.8):
   ```
 
   A matched, unexpired entry moves its finding out of the report's main list
-  into a `Suppressed` count (`aegis scan` prints "Suppressed by baseline:
-  N"). An **expired** entry (past `expires`) stops suppressing — the finding
+  into the report's `Suppressed` section, where every suppressed finding is
+  named — severity, tool, title, location and rule ID — not just counted
+  (P76.3): a baseline that can hide *what* it hid is the sharper problem. An **expired** entry (past `expires`) stops suppressing — the finding
   comes back into view with a note that the acceptance lapsed. An **invalid**
   entry (missing `rule_id`/`reason`, or an unparseable `expires`) is never
   applied at all, also with a note — a malformed baseline fails safe rather
@@ -946,6 +947,17 @@ returned (P11.8):
   every entry's current status (active/expired/invalid) without needing to
   run a full scan; the file itself is hand-edited, same as
   `security.tools`/`security.default_method` in `.aegis/config.yaml`.
+
+  **The baseline is only applied in a trusted workspace** (P76.3). It is read
+  out of the scan *target*, and this subsystem's whole threat model is a
+  hostile repository — the reason multiscanner runs `--network none` with the
+  workspace mounted. A repo you have not trusted can therefore ship a
+  baseline pre-suppressing the vulnerability it planted, so it doesn't get
+  one: an untrusted target's entries suppress nothing, and the report prints
+  `Baseline IGNORED (scan target is not a trusted workspace)` followed by
+  every entry that was skipped. `aegis trust` in that directory is what turns
+  a suppression list back into an accepted-risk decision — an operator's
+  decision, which is the only kind a suppression can be.
 
 ### Regression testing (P11.9)
 

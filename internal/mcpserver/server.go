@@ -108,6 +108,16 @@ type Server struct {
 
 	authMu        sync.Mutex
 	authenticated bool
+
+	// createdMu/created records the sessions this Server instance created, so
+	// callPrompt can tell "mine" from "borrowed" without a round trip. It is
+	// a fast path and explicitly *not* the security control: the set does not
+	// survive an mcp-serve restart, and rejecting everything outside it would
+	// break an editor plugin resuming its own session across one (P80.1). A
+	// session it does not recognise is checked against the mode ceiling
+	// instead of refused.
+	createdMu sync.Mutex
+	created   map[string]struct{}
 }
 
 // NewServer builds an MCP server over backend.
@@ -139,6 +149,7 @@ func NewServer(backend Backend, opts Options, logger *slog.Logger) *Server {
 		allowEscalation:  opts.AllowCallerModeEscalation,
 		version:          version,
 		authToken:        opts.AuthToken,
+		created:          map[string]struct{}{},
 	}
 }
 
@@ -393,7 +404,65 @@ func (s *Server) callNewSession(ctx context.Context, raw json.RawMessage) (any, 
 	if err != nil {
 		return errResult(fmt.Errorf("create session: %w", err)), nil
 	}
+	s.rememberCreated(meta.ID)
 	return textResult(fmt.Sprintf("Created session %s (mode: %s)", meta.ID, meta.Mode)), nil
+}
+
+func (s *Server) rememberCreated(id string) {
+	s.createdMu.Lock()
+	defer s.createdMu.Unlock()
+	s.created[id] = struct{}{}
+}
+
+func (s *Server) isOwnSession(id string) bool {
+	s.createdMu.Lock()
+	defer s.createdMu.Unlock()
+	_, ok := s.created[id]
+	return ok
+}
+
+// checkBorrowedSessionMode enforces mcp_server.default_mode as a ceiling on a
+// session this server did not create (P80.1 / FIND-21).
+//
+// aegis_list_sessions proxies the daemon's whole session list, so a caller can
+// see the interactive auto-mode session a human started in the TUI and name
+// its id here. F1's clamp binds only sessions this server *creates*; a
+// borrowed one carried whatever mode it already had, which made the clamp
+// bypassable by reuse. The ceiling is applied at prompt time instead, which
+// needs no schema change and leaves the real fix — a session origin recorded
+// at creation and filtered server-side — an open product decision.
+//
+// It refuses rather than silently downgrading: the session belongs to someone
+// else, and quietly moving a human's TUI session from auto to plan is a
+// side effect no MCP caller should be able to cause. A session at or below the
+// ceiling is untouched, which is what keeps cross-restart resume working.
+//
+// A session id that is not in the list is allowed through: it is unverifiable,
+// not evidence of escalation, and the enumeration this defends against only
+// reaches listed sessions. PostMessageReq rejects an id that does not exist.
+func (s *Server) checkBorrowedSessionMode(ctx context.Context, id string) *rpcErr {
+	if s.allowEscalation || s.isOwnSession(id) {
+		return nil
+	}
+	metas, err := s.backend.ListSessions(ctx)
+	if err != nil {
+		s.logger.Warn("mcp-serve: could not check a borrowed session's mode against default_mode", "session", id, "err", err)
+		return nil
+	}
+	for _, m := range metas {
+		if m.ID != id {
+			continue
+		}
+		if permModeRank(m.Mode) <= permModeRank(s.defaultMode) {
+			return nil
+		}
+		s.logger.Warn("mcp-serve: refusing a prompt into a session this server did not create whose mode exceeds default_mode",
+			"session", id, "session_mode", m.Mode, "default_mode", s.defaultMode)
+		return &rpcErr{Code: codeInvalidParams, Message: fmt.Sprintf(
+			"session %s is in %s mode, which exceeds mcp_server.default_mode (%s), and was not created by this server; start your own session with aegis_new_session, or set mcp_server.allow_caller_mode_escalation to opt in",
+			id, m.Mode, s.defaultMode)}
+	}
+	return nil
 }
 
 func (s *Server) callListSessions(ctx context.Context) (any, *rpcErr) {
@@ -431,6 +500,9 @@ func (s *Server) callPrompt(ctx context.Context, raw json.RawMessage) (any, *rpc
 			return errResult(fmt.Errorf("create session: %w", err)), nil
 		}
 		sessionID = meta.ID
+		s.rememberCreated(sessionID)
+	} else if rerr := s.checkBorrowedSessionMode(ctx, sessionID); rerr != nil {
+		return nil, rerr
 	}
 
 	events, err := s.backend.PostMessageReq(ctx, sessionID, api.PostMessageRequest{Text: a.Text})

@@ -19,6 +19,10 @@ type Backend interface {
 	CreateSession(ctx context.Context, req api.CreateSessionRequest) (*api.SessionMeta, error)
 	PostMessageReq(ctx context.Context, id string, req api.PostMessageRequest) (<-chan api.Event, error)
 	SendApproval(ctx context.Context, sessionID, approvalID string, approved, allowAlways bool) error
+	// ListSessions backs the P80.1 mode ceiling on a borrowed session: it is
+	// the only way this package can learn the mode of a session it did not
+	// create. Nothing in the ACP protocol surface exposes the list itself.
+	ListSessions(ctx context.Context) ([]api.SessionMeta, error)
 }
 
 // Agent implements the ACP Handler, translating ACP methods into daemon calls
@@ -34,6 +38,11 @@ type Agent struct {
 	mu            sync.Mutex
 	cancels       map[string]context.CancelFunc // sessionId -> cancel for in-flight prompt
 	authenticated bool
+	// created records the sessions this Agent created. Like mcpserver's set,
+	// it is a fast path rather than the control — it does not survive a
+	// restart, and an unrecognised id is checked against the mode ceiling
+	// instead of being refused (P80.1).
+	created map[string]struct{}
 }
 
 // NewAgent builds an ACP agent over backend. mode is the permission mode applied
@@ -57,6 +66,7 @@ func NewAgent(backend Backend, mode string, logger *slog.Logger, authToken strin
 		logger:    logger,
 		authToken: authToken,
 		cancels:   map[string]context.CancelFunc{},
+		created:   map[string]struct{}{},
 	}
 }
 
@@ -173,7 +183,75 @@ func (a *Agent) handleNewSession(ctx context.Context, params json.RawMessage) (a
 	if err != nil {
 		return nil, errorf(codeInternalError, "create session: %v", err)
 	}
+	a.mu.Lock()
+	a.created[meta.ID] = struct{}{}
+	a.mu.Unlock()
 	return newSessionResult{SessionID: meta.ID}, nil
+}
+
+// checkBorrowedSessionMode enforces this agent's configured mode as a ceiling
+// on a session it did not create — the ACP half of P80.1 / FIND-21.
+//
+// session/prompt takes the client's sessionId verbatim, so an authenticated
+// editor client can post a turn into any session on the daemon, including an
+// interactive auto-mode one a human started in the TUI, inheriting its mode,
+// persona and workdir. `aegis acp --mode` then describes only the sessions
+// this agent creates, which is not what an operator setting it reads it as.
+// Unlike the MCP surface, ACP exposes no session listing, so this is reachable
+// only by a client that already knows an id — which is why it is the same
+// finding at a lower reach, not a separate one.
+//
+// It refuses rather than downgrading: the session belongs to someone else. A
+// session at or below the ceiling is untouched, so resuming a session across
+// an agent restart keeps working, and an id the daemon does not list is
+// allowed through as unverifiable (PostMessageReq rejects a nonexistent one).
+func (a *Agent) checkBorrowedSessionMode(ctx context.Context, id string) *RPCError {
+	a.mu.Lock()
+	_, own := a.created[id]
+	a.mu.Unlock()
+	if own {
+		return nil
+	}
+	metas, err := a.backend.ListSessions(ctx)
+	if err != nil {
+		a.logger.Warn("acp: could not check a borrowed session's mode against the configured mode", "session", id, "err", err)
+		return nil
+	}
+	for _, m := range metas {
+		if m.ID != id {
+			continue
+		}
+		if permModeRank(m.Mode) <= permModeRank(a.mode) {
+			return nil
+		}
+		a.logger.Warn("acp: refusing a prompt into a session this agent did not create whose mode exceeds the configured mode",
+			"session", id, "session_mode", m.Mode, "mode", a.mode)
+		return errorf(codeInvalidParams,
+			"session %s is in %s mode, which exceeds this agent's configured mode (%s), and was not created by this agent; call session/new instead",
+			id, m.Mode, a.mode)
+	}
+	return nil
+}
+
+// modeRankUnknown sorts above every known mode, so an unrecognised mode string
+// counts as an escalation rather than passing a comparison against zero.
+const modeRankUnknown = 99
+
+// permModeRank orders the permission modes from least to most permissive. A
+// small deliberate duplicate of internal/server's ranking (and of
+// internal/mcpserver's, for the same reason): this package talks to the daemon
+// over api.CreateSessionRequest and does not import internal/server.
+func permModeRank(mode string) int {
+	switch mode {
+	case "", "plan":
+		return 0
+	case "build":
+		return 1
+	case "auto":
+		return 2
+	default:
+		return modeRankUnknown
+	}
 }
 
 func (a *Agent) handlePrompt(ctx context.Context, params json.RawMessage) (any, *RPCError) {
@@ -188,6 +266,10 @@ func (a *Agent) handlePrompt(ctx context.Context, params json.RawMessage) (any, 
 	req := buildMessageRequest(p.Prompt)
 	if strings.TrimSpace(req.Text) == "" && len(req.Images) == 0 {
 		return nil, errorf(codeInvalidParams, "prompt is empty")
+	}
+
+	if rerr := a.checkBorrowedSessionMode(ctx, p.SessionID); rerr != nil {
+		return nil, rerr
 	}
 
 	// A cancellable context tied to the session so session/cancel can stop it.

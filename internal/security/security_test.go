@@ -420,6 +420,11 @@ func TestRunWithOptionsDedupsAcrossScanners(t *testing.T) {
 // must move to Suppressed, not disappear or stay in Findings.
 func TestRunWithOptionsAppliesBaselineSuppression(t *testing.T) {
 	dir := t.TempDir()
+	// P76.3: suppression is gated on the target being a trusted workspace.
+	// This test is about what an operator-authored baseline does once that
+	// question is answered yes; baseline_trust_test.go covers the no.
+	withBaselineTrust(t, true)
+
 	writeBaseline(t, dir, `
 suppressions:
   - rule_id: "CVE-2024-7777"

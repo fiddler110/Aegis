@@ -23,6 +23,11 @@ type fakeBackend struct {
 	sessionID string
 	events    []api.Event
 	block     bool // hold the stream open until the run context is cancelled
+	// sessions is what ListSessions reports, backing the P80.1 mode-ceiling
+	// check on a session the agent did not create. Empty (the usual case)
+	// means the daemon lists nothing, which the check treats as unverifiable
+	// and lets through.
+	sessions []api.SessionMeta
 
 	mu        sync.Mutex
 	approvals []bool
@@ -48,6 +53,10 @@ func (f *fakeBackend) PostMessageReq(ctx context.Context, _ string, _ api.PostMe
 		}
 	}()
 	return ch, nil
+}
+
+func (f *fakeBackend) ListSessions(context.Context) ([]api.SessionMeta, error) {
+	return f.sessions, nil
 }
 
 func (f *fakeBackend) SendApproval(_ context.Context, _, _ string, approved, _ bool) error {

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/sandbox"
 )
 
@@ -199,6 +200,14 @@ type Report struct {
 	// to parse; suppression is skipped entirely in that case (fail safe —
 	// nothing is ever hidden by a baseline Aegis couldn't understand).
 	BaselineError string `json:"baseline_error,omitempty"`
+	// BaselineUntrusted is set when the scan target carries a baseline file
+	// but the directory is not a trusted workspace (P76.3). The baseline is
+	// read and reported, never applied: a suppression list is an
+	// accepted-risk decision and only the operator can make one. Each entry
+	// that was ignored is named, so a repo shipping a baseline that
+	// pre-suppresses its own planted finding reads louder in the report than
+	// a repo shipping none.
+	BaselineUntrusted []string `json:"baseline_untrusted,omitempty"`
 }
 
 // RunAll executes every available scanner over dir (using opts' per-tool
@@ -399,11 +408,28 @@ func RunWithProgress(ctx context.Context, dir string, scanners []Scanner, opts O
 	return rep
 }
 
+// baselineTrustCheck answers "may a baseline file found in this directory
+// suppress findings?". It is a var so tests can pin both sides of the gate
+// without touching the real trust store; production always resolves it
+// through config.WorkspaceTrusted, the one way this repo asks the trust
+// question (see CLAUDE.md), which also reads a grant whose security
+// fingerprint has moved as untrusted.
+var baselineTrustCheck = config.WorkspaceTrusted
+
 // applyBaseline loads dir's .aegis/security-baseline.yaml (if any) and moves
 // findings matched by an active entry into Suppressed (P11.8). A missing
 // file is the common case and does nothing; a malformed one fails safe —
 // BaselineError is set and no findings are suppressed, rather than risking a
 // broken baseline silently hiding real findings.
+//
+// P76.3: the file is read out of the scan *target*, which for this subsystem
+// is explicitly allowed to be hostile — gosec.go's comments call the whole
+// container posture "an exfiltration path out of a hostile repo", which is
+// why multiscanner runs --network none. A repo can therefore ship a baseline
+// pre-suppressing the very finding it planted. Applying a suppression is an
+// accepted-risk decision only the operator can make, so it is gated on the
+// directory being a trusted workspace; untrusted, every entry is named in
+// BaselineUntrusted and nothing is hidden.
 func (r *Report) applyBaseline(dir string) {
 	b, err := LoadBaseline(dir)
 	if err != nil {
@@ -411,6 +437,12 @@ func (r *Report) applyBaseline(dir string) {
 		return
 	}
 	if b == nil {
+		return
+	}
+	if len(b.Suppressions) > 0 && !baselineTrustCheck(dir) {
+		for _, e := range b.Suppressions {
+			r.BaselineUntrusted = append(r.BaselineUntrusted, formatSuppressionEntry(e))
+		}
 		return
 	}
 	kept, suppressed, expired, invalid := b.Apply(r.Findings, time.Now())
@@ -537,6 +569,16 @@ func (r Report) Format() string {
 	fmt.Fprintf(&b, "Findings: %d\n", len(r.Findings))
 	if r.BaselineError != "" {
 		fmt.Fprintf(&b, "Baseline error (no suppressions applied): %s\n", r.BaselineError)
+	}
+	if len(r.BaselineUntrusted) > 0 {
+		// P76.3: an untrusted target's baseline suppresses nothing, and the
+		// entries it asked for are named — a repo trying to hide its own
+		// finding reads louder than one with no baseline at all.
+		fmt.Fprintf(&b, "Baseline IGNORED (scan target is not a trusted workspace): %d suppression(s) not applied.\n", len(r.BaselineUntrusted))
+		for _, e := range r.BaselineUntrusted {
+			fmt.Fprintf(&b, "  not applied: %s\n", e)
+		}
+		b.WriteString("  Run `aegis trust` in that directory to accept these as reviewed risk.\n")
 	}
 	if len(r.Suppressed) > 0 {
 		// P76.3: name every suppressed finding, not just a count — a baseline

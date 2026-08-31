@@ -53,6 +53,11 @@ func osvFixtureParse(b []byte) ([]Finding, error) { return parseOSVScanner(b, ""
 // regenerate deliberately after reviewing the diff.
 func TestScanRegressionAcrossRecordedOutputs(t *testing.T) {
 	dir := t.TempDir()
+	// P76.3: the fixture baseline stands in for an operator-authored one, so
+	// the trust gate is pinned open — the golden records aggregation
+	// behaviour, not the trust decision.
+	withBaselineTrust(t, true)
+
 	writeBaseline(t, dir, `
 suppressions:
   - rule_id: "CVE-2021-23337"
