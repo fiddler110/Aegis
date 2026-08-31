@@ -618,9 +618,38 @@ func (s *Store) Unarchive(ctx context.Context, id string) error {
 // entirely, since only the HTTP delete-session handler called it). Returns
 // the number of sessions deleted.
 func (s *Store) Prune(ctx context.Context, olderThan time.Duration) (int, error) {
-	threshold := time.Now().Add(-olderThan).UnixMilli()
-	const pred = `archived_at IS NULL AND updated_at < ?`
+	return s.prune(ctx, `archived_at IS NULL AND updated_at < ?`, time.Now().Add(-olderThan).UnixMilli())
+}
 
+// PruneArchived deletes *archived* sessions whose archived_at is older than
+// olderThan, with the same fan-out to messages, traces, bg_events and
+// checkpoint snapshots that Prune does.
+//
+// P81.24. Prune's `archived_at IS NULL` predicate is deliberate — archiving is
+// how a user says "keep this, out of the way" — but the consequence was that
+// archiving a session opted it out of retention *permanently*: the one
+// operator gesture that means "I am done with this" was also the one that made
+// its conversation, its traces and its checkpoint file copies immortal. That
+// is a retention gap rather than a bug in Prune, so it gets its own bound and
+// its own clock: archived_at, not updated_at, because the question for an
+// archived session is how long it has been archived, and updated_at stopped
+// moving when it was.
+//
+// It is a separate method rather than a flag on Prune so the two retention
+// horizons can differ — an operator who prunes idle sessions after 30 days
+// will usually want archived ones kept much longer — and so no existing caller
+// silently starts deleting archived sessions.
+func (s *Store) PruneArchived(ctx context.Context, olderThan time.Duration) (int, error) {
+	return s.prune(ctx, `archived_at IS NOT NULL AND archived_at < ?`, time.Now().Add(-olderThan).UnixMilli())
+}
+
+// prune deletes every session matching pred (a single-placeholder predicate
+// bound to threshold) together with its messages, traces and bg_events in one
+// transaction, then fans out to the checkpoint cleaner. The session ids are
+// collected inside the transaction and the checkpoint deletion happens after
+// the commit, because checkpoints live in their own store's tables and a
+// rollback must not leave them deleted.
+func (s *Store) prune(ctx context.Context, pred string, threshold int64) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err

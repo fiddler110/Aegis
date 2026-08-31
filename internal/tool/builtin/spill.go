@@ -99,6 +99,7 @@ func spillText(ctx context.Context, root, kind, text string) (rel string, ok boo
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", false
 	}
+	hardenSpillDir(dir)
 	var nonce [4]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", false
@@ -133,6 +134,66 @@ func spillText(ctx context.Context, root, kind, text string) (rel string, ok boo
 	}
 	reapSpills(dir)
 	return spillDirRel + "/" + name, true
+}
+
+// hardenSpillDir applies fsguard.RestrictToOwner to the spill *directory*
+// (P81.24), which is a different control from the per-file call in spillText
+// rather than a duplicate of it.
+//
+// The 0o750 above is the whole story on POSIX and does nothing on Windows,
+// where a directory created under a workspace inherits that workspace's ACL —
+// commonly SYSTEM, Administrators and the user, all full control. fsguard
+// writes a *protected, inheritable* DACL there ("D:PAI(A;OICI;FA;;;OW)"), and
+// the OICI flags are why this is worth doing on top of the per-file call: every
+// file created in the directory afterwards inherits the owner-only ACE at
+// creation time. That closes the window between os.WriteFile returning and
+// RestrictToOwner running on the new file — small, but a spill file is verbatim
+// tool output, i.e. whatever the agent just read — and it covers the directory
+// listing itself, which the per-file call never did. The inheritance behaviour
+// is measured, not assumed: see
+// sqlitestore.TestHardenedDirMakesSidecarsInheritOwnerOnly.
+//
+// Best-effort, matching everything else on this path: a spill that cannot be
+// hardened is still better than a truncated result with nowhere to go, and
+// spillText's contract is that ok=false means *nothing was written*.
+func hardenSpillDir(dir string) {
+	if err := fsguard.RestrictToOwner(dir); err != nil {
+		slog.Warn("spill: could not restrict directory permissions", "path", dir, "err", err)
+	}
+}
+
+// ReapSpillDir deletes every spill file for a workspace, and the directory
+// itself. It is the session-end half of P81.24: reapSpills bounds the
+// directory over time (a 24h TTL plus file-count and byte ceilings), which is
+// a resource bound rather than a retention policy — until it fires, a spill
+// holding the verbatim contents of whatever the agent read outlives by a day
+// the session that produced it, and the package comment above records that as
+// a known weakening of the design ("files are scoped by workspace and bounded
+// by the reaper rather than deleted at session end", because the tool layer
+// has no session id).
+//
+// This is the primitive a caller that *does* know when a session ends calls to
+// close that gap. It is deliberately workspace-scoped rather than
+// session-scoped for the same reason spillText is: root is the closest thing
+// to a session identity available here. A caller must therefore only call it
+// when no other session is live in the same workspace — ending the last
+// session on a workspace, or shutting the daemon down.
+//
+// Best-effort: a file another process still holds open is left behind (the TTL
+// reaper will take it later) rather than turning session teardown into an
+// error. A missing directory is success.
+func ReapSpillDir(root string) error {
+	if root == "" {
+		return nil
+	}
+	dir := filepath.Join(root, filepath.FromSlash(spillDirRel))
+	if err := os.RemoveAll(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reap spill directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 // sanitizeSpillKind keeps the label to characters that are safe in a filename

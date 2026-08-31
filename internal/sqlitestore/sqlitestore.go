@@ -49,6 +49,17 @@ const BusyTimeoutDSN = "?_pragma=busy_timeout(5000)"
 // exist until the connection has been used, so a caller hardens by calling
 // HardenPermissions after its migration has run. Open cannot do it for them
 // without hardening too early to catch the sidecars.
+//
+// P81.24 measured what "not hardened" actually means on Windows, because the
+// threat model flagged that the driver's file-creation mode had never been
+// traced. Measured with icacls against modernc.org/sqlite: the main file *and*
+// both sidecars are created with a purely inherited DACL — the parent
+// directory's SYSTEM / Administrators / <user> ACEs, marked (I) — and the
+// 0o700 MkdirAll above does not change that, since a Go mode bit sets no ACL.
+// So the exposure is real, and it is the sidecars as much as the database.
+// The timing is narrower than it reads, though: `PRAGMA journal_mode=WAL`
+// below is itself a write, so -wal and -shm exist by the time Open returns and
+// a HardenPermissions call after migration does catch them.
 func Open(dbPath, label string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		return nil, err
@@ -84,6 +95,23 @@ func Open(dbPath, label string) (*sql.DB, error) {
 //
 // label names the store in the sidecar warning; it was the only thing that
 // differed between the three copies this replaces.
+//
+// One residual window, measured rather than assumed (P81.24). This hardens the
+// three files that exist *now*. SQLite deletes -wal and -shm when the last
+// connection closes and recreates them on the next write, and a recreated file
+// inherits the parent directory's DACL again — so a pooled connection dropped
+// after an error re-exposes the sidecars for the rest of the process's life.
+// The durable fix is not another call here: a protected *inheritable* DACL on
+// the containing directory ("D:PAI(A;OICI;FA;;;OW)", which is what
+// fsguard.RestrictToOwner writes) makes every file created in it afterwards
+// inherit the owner-only ACE, sidecars included. That is verified by
+// TestHardenedDirMakesSidecarsInheritOwnerOnly. It is deliberately not applied
+// here because the directory these stores share is the daemon's data dir,
+// whose ACL is a host-posture decision owned by its creator (internal/config,
+// internal/server) rather than by a database bootstrap — see P81.24's
+// follow-up. internal/tool/builtin's spill directory, which this package does
+// not own but which had the same shape, *does* get the directory treatment,
+// because that directory is created by and belongs to one subsystem.
 func HardenPermissions(dbPath, label string) error {
 	if err := fsguard.RestrictToOwner(dbPath); err != nil {
 		return fmt.Errorf("restrict %s db permissions: %w", label, err)

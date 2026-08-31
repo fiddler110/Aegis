@@ -367,6 +367,38 @@ func (s *Store) DeleteForSession(ctx context.Context, sessionID string) error {
 	return err
 }
 
+// PruneOlderThan deletes every checkpoint created before cutoff, and the file
+// snapshots captured under it. It returns the number of checkpoints deleted.
+//
+// P81.24. Until this existed, a checkpoint row was deleted only when its
+// session was (Delete/DeleteForSession, reached from the delete-session
+// handler and from session.Store.Prune), and session.Store.Prune deliberately
+// skips archived sessions. So a checkpoint outlived its usefulness
+// indefinitely — and a checkpoint is not metadata: checkpoint_files holds
+// whole verbatim copies of every file the agent was about to modify, up to
+// maxSnapshotBytes each. Rewind only ever reaches the current session's
+// recent turns, so age is a sound retention key on its own, independent of
+// whether the owning session still exists.
+//
+// It is a time cutoff rather than a "keep the last N per session" rule because
+// the value of a checkpoint decays with wall-clock time, not with the number
+// of turns since: a session idle for a month has nothing worth rewinding to
+// however few checkpoints it made.
+func (s *Store) PruneOlderThan(ctx context.Context, cutoff time.Time) (int, error) {
+	ms := cutoff.UnixMilli()
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM checkpoint_files WHERE checkpoint_id IN (SELECT id FROM checkpoints WHERE created_at < ?)`,
+		ms); err != nil {
+		return 0, err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM checkpoints WHERE created_at < ?`, ms)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // NewSnapshotter returns a Snapshotter that captures pre-modification file
 // content into the given checkpoint.
 func (s *Store) NewSnapshotter(checkpointID string) *Snapshotter {

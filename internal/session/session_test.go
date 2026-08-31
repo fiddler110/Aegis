@@ -556,6 +556,73 @@ func TestPruneRemovesBGEventsAndCheckpoints(t *testing.T) {
 	}
 }
 
+// TestPruneArchivedCoversWhatPruneDeliberatelySkips is the P81.24 retention
+// test. Prune's `archived_at IS NULL` predicate means archiving a session made
+// its conversation, traces and checkpoint snapshots immortal, so the two
+// assertions that matter are that PruneArchived reaches an aged archived
+// session and that plain Prune still does not.
+func TestPruneArchivedCoversWhatPruneDeliberatelySkips(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	cleaner := &fakeCheckpointCleaner{}
+	st.SetCheckpointCleaner(cleaner)
+
+	old, err := st.Create(ctx, "archived-long-ago", "sys", "build", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := st.AppendBGEvent(ctx, old.ID, `{"kind":"text"}`); err != nil {
+		t.Fatalf("AppendBGEvent: %v", err)
+	}
+	if err := st.Archive(ctx, old.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	backdated := time.Now().Add(-48 * time.Hour).UnixMilli()
+	if _, err := st.db.Exec(`UPDATE sessions SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		backdated, backdated, old.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	recent, err := st.Create(ctx, "archived-just-now", "sys", "build", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := st.Archive(ctx, recent.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	// The regression this closes: the aged session is archived, so the
+	// existing retention sweep does not see it at all.
+	if n, err := st.Prune(ctx, 24*time.Hour); err != nil || n != 0 {
+		t.Fatalf("Prune over archived sessions = %d, %v; want 0, nil", n, err)
+	}
+
+	n, err := st.PruneArchived(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("PruneArchived: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("PruneArchived deleted %d sessions, want 1", n)
+	}
+	if _, err := st.Get(ctx, old.ID); err == nil {
+		t.Error("the aged archived session survived PruneArchived")
+	}
+	if _, err := st.Get(ctx, recent.ID); err != nil {
+		t.Errorf("a just-archived session should survive PruneArchived: %v", err)
+	}
+
+	var bgCount int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM bg_events WHERE session_id = ?`, old.ID).Scan(&bgCount); err != nil {
+		t.Fatalf("count bg_events: %v", err)
+	}
+	if bgCount != 0 {
+		t.Errorf("PruneArchived left %d orphan bg_events rows", bgCount)
+	}
+	if len(cleaner.deleted) != 1 || cleaner.deleted[0] != old.ID {
+		t.Errorf("expected checkpoint cleaner called once with %q, got %v", old.ID, cleaner.deleted)
+	}
+}
+
 // TestTodayCostDefaultsToZero verifies a fresh store with no recorded spend
 // reports zero rather than erroring (P9.5 daily spend cap).
 func TestTodayCostDefaultsToZero(t *testing.T) {
