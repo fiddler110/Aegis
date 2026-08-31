@@ -19,9 +19,8 @@ aegis scan image alpine:3.20                  # scan a container image by refere
 aegis scan sbom .                             # generate a CycloneDX SBOM via syft (see below)
 ```
 
-Every findings scan (plain path or `--scanner`-filtered) is written to
-`.aegis/security/scan.json` under the scanned path — see [Persisted reports](#persisted-reports)
-below.
+Every findings scan (plain path or `--scanner`-filtered) is written to `scan.json` in the data
+directory, outside the scanned repository — see [Persisted reports](#persisted-reports) below.
 
 ### Picking specific scanners, or letting Aegis pick for you
 
@@ -170,13 +169,30 @@ Or generate an SBOM instead of scanning for findings:
 
 ### Persisted reports
 
-Every findings scan (path, image, or network) persists its report as JSON under
-`.aegis/security/` — `scan.json` for a path scan, `image.json` for `aegis scan image`/`/scan
+Every findings scan (path, image, or network) persists its report as JSON —
+`scan.json` for a path scan, `image.json` for `aegis scan image`/`/scan
 image`, `network.json` for `aegis scan network`/`/scan network`/`recon_scan`, `dast.json` for
 `aegis scan dast`/`dast_scan`. Each file is overwritten on every run (the latest result, not a
 growing history) — the same posture `.aegis/sbom.cdx.json` already uses for SBOMs. This means a
 scan's findings survive past whatever ephemeral output captured them (terminal scrollback, a
 model turn) and are diffable/greppable/scriptable afterward.
+
+Reports land in the **data directory**, under
+`<data_dir>/security/reports/<workspace>-<hash>/`, not inside the scanned repository (P81.29's
+sibling, P81.32). A report is a ranked map of a project's weaknesses — every finding's rule,
+severity and `file:line`, sorted so the interesting ones are on top. It carries no source excerpt
+and no matched secret (a `Finding` has no field for either, and the secret scanners contribute only
+their pre-redacted display form), but the map itself is worth keeping out of the repository: inside
+it, a report is one routine `git add -A` away from being pushed wherever that repository is
+mirrored, by whoever next commits, without anyone having decided to publish it. The
+`<workspace>-<hash>` directory name keeps two checkouts of the same repository from overwriting
+each other's report.
+
+The historical in-repository location, `.aegis/security/`, remains implemented as an explicit
+opt-in (`security.InWorkspace()` at the call site; no config key exposes it yet). Whenever it is
+chosen, the write also adds `/.aegis/security/` to that repository's `.gitignore` — unless something
+already covers it — and says so, because the risk being guarded against is an accidental commit and
+a silent mitigation is one nobody knows to rely on.
 
 Threat models produced by the `threat-modeling` skill (`/threat-model`, or the unattended
 `aegis chat "…" --skill threat-modeling --mode build --yes`) live in the same family: the skill
@@ -1106,7 +1122,7 @@ enforced egress isolation.
 If `sandbox.backend` is `os` but the OS sandbox mechanism can't be initialized (e.g. no seatbelt/bwrap on this host), the daemon falls back to the unsandboxed local backend rather than refusing to start. If `sandbox.backend` is `container` (the default) or `auto` and no runtime can be initialized (e.g. the Docker daemon isn't running), it cascades to the `os` backend first and only falls all the way to local if that's unavailable too. Either way this is a silent security downgrade if you don't notice it, so:
 
 - It's always logged at `WARN`.
-- It's reported by `/healthz` (`sandbox_fallback`/`sandbox_fallback_reason`), and the TUI/CLI print a warning banner before entering a session when it's active.
+- It's reported by the authenticated `/status` (`sandbox_fallback`/`sandbox_fallback_reason`), and the TUI/CLI print a warning banner before entering a session when it's active. It is deliberately **not** on the unauthenticated `/healthz`: that would tell any local process holding no credential that command isolation had degraded.
 - Set `sandbox.strict: true` to turn this into a hard startup failure instead of a silent downgrade — use this when you depend on sandboxing being active (e.g. CI running untrusted code).
 
 ---

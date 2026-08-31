@@ -46,15 +46,36 @@ func TestRunReconRejectsOneDisallowedTargetInList(t *testing.T) {
 	}
 }
 
-func TestRunReconAcceptsPrivateCIDR(t *testing.T) {
-	// A private CIDR's network address should gate-check as allowed without
-	// any config — the common "scan my home lab subnet" case.
+// TestRunReconPrivateCIDRNeedsAnAllowlistEntry is the P81.29 (FIND-29)
+// regression on the recon surface: a private CIDR is a declared-targets
+// decision, not a default. The "scan my home lab subnet" case still works —
+// it just has to be written down first.
+func TestRunReconPrivateCIDRNeedsAnAllowlistEntry(t *testing.T) {
 	host, err := targetHost("192.168.1.0/24")
 	if err != nil {
 		t.Fatalf("targetHost: %v", err)
 	}
-	if allowed, reason := isHostAllowed(host, nil); !allowed {
-		t.Errorf("expected private CIDR network address to be allowed by default, got reason %q", reason)
+	if allowed, reason := isHostAllowed(host, nil); allowed {
+		t.Errorf("expected an undeclared private CIDR to be refused, got allowed (%q)", reason)
+	}
+	if allowed, reason := isHostAllowed(host, []string{"192.168.1.0/24"}); !allowed {
+		t.Errorf("expected a declared private CIDR to be allowed, got reason %q", reason)
+	}
+}
+
+// TestRunReconRefusesAnUndeclaredPrivateTarget drives the refusal through
+// RunRecon itself, so the gate is exercised where a model-issued recon_scan
+// actually enters — and confirms one bad host still fails the whole call
+// rather than being silently dropped from the target list (P13.5.3).
+func TestRunReconRefusesAnUndeclaredPrivateTarget(t *testing.T) {
+	_, err := RunRecon(context.Background(), ReconOptions{
+		Targets: []string{"127.0.0.1", "10.0.0.0/8"},
+	}, Options{})
+	if err == nil {
+		t.Fatal("expected an undeclared RFC-1918 sweep to be refused")
+	}
+	if !strings.Contains(err.Error(), "10.0.0.0/8") {
+		t.Errorf("err = %q, want it to name the refused target", err)
 	}
 }
 

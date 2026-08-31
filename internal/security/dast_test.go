@@ -8,21 +8,34 @@ import (
 	yaml "go.yaml.in/yaml/v3"
 )
 
-// TestIsDASTTargetAllowedDefaultsToLoopbackAndPrivate is the P11.7 default
-// policy: the common "scan my locally running app" case needs no config.
-func TestIsDASTTargetAllowedDefaultsToLoopbackAndPrivate(t *testing.T) {
+// TestIsDASTTargetAllowedDefaultsToLoopback is the P11.7 default policy as
+// narrowed by P81.29: the common "scan my locally running app" case needs no
+// config, and nothing beyond the local machine does.
+func TestIsDASTTargetAllowedDefaultsToLoopback(t *testing.T) {
 	cases := []string{
 		"http://localhost:8080",
 		"http://127.0.0.1:3000",
-		"https://10.20.30.40",
-		"http://192.168.1.50",
-		"http://172.16.5.5",
 		"http://[::1]:9000",
 	}
 	for _, target := range cases {
 		allowed, reason := isDASTTargetAllowed(target, nil)
 		if !allowed {
 			t.Errorf("isDASTTargetAllowed(%q, nil) = false, %q; want allowed by default", target, reason)
+		}
+	}
+}
+
+// TestIsDASTTargetAllowedRejectsUndeclaredPrivateHost is the P81.29 (FIND-29)
+// regression at the URL level: an RFC-1918 target used to be authorized with
+// no configuration, which handed a model the operator's whole LAN.
+func TestIsDASTTargetAllowedRejectsUndeclaredPrivateHost(t *testing.T) {
+	for _, target := range []string{"https://10.20.30.40", "http://192.168.1.50", "http://172.16.5.5"} {
+		allowed, reason := isDASTTargetAllowed(target, nil)
+		if allowed {
+			t.Errorf("isDASTTargetAllowed(%q, nil) = true; want refused without an allowlist entry", target)
+		}
+		if !strings.Contains(reason, "not declared") {
+			t.Errorf("reason for %q = %q, want it to point at the allowlist", target, reason)
 		}
 	}
 }

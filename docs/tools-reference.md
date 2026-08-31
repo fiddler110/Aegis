@@ -869,7 +869,7 @@ Run available static/dependency/secrets scanners (opengrep, trivy, gitleaks, kub
 }
 ```
 
-Returns findings with: severity (critical/high/medium/low/info), location (file:line), rule ID, message, and remediation hint; deduped across overlapping tools and tagged with an OWASP ASVS chapter where confidently derivable. Every run also persists its report to `.aegis/security/scan.json` (or `image.json` for an image scan) — same artifact `aegis scan`/`/scan` produce.
+Returns findings with: severity (critical/high/medium/low/info), location (file:line), rule ID, message, and remediation hint; deduped across overlapping tools and tagged with an OWASP ASVS chapter where confidently derivable. Every run also persists its report to `scan.json` (or `image.json` for an image scan) in the data directory, outside the scanned repository — same artifact `aegis scan`/`/scan` produce.
 
 ---
 
@@ -887,7 +887,7 @@ Dynamic Application Security Testing via OWASP ZAP: crawls (and, in `active`/`ap
 }
 ```
 
-The target must be loopback/private (allowed by default) or explicitly declared in `security.dast.allowed_targets` — checked unconditionally, independent of permission mode. `active`/`api` modes additionally require `security.dast.allow_active: true`. Persists its report to `.aegis/security/dast.json`. See [Security Features](security_scan.md#dynamic-application-security-testing-dast) for the full gating.
+The target must be the local machine (`localhost`, `127.0.0.0/8`, `::1` — the only zero-config case) or explicitly declared in `security.dast.allowed_targets` — checked unconditionally, independent of permission mode. A private-range (RFC-1918 or link-local) address needs an allowlist entry like any other: it used to be auto-allowed, which handed a model the operator's whole LAN (P81.29). `active`/`api` modes additionally require `security.dast.allow_active: true`. Persists its report to `dast.json` in the data directory. See [Security Features](security_scan.md#dynamic-application-security-testing-dast) for the full gating.
 
 ---
 
@@ -903,7 +903,7 @@ Network/host reconnaissance for attack-surface mapping: nmap discovers live host
 }
 ```
 
-Shares its target-authorization gate with `dast_scan` (loopback/private allowed by default, else must be declared in `security.dast.allowed_targets`), checked individually per target with a 256-target cap per call. `nuclei` additionally requires `security.tools.nuclei.templates_version` (a pinned `nuclei-templates` release tag). Host-binary only — no container fallback. `security.dast.allow_active: true` unlocks nmap's OS-detection/full-port-range/default-script mode and nuclei's full template set. Persists its report to `.aegis/security/network.json`. See [Security Features](security_scan.md#network--host-reconnaissance-nmap--nuclei).
+Shares its target-authorization gate with `dast_scan` (only the local machine is allowed with no configuration; everything else, private ranges included, must be declared in `security.dast.allowed_targets`), checked individually per target with a 256-target cap per call — one undeclared target fails the whole call rather than being silently dropped. `nuclei` additionally requires `security.tools.nuclei.templates_version` (a pinned `nuclei-templates` release tag). Host-binary only — no container fallback. `security.dast.allow_active: true` unlocks nmap's OS-detection/full-port-range/default-script mode and nuclei's full template set. Persists its report to `network.json` in the data directory. See [Security Features](security_scan.md#network--host-reconnaissance-nmap--nuclei).
 
 ---
 

@@ -482,7 +482,7 @@ Run available security scanners against a path.
 aegis scan [path] [flags]
 ```
 
-Default path is the current directory. Runs every enabled scanner (**opengrep**, **trivy**, **gitleaks**, **kubescape**, **hadolint**, **osv-scanner**, **grype**, whichever are installed or container-fallback-able) and produces a normalized findings report with severity, location, rule ID, and remediation hint, persisted to `.aegis/security/scan.json`. The language-targeted engines (**gosec**/**bandit**/**brakeman**/**njsscan**) are opt-in — a plain scan auto-detects the project's language (`go.mod`/`*.go`, `requirements.txt`/`*.py`, `Gemfile`/`*.rb`, `package.json`/`*.js`, and more) and auto-enables the matching one for this run only, without touching config, so a Rust or Java repo never triggers bandit. **hadolint**/**kubescape** are likewise skipped, with a reason, when the path has no Dockerfile/Kubernetes manifest.
+Default path is the current directory. Runs every enabled scanner (**opengrep**, **trivy**, **gitleaks**, **kubescape**, **hadolint**, **osv-scanner**, **grype**, whichever are installed or container-fallback-able) and produces a normalized findings report with severity, location, rule ID, and remediation hint, persisted to `scan.json` in the data directory, outside the scanned repository. The language-targeted engines (**gosec**/**bandit**/**brakeman**/**njsscan**) are opt-in — a plain scan auto-detects the project's language (`go.mod`/`*.go`, `requirements.txt`/`*.py`, `Gemfile`/`*.rb`, `package.json`/`*.js`, and more) and auto-enables the matching one for this run only, without touching config, so a Rust or Java repo never triggers bandit. **hadolint**/**kubescape** are likewise skipped, with a reason, when the path has no Dockerfile/Kubernetes manifest.
 
 At a real terminal, a plain `aegis scan` (no `--scanner`, no `--yes`) previews that auto-detected plan and asks for confirmation before running anything; `--yes` (or a non-interactive stdin, e.g. CI) skips the prompt and runs immediately.
 
@@ -509,7 +509,7 @@ Full scanner reference, category aliases, and details on the container/WSL fallb
 aegis scan image <ref>
 ```
 
-Runs image-oriented scanners (trivy image, grype, dockle) against a container image reference (e.g. `alpine:3.20`) and prints a unified findings report, persisted to `.aegis/security/image.json`. Host-binary only — an image scanner that would otherwise run via a container is reported skipped, since scanner containers run network-isolated and can't pull the target image.
+Runs image-oriented scanners (trivy image, grype, dockle) against a container image reference (e.g. `alpine:3.20`) and prints a unified findings report, persisted to `image.json` in the data directory. Host-binary only — an image scanner that would otherwise run via a container is reported skipped, since scanner containers run network-isolated and can't pull the target image.
 
 ### `aegis scan sbom`
 
@@ -525,7 +525,7 @@ Generates a CycloneDX JSON SBOM via syft over the given path (default: current d
 aegis scan dast <target-url> [--mode baseline|active|api] [--api-definition <path-or-url>]
 ```
 
-Crawls (and, in `--mode active`/`api`, actively attacks) a *running* application via OWASP ZAP, persisted to `.aegis/security/dast.json`. Container-only, digest-pinned. The target must be loopback/private or explicitly declared in `security.dast.allowed_targets`; `--mode active`/`api` additionally requires `security.dast.allow_active: true`.
+Crawls (and, in `--mode active`/`api`, actively attacks) a *running* application via OWASP ZAP, persisted to `dast.json` in the data directory. Container-only, digest-pinned. The target must be the local machine (`localhost`, `127.0.0.0/8`, `::1`) or explicitly declared in `security.dast.allowed_targets` — a private-range address is no longer allowed by default (P81.29); `--mode active`/`api` additionally requires `security.dast.allow_active: true`.
 
 ### `aegis scan network`
 
@@ -533,7 +533,7 @@ Crawls (and, in `--mode active`/`api`, actively attacks) a *running* application
 aegis scan network <target> [target...]
 ```
 
-Runs nmap + nuclei against a bare host/IP/CIDR list (attack-surface mapping), persisted to `.aegis/security/network.json`. Same target-allowlist gate as `scan dast`.
+Runs nmap + nuclei against a bare host/IP/CIDR list (attack-surface mapping), persisted to `network.json` in the data directory. Same target-allowlist gate as `scan dast`: only the local machine is allowed with no configuration, and a private-range target needs a `security.dast.allowed_targets` entry.
 
 ---
 

@@ -200,16 +200,5 @@ func TestDetectLanguageSummaryDedicatedVsGeneric(t *testing.T) {
 	}
 }
 
-func TestWriteReportArtifactRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	rep := Report{Findings: []Finding{{Tool: "trufflehog", RuleID: "AWS", Severity: SevHigh}}}
-	WriteReportArtifact(dir, "scan", rep)
-	path := ReportArtifactPath(dir, "scan")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("expected report artifact at %s: %v", path, err)
-	}
-	if len(data) == 0 {
-		t.Error("report artifact is empty")
-	}
-}
+// TestWriteReportArtifactRoundTrip moved to report_artifact_test.go with the
+// rest of the P81.32 report-location tests.
