@@ -321,7 +321,7 @@ func (s *Server) wireAuthAndTLS(cfg *config.Config) error {
 	s.authToken = token
 
 	if cfg.Server.TLS.Enabled {
-		cert, err := ensureTLSCert(cfg.TLSCertPath(), cfg.TLSKeyPath())
+		cert, err := ensureTLSCert(cfg.TLSCertPath(), cfg.TLSKeyPath(), s.logger)
 		if err != nil {
 			return fmt.Errorf("tls cert: %w", err)
 		}

@@ -291,7 +291,13 @@ type pageTokenEntry struct {
 // the frontend trades both for the real token via exchangePageToken/POST
 // /auth/exchange, which requires the csrf nonce as well (see
 // uiCSRFCookieName doc comment).
-func (s *Server) mintPageToken() (token, csrf string, err error) {
+func (s *Server) mintPageToken(remoteAddr string) (token, csrf string, err error) {
+	// P81.16: the rate limit runs before any randomness is generated and
+	// before the shared cap is consulted, so a flooder is stopped at its own
+	// bucket rather than at the cap every other caller shares.
+	if !s.allowPageTokenMint(remoteAddr) {
+		return "", "", errMintRateLimited
+	}
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", "", err
@@ -325,15 +331,156 @@ func (s *Server) mintPageToken() (token, csrf string, err error) {
 	// page tokens of legitimate loads, turning a memory bound into a working
 	// denial of the UI.
 	if len(s.pageTokens) >= maxPageTokens {
+		// P81.16: the cap engaging means the operator's own UI is about to
+		// stop loading, and before this warning that condition presented as
+		// "the UI won't load" with nothing in the log. Warn once per episode
+		// (see pageTokenCapWarned) naming the address that met the cap.
+		if !s.pageTokenCapWarned {
+			s.pageTokenCapWarned = true
+			s.logger.Warn("page-token cap reached; /ui loads are being refused",
+				"remote_addr", remoteAddr,
+				"outstanding", len(s.pageTokens),
+				"cap", maxPageTokens,
+				"ttl", pageTokenTTL,
+			)
+		}
 		return "", "", errTooManyPageTokens
 	}
+	s.pageTokenCapWarned = false
 	s.pageTokens[token] = pageTokenEntry{expiry: now.Add(pageTokenTTL), csrf: csrf}
 	return token, csrf, nil
 }
 
+// mintLimiter is one remote address's token bucket for GET /ui page-token
+// mints, plus the bookkeeping that keeps its logging quiet: warned is set on
+// the first refusal and cleared once the bucket has refilled, so a sustained
+// flood yields one warn line per episode rather than one per request.
+type mintLimiter struct {
+	tokens   float64
+	last     time.Time
+	warned   bool
+	refusals uint64
+}
+
+// The P81.16 mint rate limit. A browser mints exactly one page token per
+// GET /ui — assets under /ui/ do not mint — so even a user leaning on the
+// reload key produces a handful of mints per second at most, and an
+// automated reload loop in a dev workflow a few more. mintBurst allows a
+// full minute's worth of that at once and mintRefillPerSecond sustains one
+// load per second indefinitely, which is orders of magnitude below the
+// >1024-inside-60s a flood needs to reach maxPageTokens, and orders of
+// magnitude above anything a real client does. Sized to be generous on
+// purpose: this control exists to stop a runaway, not to police the
+// operator's browser.
+const (
+	mintBurst            = 60.0
+	mintRefillPerSecond  = 1.0
+	maxMintLimiters      = 1024
+	mintLimiterIdleAfter = 10 * time.Minute
+)
+
+// errMintRateLimited is returned by mintPageToken when the calling address
+// has exhausted its P81.16 bucket. Distinct from errTooManyPageTokens so the
+// handler can answer 429 (this caller is going too fast) rather than 503
+// (the daemon as a whole is saturated).
+var errMintRateLimited = errors.New("too many /ui page loads from this address; retry shortly")
+
+// allowPageTokenMint reports whether remoteAddr may mint another page token
+// now, consuming one unit of its bucket when it may. Keyed on the address's
+// host part: the port differs per connection, so keying on the full
+// RemoteAddr would give every TCP connection a fresh budget and limit
+// nothing.
+//
+// The limiter's own state is bounded two ways, because a control added to
+// stop a resource-exhaustion DoS must not be one. Entries idle for
+// mintLimiterIdleAfter with a full bucket are swept on each call, and if the
+// map is still at maxMintLimiters the least-recently-seen entry is evicted
+// to make room. Evicting here — unlike evicting a page token — costs nothing
+// a legitimate client can miss: it only resets a rate budget, and
+// maxPageTokens still stands behind it as the hard bound.
+func (s *Server) allowPageTokenMint(remoteAddr string) bool {
+	key := mintLimiterKey(remoteAddr)
+	now := time.Now()
+
+	s.mintLimitMu.Lock()
+	defer s.mintLimitMu.Unlock()
+	if s.mintLimiters == nil {
+		s.mintLimiters = make(map[string]*mintLimiter)
+	}
+	lim, ok := s.mintLimiters[key]
+	if !ok {
+		s.sweepMintLimitersLocked(now)
+		lim = &mintLimiter{tokens: mintBurst, last: now}
+		s.mintLimiters[key] = lim
+	}
+
+	// Refill for the elapsed time, then spend.
+	if elapsed := now.Sub(lim.last); elapsed > 0 {
+		lim.tokens += elapsed.Seconds() * mintRefillPerSecond
+		if lim.tokens > mintBurst {
+			lim.tokens = mintBurst
+		}
+	}
+	lim.last = now
+	if lim.tokens >= 1 {
+		lim.tokens--
+		lim.warned = false
+		return true
+	}
+	lim.refusals++
+	if !lim.warned {
+		lim.warned = true
+		s.logger.Warn("page-token mint rate limit engaged; refusing /ui loads from this address",
+			"remote_addr", remoteAddr,
+			"burst", int(mintBurst),
+			"refill_per_second", mintRefillPerSecond,
+			"refusals", lim.refusals,
+		)
+	}
+	return false
+}
+
+// sweepMintLimitersLocked drops limiter entries that have been idle long
+// enough to have refilled completely, and — if that left the map still at
+// its cap — the single least-recently-seen entry, so admitting a new address
+// can never grow the map past maxMintLimiters. Callers must hold mintLimitMu.
+func (s *Server) sweepMintLimitersLocked(now time.Time) {
+	for k, l := range s.mintLimiters {
+		if now.Sub(l.last) >= mintLimiterIdleAfter {
+			delete(s.mintLimiters, k)
+		}
+	}
+	for len(s.mintLimiters) >= maxMintLimiters {
+		oldestKey := ""
+		var oldest time.Time
+		for k, l := range s.mintLimiters {
+			if oldestKey == "" || l.last.Before(oldest) {
+				oldestKey, oldest = k, l.last
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.mintLimiters, oldestKey)
+	}
+}
+
+// mintLimiterKey reduces a net/http RemoteAddr to the host part it should be
+// limited by. An address that doesn't parse is used whole rather than
+// dropped: bucketing an unparseable address together is safer than exempting
+// it from the limit.
+func mintLimiterKey(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil && host != "" {
+		return host
+	}
+	return remoteAddr
+}
+
 // maxPageTokens bounds the unexchanged page tokens held at once. Entries expire
 // after pageTokenTTL, so this is a bound on the *rate* of unauthenticated /ui
-// loads, far above any real browser's.
+// loads, far above any real browser's. It is a process-wide bound and refuses
+// rather than evicts, which is why the P81.16 per-address limiter sits in front
+// of it: without one, whoever reaches the cap first denies everyone else.
 const maxPageTokens = 1024
 
 // errTooManyPageTokens is returned by mintPageToken when maxPageTokens

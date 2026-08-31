@@ -1,16 +1,24 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/fsguard"
 )
 
 // freeLoopbackAddr reserves an ephemeral loopback port by binding to it and
@@ -143,4 +151,118 @@ func waitForHealthy(cl *client.Client, timeout time.Duration) error {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return lastErr
+}
+
+// TestEnsureTLSCertRestrictsBothHalves is P81.25/FIND-25. daemon.key was
+// already given fsguard.RestrictToOwner; daemon.crt was not, even though it is
+// the file internal/client.WithTLS *pins* — another local account able to
+// rewrite it makes the client trust an impersonating listener. On Windows the
+// mode bit alone does not say that (a new file inherits its parent
+// directory's ACL), which is the whole reason generateAndWriteToken calls
+// fsguard for daemon.token.
+func TestEnsureTLSCertRestrictsBothHalves(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "daemon.crt")
+	keyPath := filepath.Join(dir, "daemon.key")
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	if _, err := ensureTLSCert(certPath, keyPath, logger); err != nil {
+		t.Fatalf("ensureTLSCert: %v", err)
+	}
+
+	for _, p := range []string{certPath, keyPath} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %o, want 0600", p, info.Mode().Perm())
+		}
+		// fsguard.RestrictToOwner is a no-op on POSIX and the real control on
+		// Windows; calling it again must succeed on a file it has already
+		// restricted, which is the observable both platforms share here.
+		if err := fsguard.RestrictToOwner(p); err != nil {
+			t.Errorf("RestrictToOwner(%s): %v", p, err)
+		}
+	}
+
+	// First-ever generation is normal and must not warn — only the
+	// fingerprint is reported, so the operator has a value to compare later.
+	if strings.Contains(logBuf.String(), "level=WARN") {
+		t.Errorf("first-ever generation warned, got: %s", logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "fingerprint_sha256=") {
+		t.Errorf("no certificate fingerprint reported, got: %s", logBuf.String())
+	}
+}
+
+// TestEnsureTLSCertWarnsOnRegeneration is the second half of P81.25: deleting
+// daemon.crt (or leaving a pair that no longer loads) regenerates silently on
+// the next start, changing the identity every pinned client trusts. The
+// regeneration itself is what keeps the daemon startable and stays; the
+// silence is the defect.
+func TestEnsureTLSCertWarnsOnRegeneration(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "daemon.crt")
+	keyPath := filepath.Join(dir, "daemon.key")
+
+	first, err := ensureTLSCert(certPath, keyPath, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("first ensureTLSCert: %v", err)
+	}
+
+	// A reload of intact material is silent and returns the same certificate.
+	var reloadBuf bytes.Buffer
+	again, err := ensureTLSCert(certPath, keyPath, slog.New(slog.NewTextHandler(&reloadBuf, nil)))
+	if err != nil {
+		t.Fatalf("reload ensureTLSCert: %v", err)
+	}
+	if certFingerprint(again.Certificate[0]) != certFingerprint(first.Certificate[0]) {
+		t.Error("reloading intact material produced a different certificate")
+	}
+	if strings.Contains(reloadBuf.String(), "level=WARN") {
+		t.Errorf("reloading intact material warned, got: %s", reloadBuf.String())
+	}
+
+	// Now delete the pinned certificate, as an operator (or anything else)
+	// could, and start again.
+	if err := os.Remove(certPath); err != nil {
+		t.Fatal(err)
+	}
+	var regenBuf bytes.Buffer
+	regen, err := ensureTLSCert(certPath, keyPath, slog.New(slog.NewTextHandler(&regenBuf, nil)))
+	if err != nil {
+		t.Fatalf("regenerate ensureTLSCert: %v", err)
+	}
+	if certFingerprint(regen.Certificate[0]) == certFingerprint(first.Certificate[0]) {
+		t.Fatal("expected a new certificate after deleting daemon.crt")
+	}
+	logged := regenBuf.String()
+	if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "regenerated over existing material") {
+		t.Errorf("regeneration over an existing pin did not warn, got: %s", logged)
+	}
+	// The new fingerprint is in the warning, so the operator can compare it
+	// against what their clients pinned.
+	if !strings.Contains(logged, certFingerprint(regen.Certificate[0])) {
+		t.Errorf("regeneration warning omits the new fingerprint, got: %s", logged)
+	}
+}
+
+// TestCertFingerprintMatchesOpenSSLForm pins the rendering, since the value's
+// only purpose is being compared by eye against
+// `openssl x509 -in daemon.crt -noout -fingerprint -sha256`.
+func TestCertFingerprintMatchesOpenSSLForm(t *testing.T) {
+	der := []byte("not a real certificate, only bytes to hash")
+	sum := sha256.Sum256(der)
+	got := certFingerprint(der)
+	if len(got) != len(sum)*3-1 {
+		t.Fatalf("fingerprint %q has length %d, want %d", got, len(got), len(sum)*3-1)
+	}
+	if !regexp.MustCompile(`^([0-9A-F]{2}:){31}[0-9A-F]{2}$`).MatchString(got) {
+		t.Errorf("fingerprint %q is not colon-separated uppercase hex", got)
+	}
+	if !strings.HasPrefix(got, fmt.Sprintf("%02X:%02X", sum[0], sum[1])) {
+		t.Errorf("fingerprint %q does not start with the SHA-256 of the input", got)
+	}
 }

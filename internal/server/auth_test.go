@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -265,7 +267,7 @@ func TestAuthExchangeFailuresAreLogged(t *testing.T) {
 		{
 			name: "expired page token",
 			build: func(t *testing.T, srv *Server, url string) *http.Request {
-				token, csrf, err := srv.mintPageToken()
+				token, csrf, err := srv.mintPageToken("127.0.0.1:12345")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -347,5 +349,159 @@ func TestAuthExchangeFailuresDoNotArmLockout(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("authenticated request status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestPageTokenMintRateLimitIsPerAddress is P81.16/FIND-16. maxPageTokens
+// refuses rather than evicts — deliberately, since evicting would let a flood
+// invalidate legitimate page tokens — but with nothing in front of that cap,
+// whoever reaches it first denies everyone else, and the operator experiences
+// it as "the UI won't load". The per-address bucket makes the flood spend its
+// own budget instead of the shared one: the flooding address is refused long
+// before the cap is anywhere near, and a different address still mints.
+func TestPageTokenMintRateLimitIsPerAddress(t *testing.T) {
+	srv, _, logBuf := newLoggingAuthTestServer(t)
+
+	const flood = 4 * maxPageTokens
+	minted, limited := 0, 0
+	for i := 0; i < flood; i++ {
+		_, _, err := srv.mintPageToken("10.1.1.1:5000")
+		switch {
+		case err == nil:
+			minted++
+		case errors.Is(err, errMintRateLimited):
+			limited++
+		default:
+			t.Fatalf("mint %d: unexpected error %v", i, err)
+		}
+	}
+	if limited == 0 {
+		t.Fatalf("a %d-mint flood from one address was never rate limited", flood)
+	}
+	// The flood must be stopped by its own bucket, not by the shared cap:
+	// if it reached maxPageTokens the operator is locked out again.
+	if minted > int(mintBurst)+1 {
+		t.Errorf("flood minted %d tokens, want at most the %d-token burst", minted, int(mintBurst))
+	}
+	srv.pageTokenMu.Lock()
+	outstanding := len(srv.pageTokens)
+	srv.pageTokenMu.Unlock()
+	if outstanding >= maxPageTokens {
+		t.Errorf("outstanding page tokens = %d; the flood reached the shared cap despite the limiter", outstanding)
+	}
+
+	// The whole point: a different address is unaffected.
+	if _, _, err := srv.mintPageToken("10.2.2.2:5000"); err != nil {
+		t.Fatalf("a second address could not mint during another address's flood: %v", err)
+	}
+
+	// And the condition is diagnosable, naming the address responsible.
+	logged := logBuf.String()
+	if !strings.Contains(logged, "page-token mint rate limit engaged") {
+		t.Errorf("no warn line for the engaged rate limit, got: %s", logged)
+	}
+	if !strings.Contains(logged, "10.1.1.1:5000") {
+		t.Errorf("warn line does not name the flooding address, got: %s", logged)
+	}
+	if strings.Contains(logged, "10.2.2.2") {
+		t.Errorf("the innocent address was reported as rate limited, got: %s", logged)
+	}
+	// One line per episode, not one per refused request.
+	if n := strings.Count(logged, "page-token mint rate limit engaged"); n != 1 {
+		t.Errorf("rate-limit warn logged %d times for one flood, want 1", n)
+	}
+}
+
+// TestPageTokenMintRateLimitOverHTTP checks the same control through the
+// handler an unauthenticated browser actually hits, including the status code
+// split: 429 means "this address is going too fast" (retryable in a second),
+// which is a different operator story from the 503 the shared cap produces.
+func TestPageTokenMintRateLimitOverHTTP(t *testing.T) {
+	srv := newTestWebUIServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	sawLimit := false
+	for i := 0; i < int(mintBurst)*3; i++ {
+		resp, err := http.Get(ts.URL + "/ui")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if resp.Header.Get("Retry-After") == "" {
+				t.Error("429 from /ui carries no Retry-After")
+			}
+			sawLimit = true
+			break
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /ui %d status = %d, want 200 or 429", i, resp.StatusCode)
+		}
+	}
+	if !sawLimit {
+		t.Error("flooding GET /ui never produced a 429")
+	}
+}
+
+// TestMintLimiterStateStaysBounded is the other half of P81.16: a control
+// added to stop a resource-exhaustion DoS must not become one. An attacker
+// varying source addresses creates a limiter entry per address, so the map is
+// swept of idle entries and hard-bounded at maxMintLimiters.
+func TestMintLimiterStateStaysBounded(t *testing.T) {
+	srv, _, _ := newLoggingAuthTestServer(t)
+
+	for i := 0; i < maxMintLimiters*2; i++ {
+		// Errors are expected here — the shared page-token cap is reached
+		// partway through — but the limiter entry is created regardless, which
+		// is exactly the state whose growth is under test.
+		_, _, _ = srv.mintPageToken(fmt.Sprintf("10.%d.%d.%d:1234", i/65536, (i/256)%256, i%256))
+	}
+
+	srv.mintLimitMu.Lock()
+	n := len(srv.mintLimiters)
+	srv.mintLimitMu.Unlock()
+	if n > maxMintLimiters {
+		t.Errorf("limiter map holds %d entries, want at most %d", n, maxMintLimiters)
+	}
+
+	// An idle entry is swept rather than held for the process's lifetime.
+	srv.mintLimitMu.Lock()
+	srv.mintLimiters = map[string]*mintLimiter{
+		"10.9.9.9": {tokens: mintBurst, last: time.Now().Add(-2 * mintLimiterIdleAfter)},
+	}
+	srv.mintLimitMu.Unlock()
+	_, _, _ = srv.mintPageToken("10.8.8.8:1")
+	srv.mintLimitMu.Lock()
+	_, stillThere := srv.mintLimiters["10.9.9.9"]
+	srv.mintLimitMu.Unlock()
+	if stillThere {
+		t.Error("an idle limiter entry survived a later mint; the map must be swept")
+	}
+}
+
+// TestPageTokenCapEngagementIsLogged covers the reporting half of P81.16: if
+// the shared cap does engage — the limiter bounds one address, not a hundred
+// cooperating ones — the operator must be able to find out why the UI stopped
+// loading, instead of reading a bare 503 with nothing in the log.
+func TestPageTokenCapEngagementIsLogged(t *testing.T) {
+	srv, _, logBuf := newLoggingAuthTestServer(t)
+
+	srv.pageTokenMu.Lock()
+	srv.pageTokens = make(map[string]pageTokenEntry, maxPageTokens)
+	for i := range maxPageTokens {
+		srv.pageTokens[strconv.Itoa(i)] = pageTokenEntry{expiry: time.Now().Add(pageTokenTTL), csrf: "x"}
+	}
+	srv.pageTokenMu.Unlock()
+
+	if _, _, err := srv.mintPageToken("192.168.5.5:4444"); !errors.Is(err, errTooManyPageTokens) {
+		t.Fatalf("mint past the cap returned %v, want errTooManyPageTokens", err)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "page-token cap reached") {
+		t.Errorf("no warn line when the cap engaged, got: %s", logged)
+	}
+	if !strings.Contains(logged, "192.168.5.5:4444") {
+		t.Errorf("cap warn does not name the remote address, got: %s", logged)
 	}
 }

@@ -51,8 +51,16 @@ func (s *Server) handleWebUI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web UI not available", http.StatusInternalServerError)
 		return
 	}
-	pageToken, csrf, err := s.mintPageToken()
+	pageToken, csrf, err := s.mintPageToken(r.RemoteAddr)
 	if err != nil {
+		// P81.16: this caller specifically is minting too fast. 429 rather
+		// than the 503 below, because the daemon is fine — this address is
+		// not — and the distinction is what makes the log line actionable.
+		if errors.Is(err, errMintRateLimited) {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "too many page loads from this address; retry shortly", http.StatusTooManyRequests)
+			return
+		}
 		// M3: the cap is a rate bound, so 503 with a Retry-After is the honest
 		// answer — the next load a second later succeeds.
 		if errors.Is(err, errTooManyPageTokens) {

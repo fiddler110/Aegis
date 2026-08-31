@@ -230,7 +230,7 @@ func TestAuthExchangeRejectsMissingOrUnknownToken(t *testing.T) {
 func TestPageTokenSingleUseAndExpiry(t *testing.T) {
 	srv := newTestWebUIServer(t)
 
-	tok, csrf, err := srv.mintPageToken()
+	tok, csrf, err := srv.mintPageToken("127.0.0.1:12345")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestPageTokenSingleUseAndExpiry(t *testing.T) {
 		t.Fatal("expected a replayed token to be rejected")
 	}
 
-	expired, expiredCSRF, err := srv.mintPageToken()
+	expired, expiredCSRF, err := srv.mintPageToken("127.0.0.1:12345")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestPageTokenSingleUseAndExpiry(t *testing.T) {
 		t.Fatal("expected an expired token to be rejected")
 	}
 
-	mismatched, _, err := srv.mintPageToken()
+	mismatched, _, err := srv.mintPageToken("127.0.0.1:12345")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +430,7 @@ func TestMintPageTokenSweepsAndCaps(t *testing.T) {
 
 	// A token nobody exchanges is swept by the next mint once it expires,
 	// rather than living until some later exchange happens to run.
-	stale, staleCSRF, err := srv.mintPageToken()
+	stale, staleCSRF, err := srv.mintPageToken("127.0.0.1:12345")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestMintPageTokenSweepsAndCaps(t *testing.T) {
 	srv.pageTokens[stale] = pageTokenEntry{expiry: time.Now().Add(-time.Second), csrf: staleCSRF}
 	srv.pageTokenMu.Unlock()
 
-	if _, _, err := srv.mintPageToken(); err != nil {
+	if _, _, err := srv.mintPageToken("127.0.0.1:12345"); err != nil {
 		t.Fatal(err)
 	}
 	srv.pageTokenMu.Lock()
@@ -458,7 +458,7 @@ func TestMintPageTokenSweepsAndCaps(t *testing.T) {
 	}
 	srv.pageTokenMu.Unlock()
 
-	if _, _, err := srv.mintPageToken(); !errors.Is(err, errTooManyPageTokens) {
+	if _, _, err := srv.mintPageToken("127.0.0.1:12345"); !errors.Is(err, errTooManyPageTokens) {
 		t.Errorf("mint past the cap returned %v, want errTooManyPageTokens", err)
 	}
 	srv.pageTokenMu.Lock()
