@@ -95,13 +95,14 @@ func ComputeHardenPlan(cfg *Config) HardenPlan {
 		// Likewise passed through unchanged (P39.17): harden does not tune the
 		// stall detector, but the cost block is rewritten wholesale, so a value
 		// absent here would be dropped from the user's file.
-		MaxTurnStallSec: cfg.Cost.MaxTurnStallSec,
-		MaxTokensPerRun: cfg.Cost.MaxTokensPerRun,
-		SessionCapUSD:   cfg.Cost.SessionCapUSD,
-		DailyCapUSD:     cfg.Cost.DailyCapUSD,
-		SessionTokenCap: cfg.Cost.SessionTokenCap,
-		DailyTokenCap:   cfg.Cost.DailyTokenCap,
-		AlertThreshold:  cfg.Cost.AlertThreshold,
+		MaxTurnStallSec:          cfg.Cost.MaxTurnStallSec,
+		MaxTokensPerRun:          cfg.Cost.MaxTokensPerRun,
+		MaxGeneratedTokensPerRun: cfg.Cost.MaxGeneratedTokensPerRun,
+		SessionCapUSD:            cfg.Cost.SessionCapUSD,
+		DailyCapUSD:              cfg.Cost.DailyCapUSD,
+		SessionTokenCap:          cfg.Cost.SessionTokenCap,
+		DailyTokenCap:            cfg.Cost.DailyTokenCap,
+		AlertThreshold:           cfg.Cost.AlertThreshold,
 	}
 	var costChanges []string
 	if tightenable(costPatch.SessionCapUSD, DefaultCloudSessionCapUSD) {

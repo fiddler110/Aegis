@@ -10,9 +10,16 @@ import (
 
 // ProviderPatch holds the provider fields to write into the global config file.
 type ProviderPatch struct {
-	Adapter    string // "anthropic" | "openai" | "ollama"
-	BaseURL    string // empty = omit from YAML
-	Model      string
+	Adapter string // "anthropic" | "openai" | "ollama"
+	BaseURL string // empty = omit from YAML
+	Model   string
+	// SmallModel is provider.small_model: the fast model background calls
+	// (session titles, compaction, output-guard verdicts) route to. Empty omits
+	// the line, which means those calls run on Model itself. Writable here
+	// because it is the other half of the model decision — a /config dialog that
+	// can change the main model but not its companion leaves the guard's own
+	// documented precondition ("set small_model first") unreachable from the UI.
+	SmallModel string
 	MaxTokens  int
 	MaxRetries int   // 0 falls back to 4
 	Think      *bool // nil = "~" (provider default)
@@ -78,6 +85,12 @@ func buildProviderBlock(p ProviderPatch) string {
 		fmt.Fprintf(&b, "  base_url: %q\n", p.BaseURL)
 	}
 	fmt.Fprintf(&b, "  model: %q\n", p.Model)
+	if p.SmallModel != "" {
+		b.WriteString("  # Fast model for background calls: session titles, compaction, and\n")
+		b.WriteString("  # output-guard verdicts. Keeping them off the primary model is what\n")
+		b.WriteString("  # makes output_guard affordable on a local setup.\n")
+		fmt.Fprintf(&b, "  small_model: %q\n", p.SmallModel)
+	}
 	if p.ContextWindow > 0 {
 		b.WriteString("  # Serving context window in tokens (sent to Ollama as num_ctx,\n")
 		b.WriteString("  # overriding the model's Modelfile pin). Sized from the model's\n")
@@ -108,6 +121,71 @@ func buildProviderBlock(p ProviderPatch) string {
 		}
 	}
 	fmt.Fprintf(&b, "  think: %s\n", think)
+	return b.String()
+}
+
+// OutputGuardPatch holds the output_guard: fields to write into a config file.
+//
+// Rubric and Model are carried rather than derived because patchOutputGuard
+// splices in a freshly built block: a key absent from this struct is deleted
+// from the operator's file. A dialog that only toggles Enabled must therefore
+// read the current config and pass the rest back through, which is exactly what
+// CostPatch documents for the same reason.
+type OutputGuardPatch struct {
+	Enabled    bool
+	Mode       string // "llm" (default) or "schema"
+	MaxRetries int
+	Rubric     string // empty = omit, falling back to the built-in generic rubric
+	Model      string // empty = omit; see OutputGuardConfig.Model
+}
+
+// PatchGlobalOutputGuard replaces the output_guard: block in the global config
+// file, preserving all other sections.
+func PatchGlobalOutputGuard(p OutputGuardPatch) error {
+	return patchOutputGuard(GlobalConfigPath(), p)
+}
+
+// PatchProjectOutputGuard is PatchGlobalOutputGuard's project-config counterpart.
+func PatchProjectOutputGuard(p OutputGuardPatch) error {
+	return patchOutputGuard(ProjectConfigPath(), p)
+}
+
+func patchOutputGuard(path string, p OutputGuardPatch) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	block := buildOutputGuardBlock(p)
+	var out []byte
+	if len(existing) == 0 {
+		out = []byte("# Aegis configuration\n\n" + block + "\n")
+	} else {
+		out = spliceSection(existing, "output_guard", block)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+func buildOutputGuardBlock(p OutputGuardPatch) string {
+	if p.Mode == "" {
+		p.Mode = "llm"
+	}
+	var b strings.Builder
+	b.WriteString("output_guard:\n")
+	fmt.Fprintf(&b, "  enabled: %t\n", p.Enabled)
+	fmt.Fprintf(&b, "  mode: %s\n", p.Mode)
+	fmt.Fprintf(&b, "  max_retries: %d\n", p.MaxRetries)
+	if p.Model != "" {
+		fmt.Fprintf(&b, "  model: %q\n", p.Model)
+	}
+	if p.Rubric != "" {
+		b.WriteString("  rubric: |\n")
+		for _, line := range strings.Split(strings.TrimRight(p.Rubric, "\n"), "\n") {
+			fmt.Fprintf(&b, "    %s\n", line)
+		}
+	}
 	return b.String()
 }
 
@@ -490,6 +568,10 @@ type CostPatch struct {
 	// `harden` rewrite — and harden itself carries the value through, so that
 	// only bites callers building a CostPatch by hand.
 	MaxTurnStallSec int
+	// MaxGeneratedTokensPerRun (P59.4) is carried for the same reason as the two
+	// above: a caller rewriting the cost block must not delete the output-token
+	// budget just because it only meant to change budget_usd.
+	MaxGeneratedTokensPerRun int
 }
 
 // PatchProjectCost replaces the cost: block in the project-level
@@ -526,6 +608,7 @@ func buildCostBlock(p CostPatch) string {
 	b.WriteString("cost:\n")
 	fmt.Fprintf(&b, "  budget_usd: %g\n", p.BudgetUSD)
 	fmt.Fprintf(&b, "  max_tokens_per_run: %d\n", p.MaxTokensPerRun)
+	fmt.Fprintf(&b, "  max_generated_tokens_per_run: %d\n", p.MaxGeneratedTokensPerRun)
 	fmt.Fprintf(&b, "  max_wall_clock_per_run: %d\n", p.MaxWallClockPerRunSec)
 	if p.MaxTurnStallSec > 0 {
 		fmt.Fprintf(&b, "  max_turn_stall: %d\n", p.MaxTurnStallSec)
@@ -615,7 +698,37 @@ func PatchGlobalContextWindow(tokens int) error {
 }
 
 // patchContextWindowLine is the pure half of PatchGlobalContextWindow.
+// PatchGlobalVRAMBudget rewrites just the `vram_budget_gb:` line inside the
+// global config's provider block, for the same reason PatchGlobalContextWindow
+// is surgical: a measured budget is exactly the kind of number that needs the
+// comment explaining how it was measured to survive the next write.
+func PatchGlobalVRAMBudget(gib float64) error {
+	path := GlobalConfigPath()
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	out, err := patchProviderScalarLine(existing, "vram_budget_gb", fmt.Sprintf("%g", gib))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
 func patchContextWindowLine(data []byte, tokens int) ([]byte, error) {
+	return patchProviderScalarLine(data, "context_window", fmt.Sprintf("%d", tokens))
+}
+
+// patchProviderScalarLine replaces `  <key>: <value>` inside the provider
+// block, leaving every other byte — comments above the key included —
+// untouched. When the key is absent it is inserted directly after `model:`,
+// which is where both templates put the window and the budget.
+//
+// A commented-out `# <key>:` example is deliberately NOT treated as the key:
+// it is documentation, and rewriting it in place would produce a config whose
+// explanatory comment is also its active setting. The new line goes after
+// `model:` as usual and the example stays where it is.
+func patchProviderScalarLine(data []byte, key, value string) ([]byte, error) {
 	lines := strings.Split(string(data), "\n")
 
 	start, end := -1, len(lines)
@@ -638,11 +751,11 @@ func patchContextWindowLine(data []byte, tokens int) ([]byte, error) {
 		return nil, fmt.Errorf("no provider: block in %s", GlobalConfigPath())
 	}
 
-	newLine := fmt.Sprintf("  context_window: %d", tokens)
+	newLine := "  " + key + ": " + value
 	modelAt := -1
 	for i := start + 1; i < end; i++ {
 		trimmed := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(trimmed, "context_window:") {
+		if strings.HasPrefix(trimmed, key+":") {
 			lines[i] = newLine
 			return []byte(strings.Join(lines, "\n")), nil
 		}

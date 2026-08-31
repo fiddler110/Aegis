@@ -33,6 +33,14 @@ aegis --first-init   # global config with full template
 aegis --init         # project config (.aegis/config.yaml)
 ```
 
+`--first-init` probes the local Ollama first and writes concrete
+`provider.model`, `provider.small_model` and `provider.think` values in place of
+the template's placeholders, printing what it chose and why. `--init` writes the
+project file, whose sections mirror the global template's one-for-one but ship
+entirely commented out — a project override is only worth writing where the repo
+genuinely differs from the machine, and an active key there shadows the global
+config the moment the file is created.
+
 Both abort if the target file already exists. To regenerate an existing config
 from the latest template — e.g. after upgrading Aegis and picking up new
 template sections — add `--overwrite`; the old file is backed up first
@@ -46,6 +54,190 @@ aegis --init --overwrite
 This fully replaces the file, discarding any customizations — use `aegis
 config update` instead if you want to merge in new fields while keeping your
 existing edits (see below).
+
+---
+
+## How a model is chosen
+
+Three places have to answer "which model": `aegis --first-init`, the `/config`
+dialog, and `provider.model: "auto"` at daemon startup. They all go through one
+ranking (`internal/modelpick`), so they cannot disagree about the machine they
+are running on.
+
+Before this existed each of them took the first entry of a list — `GET
+/api/tags` order for two of them, alphabetical for the third. Ollama orders
+`/api/tags` most-recently-modified first, so pulling a 3B for a single
+experiment re-pinned the whole machine to it on the next `--first-init`, with a
+9B sitting untouched beside it.
+
+**The main model** is the largest model, by parameter count, whose weights fit a
+memory ceiling. Size is a coarse proxy for quality, but it is the only signal
+available without running the model — Aegis has two real ones,
+`internal/toolcallprobe` (can this model actually call tools?) and
+`internal/eval` (does it behave?), and both need a live model and minutes of
+wall clock rather than the two-second HTTP call setup can afford.
+
+**The ceiling** is, in order of preference:
+
+1. `provider.vram_budget_gb`, when you have stated one;
+2. 75% of detected total system RAM, as a sanity bound;
+3. no bound, when neither is knowable.
+
+No GPU or VRAM detection is attempted, on any platform, ever — see
+`internal/hwinfo`'s package note and P17.5. The RAM figure is not a claim about
+your card; its job is to stop a 70B being pinned on a 16 GB laptop, not to size
+a context window. `aegis models --fit` does that, exactly, from the model's own
+KV geometry.
+
+**Tool-calling capability is a tiebreak, never a filter.** Ollama reports
+capabilities from the model's manifest, and a model imported from a raw GGUF via
+a custom Modelfile loses the claim while keeping the ability. Filtering on it
+would reject the best model on a machine in favour of a 3B with a more complete
+manifest.
+
+**`provider.small_model`** — the fast model background calls (session titles,
+compaction, output-guard verdicts) route to — is the smallest *non-thinking*,
+preferably tool-capable model that is meaningfully smaller than the main one
+(under ~70% of its parameter count). Nothing is chosen when no such model
+exists: a companion the same size as the primary buys nothing and costs a second
+resident set of weights.
+
+**`provider.think`** follows the main model: Ollama's own `thinking` capability
+where the manifest reports one, otherwise a name/family heuristic covering the
+qwen3, deepseek-r1, QwQ, magistral, gpt-oss and `*-reasoning` families — with
+the non-thinking variants of those same families (`qwen3-coder`,
+`qwen3-*-instruct`) excluded. A wrong guess in either direction is cheap: the
+native adapter latches and silently drops `think` the first time a model 400s on
+it.
+
+Setting `small_model` also flips `output_guard.enabled` on at `--first-init`.
+The template's stated reason the guard ships off is that its extra rubric call
+otherwise runs on the primary model, roughly doubling turn latency on a local
+setup; having a small model to route verdicts to is exactly the condition that
+stops being true.
+
+Everything the ranking decided is printed, with its reason:
+
+```
+Detected Ollama models: llama3.2:3b, aegis-qwen35-9b:16k, ..., nomic-embed-text:latest
+  Main model: aegis-qwen35-9b:32k (9.2B, 6.6 GiB) — the largest of 5 chat-capable models pulled.
+  Memory ceiling: 75% of ~16 GB detected system RAM (no VRAM detection — see internal/hwinfo).
+  provider.think: true — its name/family matches a known reasoning-model family.
+  Small model: llama3.2:3b (3.2B, 1.9 GiB) — the smallest non-thinking, tool-capable model pulled.
+```
+
+Disagree with any of it? Every value is a plain key in the file, and `/config`
+shows the same ranking as a picker you can override.
+
+---
+
+## Sizing the context window to the machine
+
+Three pieces already exist, and together they make `context_window` automatic:
+
+| Piece | What it does |
+|---|---|
+| `internal/ollamainfo/kvfit.go` | Solves the largest window whose KV cache fits a budget beside the model's *measured* weights |
+| `aegis models --fit` | Runs that once, on demand, and can `--write` the answer |
+| `provider.autofit_context: true` | Has the **daemon re-solve it at every start**, for whatever model is configured, on whatever machine it is running on |
+
+So `vram_budget_gb` + `autofit_context: true` is the answer to "size it to this
+device": nothing is pasted, and moving the config to another machine re-solves
+there. The daemon loads the model at a provisional window, measures the weights
+from `/api/ps`, fits, and installs — the window is announced in the log and
+`/status` shows `fit:vram-budget` as its source.
+
+That leaves one stated number, and `aegis models --calibrate` measures it.
+
+### `aegis models --calibrate`
+
+Aegis does **no GPU/VRAM introspection, on any platform** — see `internal/hwinfo`
+and P17.5. Querying nvidia-smi for total VRAM would mean reimplementing Ollama's
+offload heuristic blind, guessing at a decision another process makes.
+
+Calibration measures instead. Ollama publishes the verdict on its own placement:
+`/api/ps` reports `size` and `size_vram`, and the difference is whether the model
+fit. So load the model at a window, read the verdict, and search. When it spills,
+`size_vram` is how many bytes Ollama *did* place — a direct reading of the card.
+
+```bash
+aegis models --calibrate                    # measure and report
+aegis models --calibrate --write            # ...and patch vram_budget_gb
+aegis models --calibrate --fit-model qwen3:32b --headroom-gb 1.0
+```
+
+Each probe is a full model reload, so it takes a few minutes; `--max-probes`
+bounds it. Run it with the machine in the state you normally work in — a
+calibration taken with nothing else on the GPU measures a card you will not have
+once your browser is open. `--headroom-gb` (default 0.5) is the cushion for that.
+
+The result is a lower bound by construction: estimates are only ever refined
+*downward* from an observed spill, because an understated budget costs a smaller
+window while an overstated one costs a model that spills on its first real turn.
+
+### Hybrid attention: why the window used to come out 4x too small
+
+Calibration measures the per-token cache cost rather than computing it, and the
+first live run is what exposed this. On `aegis-qwen35-9b` the measurement came
+back at **33 KiB per token against a predicted 132** — exactly 4x.
+
+The cache size is `caching_layers × kv_heads × (key + value) × bytes`, and the
+first factor used to be the block count. That is right for a conventional
+transformer and wrong for a hybrid one: Qwen3.5 uses linear (state-space)
+attention in three layers out of four, and those hold a fixed-size recurrent
+state rather than a per-token cache. Only every fourth block caches.
+
+Ollama reports the period, as `<arch>.full_attention_interval`. Nothing read it.
+
+```
+qwen35.block_count             = 33
+qwen35.full_attention_interval = 4      # every 4th block uses full attention
+qwen35.nextn_predict_layers    = 1      # counted in block_count, caches nothing
+```
+
+`KVGeometry.KVLayers()` now applies it: `(33 − 1) / 4 = 8` caching layers, which
+predicts 32.00 KiB/token against the 32.66 measured — a 2% shortfall in place of
+a 304% overshoot. The residual is the state-space layers' own constant, which is
+a per-*sequence* cost and is deliberately not modelled.
+
+This was not academic. `aegis models --fit`, `provider.autofit_context` and the
+debate resident-set planner all size windows from this formula, so on such a
+model every one of them reserved four times what was needed:
+
+| | before | after |
+|---|---|---|
+| solo window (14.5 GiB budget) | 70,656 | **262,144** (the model's whole training context) |
+| debate seat, 3 seats co-resident | 29,184 | **37,888** |
+| measured weights | 4.14 GiB | **5.63 GiB** |
+
+Both halves of the system now agree on the same machine: `--fit` solves 262,144
+at 13.63 GiB, and `--calibrate` independently *loaded* that window and watched
+Ollama place 13.80 GiB entirely in VRAM.
+
+`--calibrate` still reports any disagreement above 25%, which is how the next
+architecture with an unread geometry key gets found.
+
+### One model by default, a resident set only for a debate
+
+The single-model case is the default and needs no arrangement. `context_window`
+(or `autofit_context`) sizes the window for *one* model on the card, which is
+what every workload except a debate looks like.
+
+A debate is the exception, and the daemon handles it as one (P69.6/P72.3). When
+one starts it **claims a resident set**: plans seat-sized windows against
+`vram_budget_gb`, loads any seat not already resident, installs those windows
+daemon-wide, and reloads the members whose window moved. When it finishes, the
+solo window is restored and the seats the claim brought in are unloaded — never
+the daily-driver model or `small_model`, which every ordinary turn needs. The
+solo reload is left to the next turn, which stamps `num_ctx` and gets it free.
+
+**This whole cycle is gated on `vram_budget_gb`.** With it unset the claim is a
+no-op, and the only way to keep a debate's seats co-resident is to pin a small
+`context_window` by hand — which then caps every solo session too. If you have a
+hand-pinned window whose comment mentions co-residency, that is what it is doing,
+and setting a budget is what retires it.
+
+`aegis models --fit-debate` shows the plan without spending a debate to find out.
 
 ---
 
@@ -96,7 +288,8 @@ provider:
   # Use "openai" for ALL local LLMs and OpenAI-compatible cloud providers.
   default: openai
 
-  # Model ID. "auto" or "" picks the first available Ollama model at startup.
+  # Model ID. "auto" or "" ranks what the local Ollama has pulled and takes the
+  # best fit at startup (see "How a model is chosen" below).
   # Set any explicit ID: "llama3.2", "claude-opus-4-8", "gpt-4o", etc.
   model: "auto"
 
@@ -1512,6 +1705,17 @@ mcp_server:
   # argument, but only one at or *below* this value: an MCP client is a program
   # holding a token read from a file, not the local user, so it cannot escalate
   # itself past what you configured here. An attempt to is clamped and logged.
+  #
+  # It is also a ceiling on a session the caller *borrows* (P80.1).
+  # aegis_list_sessions shows every session on the daemon, including one a
+  # human started in the TUI, and aegis_prompt takes a session_id — so without
+  # this the clamp was bypassable by reuse: post into an existing auto-mode
+  # session and inherit its mode, persona and workdir. Prompting into a
+  # session this server did not create and whose mode exceeds default_mode is
+  # refused (not silently downgraded — the session is someone else's). One at
+  # or below it is untouched, so an editor resuming its own session across an
+  # mcp-serve restart keeps working. `aegis acp` applies the same ceiling
+  # using its own --mode.
   default_mode: plan
   # Restores the pre-clamp behavior, where a caller's `mode` argument won
   # outright. Off by default. Leaving it off is what makes default_mode and

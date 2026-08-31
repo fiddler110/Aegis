@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/hwinfo"
+	"github.com/fiddler110/aegis/internal/modelpick"
 	"github.com/fiddler110/aegis/internal/ollamainfo"
 )
 
@@ -75,9 +77,10 @@ func ensureOllamaRunning(cfg *config.Config) (stop func(), err error) {
 }
 
 // resolveOllamaModel resolves the sentinel values "auto" and "" in
-// cfg.Provider.Model to the first model available on the Ollama instance,
-// mutating cfg.Provider.Model in place. Does nothing when the provider is not
-// Ollama or the model name is already set to a non-sentinel value.
+// cfg.Provider.Model to the best model available on the Ollama instance —
+// modelpick.Select's ranking, not an arbitrary listing order — mutating
+// cfg.Provider.Model in place. Does nothing when the provider is not Ollama or
+// the model name is already set to a non-sentinel value.
 func resolveOllamaModel(cfg *config.Config) error {
 	base := ollamaNativeBase(cfg)
 	if base == "" {
@@ -93,15 +96,54 @@ func resolveOllamaModel(cfg *config.Config) error {
 	if len(models) == 0 {
 		return fmt.Errorf("model: auto — no models available in Ollama; pull one first: ollama pull <model>")
 	}
-	cfg.Provider.Model = models[0].Name
+	// "auto" used to mean tags[0] — Ollama's most-recently-*modified* model,
+	// which is whatever was pulled or touched last and has nothing to do with
+	// which model this machine should run. It goes through the same ranking
+	// --first-init and the /config wizard use, so all three agree.
+	sel := modelpick.Select(pickModels(models), hwinfo.Detect(), cfg.Provider.VRAMBudgetGB)
+	if sel.Main == "" {
+		return fmt.Errorf("model: auto — no model in Ollama can serve chat completions; pull one first: ollama pull <model>")
+	}
+	cfg.Provider.Model = sel.Main
 	return nil
 }
 
-// ollamaModelInfo is one entry from GET /api/tags.
+// ollamaModelInfo is one entry from GET /api/tags. Details and ModifiedAt are
+// carried because the model ranking (internal/modelpick) needs the parameter
+// count to rank on and the timestamp as its final tiebreak — /api/tags already
+// returns both, so reading them costs nothing beyond the fields.
 type ollamaModelInfo struct {
-	Name         string   `json:"name"`
-	Size         int64    `json:"size"`
-	Capabilities []string `json:"capabilities"`
+	Name         string    `json:"name"`
+	Size         int64     `json:"size"`
+	Capabilities []string  `json:"capabilities"`
+	ModifiedAt   time.Time `json:"modified_at"`
+	Details      struct {
+		Family        string `json:"family"`
+		ParameterSize string `json:"parameter_size"`
+		Quantization  string `json:"quantization_level"`
+	} `json:"details"`
+}
+
+// pick converts to the ranking package's model type.
+func (m ollamaModelInfo) pick() modelpick.Model {
+	return modelpick.Model{
+		Name:          m.Name,
+		Family:        m.Details.Family,
+		ParameterSize: m.Details.ParameterSize,
+		Quantization:  m.Details.Quantization,
+		SizeBytes:     m.Size,
+		Capabilities:  m.Capabilities,
+		ModifiedAt:    m.ModifiedAt,
+	}
+}
+
+// pickModels converts a whole /api/tags listing for ranking.
+func pickModels(models []ollamaModelInfo) []modelpick.Model {
+	out := make([]modelpick.Model, len(models))
+	for i, m := range models {
+		out[i] = m.pick()
+	}
+	return out
 }
 
 // chatCapable reports whether m can serve chat completions — i.e. is not an
@@ -111,22 +153,12 @@ type ollamaModelInfo struct {
 // "smallest model" pick before this check existed. A model that reports no
 // capabilities at all (older Ollama servers) is assumed chat-capable rather
 // than excluded, since absence of the field is not evidence either way.
-func (m ollamaModelInfo) chatCapable() bool {
-	if len(m.Capabilities) == 0 {
-		return true
-	}
-	for _, c := range m.Capabilities {
-		if c == "completion" {
-			return true
-		}
-	}
-	return false
-}
+func (m ollamaModelInfo) chatCapable() bool { return m.pick().ChatCapable() }
 
 // discoverOllamaModels lists the models currently pulled into an Ollama
-// instance at base, in the order /api/tags reports them (most-recently-
-// pulled/used first, per Ollama's own convention — the same order
-// resolveOllamaModel treats "first" as "auto"'s pick).
+// instance at base, in whatever order /api/tags reports them. That order is
+// most-recently-modified first and carries no quality signal, so every caller
+// ranks the result through internal/modelpick rather than taking the head.
 func discoverOllamaModels(base string, timeout time.Duration) ([]ollamaModelInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

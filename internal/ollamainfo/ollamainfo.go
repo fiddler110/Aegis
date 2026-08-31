@@ -335,6 +335,15 @@ type LocalModel struct {
 	ParameterSize string // e.g. "9.2B"
 	Quantization  string // e.g. "Q4_K_M"
 	SizeBytes     int64  // on-disk size, /api/tags' figure — see kvfit.go's note on why this overstates resident weights for a multimodal model
+	// Capabilities is the manifest's own list, e.g. ["completion","tools",
+	// "thinking","vision"]. Carried rather than reduced to a bool because
+	// internal/modelpick ranks on several of them, and because a model imported
+	// from a raw GGUF reports a shorter list than its weights deserve — a
+	// distinction that is only visible if the whole list survives.
+	Capabilities []string
+	// ModifiedAt is /api/tags' timestamp, used as the model ranking's final
+	// tiebreak so a re-run on an unchanged machine picks the same model.
+	ModifiedAt time.Time
 }
 
 // ListLocal fetches every locally-pulled model from GET /api/tags with the
@@ -359,9 +368,10 @@ func ListLocal(ctx context.Context, nativeBase string) ([]LocalModel, bool) {
 	}
 	var out struct {
 		Models []struct {
-			Name         string   `json:"name"`
-			Size         int64    `json:"size"`
-			Capabilities []string `json:"capabilities"`
+			Name         string    `json:"name"`
+			Size         int64     `json:"size"`
+			Capabilities []string  `json:"capabilities"`
+			ModifiedAt   time.Time `json:"modified_at"`
 			Details      struct {
 				Family        string `json:"family"`
 				ParameterSize string `json:"parameter_size"`
@@ -390,6 +400,8 @@ func ListLocal(ctx context.Context, nativeBase string) ([]LocalModel, bool) {
 			ParameterSize: m.Details.ParameterSize,
 			Quantization:  m.Details.Quantization,
 			SizeBytes:     m.Size,
+			Capabilities:  m.Capabilities,
+			ModifiedAt:    m.ModifiedAt,
 		})
 	}
 	return models, true

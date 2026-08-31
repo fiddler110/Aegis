@@ -438,15 +438,16 @@ func costConfigResponse(scope string, p config.CostPatch) api.ConfigCostResponse
 func (s *Server) handleGetConfigCost(w http.ResponseWriter, r *http.Request) {
 	getConfigSection(w, r, s, func(scope string, cfg *config.Config) api.ConfigCostResponse {
 		return costConfigResponse(scope, config.CostPatch{
-			BudgetUSD:             cfg.Cost.BudgetUSD,
-			MaxTokensPerRun:       cfg.Cost.MaxTokensPerRun,
-			MaxWallClockPerRunSec: cfg.Cost.MaxWallClockPerRunSec,
-			MaxTurnStallSec:       cfg.Cost.MaxTurnStallSec,
-			SessionCapUSD:         cfg.Cost.SessionCapUSD,
-			DailyCapUSD:           cfg.Cost.DailyCapUSD,
-			SessionTokenCap:       cfg.Cost.SessionTokenCap,
-			DailyTokenCap:         cfg.Cost.DailyTokenCap,
-			AlertThreshold:        cfg.Cost.AlertThreshold,
+			BudgetUSD:                cfg.Cost.BudgetUSD,
+			MaxTokensPerRun:          cfg.Cost.MaxTokensPerRun,
+			MaxGeneratedTokensPerRun: cfg.Cost.MaxGeneratedTokensPerRun,
+			MaxWallClockPerRunSec:    cfg.Cost.MaxWallClockPerRunSec,
+			MaxTurnStallSec:          cfg.Cost.MaxTurnStallSec,
+			SessionCapUSD:            cfg.Cost.SessionCapUSD,
+			DailyCapUSD:              cfg.Cost.DailyCapUSD,
+			SessionTokenCap:          cfg.Cost.SessionTokenCap,
+			DailyTokenCap:            cfg.Cost.DailyTokenCap,
+			AlertThreshold:           cfg.Cost.AlertThreshold,
 		})
 	})
 }
@@ -460,15 +461,16 @@ func (s *Server) handlePatchConfigCost(w http.ResponseWriter, r *http.Request) {
 				return config.CostPatch{}, err
 			}
 			patch := config.CostPatch{
-				BudgetUSD:             cfg.Cost.BudgetUSD,
-				MaxTokensPerRun:       cfg.Cost.MaxTokensPerRun,
-				MaxWallClockPerRunSec: cfg.Cost.MaxWallClockPerRunSec,
-				MaxTurnStallSec:       cfg.Cost.MaxTurnStallSec,
-				SessionCapUSD:         cfg.Cost.SessionCapUSD,
-				DailyCapUSD:           cfg.Cost.DailyCapUSD,
-				SessionTokenCap:       cfg.Cost.SessionTokenCap,
-				DailyTokenCap:         cfg.Cost.DailyTokenCap,
-				AlertThreshold:        cfg.Cost.AlertThreshold,
+				BudgetUSD:                cfg.Cost.BudgetUSD,
+				MaxTokensPerRun:          cfg.Cost.MaxTokensPerRun,
+				MaxGeneratedTokensPerRun: cfg.Cost.MaxGeneratedTokensPerRun,
+				MaxWallClockPerRunSec:    cfg.Cost.MaxWallClockPerRunSec,
+				MaxTurnStallSec:          cfg.Cost.MaxTurnStallSec,
+				SessionCapUSD:            cfg.Cost.SessionCapUSD,
+				DailyCapUSD:              cfg.Cost.DailyCapUSD,
+				SessionTokenCap:          cfg.Cost.SessionTokenCap,
+				DailyTokenCap:            cfg.Cost.DailyTokenCap,
+				AlertThreshold:           cfg.Cost.AlertThreshold,
 			}
 			if req.BudgetUSD != nil {
 				patch.BudgetUSD = *req.BudgetUSD

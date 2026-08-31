@@ -31,18 +31,37 @@ func gib(f float64) int64 { return int64(f * float64(int64(1)<<30)) }
 // 6.01 GiB resident; the formula predicts 2.01 GiB of KV against 4.00 GiB of
 // weights. If BytesPerToken ever stops returning 132 KiB/token for this shape,
 // every fitted window on a qwen35 model moves with it.
+// This test used to assert 132 KiB per token for qwen35 and pass, under a name
+// claiming it matched a measurement. It never measured anything: it built the
+// geometry by hand *without* full_attention_interval, so it asserted the formula
+// against itself and pinned the P83 defect in place for as long as it shipped.
+//
+// It now uses the model_info Ollama really returns, and the number it checks is
+// the one `aegis models --calibrate` really measured.
 func TestBytesPerTokenMatchesTheMeasuredQwen35(t *testing.T) {
-	g := KVGeometry{BlockCount: 33, HeadCountKV: 4, KeyLength: 256, ValueLength: 256, ContextMax: 262144}
+	g := geometryFromModelInfo(modelInfo(t, qwen35RealModelInfo()))
 	got, ok := g.BytesPerToken(KVTypeF16)
 	if !ok {
 		t.Fatal("BytesPerToken not ok for a complete geometry")
 	}
+	if want := int64(32768); got != want {
+		t.Errorf("bytes/token = %d, want %d (32 KiB, 8 caching layers of 33 blocks)", got, want)
+	}
+	// Measured on a loaded aegis-qwen35-9b: 0.50 GiB of cache at 16000 tokens,
+	// where the block-count formula claimed 2.01.
+	kv, _ := KVBytes(g, 16000, KVTypeF16)
+	if gib := float64(kv) / (1 << 30); gib < 0.48 || gib > 0.52 {
+		t.Errorf("KV at 16000 = %.2f GiB, want ~0.50", gib)
+	}
+}
+
+// The raw arithmetic, on a geometry that really does cache in every block —
+// what the test above was actually exercising all along.
+func TestBytesPerTokenOnAConventionalStack(t *testing.T) {
+	g := KVGeometry{BlockCount: 33, HeadCountKV: 4, KeyLength: 256, ValueLength: 256, ContextMax: 262144}
+	got, _ := g.BytesPerToken(KVTypeF16)
 	if want := int64(135168); got != want {
 		t.Errorf("bytes/token = %d, want %d (132 KiB)", got, want)
-	}
-	kv, _ := KVBytes(g, 16000, KVTypeF16)
-	if gib := float64(kv) / (1 << 30); gib < 2.00 || gib > 2.02 {
-		t.Errorf("KV at 16000 = %.2f GiB, want ~2.01", gib)
 	}
 }
 
@@ -315,4 +334,155 @@ func TestFullyOnGPUIsTheEmpiricalFitCheck(t *testing.T) {
 	if (Footprint{}).FullyOnGPU() {
 		t.Error("an empty footprint must not report FullyOnGPU")
 	}
+}
+
+// ── Hybrid attention (P83) ───────────────────────────────────────────────────
+
+// qwen35RealModelInfo is the model_info map GET /api/show actually returned for
+// aegis-qwen35-9b, trimmed to the keys this package reads. The two that matter
+// were present all along and unread: full_attention_interval and
+// nextn_predict_layers.
+func qwen35RealModelInfo() map[string]any {
+	return map[string]any{
+		"general.architecture":           "qwen35",
+		"qwen35.block_count":             33,
+		"qwen35.context_length":          262144,
+		"qwen35.attention.head_count":    16,
+		"qwen35.attention.head_count_kv": 4,
+		"qwen35.attention.key_length":    256,
+		"qwen35.attention.value_length":  256,
+		"qwen35.full_attention_interval": 4,
+		"qwen35.nextn_predict_layers":    1,
+		"qwen35.ssm.state_size":          128,
+		"qwen35.ssm.conv_kernel":         4,
+	}
+}
+
+// The headline regression. Counting every block predicted 132 KiB per token
+// where `aegis models --calibrate` measures 32.66 — a 4x over-reservation that
+// made --fit, autofit_context and the resident-set planner each serve a quarter
+// of the window the card could hold.
+func TestHybridAttentionKVIsAQuarterOfTheBlockCount(t *testing.T) {
+	g := geometryFromModelInfo(modelInfo(t, qwen35RealModelInfo()))
+
+	if g.FullAttentionInterval != 4 {
+		t.Fatalf("FullAttentionInterval = %d, want 4 — the key is present in /api/show", g.FullAttentionInterval)
+	}
+	if g.NextNPredictLayers != 1 {
+		t.Errorf("NextNPredictLayers = %d, want 1", g.NextNPredictLayers)
+	}
+	if g.BlockCount != 33 {
+		t.Errorf("BlockCount = %d, want the raw 33 — KVLayers does the narrowing", g.BlockCount)
+	}
+	if got := g.KVLayers(); got != 8 {
+		t.Errorf("KVLayers = %d, want 8: (33 blocks - 1 MTP) / 4", got)
+	}
+	if !g.Hybrid() {
+		t.Error("Hybrid() = false for a stack that caches in 8 of 33 blocks")
+	}
+
+	per, ok := g.BytesPerToken(KVTypeF16)
+	if !ok {
+		t.Fatal("BytesPerToken not computable from a complete geometry")
+	}
+	if per != 32*1024 {
+		t.Errorf("BytesPerToken = %d (%.2f KiB), want 32768 (32 KiB)", per, float64(per)/1024)
+	}
+	// The old formula, for contrast — this is what shipped. 33 blocks against 8
+	// caching layers is 4.125x, not 4x: the MTP block is counted in block_count
+	// and caches nothing.
+	oldWay := int64(g.BlockCount) * 4 * 512 * 2
+	if ratio := float64(oldWay) / float64(per); ratio < 4.0 || ratio > 4.2 {
+		t.Errorf("counting every block gives %d against the %d now computed — %.3fx, want ~4.125x",
+			oldWay, per, ratio)
+	}
+}
+
+// Against the measurement rather than against arithmetic: 32.66 KiB per token,
+// least-squares over seven probe windows on the machine this was found on. The
+// prediction must land close, and the direction of any error must be visible.
+func TestHybridPredictionMatchesTheMeasurement(t *testing.T) {
+	g := geometryFromModelInfo(modelInfo(t, qwen35RealModelInfo()))
+	per, _ := g.BytesPerToken(KVTypeF16)
+
+	const measured = 33448.0 // bytes/token, `aegis models --calibrate`, 2026-08-31
+	off := (float64(per) - measured) / measured
+	if off > 0.05 || off < -0.05 {
+		t.Errorf("predicted %.2f KiB/token against %.2f measured (%.1f%% off)",
+			float64(per)/1024, measured/1024, off*100)
+	}
+	// Documented shortfall: the state-space layers hold a constant per-sequence
+	// state this deliberately does not model. If that ever flips to an
+	// overshoot, the reserve is no longer conservative and the note above
+	// KVLayers is wrong.
+	if float64(per) > measured {
+		t.Errorf("prediction %.0f now exceeds the measured %.0f; KVLayers' doc comment says it under-reserves slightly", float64(per), measured)
+	}
+}
+
+// A conventional stack reports no interval, and nothing about it may change —
+// every model that was sized correctly before must still be.
+func TestConventionalModelIsUnaffectedByTheHybridFix(t *testing.T) {
+	g := geometryFromModelInfo(modelInfo(t, map[string]any{
+		"general.architecture":          "llama",
+		"llama.block_count":             32,
+		"llama.context_length":          131072,
+		"llama.attention.head_count":    32,
+		"llama.attention.head_count_kv": 8,
+		"llama.attention.key_length":    128,
+		"llama.attention.value_length":  128,
+	}))
+	if g.KVLayers() != g.BlockCount {
+		t.Errorf("KVLayers = %d for a conventional stack of %d blocks", g.KVLayers(), g.BlockCount)
+	}
+	if g.Hybrid() {
+		t.Error("Hybrid() = true for a model reporting no full_attention_interval")
+	}
+	per, _ := g.BytesPerToken(KVTypeF16)
+	want := int64(32) * 8 * (128 + 128) * 2
+	if per != want {
+		t.Errorf("BytesPerToken = %d, want the unchanged %d", per, want)
+	}
+}
+
+// full_attention_interval: 1 means every block caches — the same as absent, and
+// it must not divide anything away.
+func TestFullAttentionIntervalOfOneCachesEveryBlock(t *testing.T) {
+	g := KVGeometry{BlockCount: 24, HeadCountKV: 8, KeyLength: 128, ValueLength: 128, FullAttentionInterval: 1}
+	if g.KVLayers() != 24 {
+		t.Errorf("KVLayers = %d, want 24", g.KVLayers())
+	}
+}
+
+// An interval wider than the stack still leaves one caching layer. Returning 0
+// would make the cache free and the fitted window unbounded.
+func TestIntervalWiderThanTheStackStillCaches(t *testing.T) {
+	g := KVGeometry{BlockCount: 4, HeadCountKV: 8, KeyLength: 128, ValueLength: 128, FullAttentionInterval: 64}
+	if got := g.KVLayers(); got != 1 {
+		t.Errorf("KVLayers = %d, want 1 — a free KV cache would make Fit unbounded", got)
+	}
+	per, ok := g.BytesPerToken(KVTypeF16)
+	if !ok || per <= 0 {
+		t.Errorf("BytesPerToken = %d, ok=%v; must stay positive", per, ok)
+	}
+}
+
+// The fix has to reach the thing it exists for: a fitted window.
+func TestHybridFixQuadruplesTheFittedWindow(t *testing.T) {
+	g := geometryFromModelInfo(modelInfo(t, qwen35RealModelInfo()))
+	gib := func(f float64) int64 { return int64(f * float64(int64(1)<<30)) }
+	budget, weights := gib(14.5), gib(5.55)
+
+	win, ok := Fit(g, budget, weights, KVTypeF16)
+	if !ok {
+		t.Fatal("no window fits a 14.5 GiB budget with 5.55 GiB of weights")
+	}
+	// Same solve with the pre-fix layer count.
+	old := g
+	old.FullAttentionInterval = 0
+	oldWin, _ := Fit(old, budget, weights, KVTypeF16)
+	if win < oldWin*3 {
+		t.Errorf("fitted window %d is not materially larger than the old %d", win, oldWin)
+	}
+	t.Logf("fitted window %d, was %d (%.1fx)", win, oldWin, float64(win)/float64(oldWin))
 }

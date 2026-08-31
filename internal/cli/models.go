@@ -12,6 +12,7 @@ import (
 	"github.com/fiddler110/aegis/internal/discover"
 	"github.com/fiddler110/aegis/internal/hwinfo"
 	"github.com/fiddler110/aegis/internal/modelcatalog"
+	"github.com/fiddler110/aegis/internal/ollamainfo"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +20,7 @@ func newModelsCmd() *cobra.Command {
 	var local bool
 	var recommend bool
 	var fit fitOptions
+	var cal calibrateOptions
 
 	cmd := &cobra.Command{
 		Use:   "models",
@@ -34,10 +36,19 @@ func newModelsCmd() *cobra.Command {
 			// --fit is a calibration run, not a catalog listing: printing the
 			// curated table above a VRAM report would bury the number the
 			// operator asked for.
-			if fit.enabled || fit.debate || len(fit.set) > 0 {
+			if fit.enabled || fit.debate || len(fit.set) > 0 || cal.enabled {
 				cfg, err := config.Load()
 				if err != nil {
 					return err
+				}
+				// --calibrate measures the budget --fit consumes, so it runs
+				// first and alone: printing a fit against the *old* budget under
+				// a freshly measured one is two answers to one question.
+				if cal.enabled {
+					// --calibrate shares --fit-model, --kv-type and --write with
+					// --fit rather than growing three near-duplicate flags.
+					cal.model, cal.kvType, cal.write = fit.model, fit.kvType, fit.write
+					return runCalibrate(cmd.Context(), out, cfg, cal)
 				}
 				return runFit(cmd.Context(), out, cfg, fit)
 			}
@@ -79,7 +90,10 @@ func newModelsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&fit.kvType, "kv-type", "", "KV cache element type for --fit: f16, q8_0 or q4_0 (default: provider.kv_cache_type)")
 	cmd.Flags().StringSliceVar(&fit.set, "fit-set", nil, "plan a whole resident set: comma-separated models that must fit in --budget-gb simultaneously")
 	cmd.Flags().BoolVar(&fit.debate, "fit-debate", false, "plan the configured debate's seat models as one resident set — answers \"will my debate fit\" without spending one")
-	cmd.Flags().BoolVar(&fit.write, "write", false, "with --fit and --budget-gb, patch context_window into the global config")
+	cmd.Flags().BoolVar(&fit.write, "write", false, "with --fit and --budget-gb, patch context_window into the global config; with --calibrate, patch vram_budget_gb")
+	cmd.Flags().BoolVar(&cal.enabled, "calibrate", false, "measure this machine's usable VRAM by loading the model at a ladder of context windows and reading Ollama's own placement verdict; prints a recommended vram_budget_gb")
+	cmd.Flags().Float64Var(&cal.headroomGB, "headroom-gb", defaultCalibrationHeadroomGB, "GiB to leave free below the measured capacity when recommending vram_budget_gb")
+	cmd.Flags().IntVar(&cal.maxProbes, "max-probes", ollamainfo.DefaultCalibrationProbes, "cap the number of model loads --calibrate spends; each is a full reload")
 	return cmd
 }
 

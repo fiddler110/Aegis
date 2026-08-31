@@ -92,8 +92,8 @@ func commandDefs() []commandDef {
 		},
 		{
 			name:         "config",
-			shortDesc:    "Interactive configuration wizard",
-			detailedHelp: "/config\n  Open the interactive configuration wizard to change provider, model, tokens, and think settings.\n  Changes are written to the global config file and take effect on next restart.",
+			shortDesc:    "Interactive configuration menu",
+			detailedHelp: "/config\n  Open the configuration menu. It lists each area — Provider, Models, Generation, Memory & context, Spend & stall limits, Output guard, Host tools — with its current value; drill into one to change it and Esc back out. Nothing is written until \"Save and exit\", and \"Discard and exit\" throws every edit away.\n  On a local Ollama backend the model picker annotates each pulled model with its parameter count, size and capabilities, and marks (★) the pair this machine's ranking recommends; \"Use recommended\" applies main + small model and sets think to match.\n  Changes are written to the global config file and take effect on next restart. Security scanners have their own dialog: /security-config.",
 			handler:      (*SlashDispatcher).cmdConfig,
 		},
 		{

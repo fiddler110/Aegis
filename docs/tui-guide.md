@@ -218,7 +218,7 @@ Type `/` to open the command completion popup and browse available commands.
 
 | Command | Description |
 |---------|-------------|
-| `/config` | Open the interactive configuration wizard (5-step) |
+| `/config` | Open the configuration menu (drill into a section, save once) |
 | `/sandbox [use <target>]` | Show active sandbox backend and detected runtimes, or switch backend |
 | `/notify [off\|bell\|desktop\|both]` | Set the attention-system mode for stream-end/approval-pending/error while unfocused (bell, desktop OSC 9/777 notification, or both — the default); no args shows the current mode; session-only, set `tui.notifications` in config to persist |
 
@@ -292,26 +292,63 @@ Any markdown files in `.aegis/commands/` or the user data `commands/` directory 
 
 ---
 
-## The `/config` Wizard
+## The `/config` Menu
 
-The `/config` command opens a 5-step interactive wizard for changing provider and model settings without editing files or leaving the terminal:
+`/config` opens a settings menu rather than a fixed sequence of questions. Each
+row names an area and its current value, read from the config file on disk;
+select one to change it, `Esc` to come back out. Nothing is written until you
+choose **Save and exit**, and **Discard and exit** throws every edit away.
 
-**Step 1 — Provider**
-Select from: Anthropic, Ollama, OpenAI, LM Studio, Groq, OpenRouter, Custom.
+```
+Aegis configuration
+▶ Provider              Ollama (local) · http://localhost:11434
+  Models                aegis-qwen35-9b:32k · small llama3.2:3b
+  Generation            8192 tokens · retries 3 · think enabled
+  Memory & context      window 32768 · budget 14.5 GiB · autofit on
+  Spend & stall limits  budget unlimited · stall 2100s
+  Output guard          on · llm · 1 retries
+  Host tools            ripgrep installed
+  Save and exit         write the changes above to ~/.config/aegis/config.yaml
+  Discard and exit      leave the config file untouched
+```
 
-**Step 2 — Base URL**
-Pre-filled for local servers. Leave empty for cloud providers using the default endpoint.
+| Section | What it sets |
+|---------|--------------|
+| Provider | Preset (Ollama, LM Studio, Anthropic, OpenAI, OpenRouter, Groq, Custom) and base URL. Changing it re-probes a local backend for models. |
+| Models | `provider.model` and `provider.small_model`. |
+| Generation | `provider.max_tokens`, `max_retries`, `think`. |
+| Memory & context | `provider.vram_budget_gb`, `context_window`, `autofit_context`. Ollama only — every other backend runs where Aegis does not manage residency. |
+| Spend & stall limits | `cost.budget_usd`, `cost.max_turn_stall`. |
+| Output guard | `output_guard.enabled`, `mode`, `max_retries`. |
+| Host tools | ripgrep status, with a guided install where one is available. |
 
-**Step 3 — Model**
-For Ollama and LM Studio: shows discovered models on the running server. For cloud providers: curated list. Manual entry always available.
+On a local Ollama backend the model picker annotates each pulled model with what
+the ranking ranked on — parameter count, on-disk size, whether it advertises
+tool support, whether it reasons — and marks the recommended pick with a ★:
 
-**Step 4 — Max tokens**
-Response token cap.
+```
+▶ Use recommended: aegis-qwen35-9b:32k + llama3.2:3b
+  aegis-qwen35-9b:32k  (9.2B, 6.6G, thinks) ★
+  aegis-qwen35-9b:16k  (9.2B, 6.6G, thinks)
+  phi4-mini-reasoning:3.8b  (3.8B, 2.9G, thinks)
+  llama3.2:3b  (3.2B, 1.9G, tools)
+```
 
-**Step 5 — Thinking mode**
-Auto / Enabled / Disabled. Controls Anthropic extended thinking and the local-model `think` flag (qwen3, deepseek-r1).
+**Use recommended** applies the whole decision in one keystroke: main model,
+small model, and the `think` setting that follows from the main model. See
+[How a model is chosen](configuration.md#how-a-model-is-chosen) for what the ★
+is ranked on.
 
-Changes are written to the global `config.yaml` and take effect on the next Aegis restart.
+Two things the menu tells you that the old wizard did not. The Generation
+section says whether the *selected* model looks like a reasoning model, instead
+of asking about extended thinking in the abstract. And the Output guard section
+names its cost — one extra model call per answer, and where that call runs: on
+your small model, or, with none set, on the primary model at roughly double the
+turn latency.
+
+Sections you never open are not rewritten, so saving a model change leaves your
+hand-annotated `cost:` block exactly as it was. Changes take effect on the next
+Aegis restart. Security scanners have their own dialog: `/security-config`.
 
 ---
 

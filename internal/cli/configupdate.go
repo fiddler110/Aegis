@@ -19,7 +19,7 @@ import (
 // below (for `aegis config update` against a config file created by an
 // older version), so the two paths never drift apart. The project
 // template's own copy is illustrative-only static text (see
-// projectConfigTemplateRaw) since it lives inside an already-commented
+// projectConfigTemplate) since it lives inside an already-commented
 // example block there, not a live section — it isn't wired through this
 // shared const.
 //

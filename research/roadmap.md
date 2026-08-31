@@ -450,6 +450,86 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
+**Updated 2026-08-31 (fifth entry the same day)**: **P83 — the KV-cache formula was 4x wrong on
+hybrid-attention models, and nothing in the tree could see it.** Found by building
+`aegis models --calibrate`, which measures `provider.vram_budget_gb` instead of asking for it: it
+loads the model at a ladder of windows and reads Ollama's own placement verdict, so the binding
+constraint is discovered rather than predicted. P17.5 is untouched — no GPU introspection, and the
+authority consulted is the process actually doing the placing.
+
+The first live run reported a **38 GiB capacity for a 16 GB card**, which is how the real defect
+surfaced. `KVGeometry.BytesPerToken` computed `block_count x kv_heads x (k+v) x bytes`, and the first
+factor is not the block count. Qwen3.5 uses state-space attention in three layers of four, which hold
+a fixed per-sequence state and no per-token cache. Ollama has been reporting the period the whole
+time — `qwen35.full_attention_interval = 4` — and nothing read it. `KVLayers()` now does:
+`(33 blocks - 1 MTP block) / 4 = 8`, predicting 32.00 KiB/token against 32.66 measured, in place of
+132.
+
+The blast radius was every consumer of that formula. Measured on the reporting machine:
+
+| | before | after |
+|---|---|---|
+| solo window at a 14.5 GiB budget | 70,656 | **262,144** (the model's entire training context) |
+| debate seat, three seats co-resident | 29,184 | **37,888** |
+| derived model weights | 4.14 GiB | **5.63 GiB** |
+
+That last row is why this survived so long. `WeightsBytes` derives weights as `size - KV(window)`, so
+an inflated KV term deflated the weights by the same amount and the *total* stayed plausible. Two
+compensating errors, and the one test that would have caught them — `TestBytesPerTokenMatchesThe
+MeasuredQwen35` — built its geometry by hand without `full_attention_interval` and asserted the
+formula against itself, under a name claiming it matched a measurement. It has been rewritten against
+the model_info Ollama really returns. The corrected weights now agree with `--calibrate`'s
+independently-fitted intercept (5.617 GiB) to 0.2%; the old figure was 27% low.
+
+Also settled here: **the single-model default the operator asked for already existed** and was inert.
+`claimResidentSet` (P69.6/P72.3) plans seat windows for a debate's duration, restores the solo window
+on release and unloads only the seats it brought in — but the whole cycle is gated on
+`vram_budget_gb`, which was unset. So the static `context_window: 16000` pin was the only thing
+holding the debate topology together, and it was capping every solo session to do it. The pin's own
+comment was half right in an instructive way: its *measured* figure (11.06 GiB at 16k) was correct,
+while its projection ("at 64000 the 9B's KV alone is ~8 GiB") came from the broken formula. Measured,
+the 9B at 65536 is 7.61 GiB resident in total.
+
+**Updated 2026-08-31 (fourth entry the same day)**: **P82 — first-run model selection and the
+`/config` menu — is worked and shipped**, filed from an operator report rather than from the threat
+model. The report was three symptoms: `--first-init` picked the smallest model on the machine,
+`think` stayed `false` under a qwen, and `small_model` went unset. All three were one defect. *Three*
+places answered "which model" and none of them ranked anything: `--first-init` and
+`provider.model: "auto"` took `GET /api/tags`' first entry — Ollama orders that **most-recently-
+modified**, so pulling a 3B for one experiment re-pinned the machine to it — and the `/config` wizard
+took `discover.Discover`'s first entry, which is alphabetical. `internal/modelpick` is now the single
+answer all three use.
+
+One measurement changed the design mid-flight and is the reason this entry exists rather than a
+one-line fix. Querying the reporting machine's own Ollama showed `aegis-qwen35-9b` — the model the
+operator wanted chosen — advertising `capabilities: ["completion","vision"]` with **no `tools`**,
+while the 3B it lost to advertises them. A model imported from a raw GGUF via a custom Modelfile
+loses the manifest claim and keeps the ability. So tool capability is a **tiebreak, never a filter**:
+ranking on it would have rejected the best model on the machine in favour of the one with the more
+complete manifest, which is precisely the bug being fixed, arrived at from the other direction.
+
+The memory ceiling holds the P17.5 line: `provider.vram_budget_gb` when stated, 75% of detected
+system RAM as a sanity bound otherwise, and **no GPU/VRAM introspection on any platform, ever**. The
+RAM figure is not a claim about the card — its only job is to stop a 70B being pinned on a 16 GB
+laptop. Sizing a window remains `internal/ollamainfo/kvfit.go`'s exact arithmetic.
+
+`think` now reads Ollama's own `thinking` capability where the manifest reports one, and falls back
+to a name/family heuristic that finally covers the qwen3 family (the old list — `thinking`, `-deep`,
+`deepseek`, `-r1`, `qwq`, `o1-`, `o3-` — contained neither `qwen3` nor `reasoning`), with the
+non-thinking variants of those same families excluded so `qwen3-coder` is not flipped on. `aegis
+doctor` and `--first-init` now share that one list rather than keeping two that disagreed.
+
+`/config` became a raspi-config-style menu in the same pass, because the linear wizard was the
+*other* half of the same complaint: it walked all five questions every time, started from an empty
+form rather than the file on disk (so pressing enter through re-wrote hand-tuned settings), and had
+no way to reach `small_model` at all — leaving the output guard's own documented precondition
+unreachable from the UI that offers the guard. Each section now shows its current value, is entered
+and left independently, and nothing is written until save; a section never opened is not rewritten,
+so changing a model no longer reflows an annotated `cost:` block. `--init`'s project template was
+realigned to mirror the global template section-for-section, commented throughout, with the three
+keys a project scope cannot set (`server.addr`, `log_level`, `security.dast.allowed_targets`)
+absent and *explained* rather than silently missing.
+
 **Updated 2026-08-31 (third entry the same day)**: **P76.2, P76.3 and P80.1 — the three items that
 had sat at the top of this table since 23 and 30 August — are worked and off it.** Two of the three
 turned out to be part-built already, which is the same pattern the P81 first wave found hours earlier

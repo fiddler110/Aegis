@@ -5,11 +5,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/hwinfo"
+	"github.com/fiddler110/aegis/internal/modelpick"
 )
 
 // runFirstInit writes the global config template to the user's OS config
@@ -29,30 +30,36 @@ func runFirstInit(overwrite bool) error {
 	return writeConfigTemplate(path, template, "global", overwrite)
 }
 
+// statedVRAMBudget reads provider.vram_budget_gb out of the config that already
+// exists, or 0 when there is none (the true first run) or it cannot be read.
+//
+// A re-run of --first-init --overwrite is the case this exists for. The budget
+// is the operator's own answer to the question the model ranking is about to
+// guess at, so ignoring it would mean the regenerated file ranks against a
+// share of system RAM while the daemon plans residency against 14.5 GiB — two
+// numbers for one machine. Worse, --overwrite rewrites from the template, so a
+// budget that is not carried forward is *deleted by the run that should have
+// used it*.
+//
+// Deliberately narrow: this is not --overwrite quietly becoming an `aegis
+// config update`. Only the keys the ranking itself consumes are carried, and every
+// other customization is still discarded, still diffed, and still backed up.
+func statedVRAMBudget() (budget float64, autofit bool) {
+	cfg, err := config.Load()
+	if err != nil || cfg == nil {
+		return 0, false
+	}
+	return cfg.Provider.VRAMBudgetGB, cfg.Provider.AutofitContext
+}
+
 // applyOllamaTemplateDefaults probes http://localhost:11434 for pulled models
 // and, if any are found, rewrites the template so a fresh install lands
 // configured for what is actually on the machine instead of generic
-// placeholders the operator has to come back and fill in:
+// placeholders the operator has to come back and fill in.
 //
-//   - provider.model is pinned to the most-recently-used pulled model instead
-//     of "auto".
-//   - provider.small_model is uncommented with the smallest *other* pulled
-//     model, when a second one is present.
-//   - provider.think flips to true when the chosen main model's name looks
-//     like a reasoning/thinking model (looksLikeThinkingModel, the same
-//     heuristic `aegis doctor` already warns from) — a wrong guess in either
-//     direction costs nothing: the native adapter already latches and
-//     silently drops `think` the first time a model 400s on it (P52.5).
-//   - output_guard.enabled flips to true, but *only* when small_model was
-//     also detected: the template's own documented reason it ships off is
-//     that the guard's extra rubric call runs on the primary model without
-//     one, roughly doubling turn latency for a local (often slow or
-//     thinking-style) model. Detecting small_model is exactly the condition
-//     that reasoning no longer applies, so a two-model machine gets response
-//     validation for free instead of a step the operator has to remember and
-//     come back for.
-//
-// Returns the template unchanged if Ollama isn't reachable or has no models.
+// Returns the template unchanged if Ollama isn't reachable or has no models:
+// the template's existing "auto" defaults are already the correct fallback,
+// and a network hiccup is not an error here.
 func applyOllamaTemplateDefaults(template string) string {
 	all, err := discoverOllamaModels("http://localhost:11434", 2*time.Second)
 	if err != nil || len(all) == 0 {
@@ -61,44 +68,73 @@ func applyOllamaTemplateDefaults(template string) string {
 	return applyDiscoveredModelDefaults(template, all)
 }
 
-// applyDiscoveredModelDefaults is applyOllamaTemplateDefaults's pure half —
-// no network, no stdout — split out so the substitution rules themselves
-// (model/small_model/think/output_guard) are unit-testable against a
-// synthetic model list instead of a live Ollama instance.
+// applyDiscoveredModelDefaults ranks against whatever budget the existing
+// config states; see statedVRAMBudget for why a re-run must not ignore it.
 func applyDiscoveredModelDefaults(template string, all []ollamaModelInfo) string {
-	// Exclude embedding-only models (nomic-embed-text and the like): neither
-	// the main model nor small_model can be one, since both need to serve
-	// chat completions. They stay in the "detected" list printed below, since
-	// that's just reporting what's on the machine.
-	models := chatCapableModels(all)
-	if len(models) == 0 {
-		fmt.Printf("Detected Ollama model%s: %s (none serve chat completions — leaving provider.model: \"auto\")\n",
-			pluralS(len(all)), strings.Join(modelNames(all), ", "))
+	budget, autofit := statedVRAMBudget()
+	return applyModelDefaults(template, all, budget, autofit)
+}
+
+// applyModelDefaults is applyOllamaTemplateDefaults's pure half — no network,
+// no config read — split out so the substitution rules are unit-testable
+// against a synthetic model list instead of a live Ollama instance.
+//
+// The choices themselves belong to internal/modelpick, which ranks the pulled
+// models rather than taking whichever one /api/tags happened to list first (the
+// pre-P82 rule: most-recently-modified, so pulling a 3B for one experiment
+// re-pinned the whole machine to it). What is decided here is only how a
+// Selection becomes YAML:
+//
+//   - provider.model is pinned to Selection.Main instead of "auto".
+//   - provider.small_model is uncommented with Selection.Small, when the
+//     machine has a model meaningfully smaller than the main one.
+//   - provider.think follows Selection.Think — the model's own advertised
+//     "thinking" capability where Ollama reports one, else a name/family
+//     heuristic. A wrong guess in either direction costs nothing: the native
+//     adapter latches and silently drops `think` the first time a model 400s
+//     on it (P52.5).
+//   - output_guard.enabled flips to true, but *only* when small_model was
+//     also set: the template's own documented reason it ships off is that the
+//     guard's extra rubric call runs on the primary model without one, roughly
+//     doubling turn latency for a local (often slow or thinking-style) model.
+//     Setting small_model is exactly the condition that reasoning no longer
+//     applies, so a two-model machine gets response validation for free
+//     instead of a step the operator has to remember and come back for.
+//
+// Every pick is printed with the reason it was made, because an operator who
+// disagrees with the ranking needs to know what it ranked on before they can
+// override it.
+func applyModelDefaults(template string, all []ollamaModelInfo, budgetGB float64, autofit bool) string {
+	// budgetGB is 0 on a true first run — no config exists to have stated one —
+	// and the ceiling then falls back to detected system RAM. See
+	// modelpick.Ceiling for why that is a sanity bound rather than a fit.
+	sel := modelpick.Select(pickModels(all), hwinfo.Detect(), budgetGB)
+	fmt.Printf("Detected Ollama model%s: %s\n", pluralS(len(all)), strings.Join(modelNames(all), ", "))
+	if sel.Main == "" {
+		fmt.Printf("  None serve chat completions — leaving provider.model: \"auto\".\n")
 		return template
 	}
 
-	main := models[0].Name
 	template = strings.Replace(template,
 		`model: "auto"              # "auto" picks the first available Ollama model`,
-		fmt.Sprintf(`model: %q            # detected at "aegis --first-init" time; re-run with`, main)+"\n"+
+		fmt.Sprintf(`model: %q            # detected at "aegis --first-init" time; re-run with`, sel.Main)+"\n"+
 			`                             # --overwrite after pulling new models, or edit by hand.`,
 		1)
 
-	if looksLikeThinkingModel(config.ProviderConfig{Model: main}) {
+	if sel.Think {
 		template = strings.Replace(template,
 			`think: false               # true only for extended-thinking models such as
                              #   qwen3 or deepseek-r1 served via Ollama.`,
-			`think: true                # detected at init time: `+main+` looks like a`+"\n"+
+			`think: true                # detected at init time: `+sel.Main+` looks like a`+"\n"+
 				`                             #   reasoning/thinking model. Set to false if it`+"\n"+
 				`                             #   turns out not to be one, or answers ramble.`,
 			1)
 	}
 
-	guardEnabled := false
-	if small := smallestOtherModel(models, main); small != "" {
+	if sel.Small != "" {
 		template = strings.Replace(template,
 			`  # small_model: "llama3.2"  # Optional fast model for background calls`,
-			fmt.Sprintf("  small_model: %q     # detected at init time: smallest other model pulled", small),
+			fmt.Sprintf("  small_model: %q     # detected at init time: smallest suitable model pulled", sel.Small),
 			1)
 		// The template's own stated precondition for enabling the guard
 		// without a latency penalty — see this function's doc comment — is
@@ -112,24 +148,28 @@ func applyDiscoveredModelDefaults(template string, all []ollamaModelInfo) string
                              # route there instead of doubling latency on the primary model.
                              # /guard off disables per session.`,
 			1)
-		guardEnabled = true
 	}
-	fmt.Printf("Detected Ollama model%s: %s\n", pluralS(len(all)), strings.Join(modelNames(all), ", "))
-	if guardEnabled {
-		fmt.Println("Two or more chat models found — output_guard enabled (verdicts route to the detected small_model).")
-	}
-	return template
-}
 
-// chatCapableModels filters out embedding-only models.
-func chatCapableModels(models []ollamaModelInfo) []ollamaModelInfo {
-	var out []ollamaModelInfo
-	for _, m := range models {
-		if m.chatCapable() {
-			out = append(out, m)
+	if budgetGB > 0 {
+		template = strings.Replace(template,
+			"  # vram_budget_gb: 14.5",
+			fmt.Sprintf("  vram_budget_gb: %g              # carried forward from your existing config", budgetGB),
+			1)
+		if autofit {
+			template = strings.Replace(template,
+				"  # autofit_context: false",
+				"  autofit_context: true      # carried forward from your existing config",
+				1)
 		}
 	}
-	return out
+
+	for _, r := range sel.Reasons {
+		fmt.Printf("  %s\n", r)
+	}
+	if sel.Small != "" {
+		fmt.Println("  output_guard enabled: rubric verdicts route to the small model, not the primary one.")
+	}
+	return template
 }
 
 func pluralS(n int) string {
@@ -145,22 +185,6 @@ func modelNames(models []ollamaModelInfo) []string {
 		names[i] = m.Name
 	}
 	return names
-}
-
-// smallestOtherModel returns the name of the smallest-by-size model in models
-// other than exclude, or "" if models has no second entry.
-func smallestOtherModel(models []ollamaModelInfo, exclude string) string {
-	var others []ollamaModelInfo
-	for _, m := range models {
-		if m.Name != exclude {
-			others = append(others, m)
-		}
-	}
-	if len(others) == 0 {
-		return ""
-	}
-	sort.Slice(others, func(i, j int) bool { return others[i].Size < others[j].Size })
-	return others[0].Name
 }
 
 // runProjectInit writes a project-level override template to .aegis/config.yaml
@@ -330,6 +354,22 @@ provider:
   # — tune to your GPU (e.g. 8192 on a small card, 32768 on 16GB). Unset leaves
   # Ollama's own default (OLLAMA_CONTEXT_LENGTH or the modelfile value).
   # context_window: 32768
+  # vram_budget_gb is how much memory you say the model server may hold across
+  # EVERY concurrently resident model, in GiB. Stated, never detected — Aegis
+  # does no GPU/VRAM introspection on any platform (see internal/hwinfo). It is
+  # also not the card's capacity: subtract the driver reserve and whatever your
+  # desktop already holds, e.g. 14.5 on a 16 GB card.
+  #
+  # Three things read it: "aegis models --fit" sizes context_window against it,
+  # a debate plans its co-resident seats against it, and "aegis --first-init"
+  # ranks which model to pin against it instead of falling back to a share of
+  # system RAM. Stating it here is strictly better than any of them guessing.
+  # vram_budget_gb: 14.5
+  #
+  # autofit_context lets the daemon re-solve context_window from vram_budget_gb
+  # at startup, once the model has actually been loaded and its weights can be
+  # measured. Leave it off to keep a window you tuned by hand.
+  # autofit_context: false
   think: false               # true only for extended-thinking models such as
                              #   qwen3 or deepseek-r1 served via Ollama.
   # small_model: "llama3.2"  # Optional fast model for background calls
@@ -698,38 +738,128 @@ const projectConfigTemplate = `# ═══════════════�
 # THIS PROJECT ONLY. Commit it to share settings with your team — it contains
 # no secrets (API keys always come from environment variables).
 #
-# Precedence: environment variables  >  this file  >  global config
+# Precedence (highest wins):
+#   environment variables  >  this file  >  global config
+#
+# The sections below appear in the same order as the global template, so the
+# two files can be read side by side: every heading here has a counterpart
+# there. The difference is what they contain. The global file states a whole
+# posture with active values; this one ships every key COMMENTED OUT, because
+# a project override is only worth writing when this repo genuinely differs
+# from the machine's defaults. Uncomment a key and it wins for this directory;
+# leave it commented and the global value stands.
+#
+# Three of the global file's sections have no counterpart here, and their
+# absence is deliberate rather than an omission:
+#   · server.addr and log_level are per-machine, not per-repo.
+#   · security.dast.allowed_targets is never project-settable — a cloned repo
+#     must not be able to name its own scan targets (the daemon logs and
+#     ignores it if you try).
+#   · multiscanner:/netscanner: image pins are machine-wide assets; see the
+#     note under Security policies below.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Override the model for this project ──────────────────────────────────────
-# Useful when a project needs a specific capability (e.g. a reasoning model
-# for security analysis, or a fast small model for routine edits).
-# For Ollama, "auto" selects the first available model automatically.
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Provider  ·  model overrides for this project
+# ─────────────────────────────────────────────────────────────────────────────
+# Useful when a project needs a specific capability — a reasoning model for
+# security analysis, a fast small one for routine edits, or a pinned tag so a
+# team gets reproducible behaviour regardless of what each member has pulled.
+#
+# Only the keys you uncomment override; the rest of provider: comes from the
+# global file. "auto" asks Aegis to rank what the local Ollama has pulled and
+# take the best fit (the same ranking "aegis --first-init" uses), rather than
+# whichever model happens to be listed first.
 #
 # provider:
-#   model: "auto"              # Ollama: pick the first available model
-#   # model: "qwen3:32b"       # pin a specific Ollama model
-#   # model: "claude-opus-4-8" # Anthropic example
+#   model: "auto"              # or pin a tag: "qwen3:32b", "claude-opus-4-8"
+#   # small_model: "llama3.2"  # fast model for titles, compaction, guard verdicts
 #   # max_tokens: 32768
+#   # think: ~                 # ~ = provider default; true/false to force
+#   # context_window: 32768    # num_ctx sent to Ollama for this project's runs
 
 
-# ── Tighten the permission posture for sensitive repos ────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Permission & behaviour
+# ─────────────────────────────────────────────────────────────────────────────
+# Tighten the posture for a sensitive repo. A project may only NARROW what the
+# global config allows here — it can move build -> plan, never plan -> build.
 #
 # permission:
-#   mode: plan                 # Read-only: no file writes or shell commands.
-#   auto_approve_exec: false
+#   mode: plan                 # "plan" = read-only: no file writes, no shell
+#                              # "build" = edits allowed; shell needs approval
+#   auto_approve_exec: false   # true = never prompt for shell/execute calls
+#   # rules:                   # allow/deny rules, evaluated before the mode gate
+#   #   - "allow bash(npm test*)"
+#   #   - "deny write(/etc/*)"
+#   #   - "deny shell(rm -rf /*)"
 
 
-# ── Cap spending for this project ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Output validation
+# ─────────────────────────────────────────────────────────────────────────────
+# Worth enabling per-project when this repo's answers are deliverables (reports,
+# threat models) rather than edits. Set provider.small_model above — globally or
+# here — before turning it on, or the extra rubric call runs on the primary
+# model and roughly doubles turn latency on a local setup.
+#
+# output_guard:
+#   enabled: true
+#   mode: llm                  # "llm" (rubric check) or "schema" (required keys)
+#   max_retries: 1
+#   # rubric: |
+#   #   The response must directly and completely address the request and
+#   #   ground every factual claim in tool output.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Per-persona model overrides
+# ─────────────────────────────────────────────────────────────────────────────
+# Same shape as the global file's personas: block; name only the personas this
+# project routes differently. Anything unlisted falls through to the global
+# mapping, and from there to provider.model.
+#
+# personas:
+#   security-architect: { model: "claude-opus-4-8" }
+#   developer:          { model: "" }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Spend guard
+# ─────────────────────────────────────────────────────────────────────────────
+# A project may only TIGHTEN a spend bound, never loosen one (P81.15): a value
+# here that is larger than the global one is ignored and logged.
 #
 # cost:
-#   budget_usd: 2.0            # Abort if estimated cost exceeds $2.00.
+#   budget_usd: 2.0            # abort a run past $2.00 of estimated cost
+#   # max_tokens_per_run: 400000
+#   # max_turn_stall: 2100     # seconds of complete silence before a turn aborts
 
 
-# ── Restrict network access to project-relevant domains ───────────────────────
-#
+# ─────────────────────────────────────────────────────────────────────────────
+#  Multi-agent / swarm
+# ─────────────────────────────────────────────────────────────────────────────
+# swarm:
+#   backend: subprocess        # "in_process" (default) or process-isolated
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Shell execution sandbox
+# ─────────────────────────────────────────────────────────────────────────────
+# sandbox:
+#   backend: container         # container | os | local | auto
+#   # runtime: podman          # force a runtime; empty = auto-detect
+#   # image: ubuntu:22.04
+#   # network: false
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Security policies
+# ─────────────────────────────────────────────────────────────────────────────
 # security:
-#   network_allowlist:
+#   egress_then_write: false   # true = approve any write that follows a fetch
+#   network_allowlist:         # restrict web_fetch / web_search to these hosts
 #     - "github.com"
 #     - "pkg.go.dev"
 #     - "docs.python.org"
@@ -745,7 +875,6 @@ const projectConfigTemplate = `# ═══════════════�
 #     trivy: { enabled: false }      # e.g. disable a noisy scanner for this repo
 #     nmap:  { method: wsl }         # force WSL over a flaky native Windows install
 #   dast:
-#     allowed_targets: []
 #     allow_active: false
 #   debate:
 #     triage: false
@@ -758,10 +887,34 @@ const projectConfigTemplate = `# ═══════════════�
 # machine-wide pin and fails closed the first time the image is rebuilt:
 # "no longer matches the ID recorded in config". Use "build-image --project" only
 # when this repo deliberately runs a different image from the rest of the machine.
-
-
-# ── Project-specific LSP servers ─────────────────────────────────────────────
 #
+# ── security.dast.allowed_targets is deliberately absent ──────────────────────
+# It is never project-settable. A cloned repository must not be able to name the
+# hosts an active scan may be pointed at; set it in the user config or the
+# environment. The daemon logs and ignores it if it appears here.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Skills  (progressive-disclosure instructions; see: aegis skills list)
+# ─────────────────────────────────────────────────────────────────────────────
+# Built-in skills ship dormant in the binary and cost nothing until enabled.
+# Project files in .aegis/skills/ are always active and need no entry here.
+#
+# skills:
+#   builtin_enabled:
+#     - document-codebase
+#     - html-report
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Default persona for this project
+# ─────────────────────────────────────────────────────────────────────────────
+# persona: security-architect
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  LSP servers  (code intelligence — diagnostics, references)
+# ─────────────────────────────────────────────────────────────────────────────
 # lsp:
 #   - name: gopls
 #     command: gopls
@@ -769,8 +922,9 @@ const projectConfigTemplate = `# ═══════════════�
 #     extensions: [".go"]
 
 
-# ── Project-specific MCP servers ─────────────────────────────────────────────
-#
+# ─────────────────────────────────────────────────────────────────────────────
+#  MCP servers  (external tool servers via the Model Context Protocol)
+# ─────────────────────────────────────────────────────────────────────────────
 # mcp:
 #   - name: github
 #     command: npx
@@ -779,8 +933,21 @@ const projectConfigTemplate = `# ═══════════════�
 #       GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_..."
 
 
-# ── Notes ─────────────────────────────────────────────────────────────────────
-# Files you should NOT commit from .aegis/:
+# ─────────────────────────────────────────────────────────────────────────────
+#  Process plugins  (external executables exposed as tools)
+# ─────────────────────────────────────────────────────────────────────────────
+# plugins:
+#   - name: my_tool
+#     description: "Run my custom analysis script"
+#     command: python
+#     args: ["/path/to/script.py"]
+#     capability: execute        # read | write | execute | network
+#     timeout_sec: 30
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Notes  ·  what not to commit from .aegis/
+# ─────────────────────────────────────────────────────────────────────────────
 #   .aegis/sessions.db       — local session history
 #   .aegis/daemon.token      — auth token for the local daemon
 #   .aegis/mcp.token         — auth token for "aegis mcp-serve", auto-generated
@@ -788,6 +955,7 @@ const projectConfigTemplate = `# ═══════════════�
 #   .aegis/acp.token         — auth token for "aegis acp", auto-generated
 #                              when AEGIS_ACP_TOKEN is unset (P27.4)
 #   .aegis/aegis.log         — daemon log
+#   .aegis/.env              — secrets, read only in a TRUSTED workspace
 #   .aegis/builtin-skills/   — built-in skills materialized into this project
 #                              so their reference/skeleton assets are reachable
 #                              by the model's sandboxed file tools; regenerated
@@ -797,5 +965,6 @@ const projectConfigTemplate = `# ═══════════════�
 #   .aegis/sessions.db
 #   .aegis/*.token
 #   .aegis/*.log
+#   .aegis/.env
 #   .aegis/builtin-skills/
 `

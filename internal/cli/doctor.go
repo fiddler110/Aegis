@@ -20,6 +20,7 @@ import (
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/modelcaps"
+	"github.com/fiddler110/aegis/internal/modelpick"
 	"github.com/fiddler110/aegis/internal/ollamainfo"
 	"github.com/fiddler110/aegis/internal/providerfactory"
 	"github.com/fiddler110/aegis/internal/security"
@@ -1064,13 +1065,11 @@ func looksLikeThinkingModel(p config.ProviderConfig) bool {
 	if p.ReasoningEffort != "" {
 		return true
 	}
-	name := strings.ToLower(p.Model)
-	for _, marker := range []string{"thinking", "-deep", "deepseek", "-r1", "qwq", "o1-", "o3-"} {
-		if strings.Contains(name, marker) {
-			return true
-		}
-	}
-	return false
+	// One spelling of the name heuristic, shared with `aegis --first-init` and
+	// the /config wizard (internal/modelpick). Two lists meant doctor warning
+	// about a model init had already decided was not a thinking model, and vice
+	// versa.
+	return modelpick.NameSuggestsThinking(p.Model)
 }
 
 // doctorWorkdirCheck reports the session-workdir-allowlist posture

@@ -14,12 +14,19 @@ package ollamainfo
 // The arithmetic is exact and needs nothing Aegis does not already fetch. A
 // transformer's KV cache is
 //
-//	blocks × kv_heads × (key_length + value_length) × bytes_per_element
+//	caching_layers × kv_heads × (key_length + value_length) × bytes_per_element
 //
-// bytes per token, and all four factors are in the /api/show model_info map
-// this package already parses for context_length. Measured against a loaded
-// qwen35-9b at 16000 tokens the formula predicts 6.00 GiB where Ollama reports
-// 6.01 — the model is not the uncertain part.
+// bytes per token, and every factor is in the /api/show model_info map this
+// package already parses for context_length.
+//
+// The first factor is not the block count, and assuming it was cost a fourfold
+// over-reservation on every hybrid-attention model (P83). A stack that uses
+// linear or state-space attention in three layers of four caches in only the
+// fourth; the others hold a fixed-size recurrent state that does not grow with
+// the context. Ollama reports the period as <arch>.full_attention_interval and
+// nothing read it, so a qwen35-9b was budgeted 132 KiB per token against 33
+// measured — and `--fit`, autofit_context and the resident-set planner all
+// served a quarter of the window the card could hold. See KVLayers.
 //
 // What this file deliberately does NOT do is detect total VRAM. internal/hwinfo
 // rules that out ("no GPU/VRAM detection is attempted, on any platform, ever",
@@ -77,11 +84,29 @@ func (t KVCacheType) bitsX2() (int64, bool) {
 // /api/show's model_info.
 type KVGeometry struct {
 	Arch        string
-	BlockCount  int // transformer layers holding a KV cache
+	BlockCount  int // transformer blocks in total — NOT the number holding a KV cache; see KVLayers
 	HeadCountKV int // grouped-query attention: KV heads, not attention heads
 	KeyLength   int // per-head key dimension
 	ValueLength int // per-head value dimension
 	ContextMax  int // training context length, 0 when unknown
+
+	// FullAttentionInterval is the period of full-attention layers in a hybrid
+	// stack: 4 means every fourth block uses full attention and the other three
+	// use linear/state-space attention, which holds a fixed-size recurrent state
+	// instead of a per-token KV cache. 0 or 1 is a conventional stack where
+	// every block caches.
+	//
+	// P83: leaving this out was a fourfold over-reservation. `blocks × kv_heads
+	// × (k+v)` silently assumes every block caches, and on qwen35 that predicted
+	// 132 KiB per token against 33 KiB measured — so every window `--fit`,
+	// autofit_context and the resident-set planner produced was a quarter of
+	// what the card could serve. Ollama reports the interval; nothing read it.
+	FullAttentionInterval int
+
+	// NextNPredictLayers is the count of multi-token-prediction blocks included
+	// in BlockCount. They are recorded because they inflate the block count
+	// without contributing a full-attention layer at the stack's own interval.
+	NextNPredictLayers int
 
 	// SWAWindow is the sliding-window size when the architecture reports one,
 	// else 0. It is recorded but deliberately NOT applied as a discount — see
@@ -120,9 +145,48 @@ func (g KVGeometry) BytesPerToken(t KVCacheType) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
-	// blocks × kv_heads × (k+v) dims × bits/element ÷ 8 bits per byte,
+	// caching layers × kv_heads × (k+v) dims × bits/element ÷ 8 bits per byte,
 	// with the ×2 from bitsX2 divided back out: ÷16 total.
-	return int64(g.BlockCount) * int64(g.HeadCountKV) * int64(g.KeyLength+g.ValueLength) * bx2 / 16, true
+	return int64(g.KVLayers()) * int64(g.HeadCountKV) * int64(g.KeyLength+g.ValueLength) * bx2 / 16, true
+}
+
+// KVLayers is the number of blocks that actually hold a per-token KV cache.
+//
+// On a conventional stack that is every block. On a hybrid one it is every
+// FullAttentionInterval-th block: the rest use linear or state-space attention,
+// whose recurrent state is a fixed size per sequence and does not grow with the
+// context, so it belongs in the weights rather than in the per-token cost.
+//
+// The multi-token-prediction blocks are excluded before dividing. They are
+// counted in block_count but sit outside the repeating attention pattern, so
+// including them rounds the interval arithmetic up by one layer on a stack whose
+// block count is not a multiple of the interval — qwen35 reports 33 blocks with
+// interval 4, which is 32 real blocks plus 1 MTP block, and 32/4 = 8 exactly.
+//
+// Verified against measurement: 8 layers predicts 32.00 KiB per token where
+// `aegis models --calibrate` measures 32.66 on that model — a 2% shortfall,
+// against the 304% overshoot of counting every block. The residual is the
+// state-space layers' own constant, which this deliberately does not model:
+// it is a per-sequence cost, not a per-token one.
+func (g KVGeometry) KVLayers() int {
+	blocks := g.BlockCount
+	if g.FullAttentionInterval <= 1 {
+		return blocks
+	}
+	if g.NextNPredictLayers > 0 && g.NextNPredictLayers < blocks {
+		blocks -= g.NextNPredictLayers
+	}
+	if n := blocks / g.FullAttentionInterval; n > 0 {
+		return n
+	}
+	// An interval larger than the whole stack still leaves one full-attention
+	// layer; returning 0 here would make the cache free, which it is not.
+	return 1
+}
+
+// Hybrid reports whether this architecture caches in only some of its blocks.
+func (g KVGeometry) Hybrid() bool {
+	return g.FullAttentionInterval > 1 && g.KVLayers() < g.BlockCount
 }
 
 // fitStep is the granularity fitted windows are rounded down to. A window is a
@@ -210,6 +274,8 @@ func geometryFromModelInfo(info map[string]json.RawMessage) KVGeometry {
 	g.BlockCount = key("block_count")
 	g.ContextMax = key("context_length")
 	g.SWAWindow = key("attention.sliding_window")
+	g.FullAttentionInterval = key("full_attention_interval")
+	g.NextNPredictLayers = key("nextn_predict_layers")
 
 	g.HeadCountKV = key("attention.head_count_kv")
 	heads := key("attention.head_count")
