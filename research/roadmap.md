@@ -1,6 +1,21 @@
 # Aegis Capability Roadmap
 
-**Last updated:** 2026-08-31 — **P81.1**–**P81.33** filed (32 items; **P81.21** is deliberately absent)
+**Last updated:** 2026-08-31 (second entry the same day) — **the P81 batch's first wave is worked**:
+**P81.15**, **P81.16**, **P81.19**, **P81.29** and **P81.32** shipped, **P81.24**, **P81.25** and
+**P81.27** shipped in part, and **P81.6** and **P81.11** closed without production code — refuted and
+accepted respectively. Four disjoint-package sub-agents ran the wave; every finding was checked against
+the tree before it was built, and **that is what most of the value turned out to be**. Three of the
+eight items were substantially wrong as filed: `provider.base_url` is already frozen (the policy table
+is in `freeze.go`, not the `fingerprint.go` the report cited), `sqlitestore.HardenPermissions` already
+covers the `-wal`/`-shm` sidecars, and `workspacetrust.save()` already calls `fsguard`. What the passes
+found *instead* is the better haul — a spill directory inheriting the workspace ACL, `session.Prune`
+skipping archived sessions so archiving made a conversation immortal, `daemon.crt` at `0o644` while
+`daemon.key` was hardened, and `/healthz` publishing `sandbox_fallback_reason` to any process holding
+no credential. Two roadmap-visible decisions came out of it: **P81.11** is an accepted risk, and
+`freeze.go` gained a third trust policy, **`projectMayTighten`**, so a project may narrow a spend bound
+and never loosen one. Records below and in [releases.md](releases.md).
+
+**Last updated (previous):** 2026-08-31 — **P81.1**–**P81.33** filed (32 items; **P81.21** is deliberately absent)
 from a full STRIDE-A threat model of the working tree at commit `88cea69`, output in
 [threat-model-20260831-002123/](../threat-model-20260831-002123/0-assessment.md). Nothing shipped this
 sitting: the batch is intake, not work. The report analysed 22 elements across 4 trust boundaries,
@@ -93,10 +108,13 @@ adding items.
 
 ## Status
 
-**73 open items: 64 build + 9 verification-only.** Tier 1: 1 (**P81.6**, filed 2026-08-31, a
-one-change fix to a control that already exists). **P81.11** was filed Tier 1 the same day and
-**re-tiered to 4 on 2026-08-31 when the operator confirmed the CI disablement is deliberate** — the
-risk is accepted, not pending; what stays open there is only where the lost coverage should live. Tier 2: 13 (**P76.2**, filed
+**64 open items: 55 build + 9 verification-only.** Eight P81 items closed on 2026-08-31 (five
+shipped, two closed without code, one — **P81.19** — shipped and superseded by the larger gap it
+uncovered); three more shipped in part and stay open for their remainder. Tier 1: **0**. Both of the P81 batch's Tier 1
+items closed on 2026-08-31 without production code: **P81.6** was **refuted** (the trust freeze
+already covers `provider.base_url` — the report looked in `fingerprint.go`, the policy table is in
+`freeze.go`), and **P81.11** is an **accepted risk** re-tiered to 4 after the operator confirmed the
+CI disablement is deliberate. Two of the report's own Quick Wins, neither of which was a defect. Tier 2: 13 (**P76.2**, filed
 2026-08-23, survivor of P76.1 Session B; **P79.1**, filed 2026-08-30, a Windows read-only-shell
 confinement regression; and 11 from the P81 threat-model batch). Tier 3: 18 (**P76.1**, filed
 2026-08-21, both sessions now done — see its entry; **P76.3**, filed 2026-08-23, survivor of P76.1
@@ -106,10 +124,11 @@ from the P81 batch, including **P81.1**, the threat model's one `Critical`). Tie
 **P81.11** re-tiered there the same day).
 Verification: 9 (**P80.4** added 2026-08-30).
 
-**The 2026-08-31 threat-model batch is 32 of those 64 build items — half the open build work, filed in
-one sitting and none of it started.** That is intake from an external analysis, not a backlog that
-accumulated, and the tier distribution is the useful signal: only two items are Tier 1, and both are
-switching on a control the repo already built. See
+**The 2026-08-31 threat-model batch was 32 build items when filed; 24 remain.** That is intake from
+an external analysis rather than a backlog that accumulated. The first wave's result is the number
+worth carrying forward: of eight items worked, **three were refuted against the tree and two of the
+five real ones were smaller than filed** — while the same passes turned up four defects the report
+never saw. Treat a finding's premise as a claim to check, not a work order. See
 [Threat model 2026-08-31 — the P81 batch](#threat-model-2026-08-31--the-p81-batch) for the
 finding-to-item index and the suggested order.
 
@@ -438,7 +457,7 @@ of FIND-21 belonging to P80.1.
 | FIND-03 | 8.1 `Important` | **P81.3** | Tier 3 | Config PATCH endpoints can disable isolation with only the bearer token |
 | FIND-04 | 7.6 `Important` | **P81.4** | Tier 3 | The web UI hands the real daemon token to browser JavaScript |
 | FIND-05 | 7.5 `Important` | **P81.5** | Tier 3 | Outbound provider payloads and tool arguments are never redacted |
-| FIND-06 | 7.3 `Important` | **P81.6** | **Tier 1** | `provider.base_url` redirects credentials on a warning only |
+| FIND-06 | 7.3 `Important` | **P81.6** | — | `provider.base_url` redirects credentials on a warning only — **REFUTED 2026-08-31**, the control already exists |
 | FIND-07 | 7.1 `Important` | **P81.7** | Tier 4 | The local model endpoint is unauthenticated plaintext HTTP |
 | FIND-08 | 6.9 `Important` | **P81.8** | Tier 3 | `web_fetch` is an unreviewed egress channel |
 | FIND-09 | 6.8 `Important` | **P81.9** | Tier 2 | The session workdir allowlist is skipped on the default bind |
@@ -467,9 +486,9 @@ of FIND-21 belonging to P80.1.
 | FIND-32 | 3.9 `Low` | **P81.32** | Tier 2 | Scan reports land inside the repository they describe |
 | FIND-33 | 3.6 `Low` | **P81.33** | Tier 2 | The TUI render path is unbounded; rounds train click-through |
 
-**Suggested order, which is not severity order and says why.** **P81.6** first: Tier 1, one change,
-and the enforcement it needs is already written and tested. (**P81.11** was the other Tier 1 item and
-is closed as an accepted risk — see below.) Then **P81.14**, ranked above its own `Moderate` severity because P81.3, P81.5, P81.8, P81.23, P81.29 and
+**Suggested order, which is not severity order and says why.** **Both Tier 1 items are already
+closed** and neither took production code: **P81.11** is an accepted risk, **P81.6** was refuted (the
+freeze already covers `provider.base_url`). Start at **P81.14**, ranked above its own `Moderate` severity because P81.3, P81.5, P81.8, P81.23, P81.29 and
 P80.1 all want its message-origin stamp or its sink, and building it late means six half-solutions.
 Then **P81.8** *before* **P81.1**, because the egress ledger is useful standalone and is the instrument
 the containment work is judged with — the reverse order designs containment with nothing to measure it.
@@ -510,11 +529,61 @@ preserve: the entries above are written to be citable the same way.
 
 ## Open Work — Tier 1
 
-**Status: 1 open — P81.6**, filed 2026-08-31 from the threat model, switching on a control this repo
-already built. **P81.11** was filed here the same day and re-tiered to 4 within it: the operator
-confirmed the CI trigger disablement is deliberate, so it is an accepted risk rather than an open fix.
-Both were named in the report's own Quick Wins table; one of the two turned out to be a decision the
-report could not see. **P74.1** (a path-scoped deny rule can never match `grep`) shipped 2026-08-20, the
+**Status: 0 open.** The tier was briefly occupied on 2026-08-31 by the two Tier 1 items of the P81
+threat-model batch, and **both closed the same day without a line of production code** — which is a
+result worth stating rather than burying, because it is the second time this document has recorded an
+audit finding that did not survive contact with the tree.
+
+- **P81.11** (the merge gate runs only on manual dispatch) — **accepted risk**. The disablement is
+  deliberate; re-tiered to 4, where its one residual scheduling question lives.
+- **P81.6** (`provider.base_url` frozen only by a warning) — **refuted**. The control already exists
+  and already works; see the record below.
+
+An item enters this tier when it is a real, currently-exploitable security or robustness gap that is
+small and has no dependency. Nothing is currently open here.
+
+### P81.6 — `provider.base_url` is already security-relevant — REFUTED (FIND-06)
+
+**Filed 2026-08-31 from the threat model; refuted the same day, no code change.** The finding
+([**FIND-06**](../threat-model-20260831-002123/3-findings.md#find-06-providerbase_url-override-redirects-credentials-and-model-control-on-a-warning-only),
+CVSS 7.3, `Important`) said an HTTPS `provider.base_url` pointing at a non-default host proceeds on a
+startup `WARN`, and prescribed moving the key into the security-relevant set so a project config
+changing it re-triggers the workspace-trust prompt. **That is already the behaviour.**
+
+`internal/config/freeze.go:120` classifies the whole `provider` block as `frozenUntilTrusted`, and its
+doc comment states this item's own threat model in advance: *"provider carries base_url, headers and
+the fallback chain. Every prompt, file read and tool result travels to that endpoint, so a project
+pointing it at a host it controls is notify.webhook's exfiltration channel at conversation volume."*
+The `projectSettable` entries beneath it are a **narrowing allowlist** of 18 named sub-keys
+(`provider.model`, `max_tokens`, `temperature`, …) that exists so the ordinary "this repo wants
+qwen3:14b" case needs no trust prompt. `base_url` and `headers` are not on that list, `policyFor`
+defaults an unlisted sub-key to frozen, and `securityRelevantConfigLines` therefore already hashes
+them. A file below even names three keys *deliberately* left off the settable list for the same
+reason.
+
+**Why both the report and this entry got it wrong, which is the part worth keeping.** FIND-06's
+evidence cites `internal/config/fingerprint.go:99-117` and hedges correctly — *"whether
+`provider.base_url` is frozen depends on that policy table."* It never resolved the hedge. The policy
+table is not in `fingerprint.go`; it is in `freeze.go`. This roadmap entry then dropped the hedge and
+restated the unverified half as fact, complete with a prescription ("move it out of `projectSettable`")
+for a move with nothing to move. **The report flagged its own uncertainty and the intake lost it** —
+that is the transcription failure to watch for the next time a batch is filed from an external
+analysis, and it is why the other five Needs-Verification rows are called out in the batch index.
+
+**What was built instead, and it is worth having.** The property was *emergent*: `base_url` is frozen
+because nobody added it to the settable list, not because anything asserted it must stay off.
+`TestFingerprintCoversProviderBaseURL` (`internal/config/fingerprint_test.go`) now pins it — a project
+config introducing `base_url`, changing it, or introducing `headers` each moves the fingerprint to
+`Stale`, while a `provider.model`-only edit still does not. It passed against the **unmodified** policy
+table on first run, which is the empirical proof the finding was already closed.
+
+**Residue, unaddressed and smaller than the original finding.** `validateBaseURL`'s startup `WARN` for
+a non-default HTTPS host is still only a warning *within a trusted workspace* — trust is what the
+freeze gates, so an operator who has trusted the workspace gets no second acknowledgement for a
+specific host. FIND-06's remediation step 2 (a one-time interactive acknowledgement per non-default
+host, recorded alongside the trust grant) is the only part of this finding that survives, and it is
+defence-in-depth on an already-trusted directory rather than a gap. Not filed as its own item; noted
+here in case the question returns. **P74.1** (a path-scoped deny rule can never match `grep`) shipped 2026-08-20, the
 same day it was filed — record in [releases.md](releases.md). Before it, the tier was empty for one
 day; before that it was last occupied by **P71.1** and **P71.10**, both shipped 2026-08-19 the day they
 were filed, and before them **P69.6** (2026-08-17) and **P66.5** (2026-08-16), which closed the last of
@@ -524,32 +593,6 @@ reading before trusting [CodeReview.md](CodeReview.md) directly.
 
 An item enters this tier when it is a real, currently-exploitable security or robustness gap that is
 small and has no dependency.
-
-### P81.6 — `provider.base_url` redirects credentials and model control on a warning only (FIND-06)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-06**](../threat-model-20260831-002123/3-findings.md#find-06-providerbase_url-override-redirects-credentials-and-model-control-on-a-warning-only),
-CVSS 7.3, `Important`, CWE-346). `validateBaseURL` in `internal/providerfactory/factory.go` refuses
-the worst case correctly — plaintext HTTP to a non-loopback host with a real API key attached. For the
-remaining case, an HTTPS base URL pointing somewhere that is not the provider's default host, it emits
-a startup `WARN` and proceeds. Every request then goes to that host: the API key, the full
-conversation, and the model responses that steer the agent's next tool call.
-
-The rationale for not refusing outright is sound — corporate gateways and self-hosted
-OpenAI-compatible proxies are legitimate, and a hard refusal would be a regression. The gap is that a
-line in a startup log is not a decision, and `provider.base_url` is exactly the key a cloned
-repository's `.aegis/config.yaml` is a natural place to set. The mechanism that should be catching it
-already exists and already works: `config.SecurityFingerprint` freezes the security-relevant subset of
-project config and re-prompts for trust when a frozen key moves.
-
-**What to do.** Move `provider.base_url` (and `provider.headers`) out of `projectSettable` in
-`internal/config/fingerprint.go`'s policy table (`securityRelevantConfigLines`, lines 99-117), so a
-project config introducing or changing it re-triggers the workspace-trust prompt. Optionally add a
-one-time acknowledgement the first time a given non-default host is used with a real API key, recorded
-alongside the trust grant. Leave the plaintext-HTTP refusal exactly as it is.
-
-Priority: Tier 1 — currently reachable by any repository the operator clones and opens, and the fix is
-one entry in an existing policy table with the enforcement already written.
 
 ---
 
@@ -601,8 +644,13 @@ tier out — record in [releases.md](releases.md).
 **P76.2** (filed 2026-08-23, first survivor of **P76.1** Session B) is now open in this tier — see
 below.
 
-**Eleven more arrived 2026-08-31 with the P81 threat-model batch**: **P81.9**, **P81.13**, **P81.15**,
-**P81.16**, **P81.17**, **P81.19**, **P81.24**, **P81.25**, **P81.29**, **P81.32** and **P81.33**.
+**Eleven arrived 2026-08-31 with the P81 threat-model batch, and six closed the same day.** Shipped:
+**P81.15** (cloud spend ceilings, plus the `projectMayTighten` policy that makes them a bound rather
+than a suggestion), **P81.16** (per-address `/ui` mint limit), **P81.19** (`/healthz`, which turned out
+to be disclosing more than the report thought — see its entry), **P81.29** (private-range recon targets
+need an allowlist entry) and **P81.32** (scan reports default out of the workspace). **P81.24**,
+**P81.25** and **P81.27** shipped in part and remain open for their remainders. Still untouched:
+**P81.9**, **P81.13**, **P81.17** and **P81.33**.
 They are individually small and mostly independent, and several are explicitly worth taking while
 their file is already open for something else — **P81.33** with **P76.2**/**P80.2** in `internal/tui`,
 **P81.32** with **P76.3** and **P81.13** in `internal/security`, and the three
