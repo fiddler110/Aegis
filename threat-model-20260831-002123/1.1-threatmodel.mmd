@@ -1,0 +1,73 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'background': '#ffffff', 'primaryColor': '#ffffff', 'lineColor': '#666666' }}}%%
+flowchart LR
+    classDef process fill:#6baed6,stroke:#2171b5,stroke-width:2px,color:#000000
+    classDef external fill:#fdae61,stroke:#d94701,stroke-width:2px,color:#000000
+    classDef datastore fill:#74c476,stroke:#238b45,stroke-width:2px,color:#000000
+
+    Operator["Operator"]:::external
+
+    subgraph Client["Client Processes"]
+        TUI(("TUI")):::process
+        ClientAPI(("Client")):::process
+        WebUI(("WebUI")):::process
+        ACPAgent(("ACPAgent")):::process
+        MCPServer(("MCPServer")):::process
+    end
+
+    subgraph Daemon["Aegis Daemon"]
+        Server(("Server")):::process
+        Engine(("Engine")):::process
+        PermissionGate(("PermissionGate")):::process
+        MCPClient(("MCPClient")):::process
+        CronScheduler(("CronScheduler")):::process
+        SessionStore[("SessionStore")]:::datastore
+        CheckpointStore[("CheckpointStore")]:::datastore
+        WorkspaceTrustStore[("WorkspaceTrustStore")]:::datastore
+        DaemonTokenFile[("DaemonTokenFile")]:::datastore
+    end
+
+    subgraph Sandbox["Isolated Execution"]
+        SandboxBackend(("SandboxBackend")):::process
+        MultiScanner(("MultiScanner")):::process
+    end
+
+    subgraph External["External Services"]
+        AnthropicAPI["AnthropicAPI"]:::external
+        OllamaServer["OllamaServer"]:::external
+        ExternalMCPServer["ExternalMCPServer"]:::external
+        ExternalWebService["ExternalWebService"]:::external
+        ContainerRuntime["ContainerRuntime"]:::external
+    end
+
+    Operator <-->|"DF01: Terminal I/O"| TUI
+    Operator <-->|"DF02: HTTPS browser session"| WebUI
+    TUI <-->|"DF03: In-process API calls"| ClientAPI
+    ClientAPI <-->|"DF04: HTTPS + bearer token"| Server
+    WebUI <-->|"DF05: HTTPS page-token exchange"| Server
+    ACPAgent <-->|"DF06: JSON-RPC over stdio"| ClientAPI
+    MCPServer <-->|"DF07: JSON-RPC over stdio"| ClientAPI
+    Server <-->|"DF08: In-process turn execution"| Engine
+    Engine <-->|"DF09: Capability decision"| PermissionGate
+    Engine <-->|"DF10: Command execution"| SandboxBackend
+    Engine <-->|"DF11: MCP tool calls"| MCPClient
+    Engine <-->|"DF12: HTTPS completions"| AnthropicAPI
+    Engine <-->|"DF13: HTTP loopback completions"| OllamaServer
+    Engine <-->|"DF14: HTTPS fetch and search"| ExternalWebService
+    Server <-->|"DF15: SQLite reads and writes"| SessionStore
+    Server <-->|"DF16: Snapshot reads and writes"| CheckpointStore
+    Server <-->|"DF17: Trust grant lookup"| WorkspaceTrustStore
+    Server <-->|"DF18: Token and cert file I/O"| DaemonTokenFile
+    Server <-->|"DF19: Job scheduling"| CronScheduler
+    CronScheduler <-->|"DF20: Unattended run"| Engine
+    MCPClient <-->|"DF21: stdio or HTTP+SSE"| ExternalMCPServer
+    SandboxBackend <-->|"DF22: Container CLI"| ContainerRuntime
+    Server <-->|"DF23: Scan orchestration"| MultiScanner
+    MultiScanner <-->|"DF24: Container CLI"| ContainerRuntime
+    ClientAPI <-->|"DF25: Token file read"| DaemonTokenFile
+
+    style Client fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style Daemon fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style Sandbox fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style External fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+
+    linkStyle default stroke:#666666,stroke-width:2px

@@ -1,0 +1,55 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'background': '#ffffff', 'primaryColor': '#ffffff', 'lineColor': '#666666' }}}%%
+flowchart LR
+    classDef process fill:#6baed6,stroke:#2171b5,stroke-width:2px,color:#000000
+    classDef external fill:#fdae61,stroke:#d94701,stroke-width:2px,color:#000000
+    classDef datastore fill:#74c476,stroke:#238b45,stroke-width:2px,color:#000000
+
+    Operator["Operator"]:::external
+
+    subgraph Client["Client Processes"]
+        LocalFrontEnds(("Local Front-Ends<br/>(TUI, ACPAgent, MCPServer)")):::process
+        ClientAPI(("Client")):::process
+        WebUI(("WebUI")):::process
+    end
+
+    subgraph Daemon["Aegis Daemon"]
+        Server(("Server")):::process
+        Engine(("Engine")):::process
+        PermissionGate(("PermissionGate")):::process
+        DaemonServices(("Daemon Services<br/>(MCPClient, CronScheduler)")):::process
+        LocalState[("Local State<br/>(SessionStore, CheckpointStore, WorkspaceTrustStore, DaemonTokenFile)")]:::datastore
+    end
+
+    subgraph Sandbox["Isolated Execution"]
+        IsolatedExecution(("Isolated Execution<br/>(SandboxBackend, MultiScanner)")):::process
+    end
+
+    subgraph External["External Services"]
+        LLMProviders["LLM Providers<br/>(AnthropicAPI, OllamaServer)"]:::external
+        UntrustedSources["Untrusted Content Sources<br/>(ExternalMCPServer, ExternalWebService)"]:::external
+        ContainerRuntime["ContainerRuntime"]:::external
+    end
+
+    Operator <-->|"SDF01: Terminal and browser I/O"| LocalFrontEnds
+    Operator <-->|"SDF02: HTTPS browser session"| WebUI
+    LocalFrontEnds <-->|"SDF03: In-process and stdio API calls"| ClientAPI
+    ClientAPI <-->|"SDF04: HTTPS + bearer token"| Server
+    WebUI <-->|"SDF05: HTTPS page-token exchange"| Server
+    Server <-->|"SDF06: In-process turn execution"| Engine
+    Server <-->|"SDF07: Local state persistence"| LocalState
+    ClientAPI <-->|"SDF08: Token file read"| LocalState
+    Server <-->|"SDF09: Scheduling and MCP wiring"| DaemonServices
+    DaemonServices <-->|"SDF10: Unattended runs and tool calls"| Engine
+    Engine <-->|"SDF11: Capability decision"| PermissionGate
+    Engine <-->|"SDF12: Command execution and scans"| IsolatedExecution
+    Engine <-->|"SDF13: Model completions"| LLMProviders
+    Engine <-->|"SDF14: Fetched and MCP content"| UntrustedSources
+    DaemonServices <-->|"SDF15: MCP protocol"| UntrustedSources
+    IsolatedExecution <-->|"SDF16: Container CLI"| ContainerRuntime
+
+    style Client fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style Daemon fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style Sandbox fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+    style External fill:none,stroke:#e31a1c,stroke-width:3px,stroke-dasharray: 5 5
+
+    linkStyle default stroke:#666666,stroke-width:2px

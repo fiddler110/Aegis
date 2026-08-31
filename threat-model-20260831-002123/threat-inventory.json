@@ -1,0 +1,4635 @@
+{
+  "schema_version": "1.0",
+  "report_folder": "threat-model-20260831-002123",
+  "commit": "88cea69",
+  "commit_date": "2026-08-30T14:43:43Z",
+  "branch": "main",
+  "repository": "https://github.com/fiddler110/Aegis.git",
+  "analysis_timestamp": "2026-08-31T00:21:23Z",
+  "model": "claude-opus-5",
+  "components": [
+    {
+      "id": "ACPAgent",
+      "display": "ACP Agent",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.WebSvc",
+      "boundary": "Client",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [
+        "Agent"
+      ],
+      "source_files": [
+        "internal/acp/agent.go"
+      ],
+      "source_directories": [
+        "internal/acp/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/acp/agent.go"
+        ],
+        "source_directories": [
+          "internal/acp/"
+        ],
+        "class_names": [
+          "Agent"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/acp",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Operator"
+        ],
+        "outbound_to": [
+          "Client"
+        ],
+        "protocols": [
+          "JSON-RPC over stdio"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "AnthropicAPI",
+      "display": "Anthropic API",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "External",
+      "boundary_kind": "NetworkBoundary",
+      "aliases": [
+        "CloudLLM"
+      ],
+      "source_files": [
+        "internal/provider/anthropic/anthropic.go"
+      ],
+      "source_directories": [
+        "internal/provider/anthropic/"
+      ],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "NetworkBoundary",
+        "source_files": [
+          "internal/provider/anthropic/anthropic.go"
+        ],
+        "source_directories": [
+          "internal/provider/anthropic/"
+        ],
+        "class_names": [
+          "Adapter"
+        ],
+        "namespace": "",
+        "config_keys": [
+          "ANTHROPIC_API_KEY",
+          "provider.base_url",
+          "provider.model"
+        ],
+        "api_routes": [],
+        "dependencies": [
+          "net/http"
+        ],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "Engine"
+        ],
+        "protocols": [
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "CheckpointStore",
+      "display": "Checkpoint Store",
+      "type": "data_store",
+      "tmt_type": "SE.DS.TMCore.FS",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [
+        "Snapshotter"
+      ],
+      "source_files": [
+        "internal/checkpoint/checkpoint.go"
+      ],
+      "source_directories": [
+        "internal/checkpoint/"
+      ],
+      "fingerprint": {
+        "component_type": "data_store",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/checkpoint/checkpoint.go"
+        ],
+        "source_directories": [
+          "internal/checkpoint/"
+        ],
+        "class_names": [
+          "Store",
+          "Snapshotter",
+          "Checkpoint",
+          "FileSnapshot"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/checkpoint",
+        "config_keys": [],
+        "api_routes": [
+          "GET /sessions/{id}/checkpoints",
+          "POST /sessions/{id}/rewind"
+        ],
+        "dependencies": [],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "Server"
+        ],
+        "protocols": [
+          "File I/O"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Client",
+      "display": "Daemon Client",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.NetApp",
+      "boundary": "Client",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/client/client.go"
+      ],
+      "source_directories": [
+        "internal/client/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/client/client.go"
+        ],
+        "source_directories": [
+          "internal/client/"
+        ],
+        "class_names": [
+          "Client",
+          "StatusError"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/client",
+        "config_keys": [
+          "server.addr",
+          "server.tls.enabled"
+        ],
+        "api_routes": [],
+        "dependencies": [
+          "net/http"
+        ],
+        "inbound_from": [
+          "TUI",
+          "ACPAgent",
+          "MCPServer"
+        ],
+        "outbound_to": [
+          "Server",
+          "DaemonTokenFile"
+        ],
+        "protocols": [
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "ContainerRuntime",
+      "display": "Container Runtime",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.Megaservice",
+      "boundary": "External",
+      "boundary_kind": "NetworkBoundary",
+      "aliases": [
+        "Docker",
+        "Podman"
+      ],
+      "source_files": [
+        "internal/sandbox/docker.go"
+      ],
+      "source_directories": [
+        "internal/sandbox/"
+      ],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "NetworkBoundary",
+        "source_files": [
+          "internal/sandbox/docker.go"
+        ],
+        "source_directories": [
+          "internal/sandbox/"
+        ],
+        "class_names": [
+          "ContainerRuntime"
+        ],
+        "namespace": "",
+        "config_keys": [
+          "sandbox.backend",
+          "sandbox.image",
+          "sandbox.limits.memory",
+          "sandbox.limits.cpus",
+          "sandbox.limits.pids_limit"
+        ],
+        "api_routes": [],
+        "dependencies": [
+          "docker",
+          "podman"
+        ],
+        "inbound_from": [
+          "SandboxBackend",
+          "MultiScanner"
+        ],
+        "outbound_to": [
+          "SandboxBackend",
+          "MultiScanner"
+        ],
+        "protocols": [
+          "CLI invocation"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "CronScheduler",
+      "display": "Cron Scheduler",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.Thread",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [
+        "Scheduler"
+      ],
+      "source_files": [
+        "internal/cron/cron.go",
+        "internal/tool/builtin/cron.go"
+      ],
+      "source_directories": [
+        "internal/cron/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/cron/cron.go",
+          "internal/tool/builtin/cron.go"
+        ],
+        "source_directories": [
+          "internal/cron/"
+        ],
+        "class_names": [
+          "Scheduler",
+          "Store",
+          "Job",
+          "RunRecord"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/cron",
+        "config_keys": [],
+        "api_routes": [
+          "GET /cron/jobs"
+        ],
+        "dependencies": [],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "Engine"
+        ],
+        "protocols": [
+          "In-process"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "DaemonTokenFile",
+      "display": "Daemon Token File",
+      "type": "data_store",
+      "tmt_type": "SE.DS.TMCore.FS",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [
+        "daemon.token",
+        "daemon.crt"
+      ],
+      "source_files": [
+        "internal/server/auth.go",
+        "internal/fsguard/"
+      ],
+      "source_directories": [
+        "internal/server/",
+        "internal/fsguard/"
+      ],
+      "fingerprint": {
+        "component_type": "data_store",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/server/auth.go",
+          "internal/fsguard/"
+        ],
+        "source_directories": [
+          "internal/server/",
+          "internal/fsguard/"
+        ],
+        "class_names": [
+          "generateAndWriteToken"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/server",
+        "config_keys": [
+          "server.tls.cert_file",
+          "server.tls.key_file"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "Server",
+          "Client"
+        ],
+        "protocols": [
+          "File I/O"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Engine",
+      "display": "Agent Engine",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.Thread",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/engine/engine.go",
+        "internal/engine/toolround.go",
+        "internal/engine/toolexec.go"
+      ],
+      "source_directories": [
+        "internal/engine/",
+        "internal/enginecfg/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/engine/engine.go",
+          "internal/engine/toolround.go",
+          "internal/engine/toolexec.go"
+        ],
+        "source_directories": [
+          "internal/engine/",
+          "internal/enginecfg/"
+        ],
+        "class_names": [
+          "Engine",
+          "Conversation",
+          "Gate"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/engine",
+        "config_keys": [
+          "cost.budget_usd",
+          "cost.max_tokens_per_run",
+          "cost.max_turn_stall",
+          "provider.tool_call_shim"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Server",
+          "CronScheduler"
+        ],
+        "outbound_to": [
+          "PermissionGate",
+          "SandboxBackend",
+          "MCPClient",
+          "AnthropicAPI",
+          "OllamaServer",
+          "ExternalWebService"
+        ],
+        "protocols": [
+          "In-process",
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "ExternalMCPServer",
+      "display": "External MCP Server",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "External",
+      "boundary_kind": "NetworkBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/mcp/mcp.go",
+        "internal/mcp/http.go",
+        "internal/mcp/tool.go"
+      ],
+      "source_directories": [
+        "internal/mcp/"
+      ],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "NetworkBoundary",
+        "source_files": [
+          "internal/mcp/mcp.go",
+          "internal/mcp/http.go",
+          "internal/mcp/tool.go"
+        ],
+        "source_directories": [
+          "internal/mcp/"
+        ],
+        "class_names": [
+          "ServerConfig"
+        ],
+        "namespace": "",
+        "config_keys": [
+          "mcp.servers"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "MCPClient"
+        ],
+        "outbound_to": [
+          "MCPClient"
+        ],
+        "protocols": [
+          "stdio",
+          "HTTP+SSE"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "ExternalWebService",
+      "display": "External Web Service",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "External",
+      "boundary_kind": "NetworkBoundary",
+      "aliases": [
+        "DuckDuckGo",
+        "Marginalia"
+      ],
+      "source_files": [
+        "internal/tool/builtin/web.go",
+        "internal/tool/builtin/websearch_providers.go"
+      ],
+      "source_directories": [
+        "internal/tool/builtin/",
+        "internal/netblock/"
+      ],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "NetworkBoundary",
+        "source_files": [
+          "internal/tool/builtin/web.go",
+          "internal/tool/builtin/websearch_providers.go"
+        ],
+        "source_directories": [
+          "internal/tool/builtin/",
+          "internal/netblock/"
+        ],
+        "class_names": [
+          "fetchTool",
+          "searchTool"
+        ],
+        "namespace": "",
+        "config_keys": [
+          "websearch.provider"
+        ],
+        "api_routes": [],
+        "dependencies": [
+          "golang.org/x/net/html"
+        ],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "Engine"
+        ],
+        "protocols": [
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "MCPClient",
+      "display": "MCP Client",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.WebSvc",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/mcp/mcp.go",
+        "internal/mcp/outbound.go",
+        "internal/mcp/trust.go"
+      ],
+      "source_directories": [
+        "internal/mcp/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/mcp/mcp.go",
+          "internal/mcp/outbound.go",
+          "internal/mcp/trust.go"
+        ],
+        "source_directories": [
+          "internal/mcp/"
+        ],
+        "class_names": [
+          "Client",
+          "ToolInfo"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/mcp",
+        "config_keys": [
+          "mcp.servers",
+          "security.scan_file_reads"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "ExternalMCPServer"
+        ],
+        "protocols": [
+          "stdio",
+          "HTTP+SSE"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "MCPServer",
+      "display": "MCP Server (aegis mcp-serve)",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.WebSvc",
+      "boundary": "Client",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [
+        "Server"
+      ],
+      "source_files": [
+        "internal/mcpserver/server.go",
+        "internal/mcpserver/protocol.go"
+      ],
+      "source_directories": [
+        "internal/mcpserver/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/mcpserver/server.go",
+          "internal/mcpserver/protocol.go"
+        ],
+        "source_directories": [
+          "internal/mcpserver/"
+        ],
+        "class_names": [
+          "Server",
+          "Backend",
+          "Options"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/mcpserver",
+        "config_keys": [
+          "mcp_server.auto_approve",
+          "mcp_server.default_mode",
+          "mcp_server.auto_approve_tools"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Operator"
+        ],
+        "outbound_to": [
+          "Client"
+        ],
+        "protocols": [
+          "JSON-RPC over stdio"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "MultiScanner",
+      "display": "Security Multi-Scanner",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.VM",
+      "boundary": "Sandbox",
+      "boundary_kind": "SandboxBoundary",
+      "aliases": [
+        "Scanner"
+      ],
+      "source_files": [
+        "internal/security/multiscanner.go",
+        "internal/security/recon.go",
+        "internal/security/target.go"
+      ],
+      "source_directories": [
+        "internal/security/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "SandboxBoundary",
+        "source_files": [
+          "internal/security/multiscanner.go",
+          "internal/security/recon.go",
+          "internal/security/target.go"
+        ],
+        "source_directories": [
+          "internal/security/"
+        ],
+        "class_names": [
+          "MultiscannerPolicy",
+          "ReconScanner"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/security",
+        "config_keys": [
+          "security.default_method",
+          "security.dast.allow_active",
+          "security.dast.allowed_targets"
+        ],
+        "api_routes": [
+          "POST /security/scan",
+          "GET /security/status"
+        ],
+        "dependencies": [
+          "docker",
+          "podman",
+          "nmap",
+          "nuclei"
+        ],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "ContainerRuntime"
+        ],
+        "protocols": [
+          "CLI invocation"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "OllamaServer",
+      "display": "Ollama Server",
+      "type": "external_service",
+      "tmt_type": "SE.EI.TMCore.WebSvc",
+      "boundary": "External",
+      "boundary_kind": "NetworkBoundary",
+      "aliases": [
+        "LocalLLM"
+      ],
+      "source_files": [
+        "internal/provider/ollama/ollama.go"
+      ],
+      "source_directories": [
+        "internal/provider/ollama/"
+      ],
+      "fingerprint": {
+        "component_type": "external_service",
+        "boundary_kind": "NetworkBoundary",
+        "source_files": [
+          "internal/provider/ollama/ollama.go"
+        ],
+        "source_directories": [
+          "internal/provider/ollama/"
+        ],
+        "class_names": [
+          "Adapter",
+          "CapabilityStore"
+        ],
+        "namespace": "",
+        "config_keys": [
+          "provider.base_url",
+          "provider.num_ctx",
+          "provider.think"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "Engine"
+        ],
+        "protocols": [
+          "HTTP"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Operator",
+      "display": "Operator",
+      "type": "external_interactor",
+      "tmt_type": "SE.EI.TMCore.User",
+      "boundary": "External",
+      "boundary_kind": "NetworkBoundary",
+      "aliases": [
+        "Developer"
+      ],
+      "source_files": [
+        "cmd/aegis/main.go"
+      ],
+      "source_directories": [
+        "cmd/aegis/"
+      ],
+      "fingerprint": {
+        "component_type": "external_interactor",
+        "boundary_kind": "NetworkBoundary",
+        "source_files": [
+          "cmd/aegis/main.go"
+        ],
+        "source_directories": [
+          "cmd/aegis/"
+        ],
+        "class_names": [],
+        "namespace": "",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "TUI",
+          "WebUI"
+        ],
+        "outbound_to": [
+          "TUI",
+          "WebUI"
+        ],
+        "protocols": [
+          "Terminal I/O",
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "PermissionGate",
+      "display": "Permission Gate",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.NetApp",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [
+        "Gate",
+        "Policy"
+      ],
+      "source_files": [
+        "internal/permission/permission.go",
+        "internal/permission/scope.go",
+        "internal/permission/contextual.go",
+        "internal/tool/builtin/shell_readonly.go"
+      ],
+      "source_directories": [
+        "internal/permission/",
+        "internal/enginecfg/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/permission/permission.go",
+          "internal/permission/scope.go",
+          "internal/permission/contextual.go",
+          "internal/tool/builtin/shell_readonly.go"
+        ],
+        "source_directories": [
+          "internal/permission/",
+          "internal/enginecfg/"
+        ],
+        "class_names": [
+          "Gate",
+          "Policy",
+          "Approver"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/permission",
+        "config_keys": [
+          "permission.mode",
+          "permission.auto_approve_exec",
+          "permission.plan_mode_shell_reads",
+          "permission.rules"
+        ],
+        "api_routes": [
+          "POST /sessions/{id}/approve"
+        ],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "Engine"
+        ],
+        "protocols": [
+          "In-process"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "SandboxBackend",
+      "display": "Sandbox Backend",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.OSProcess",
+      "boundary": "Sandbox",
+      "boundary_kind": "SandboxBoundary",
+      "aliases": [
+        "LocalBackend",
+        "DockerBackend",
+        "OSBackend"
+      ],
+      "source_files": [
+        "internal/sandbox/sandbox.go",
+        "internal/sandbox/local.go",
+        "internal/sandbox/docker.go",
+        "internal/sandbox/pathvalidator.go"
+      ],
+      "source_directories": [
+        "internal/sandbox/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "SandboxBoundary",
+        "source_files": [
+          "internal/sandbox/sandbox.go",
+          "internal/sandbox/local.go",
+          "internal/sandbox/docker.go",
+          "internal/sandbox/pathvalidator.go"
+        ],
+        "source_directories": [
+          "internal/sandbox/"
+        ],
+        "class_names": [
+          "Backend",
+          "LocalBackend",
+          "ExecOpts"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/sandbox",
+        "config_keys": [
+          "sandbox.backend",
+          "sandbox.network",
+          "sandbox.persistent",
+          "sandbox.limits.memory",
+          "sandbox.strict"
+        ],
+        "api_routes": [
+          "GET /config/sandbox",
+          "PATCH /config/sandbox"
+        ],
+        "dependencies": [],
+        "inbound_from": [
+          "Engine"
+        ],
+        "outbound_to": [
+          "ContainerRuntime"
+        ],
+        "protocols": [
+          "Process spawn",
+          "CLI invocation"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "Server",
+      "display": "Aegis Daemon",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.WebServer",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [
+        "Daemon"
+      ],
+      "source_files": [
+        "internal/server/server.go",
+        "internal/server/auth.go",
+        "internal/server/lifecycle.go",
+        "internal/server/webui.go"
+      ],
+      "source_directories": [
+        "internal/server/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/server/server.go",
+          "internal/server/auth.go",
+          "internal/server/lifecycle.go",
+          "internal/server/webui.go"
+        ],
+        "source_directories": [
+          "internal/server/"
+        ],
+        "class_names": [
+          "Server"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/server",
+        "config_keys": [
+          "server.addr",
+          "server.allow_remote",
+          "server.tls.enabled",
+          "server.max_concurrent_runs",
+          "server.session_workdir_allowlist"
+        ],
+        "api_routes": [
+          "GET /healthz",
+          "POST /sessions",
+          "POST /sessions/{id}/messages",
+          "POST /auth/exchange",
+          "PATCH /config/sandbox",
+          "PATCH /config/security"
+        ],
+        "dependencies": [
+          "net/http"
+        ],
+        "inbound_from": [
+          "Client",
+          "WebUI"
+        ],
+        "outbound_to": [
+          "Engine",
+          "SessionStore",
+          "CheckpointStore",
+          "WorkspaceTrustStore",
+          "DaemonTokenFile",
+          "CronScheduler",
+          "MultiScanner"
+        ],
+        "protocols": [
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "SessionStore",
+      "display": "Session Store",
+      "type": "data_store",
+      "tmt_type": "SE.DS.TMCore.SQL",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [
+        "Store"
+      ],
+      "source_files": [
+        "internal/session/session.go",
+        "internal/sqlitestore/sqlitestore.go"
+      ],
+      "source_directories": [
+        "internal/session/",
+        "internal/sqlitestore/"
+      ],
+      "fingerprint": {
+        "component_type": "data_store",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/session/session.go",
+          "internal/sqlitestore/sqlitestore.go"
+        ],
+        "source_directories": [
+          "internal/session/",
+          "internal/sqlitestore/"
+        ],
+        "class_names": [
+          "Store",
+          "Session",
+          "Meta"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/session",
+        "config_keys": [],
+        "api_routes": [
+          "GET /sessions",
+          "DELETE /sessions/{id}"
+        ],
+        "dependencies": [
+          "modernc.org/sqlite"
+        ],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "Server"
+        ],
+        "protocols": [
+          "SQLite"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "TUI",
+      "display": "Terminal UI",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.ThickClient",
+      "boundary": "Client",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [],
+      "source_files": [
+        "internal/tui/tui.go"
+      ],
+      "source_directories": [
+        "internal/tui/",
+        "internal/termsafe/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/tui/tui.go"
+        ],
+        "source_directories": [
+          "internal/tui/",
+          "internal/termsafe/"
+        ],
+        "class_names": [
+          "Config"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/tui",
+        "config_keys": [],
+        "api_routes": [],
+        "dependencies": [
+          "charm.land/bubbletea/v2"
+        ],
+        "inbound_from": [
+          "Operator"
+        ],
+        "outbound_to": [
+          "Client"
+        ],
+        "protocols": [
+          "Terminal I/O"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "WebUI",
+      "display": "Web UI",
+      "type": "process",
+      "tmt_type": "SE.P.TMCore.BrowserClient",
+      "boundary": "Client",
+      "boundary_kind": "ProcessBoundary",
+      "aliases": [
+        "SPA"
+      ],
+      "source_files": [
+        "internal/server/webui.go"
+      ],
+      "source_directories": [
+        "internal/server/webui/frontend/",
+        "internal/server/webui/dist/"
+      ],
+      "fingerprint": {
+        "component_type": "process",
+        "boundary_kind": "ProcessBoundary",
+        "source_files": [
+          "internal/server/webui.go"
+        ],
+        "source_directories": [
+          "internal/server/webui/frontend/",
+          "internal/server/webui/dist/"
+        ],
+        "class_names": [
+          "handleWebUI",
+          "handleWebUIAssets"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/server",
+        "config_keys": [
+          "server.trust_proxy_headers"
+        ],
+        "api_routes": [
+          "GET /ui",
+          "GET /ui/assets/",
+          "POST /auth/exchange"
+        ],
+        "dependencies": [
+          "vite"
+        ],
+        "inbound_from": [
+          "Operator"
+        ],
+        "outbound_to": [
+          "Server"
+        ],
+        "protocols": [
+          "HTTPS"
+        ]
+      },
+      "sidecars": []
+    },
+    {
+      "id": "WorkspaceTrustStore",
+      "display": "Workspace Trust Store",
+      "type": "data_store",
+      "tmt_type": "SE.DS.TMCore.ConfigFile",
+      "boundary": "Daemon",
+      "boundary_kind": "MachineBoundary",
+      "aliases": [
+        "TrustStore"
+      ],
+      "source_files": [
+        "internal/workspacetrust/workspacetrust.go",
+        "internal/config/fingerprint.go"
+      ],
+      "source_directories": [
+        "internal/workspacetrust/",
+        "internal/config/"
+      ],
+      "fingerprint": {
+        "component_type": "data_store",
+        "boundary_kind": "MachineBoundary",
+        "source_files": [
+          "internal/workspacetrust/workspacetrust.go",
+          "internal/config/fingerprint.go"
+        ],
+        "source_directories": [
+          "internal/workspacetrust/",
+          "internal/config/"
+        ],
+        "class_names": [
+          "Store",
+          "Entry"
+        ],
+        "namespace": "github.com/fiddler110/aegis/internal/workspacetrust",
+        "config_keys": [
+          "workspace.additional_roots"
+        ],
+        "api_routes": [],
+        "dependencies": [],
+        "inbound_from": [
+          "Server"
+        ],
+        "outbound_to": [
+          "Server"
+        ],
+        "protocols": [
+          "File I/O"
+        ]
+      },
+      "sidecars": []
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "Client",
+      "display": "Client Processes",
+      "kind": "ProcessBoundary",
+      "aliases": [
+        "ClientTier"
+      ],
+      "contains": [
+        "ACPAgent",
+        "Client",
+        "MCPServer",
+        "TUI",
+        "WebUI"
+      ],
+      "contains_fingerprint": "ACPAgent|Client|MCPServer|TUI|WebUI"
+    },
+    {
+      "id": "Daemon",
+      "display": "Aegis Daemon",
+      "kind": "MachineBoundary",
+      "aliases": [
+        "DaemonTier"
+      ],
+      "contains": [
+        "CheckpointStore",
+        "CronScheduler",
+        "DaemonTokenFile",
+        "Engine",
+        "MCPClient",
+        "PermissionGate",
+        "Server",
+        "SessionStore",
+        "WorkspaceTrustStore"
+      ],
+      "contains_fingerprint": "CheckpointStore|CronScheduler|DaemonTokenFile|Engine|MCPClient|PermissionGate|Server|SessionStore|WorkspaceTrustStore"
+    },
+    {
+      "id": "External",
+      "display": "External Services",
+      "kind": "NetworkBoundary",
+      "aliases": [
+        "ExternalTier"
+      ],
+      "contains": [
+        "AnthropicAPI",
+        "ContainerRuntime",
+        "ExternalMCPServer",
+        "ExternalWebService",
+        "OllamaServer",
+        "Operator"
+      ],
+      "contains_fingerprint": "AnthropicAPI|ContainerRuntime|ExternalMCPServer|ExternalWebService|OllamaServer|Operator"
+    },
+    {
+      "id": "Sandbox",
+      "display": "Isolated Execution",
+      "kind": "SandboxBoundary",
+      "aliases": [
+        "SandboxTier"
+      ],
+      "contains": [
+        "MultiScanner",
+        "SandboxBackend"
+      ],
+      "contains_fingerprint": "MultiScanner|SandboxBackend"
+    }
+  ],
+  "flows": [
+    {
+      "id": "DF_ACPAgent_to_Client",
+      "from": "ACPAgent",
+      "to": "Client",
+      "protocol": "JSON-RPC over stdio",
+      "description": "Editor-driven session creation, prompts and permission responses."
+    },
+    {
+      "id": "DF_Client_to_DaemonTokenFile",
+      "from": "Client",
+      "to": "DaemonTokenFile",
+      "protocol": "File I/O",
+      "description": "Reads daemon.token and the pinned certificate to authenticate."
+    },
+    {
+      "id": "DF_Client_to_Server",
+      "from": "Client",
+      "to": "Server",
+      "protocol": "HTTPS",
+      "description": "Authenticated API traffic carrying the bearer token and conversation content."
+    },
+    {
+      "id": "DF_CronScheduler_to_Engine",
+      "from": "CronScheduler",
+      "to": "Engine",
+      "protocol": "In-process",
+      "description": "Unattended run start with the job's stored mode and workdir."
+    },
+    {
+      "id": "DF_Engine_to_AnthropicAPI",
+      "from": "Engine",
+      "to": "AnthropicAPI",
+      "protocol": "HTTPS",
+      "description": "Prompt, file content and tool results sent to a cloud model."
+    },
+    {
+      "id": "DF_Engine_to_ExternalWebService",
+      "from": "Engine",
+      "to": "ExternalWebService",
+      "protocol": "HTTPS",
+      "description": "web_fetch/web_search requests and retrieved page content."
+    },
+    {
+      "id": "DF_Engine_to_MCPClient",
+      "from": "Engine",
+      "to": "MCPClient",
+      "protocol": "In-process",
+      "description": "MCP tool invocation and wrapped results."
+    },
+    {
+      "id": "DF_Engine_to_OllamaServer",
+      "from": "Engine",
+      "to": "OllamaServer",
+      "protocol": "HTTP",
+      "description": "Prompt and tool results sent to a local model."
+    },
+    {
+      "id": "DF_Engine_to_PermissionGate",
+      "from": "Engine",
+      "to": "PermissionGate",
+      "protocol": "In-process",
+      "description": "Per-call capability classification and allow/ask/deny decision."
+    },
+    {
+      "id": "DF_Engine_to_SandboxBackend",
+      "from": "Engine",
+      "to": "SandboxBackend",
+      "protocol": "Process spawn",
+      "description": "Model-requested shell commands and their bounded output."
+    },
+    {
+      "id": "DF_MCPClient_to_ExternalMCPServer",
+      "from": "MCPClient",
+      "to": "ExternalMCPServer",
+      "protocol": "stdio or HTTP+SSE",
+      "description": "Tool listing and invocation against a third-party server."
+    },
+    {
+      "id": "DF_MCPServer_to_Client",
+      "from": "MCPServer",
+      "to": "Client",
+      "protocol": "JSON-RPC over stdio",
+      "description": "MCP client-driven session creation and prompt turns."
+    },
+    {
+      "id": "DF_MultiScanner_to_ContainerRuntime",
+      "from": "MultiScanner",
+      "to": "ContainerRuntime",
+      "protocol": "CLI invocation",
+      "description": "Scanner image execution with --network none and a workspace mount."
+    },
+    {
+      "id": "DF_Operator_to_TUI",
+      "from": "Operator",
+      "to": "TUI",
+      "protocol": "Terminal I/O",
+      "description": "Prompts, slash commands and approval decisions."
+    },
+    {
+      "id": "DF_Operator_to_WebUI",
+      "from": "Operator",
+      "to": "WebUI",
+      "protocol": "HTTPS",
+      "description": "Browser session against the daemon's embedded SPA."
+    },
+    {
+      "id": "DF_SandboxBackend_to_ContainerRuntime",
+      "from": "SandboxBackend",
+      "to": "ContainerRuntime",
+      "protocol": "CLI invocation",
+      "description": "docker/podman run with hardening flags and workspace mount."
+    },
+    {
+      "id": "DF_Server_to_CheckpointStore",
+      "from": "Server",
+      "to": "CheckpointStore",
+      "protocol": "File I/O",
+      "description": "Snapshot writes before mutating tool calls and restores on rewind."
+    },
+    {
+      "id": "DF_Server_to_CronScheduler",
+      "from": "Server",
+      "to": "CronScheduler",
+      "protocol": "In-process",
+      "description": "Job registration, listing and lifecycle."
+    },
+    {
+      "id": "DF_Server_to_DaemonTokenFile",
+      "from": "Server",
+      "to": "DaemonTokenFile",
+      "protocol": "File I/O",
+      "description": "Auth token and TLS key material generation and reuse."
+    },
+    {
+      "id": "DF_Server_to_Engine",
+      "from": "Server",
+      "to": "Engine",
+      "protocol": "In-process",
+      "description": "Turn execution, event streaming and approval round-trips."
+    },
+    {
+      "id": "DF_Server_to_MultiScanner",
+      "from": "Server",
+      "to": "MultiScanner",
+      "protocol": "In-process",
+      "description": "Scan requests and aggregated findings."
+    },
+    {
+      "id": "DF_Server_to_SessionStore",
+      "from": "Server",
+      "to": "SessionStore",
+      "protocol": "SQLite",
+      "description": "Conversation, trace and cost persistence."
+    },
+    {
+      "id": "DF_Server_to_WorkspaceTrustStore",
+      "from": "Server",
+      "to": "WorkspaceTrustStore",
+      "protocol": "File I/O",
+      "description": "Trust grant lookup and recording, keyed by directory and fingerprint."
+    },
+    {
+      "id": "DF_TUI_to_Client",
+      "from": "TUI",
+      "to": "Client",
+      "protocol": "In-process",
+      "description": "Session, message and approval API calls."
+    },
+    {
+      "id": "DF_WebUI_to_Server",
+      "from": "WebUI",
+      "to": "Server",
+      "protocol": "HTTPS",
+      "description": "Page-token mint and exchange, then bearer-authenticated API calls and SSE."
+    }
+  ],
+  "threats": [
+    {
+      "id": "T01.A",
+      "title": "Abuse — Long parallel tool rounds produce repeated approval prompts, training the operator to approve without reading",
+      "description": "Long parallel tool rounds produce repeated approval prompts, training the operator to approve without reading — approval fatigue that converts a deliberate gate into a rubber stamp.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Batch related approvals with a single reviewable summary; surface the resolved argv rather than the raw command string.",
+      "identity_key": {
+        "component_id": "TUI",
+        "data_flow_id": "DF_Operator_to_TUI",
+        "stride_category": "A",
+        "attack_surface": "TUI via DF01"
+      }
+    },
+    {
+      "id": "T01.D",
+      "title": "Denial of Service — A pathological model response (a single multi-megabyte line, or dense wide-glyph content) stalls the render...",
+      "description": "A pathological model response (a single multi-megabyte line, or dense wide-glyph content) stalls the render loop and makes the UI unresponsive.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Bound per-render line length and total buffered output in the TUI view layer.",
+      "identity_key": {
+        "component_id": "TUI",
+        "data_flow_id": "DF_Operator_to_TUI",
+        "stride_category": "D",
+        "attack_surface": "TUI via DF01"
+      }
+    },
+    {
+      "id": "T01.I1",
+      "title": "Information Disclosure — Model output rendered to the terminal includes file contents the agent read, which may contain credentials",
+      "description": "Model output rendered to the terminal includes file contents the agent read, which may contain credentials; no redaction is applied on the display path.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Apply `internal/redact` to rendered tool results, not only to shared transcripts.",
+      "identity_key": {
+        "component_id": "TUI",
+        "data_flow_id": "DF_Operator_to_TUI",
+        "stride_category": "I",
+        "attack_surface": "TUI via DF01"
+      }
+    },
+    {
+      "id": "T01.I2",
+      "title": "Information Disclosure — Terminal scrollback and any terminal-emulator logging retain secrets that appeared in agent output after th...",
+      "description": "Terminal scrollback and any terminal-emulator logging retain secrets that appeared in agent output after the session ends.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Document the scrollback exposure; offer a \"no secrets to screen\" posture that redacts by default.",
+      "identity_key": {
+        "component_id": "TUI",
+        "data_flow_id": "DF_Operator_to_TUI",
+        "stride_category": "I",
+        "attack_surface": "TUI via DF01"
+      }
+    },
+    {
+      "id": "T01.R",
+      "title": "Repudiation — An approval decision shown and accepted in the TUI leaves no independent record on the client side",
+      "description": "An approval decision shown and accepted in the TUI leaves no independent record on the client side; the only trace is whatever the daemon persists.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Enable the `internal/hooks` audit hook so `PolicyDecision` records are written for every gate outcome.",
+      "identity_key": {
+        "component_id": "TUI",
+        "data_flow_id": "DF_Operator_to_TUI",
+        "stride_category": "R",
+        "attack_surface": "TUI via DF01"
+      }
+    },
+    {
+      "id": "T01.T",
+      "title": "Tampering — Repository or model content rendered in the terminal carries ANSI/OSC escape sequences that rewrite the ter...",
+      "description": "Repository or model content rendered in the terminal carries ANSI/OSC escape sequences that rewrite the terminal title, inject keystrokes, or hide text from the operator reviewing an approval.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`internal/termsafe` (`StripControlSeqs`, `StripDangerousSeqs`) strips control sequences before rendering.",
+      "identity_key": {
+        "component_id": "TUI",
+        "data_flow_id": "DF_Operator_to_TUI",
+        "stride_category": "T",
+        "attack_surface": "TUI via DF01"
+      }
+    },
+    {
+      "id": "T02.A",
+      "title": "Abuse — Any local process running as the operator can read `daemon.token` and use this same client library to drive...",
+      "description": "Any local process running as the operator can read `daemon.token` and use this same client library to drive full agent turns — the client is not a privilege boundary.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Document explicitly that same-user local processes are inside the trust boundary; consider per-client tokens with scopes.",
+      "identity_key": {
+        "component_id": "Client",
+        "data_flow_id": "DF_Client_to_DaemonTokenFile",
+        "stride_category": "A",
+        "attack_surface": "Client via DF25"
+      }
+    },
+    {
+      "id": "T02.I1",
+      "title": "Information Disclosure — The bearer token is held in process memory and attached to every request",
+      "description": "The bearer token is held in process memory and attached to every request; a crash dump or debugger attach on the client process exposes it.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Zero the token buffer after use where practical; document that a same-user debugger defeats this.",
+      "identity_key": {
+        "component_id": "Client",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "I",
+        "attack_surface": "Client via DF04"
+      }
+    },
+    {
+      "id": "T02.I2",
+      "title": "Information Disclosure — Client-side request/response logging would persist full conversation content including any secrets present...",
+      "description": "Client-side request/response logging would persist full conversation content including any secrets present in tool results.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`internal/redact` is applied to persisted/shared output (`security.redact_secrets: true` by default).",
+      "identity_key": {
+        "component_id": "Client",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "I",
+        "attack_surface": "Client via DF04"
+      }
+    },
+    {
+      "id": "T02.S",
+      "title": "Spoofing — The client pins whatever certificate is present at `<DataDir>/daemon.crt`",
+      "description": "The client pins whatever certificate is present at `<DataDir>/daemon.crt`; a same-user process that writes that file before the client first reads it makes the client trust an impersonating listener.",
+      "stride_category": "S",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Apply `fsguard.RestrictToOwner` to `daemon.crt` as well as `daemon.token`, and record a pin fingerprint the client can compare.",
+      "identity_key": {
+        "component_id": "Client",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "S",
+        "attack_surface": "Client via DF04"
+      }
+    },
+    {
+      "id": "T02.T",
+      "title": "Tampering — Deleting `daemon.crt`/`daemon.key` causes silent regeneration on next daemon start, changing the pin with n...",
+      "description": "Deleting `daemon.crt`/`daemon.key` causes silent regeneration on next daemon start, changing the pin with no operator-visible signal.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Log loudly on regeneration and require an explicit acknowledgement when a previously-seen pin changes.",
+      "identity_key": {
+        "component_id": "Client",
+        "data_flow_id": "DF_Client_to_DaemonTokenFile",
+        "stride_category": "T",
+        "attack_surface": "Client via DF25"
+      }
+    },
+    {
+      "id": "T03.A",
+      "title": "Abuse — An operator exposing the UI through an SSH tunnel or reverse proxy meets a self-signed-certificate warning...",
+      "description": "An operator exposing the UI through an SSH tunnel or reverse proxy meets a self-signed-certificate warning and is conditioned to click through it, defeating the pin.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "The CLI calls the warning out explicitly when TLS is on; document a supported operator-supplied `cert_file`/`key_file` path for tunnelled access.",
+      "identity_key": {
+        "component_id": "WebUI",
+        "data_flow_id": "DF_Operator_to_WebUI",
+        "stride_category": "A",
+        "attack_surface": "WebUI via DF02"
+      }
+    },
+    {
+      "id": "T03.D",
+      "title": "Denial of Service — `GET /ui` is exempt from `authMiddleware` and mints a page token per load",
+      "description": "`GET /ui` is exempt from `authMiddleware` and mints a page token per load; once 1024 unexpired tokens are outstanding, `mintPageToken` refuses and the operator's own UI will not load.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "The cap is a deliberate memory bound (refuse rather than evict). Add per-source-address minting throttling so a flood cannot deny the operator's own load.",
+      "identity_key": {
+        "component_id": "WebUI",
+        "data_flow_id": "DF_WebUI_to_Server",
+        "stride_category": "D",
+        "attack_surface": "WebUI via DF05"
+      }
+    },
+    {
+      "id": "T03.E",
+      "title": "Elevation of Privilege — A hostile page frames or embeds `/ui` to drive privileged actions with the operator's session (clickjacking...",
+      "description": "A hostile page frames or embeds `/ui` to drive privileged actions with the operator's session (clickjacking / cross-origin reads).",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "`X-Frame-Options: DENY`, CSP `frame-ancestors 'none'`, and `originMiddleware` rejecting non-loopback `Origin` headers.",
+      "identity_key": {
+        "component_id": "WebUI",
+        "data_flow_id": "DF_Operator_to_WebUI",
+        "stride_category": "E",
+        "attack_surface": "WebUI via DF02"
+      }
+    },
+    {
+      "id": "T03.I1",
+      "title": "Information Disclosure — The CSRF cookie is minted without `Secure` when the request did not arrive over TLS, so on a plaintext depl...",
+      "description": "The CSRF cookie is minted without `Secure` when the request did not arrive over TLS, so on a plaintext deployment it can travel over a non-TLS hop.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "`server.tls.enabled` defaults to `true`, so `r.TLS != nil` and `Secure` is set on the default deployment; `trust_proxy_headers` covers the reverse-proxy case.",
+      "identity_key": {
+        "component_id": "WebUI",
+        "data_flow_id": "DF_WebUI_to_Server",
+        "stride_category": "I",
+        "attack_surface": "WebUI via DF05"
+      }
+    },
+    {
+      "id": "T03.I2",
+      "title": "Information Disclosure — The real daemon token is delivered into browser JavaScript memory, where any script-injection defect in the...",
+      "description": "The real daemon token is delivered into browser JavaScript memory, where any script-injection defect in the SPA (or a malicious browser extension with host access) can read and exfiltrate it.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Keep the daemon token out of JS entirely by proxying calls through a cookie-authenticated session; the CSP (`default-src 'self'`) reduces but does not remove the exposure.",
+      "identity_key": {
+        "component_id": "WebUI",
+        "data_flow_id": "DF_Operator_to_WebUI",
+        "stride_category": "I",
+        "attack_surface": "WebUI via DF02"
+      }
+    },
+    {
+      "id": "T03.S",
+      "title": "Spoofing — Any local process that can reach the loopback port calls `GET /ui`, reads the page token out of the respons...",
+      "description": "Any local process that can reach the loopback port calls `GET /ui`, reads the page token out of the response body and the CSRF nonce out of the `Set-Cookie` header, and redeems both at `/auth/exchange` for the real daemon token — the double-submit binding stops hostile *web pages*, not raw HTTP clients.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Documented as accepted residual risk in the code (`uiCSRFCookieName` doc comment). Bind the exchange to an operator-visible confirmation, or require the real token for the first `/ui` load when one is available.",
+      "identity_key": {
+        "component_id": "WebUI",
+        "data_flow_id": "DF_WebUI_to_Server",
+        "stride_category": "S",
+        "attack_surface": "WebUI via DF05"
+      }
+    },
+    {
+      "id": "T03.T",
+      "title": "Tampering — The SPA is served from a committed `dist/` embedded at build time",
+      "description": "The SPA is served from a committed `dist/` embedded at build time; drift between `frontend/src` and `dist/` is caught only by the web-UI drift check in `ci.yml`, whose push/PR triggers are commented out.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Re-enable the CI triggers, or add the drift check to a workflow that still runs on push.",
+      "identity_key": {
+        "component_id": "WebUI",
+        "data_flow_id": "DF_WebUI_to_Server",
+        "stride_category": "T",
+        "attack_surface": "WebUI via DF05"
+      }
+    },
+    {
+      "id": "T04.A",
+      "title": "Abuse — An editor plugin can drive continuous unattended turns",
+      "description": "An editor plugin can drive continuous unattended turns — legitimate functionality used to run the agent without the operator's attention.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Surface an editor-driven-run indicator and apply the same run budgets used for interactive sessions.",
+      "identity_key": {
+        "component_id": "ACPAgent",
+        "data_flow_id": "DF_ACPAgent_to_Client",
+        "stride_category": "A",
+        "attack_surface": "ACPAgent via DF06"
+      }
+    },
+    {
+      "id": "T04.E",
+      "title": "Elevation of Privilege — The permission mode for an ACP session is chosen by the client at `session/new`, so an editor plugin can re...",
+      "description": "The permission mode for an ACP session is chosen by the client at `session/new`, so an editor plugin can request a more permissive posture than the operator's interactive default.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Clamp client-requested modes to a configured ceiling, as `mcp_server.default_mode` now does for the MCP path.",
+      "identity_key": {
+        "component_id": "ACPAgent",
+        "data_flow_id": "DF_ACPAgent_to_Client",
+        "stride_category": "E",
+        "attack_surface": "ACPAgent via DF06"
+      }
+    },
+    {
+      "id": "T04.I",
+      "title": "Information Disclosure — Prompt content, file contents and tool results traverse stdio in cleartext to the editor process.",
+      "description": "Prompt content, file contents and tool results traverse stdio in cleartext to the editor process.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "Same-host, same-user pipe; no network exposure and no additional confidentiality boundary to defend.",
+      "identity_key": {
+        "component_id": "ACPAgent",
+        "data_flow_id": "DF_ACPAgent_to_Client",
+        "stride_category": "I",
+        "attack_surface": "ACPAgent via DF06"
+      }
+    },
+    {
+      "id": "T04.R",
+      "title": "Repudiation — Permission responses arrive as `session/request_permission` replies from the editor with no evidence a huma...",
+      "description": "Permission responses arrive as `session/request_permission` replies from the editor with no evidence a human saw the prompt; an editor plugin can auto-answer.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Record the approval channel (`acp`) alongside the decision so a transcript distinguishes editor-answered from human-answered approvals.",
+      "identity_key": {
+        "component_id": "ACPAgent",
+        "data_flow_id": "DF_ACPAgent_to_Client",
+        "stride_category": "R",
+        "attack_surface": "ACPAgent via DF06"
+      }
+    },
+    {
+      "id": "T04.S",
+      "title": "Spoofing — The peer on the other end of stdio is whatever process the editor launched",
+      "description": "The peer on the other end of stdio is whatever process the editor launched; `handleAuthenticate` verifies a shared token but cannot distinguish the editor from anything else that inherited the pipe.",
+      "stride_category": "S",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Document the stdio trust assumption; the token check bounds accidental, not deliberate, misuse by a same-user process.",
+      "identity_key": {
+        "component_id": "ACPAgent",
+        "data_flow_id": "DF_ACPAgent_to_Client",
+        "stride_category": "S",
+        "attack_surface": "ACPAgent via DF06"
+      }
+    },
+    {
+      "id": "T05.A",
+      "title": "Abuse — `mcp_server.auto_approve_tools` can be widened to auto-approve execute-capable tools, turning the MCP surfa...",
+      "description": "`mcp_server.auto_approve_tools` can be widened to auto-approve execute-capable tools, turning the MCP surface into unattended command execution.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`mcp_server.auto_approve` defaults to `false`, and auto-approval is now per-tool rather than one undiscriminated yes.",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "data_flow_id": "DF_MCPServer_to_Client",
+        "stride_category": "A",
+        "attack_surface": "MCPServer via DF07"
+      }
+    },
+    {
+      "id": "T05.D",
+      "title": "Denial of Service — An MCP client can start many concurrent runs and consume the daemon's global run slots, starving the operat...",
+      "description": "An MCP client can start many concurrent runs and consume the daemon's global run slots, starving the operator's interactive session.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`server.max_concurrent_runs` defaults to 10 and `server.max_run_duration_sec` to 1800, both explicitly sized to bound a lower-trust caller like `mcp-serve`.",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "data_flow_id": "DF_MCPServer_to_Client",
+        "stride_category": "D",
+        "attack_surface": "MCPServer via DF07"
+      }
+    },
+    {
+      "id": "T05.E1",
+      "title": "Elevation of Privilege — `callPrompt` accepts any `session_id` verbatim, so an authenticated MCP client can post a turn into an inte...",
+      "description": "`callPrompt` accepts any `session_id` verbatim, so an authenticated MCP client can post a turn into an interactive `auto`-mode session and inherit that session's mode, persona, workdir and `additional_roots` — a workspace the MCP path could never have created for itself.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Filed as **P80.1**; needs a recorded session origin filtered server-side.",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "data_flow_id": "DF_MCPServer_to_Client",
+        "stride_category": "E",
+        "attack_surface": "MCPServer via DF07"
+      }
+    },
+    {
+      "id": "T05.E2",
+      "title": "Elevation of Privilege — The `mcp_server.default_mode` clamp binds only sessions this server creates",
+      "description": "The `mcp_server.default_mode` clamp binds only sessions this server creates; a borrowed session carries whatever mode it already had, so the clamp is bypassed by reuse.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Same fix as T05.E1 — the clamp is only meaningful once session ownership is enforced.",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "data_flow_id": "DF_MCPServer_to_Client",
+        "stride_category": "E",
+        "attack_surface": "MCPServer via DF07"
+      }
+    },
+    {
+      "id": "T05.I",
+      "title": "Information Disclosure — `aegis_list_sessions` proxies `Backend.ListSessions`, which is the daemon's `store.List`",
+      "description": "`aegis_list_sessions` proxies `Backend.ListSessions`, which is the daemon's `store.List` — every session on the daemon, including titles and working directories of sessions created interactively.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Filter the listing to sessions this server instance created, or to a recorded session origin.",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "data_flow_id": "DF_MCPServer_to_Client",
+        "stride_category": "I",
+        "attack_surface": "MCPServer via DF07"
+      }
+    },
+    {
+      "id": "T05.R",
+      "title": "Repudiation — A turn injected into a session the MCP client did not create is recorded indistinguishably from a turn the...",
+      "description": "A turn injected into a session the MCP client did not create is recorded indistinguishably from a turn the operator typed in the TUI.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Record message origin (`mcp`, `acp`, `tui`, `cron`) on every persisted turn.",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "data_flow_id": "DF_MCPServer_to_Client",
+        "stride_category": "R",
+        "attack_surface": "MCPServer via DF07"
+      }
+    },
+    {
+      "id": "T05.S",
+      "title": "Spoofing — Anything able to write to this subprocess's stdin drives full agent turns",
+      "description": "Anything able to write to this subprocess's stdin drives full agent turns; the `authenticate` method is the only barrier and the pipe is inherited from whoever launched the process.",
+      "stride_category": "S",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Documented in the package (`internal/mcpserver/server.go:84`). Treat launch of `mcp-serve` as equivalent to granting agent access.",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "data_flow_id": "DF_MCPServer_to_Client",
+        "stride_category": "S",
+        "attack_surface": "MCPServer via DF07"
+      }
+    },
+    {
+      "id": "T06.A",
+      "title": "Abuse — Any token holder can create a session in `auto` mode with `auto_approve_exec`, then drive unattended host c...",
+      "description": "Any token holder can create a session in `auto` mode with `auto_approve_exec`, then drive unattended host command execution through a legitimate API.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Clamp API-requested modes to a configured ceiling the same way the MCP path now does.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "A",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T06.D1",
+      "title": "Denial of Service — The unauthenticated `/ui` route mints page-token entries",
+      "description": "The unauthenticated `/ui` route mints page-token entries; at `maxPageTokens` the daemon refuses to mint and the web UI stops loading for everyone.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Refusing rather than evicting is deliberate; add per-address throttling ahead of the cap.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_WebUI_to_Server",
+        "stride_category": "D",
+        "attack_surface": "Server via DF05"
+      }
+    },
+    {
+      "id": "T06.D2",
+      "title": "Denial of Service — Repeated invalid authentication engages a process-wide lockout window that could wedge the operator's own c...",
+      "description": "Repeated invalid authentication engages a process-wide lockout window that could wedge the operator's own client out of its own daemon.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "The token is checked *before* the lockout window and a valid token is served throughout it, so a local guesser cannot lock out the legitimate holder.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "D",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T06.E",
+      "title": "Elevation of Privilege — Setting `server.allow_remote: true` converts a loopback service into a network service whose entire access...",
+      "description": "Setting `server.allow_remote: true` converts a loopback service into a network service whose entire access control is one static bearer token with no TLS client authentication and no per-user identity.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "The bind is refused without the flag and a startup WARN is emitted; document that remote exposure requires an external authenticating proxy.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "E",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T06.I1",
+      "title": "Information Disclosure — `/healthz` is exempt from authentication, letting any local process confirm the daemon's presence and readi...",
+      "description": "`/healthz` is exempt from authentication, letting any local process confirm the daemon's presence and readiness without credentials.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Minimal by design; keep the response free of version, workspace or session detail.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "I",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T06.I2",
+      "title": "Information Disclosure — SSE event streams carry full conversation content, tool inputs and tool results to whichever client holds t...",
+      "description": "SSE event streams carry full conversation content, tool inputs and tool results to whichever client holds the token.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "`server.tls.enabled: true` by default encrypts the loopback hop against a local packet-capture adversary.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_WebUI_to_Server",
+        "stride_category": "I",
+        "attack_surface": "Server via DF05"
+      }
+    },
+    {
+      "id": "T06.R1",
+      "title": "Repudiation — Successful privileged operations",
+      "description": "Successful privileged operations — config PATCHes, session deletion, prune, harden — produce no dedicated audit record; only failed authentication is logged, and only one attempt in five.",
+      "stride_category": "R",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Emit a structured audit event for every state-changing endpoint.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "R",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T06.R2",
+      "title": "Repudiation — The `internal/hooks` audit sink is opt-in, so a default deployment retains no tamper-evident record of tool...",
+      "description": "The `internal/hooks` audit sink is opt-in, so a default deployment retains no tamper-evident record of tool executions or policy decisions.",
+      "stride_category": "R",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Enable a default-on audit log under the data directory with owner-only permissions.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "R",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T06.S",
+      "title": "Spoofing — Authentication is possession of a single long-lived bearer token on disk",
+      "description": "Authentication is possession of a single long-lived bearer token on disk; every local process running as the operator is indistinguishable from the operator's own client.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Constant-time compare and lockout are in place; add token rotation and per-client scoped credentials.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "S",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T06.T1",
+      "title": "Tampering — `PATCH /config/sandbox`, `/config/security`, `/config/skills` and `/config/cost` mutate security-relevant r...",
+      "description": "`PATCH /config/sandbox`, `/config/security`, `/config/skills` and `/config/cost` mutate security-relevant runtime settings over the API with nothing beyond the bearer token — including the sandbox backend that confines command execution.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Require an explicit interactive confirmation (or a separate privileged token) for endpoints that weaken isolation.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "T",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T06.T2",
+      "title": "Tampering — `server.session_workdir_allowlist` is documented as ignored on the default loopback bind, so any token hold...",
+      "description": "`server.session_workdir_allowlist` is documented as ignored on the default loopback bind, so any token holder can create a session rooted at any directory the daemon can read.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Apply the allowlist unconditionally, or gate non-default workdirs behind the workspace-trust prompt.",
+      "identity_key": {
+        "component_id": "Server",
+        "data_flow_id": "DF_Client_to_Server",
+        "stride_category": "T",
+        "attack_surface": "Server via DF04"
+      }
+    },
+    {
+      "id": "T07.A1",
+      "title": "Abuse — Loop-detection exemptions (`PollExempter`, `SignatureTransparent`) hide calls or arguments from the repetit...",
+      "description": "Loop-detection exemptions (`PollExempter`, `SignatureTransparent`) hide calls or arguments from the repetition breaker, which a model could exploit to loop indefinitely.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "Tests keep both exemption sets narrow and disjoint, and `SignatureTransparent` is barred from covering model-chosen search queries.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Server_to_Engine",
+        "stride_category": "A",
+        "attack_surface": "Engine via DF08"
+      }
+    },
+    {
+      "id": "T07.A2",
+      "title": "Abuse — An injected instruction or a looping model drives sustained metered spend against a cloud provider using en...",
+      "description": "An injected instruction or a looping model drives sustained metered spend against a cloud provider using entirely legitimate functionality.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Depends on T07.D1 — without a default budget there is no ceiling on this abuse.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "A",
+        "attack_surface": "Engine via DF12"
+      }
+    },
+    {
+      "id": "T07.D1",
+      "title": "Denial of Service — The primary spend and length bounds",
+      "description": "The primary spend and length bounds — `cost.budget_usd`, `cost.max_tokens_per_run`, `cost.session_cap_usd`, `cost.daily_cap_usd` — all default to `0`, meaning unlimited.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Ship non-zero defaults, or refuse to start a cloud-provider session with no bound set.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "D",
+        "attack_surface": "Engine via DF12"
+      }
+    },
+    {
+      "id": "T07.D2",
+      "title": "Denial of Service — A long-running tool call stalls a turn indefinitely, holding a run slot and the model server.",
+      "description": "A long-running tool call stalls a turn indefinitely, holding a run slot and the model server.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`cost.max_turn_stall` defaults to 900s and is the one bound that covers tool execution; `TestToolTimeoutsStayUnderTheStallBound` enumerates per-call timeouts.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Server_to_Engine",
+        "stride_category": "D",
+        "attack_surface": "Engine via DF08"
+      }
+    },
+    {
+      "id": "T07.E1",
+      "title": "Elevation of Privilege — A per-call capability computed against the wrong root would classify a call as a read when it executes else...",
+      "description": "A per-call capability computed against the wrong root would classify a call as a read when it executes elsewhere, widening the effective capability across the approval round-trip.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`tool.CapabilityOverrider` takes a context and classifies against `effectiveRoot`; `tool.WithCapabilityMemo` makes the verdict single-valued for the gate, scheduler and bookkeeping.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "E",
+        "attack_surface": "Engine via DF09"
+      }
+    },
+    {
+      "id": "T07.E2",
+      "title": "Elevation of Privilege — Handing a sub-agent, debate role or session the parent `Registry` rather than a clone would let session-sco...",
+      "description": "Handing a sub-agent, debate role or session the parent `Registry` rather than a clone would let session-scoped tools escape their session.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`Registry.Clone()` overlays exposure decisions and routes clone-local registration to an overlay; both directions are pinned by tests.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Server_to_Engine",
+        "stride_category": "E",
+        "attack_surface": "Engine via DF08"
+      }
+    },
+    {
+      "id": "T07.I1",
+      "title": "Information Disclosure — Every file the agent reads, plus the repo map and tool results, is placed in a provider request",
+      "description": "Every file the agent reads, plus the repo map and tool results, is placed in a provider request; the redaction pass protects shared and persisted transcripts, not the outbound provider payload.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Apply `internal/redact` (or an explicit allowlist prompt) to provider requests when the provider is a non-loopback cloud endpoint.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "I",
+        "attack_surface": "Engine via DF12"
+      }
+    },
+    {
+      "id": "T07.I2",
+      "title": "Information Disclosure — Truncated tool-result remainders spill to `<workspace>/.aegis/spill/` as plaintext files that outlive the t...",
+      "description": "Truncated tool-result remainders spill to `<workspace>/.aegis/spill/` as plaintext files that outlive the turn and are reachable by `read_file`.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Write spill files with owner-only permissions and reap them at session end.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Server_to_Engine",
+        "stride_category": "I",
+        "attack_surface": "Engine via DF08"
+      }
+    },
+    {
+      "id": "T07.R",
+      "title": "Repudiation — A tool call interrupted mid-flight could be reported to the model as \"not run\" when it had in fact started,...",
+      "description": "A tool call interrupted mid-flight could be reported to the model as \"not run\" when it had in fact started, losing the record of a side effect.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`repairOrphanedToolUses` reports a started call as *possibly* completed, never as not run (P65.1); `Engine.startedTools` tracks the set.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Server_to_Engine",
+        "stride_category": "R",
+        "attack_surface": "Engine via DF08"
+      }
+    },
+    {
+      "id": "T07.S",
+      "title": "Spoofing — The prose tool-call shim (`internal/provider/prosetoolcall.go`, `internal/toolshim`) parses tool calls out...",
+      "description": "The prose tool-call shim (`internal/provider/prosetoolcall.go`, `internal/toolshim`) parses tool calls out of free-form model text, so content the model merely *quotes* — from a fetched page or an MCP result — can be promoted into a real tool call.",
+      "stride_category": "S",
+      "tier": 3,
+      "prerequisites": "ExternalWebService Compromise",
+      "status": "Open",
+      "mitigation": "Keep the shim off by default (`provider.tool_call_shim: off`) and never parse tool calls out of content that arrived inside an untrusted-content wrapper.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Server_to_Engine",
+        "stride_category": "S",
+        "attack_surface": "Engine via DF08"
+      }
+    },
+    {
+      "id": "T07.T1",
+      "title": "Tampering — Indirect prompt injection: instructions embedded in fetched web content, MCP results or repository files st...",
+      "description": "Indirect prompt injection: instructions embedded in fetched web content, MCP results or repository files steer the model into issuing tool calls the operator never asked for.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "ExternalWebService Compromise",
+      "status": "Open",
+      "mitigation": "`internal/trust` wraps such content and scans it heuristically, but the wrapper is advisory to the model — it constrains nothing mechanically.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Engine_to_MCPClient",
+        "stride_category": "T",
+        "attack_surface": "Engine via DF11"
+      }
+    },
+    {
+      "id": "T07.T2",
+      "title": "Tampering — In a parallel tool round, read/network calls take no lock and are deliberately not held off by a concurrent...",
+      "description": "In a parallel tool round, read/network calls take no lock and are deliberately not held off by a concurrent write; only same-`path` calls are ordered, and the dependency graph keys on the literal `\"path\"` input field, so a `shell` call and a `read_file` are never ordered against each other.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Documented design (P8.6). Extend the dependency graph to cover shell commands whose argv contains a path also used by a concurrent write.",
+      "identity_key": {
+        "component_id": "Engine",
+        "data_flow_id": "DF_Server_to_Engine",
+        "stride_category": "T",
+        "attack_surface": "Engine via DF08"
+      }
+    },
+    {
+      "id": "T08.A",
+      "title": "Abuse — `permission.plan_mode_shell_reads` defaults to `true`, trading plan mode's hard guarantee for the ergonomic...",
+      "description": "`permission.plan_mode_shell_reads` defaults to `true`, trading plan mode's hard guarantee for the ergonomics of `shell(\"git log\")` — precisely the posture an operator selects when reviewing an untrusted repository.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Default the flag to `false` for workspaces that have not been granted trust.",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "A",
+        "attack_surface": "PermissionGate via DF09"
+      }
+    },
+    {
+      "id": "T08.E1",
+      "title": "Elevation of Privilege — `Gate.Check` consults `tool.EffectiveCapability` *before* `Policy.Decide`, so a call downgraded by the clas...",
+      "description": "`Gate.Check` consults `tool.EffectiveCapability` *before* `Policy.Decide`, so a call downgraded by the classifier is allowed silently in every mode — including plan mode, whose documented guarantee is that no commands run at all.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "`permission.plan_mode_shell_reads: false` makes the guarantee unconditional; it is not the default.",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "E",
+        "attack_surface": "PermissionGate via DF09"
+      }
+    },
+    {
+      "id": "T08.E2",
+      "title": "Elevation of Privilege — A bare `permission.New` at an `engine.New` call site yields the mode gate alone",
+      "description": "A bare `permission.New` at an `engine.New` call site yields the mode gate alone — no rules, contextual policy, persona-tool or scope layer (the P66.13 bypass class).",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`internal/enginecfg.BuildGate` is the single constructor and `TestEveryEngineCallSiteDecidesItsGate` fails any new `engine.New` that neither uses it nor justifies its absence.",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "E",
+        "attack_surface": "PermissionGate via DF09"
+      }
+    },
+    {
+      "id": "T08.E3",
+      "title": "Elevation of Privilege — A persona's `tools:` list is advisory",
+      "description": "A persona's `tools:` list is advisory — it prompts and warns but never enforces — so a persona documented as read-only can still issue write and execute calls.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Documented in `docs/personas.md`. Offer an enforcing mode for personas used as a containment boundary.",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "E",
+        "attack_surface": "PermissionGate via DF09"
+      }
+    },
+    {
+      "id": "T08.R",
+      "title": "Repudiation — Gate decisions are surfaced through `Audit.PolicyDecision`, which only records anything when the audit hook...",
+      "description": "Gate decisions are surfaced through `Audit.PolicyDecision`, which only records anything when the audit hook is configured — off in a default deployment.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Make the policy-decision log default-on.",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "R",
+        "attack_surface": "PermissionGate via DF09"
+      }
+    },
+    {
+      "id": "T08.T",
+      "title": "Tampering — `classifyShellCommand` is roughly 1,129 lines of hand-written argument parsing across 40+ commands and thre...",
+      "description": "`classifyShellCommand` is roughly 1,129 lines of hand-written argument parsing across 40+ commands and three shell dialects; any parsing defect makes a mutating or escaping command classify as a read. Two such defects (an unexpanded `~`, an unconfined `argv[0]`) have already shipped and been fixed.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "`FuzzClassifyShellCommand` states the invariant (a `CapRead` verdict implies nothing outside root is touched and no binary from inside root is executed); keep the fuzz corpus growing with every fixed case.",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "data_flow_id": "DF_Engine_to_PermissionGate",
+        "stride_category": "T",
+        "attack_surface": "PermissionGate via DF09"
+      }
+    },
+    {
+      "id": "T09.A",
+      "title": "Abuse — A server controls its own tool descriptions, which are injected into the model's context and can be written...",
+      "description": "A server controls its own tool descriptions, which are injected into the model's context and can be written to induce the model to call that tool with sensitive arguments.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Wrap MCP-supplied tool descriptions in the same untrusted-content marker already applied to MCP results.",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "A",
+        "attack_surface": "MCPClient via DF21"
+      }
+    },
+    {
+      "id": "T09.D",
+      "title": "Denial of Service — A hanging or slow MCP server holds a tool-call slot and stalls the turn.",
+      "description": "A hanging or slow MCP server holds a tool-call slot and stalls the turn.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "Per-call timeouts are enumerated by `TestToolTimeoutsStayUnderTheStallBound` and kept under the 900s turn-stall bound.",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "D",
+        "attack_surface": "MCPClient via DF21"
+      }
+    },
+    {
+      "id": "T09.E",
+      "title": "Elevation of Privilege — A tool newly advertised by a server after the session started becomes callable without any fresh operator a...",
+      "description": "A tool newly advertised by a server after the session started becomes callable without any fresh operator approval of that server's expanded surface.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Require re-approval when a server's advertised tool set grows, not just when its schemas change.",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "E",
+        "attack_surface": "MCPClient via DF21"
+      }
+    },
+    {
+      "id": "T09.I1",
+      "title": "Information Disclosure — Tool arguments constructed by the model can carry workspace file contents or credentials to a third-party M...",
+      "description": "Tool arguments constructed by the model can carry workspace file contents or credentials to a third-party MCP server.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "`warnOutboundSecrets` logs a warning but does not block; add a redaction or refusal path for arguments matching `internal/redact` classes.",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "I",
+        "attack_surface": "MCPClient via DF21"
+      }
+    },
+    {
+      "id": "T09.I2",
+      "title": "Information Disclosure — MCP server credentials live in `.aegis/.env`, which is a project-controlled file.",
+      "description": "MCP server credentials live in `.aegis/.env`, which is a project-controlled file.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`.aegis/.env` is read only in a trusted workspace, may not set `AEGIS_*` keys, and is ACL-restricted on Windows via `fsguard`.",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "I",
+        "attack_surface": "MCPClient via DF21"
+      }
+    },
+    {
+      "id": "T09.S",
+      "title": "Spoofing — A stdio MCP server's identity is the configured command path",
+      "description": "A stdio MCP server's identity is the configured command path; a replaced or shimmed binary on `PATH` is indistinguishable from the intended server.",
+      "stride_category": "S",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Resolve configured server commands to absolute paths and record a binary digest at first use.",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "S",
+        "attack_surface": "MCPClient via DF21"
+      }
+    },
+    {
+      "id": "T09.T",
+      "title": "Tampering — A server can replace a tool's schema mid-session via `tools/list_changed`, changing what an already-approve...",
+      "description": "A server can replace a tool's schema mid-session via `tools/list_changed`, changing what an already-approved tool name does.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "Registry clones share one `toolTable` so a parent re-registration reaches existing clones, and stale schema caches are discarded when the parent version moves.",
+      "identity_key": {
+        "component_id": "MCPClient",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "T",
+        "attack_surface": "MCPClient via DF21"
+      }
+    },
+    {
+      "id": "T10.A",
+      "title": "Abuse — Cron is a persistence mechanism: an attacker who obtains the bearer token once can register a recurring job...",
+      "description": "Cron is a persistence mechanism: an attacker who obtains the bearer token once can register a recurring job that keeps running after the token is rotated.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Show registered jobs prominently at daemon start and require re-confirmation of jobs created outside an interactive session.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_Server_to_CronScheduler",
+        "stride_category": "A",
+        "attack_surface": "CronScheduler via DF19"
+      }
+    },
+    {
+      "id": "T10.D",
+      "title": "Denial of Service — Overlapping schedules start concurrent runs that consume the daemon's global run slots.",
+      "description": "Overlapping schedules start concurrent runs that consume the daemon's global run slots.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`server.max_concurrent_runs` (default 10) and `server.max_run_duration_sec` (default 1800) bound both the count and the duration.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_Server_to_CronScheduler",
+        "stride_category": "D",
+        "attack_surface": "CronScheduler via DF19"
+      }
+    },
+    {
+      "id": "T10.E1",
+      "title": "Elevation of Privilege — A job created in `auto` mode auto-approves execute-capable tool calls on every future firing, indefinitely,...",
+      "description": "A job created in `auto` mode auto-approves execute-capable tool calls on every future firing, indefinitely, with no operator in the loop.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Refuse `auto` mode for scheduled jobs unless the sandbox backend is a real isolation backend, mirroring `allow_unsandboxed_auto_exec`.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_CronScheduler_to_Engine",
+        "stride_category": "E",
+        "attack_surface": "CronScheduler via DF20"
+      }
+    },
+    {
+      "id": "T10.E2",
+      "title": "Elevation of Privilege — A job whose working directory differs from the daemon's workspace would be classified against the wrong roo...",
+      "description": "A job whose working directory differs from the daemon's workspace would be classified against the wrong root, mis-scoping every capability decision.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`tool.CapabilityOverrider` classifies against `effectiveRoot`; cron jobs were the case that motivated it.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_CronScheduler_to_Engine",
+        "stride_category": "E",
+        "attack_surface": "CronScheduler via DF20"
+      }
+    },
+    {
+      "id": "T10.I",
+      "title": "Information Disclosure — A scheduled run reads workspace files and sends them to the configured provider with nobody watching, so an...",
+      "description": "A scheduled run reads workspace files and sends them to the configured provider with nobody watching, so an exfiltration path opened by injection runs unobserved.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Require an explicit per-job acknowledgement when the job's provider is a non-loopback cloud endpoint.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_CronScheduler_to_Engine",
+        "stride_category": "I",
+        "attack_surface": "CronScheduler via DF20"
+      }
+    },
+    {
+      "id": "T10.R",
+      "title": "Repudiation — Output and side effects of an unattended run are attributed to no human, and are recorded the same way an i...",
+      "description": "Output and side effects of an unattended run are attributed to no human, and are recorded the same way an interactive turn is.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Stamp a `cron` origin on every persisted turn and every audit record produced by a scheduled run.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_CronScheduler_to_Engine",
+        "stride_category": "R",
+        "attack_surface": "CronScheduler via DF20"
+      }
+    },
+    {
+      "id": "T10.T",
+      "title": "Tampering — A stored job's prompt and configuration are executed later with no operator present",
+      "description": "A stored job's prompt and configuration are executed later with no operator present; a job row modified in the cron SQLite store changes what runs.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Restrict the cron database to owner-only, and re-display a job's full definition before each first run after modification.",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "data_flow_id": "DF_Server_to_CronScheduler",
+        "stride_category": "T",
+        "attack_surface": "CronScheduler via DF19"
+      }
+    },
+    {
+      "id": "T11.A",
+      "title": "Abuse — With `sandbox.network` enabled, the shell tool becomes a general-purpose network client that bypasses the S...",
+      "description": "With `sandbox.network` enabled, the shell tool becomes a general-purpose network client that bypasses the SSRF blocklist enforced on `web_fetch`.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "`sandbox.network` defaults to `false`; when enabled, apply an egress policy to the container rather than leaving it unrestricted.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "A",
+        "attack_surface": "SandboxBackend via DF22"
+      }
+    },
+    {
+      "id": "T11.D1",
+      "title": "Denial of Service — A runaway command exhausts host memory, CPU or process table, starving the model server the agent depends on.",
+      "description": "A runaway command exhausts host memory, CPU or process table, starving the model server the agent depends on.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`sandbox.limits` defaults to 4G memory, 2 CPUs and 1024 PIDs per container.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "D",
+        "attack_surface": "SandboxBackend via DF22"
+      }
+    },
+    {
+      "id": "T11.D2",
+      "title": "Denial of Service — The `local` backend applies none of those limits",
+      "description": "The `local` backend applies none of those limits — a fork bomb or memory hog runs unbounded on the host.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Apply OS-level resource limits (job objects on Windows, rlimits/cgroups on POSIX) to locally-executed commands.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_Engine_to_SandboxBackend",
+        "stride_category": "D",
+        "attack_surface": "SandboxBackend via DF10"
+      }
+    },
+    {
+      "id": "T11.E1",
+      "title": "Elevation of Privilege — `SelectSandbox` cascades container → OS → `local` and emits only a startup WARN, so a Windows host with no...",
+      "description": "`SelectSandbox` cascades container → OS → `local` and emits only a startup WARN, so a Windows host with no container runtime silently executes every agent command unconfined.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "`sandbox.strict` makes the fallback fatal but is not the default; make strict the default and require an explicit opt-out.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_Engine_to_SandboxBackend",
+        "stride_category": "E",
+        "attack_surface": "SandboxBackend via DF10"
+      }
+    },
+    {
+      "id": "T11.E2",
+      "title": "Elevation of Privilege — `auto_approve_exec` combined with the unsandboxed local backend is unattended remote code execution on the...",
+      "description": "`auto_approve_exec` combined with the unsandboxed local backend is unattended remote code execution on the host.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "The daemon refuses to start on that combination unless `permission.allow_unsandboxed_auto_exec` is set explicitly.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_Engine_to_SandboxBackend",
+        "stride_category": "E",
+        "attack_surface": "SandboxBackend via DF10"
+      }
+    },
+    {
+      "id": "T11.E3",
+      "title": "Elevation of Privilege — The persistent per-workspace container keeps state between commands for the session TTL, so a command that...",
+      "description": "The persistent per-workspace container keeps state between commands for the session TTL, so a command that plants a shim or modifies `PATH` inside the container affects every later command in the session.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Persistence is on by default (`sandbox.persistent: true`); document the retained-state model and offer a per-command reset.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "E",
+        "attack_surface": "SandboxBackend via DF22"
+      }
+    },
+    {
+      "id": "T11.I1",
+      "title": "Information Disclosure — The spawned process inherits the daemon's environment minus a denylist (`DefaultStripEnv` plus configured n...",
+      "description": "The spawned process inherits the daemon's environment minus a denylist (`DefaultStripEnv` plus configured names), so any secret-bearing variable not on the list is visible to the command.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Invert to an allowlist: pass only the variables a command legitimately needs.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_Engine_to_SandboxBackend",
+        "stride_category": "I",
+        "attack_surface": "SandboxBackend via DF10"
+      }
+    },
+    {
+      "id": "T11.I2",
+      "title": "Information Disclosure — The workspace mount exposes everything under the root to the command, including `.aegis/.env` and any crede...",
+      "description": "The workspace mount exposes everything under the root to the command, including `.aegis/.env` and any credential files the developer keeps in-tree.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Exclude `.aegis/.env` and configured secret paths from the mount.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "I",
+        "attack_surface": "SandboxBackend via DF22"
+      }
+    },
+    {
+      "id": "T11.R",
+      "title": "Repudiation — Executed commands are recorded only through the opt-in audit hook, so a default deployment has no durable r...",
+      "description": "Executed commands are recorded only through the opt-in audit hook, so a default deployment has no durable record of what the agent ran.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Default-on command audit log under the data directory.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_Engine_to_SandboxBackend",
+        "stride_category": "R",
+        "attack_surface": "SandboxBackend via DF10"
+      }
+    },
+    {
+      "id": "T11.T1",
+      "title": "Tampering — The `local` backend runs the model's command directly on the host with the operator's full privileges and n...",
+      "description": "The `local` backend runs the model's command directly on the host with the operator's full privileges and no filesystem confinement beyond the tool-level path checks.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Reached only when neither a container runtime nor an OS sandbox is available; make that state a hard failure under a `sandbox.strict` default rather than a WARN.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_Engine_to_SandboxBackend",
+        "stride_category": "T",
+        "attack_surface": "SandboxBackend via DF10"
+      }
+    },
+    {
+      "id": "T11.T2",
+      "title": "Tampering — The container backend bind-mounts the workspace read-write, so a command inside the sandbox can rewrite any...",
+      "description": "The container backend bind-mounts the workspace read-write, so a command inside the sandbox can rewrite any workspace file including `.aegis/config.yaml` and project skills.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Mount read-only for read-classified commands, and route writes through the checkpointed tool path.",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "data_flow_id": "DF_Engine_to_SandboxBackend",
+        "stride_category": "T",
+        "attack_surface": "SandboxBackend via DF10"
+      }
+    },
+    {
+      "id": "T12.A",
+      "title": "Abuse — `recon_scan` auto-authorizes every loopback and RFC1918 target with no allowlist entry, so a model-issued c...",
+      "description": "`recon_scan` auto-authorizes every loopback and RFC1918 target with no allowlist entry, so a model-issued call can port-scan and template-scan the operator's home or corporate LAN.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "`security.dast.allow_active` defaults to `false` for aggressive checks, but passive nmap/nuclei sweeps of private space need no configuration at all.",
+      "identity_key": {
+        "component_id": "MultiScanner",
+        "data_flow_id": "DF_MultiScanner_to_ContainerRuntime",
+        "stride_category": "A",
+        "attack_surface": "MultiScanner via DF24"
+      }
+    },
+    {
+      "id": "T12.D",
+      "title": "Denial of Service — A rogue or looping scanner floods stdout and exhausts daemon heap.",
+      "description": "A rogue or looping scanner floods stdout and exhausts daemon heap.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`execbound.go` caps retained scanner output at 64 MiB while still draining the pipe to completion.",
+      "identity_key": {
+        "component_id": "MultiScanner",
+        "data_flow_id": "DF_Server_to_MultiScanner",
+        "stride_category": "D",
+        "attack_surface": "MultiScanner via DF23"
+      }
+    },
+    {
+      "id": "T12.E",
+      "title": "Elevation of Privilege — A scanner container with both the workspace mounted and network access could exfiltrate source.",
+      "description": "A scanner container with both the workspace mounted and network access could exfiltrate source.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "The multiscanner runs `--network none` with the workspace mounted; `aegis-netscanner` runs with network and never a workspace mount; `update-db` is the only networked run of the former.",
+      "identity_key": {
+        "component_id": "MultiScanner",
+        "data_flow_id": "DF_MultiScanner_to_ContainerRuntime",
+        "stride_category": "E",
+        "attack_surface": "MultiScanner via DF24"
+      }
+    },
+    {
+      "id": "T12.I",
+      "title": "Information Disclosure — Scan reports embed source excerpts and dependency inventories and are written into the workspace where they...",
+      "description": "Scan reports embed source excerpts and dependency inventories and are written into the workspace where they may be committed.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "`internal/security/redact.go` scrubs findings; add the report path to a generated `.gitignore` entry.",
+      "identity_key": {
+        "component_id": "MultiScanner",
+        "data_flow_id": "DF_Server_to_MultiScanner",
+        "stride_category": "I",
+        "attack_surface": "MultiScanner via DF23"
+      }
+    },
+    {
+      "id": "T12.S",
+      "title": "Spoofing — Scanner image identity is asserted by a mutable tag rather than a digest, so a compromised registry or a lo...",
+      "description": "Scanner image identity is asserted by a mutable tag rather than a digest, so a compromised registry or a local image rebuild substitutes a different scanner.",
+      "stride_category": "S",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "`aegis security verify-image` exists; make verification a precondition of a scan run rather than a separate command.",
+      "identity_key": {
+        "component_id": "MultiScanner",
+        "data_flow_id": "DF_MultiScanner_to_ContainerRuntime",
+        "stride_category": "S",
+        "attack_surface": "MultiScanner via DF24"
+      }
+    },
+    {
+      "id": "T12.T",
+      "title": "Tampering — A scanner that fails partway reports a confident but wrong finding count, which an operator would read as \"...",
+      "description": "A scanner that fails partway reports a confident but wrong finding count, which an operator would read as \"clean\".",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "gosec is the one two-phase tool and a failed warm phase aborts the scan rather than reporting a count.",
+      "identity_key": {
+        "component_id": "MultiScanner",
+        "data_flow_id": "DF_Server_to_MultiScanner",
+        "stride_category": "T",
+        "attack_surface": "MultiScanner via DF23"
+      }
+    },
+    {
+      "id": "T13.D",
+      "title": "Denial of Service — Concurrent runs contend on a single SQLite file and can pile up on lock waits.",
+      "description": "Concurrent runs contend on a single SQLite file and can pile up on lock waits.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`journal_mode=WAL` plus a 5s `busy_timeout` applied per connection through the DSN.",
+      "identity_key": {
+        "component_id": "SessionStore",
+        "data_flow_id": "DF_Server_to_SessionStore",
+        "stride_category": "D",
+        "attack_surface": "SessionStore via DF15"
+      }
+    },
+    {
+      "id": "T13.I1",
+      "title": "Information Disclosure — Full conversation content",
+      "description": "Full conversation content — including file contents and any secrets the agent read — is persisted unencrypted and retained indefinitely.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Offer at-rest encryption keyed to the OS credential store, and a retention policy that prunes old sessions by default.",
+      "identity_key": {
+        "component_id": "SessionStore",
+        "data_flow_id": "DF_Server_to_SessionStore",
+        "stride_category": "I",
+        "attack_surface": "SessionStore via DF15"
+      }
+    },
+    {
+      "id": "T13.I2",
+      "title": "Information Disclosure — `sqlitestore.Open` creates the parent directory `0o700` but the database file itself is created by the driv...",
+      "description": "`sqlitestore.Open` creates the parent directory `0o700` but the database file itself is created by the driver with default permissions and no `fsguard.RestrictToOwner` call, so on Windows it inherits the parent ACL rather than an owner-only one.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Apply `fsguard.RestrictToOwner` to the database file (and its `-wal`/`-shm` companions) as `daemon.token` already does.",
+      "identity_key": {
+        "component_id": "SessionStore",
+        "data_flow_id": "DF_Server_to_SessionStore",
+        "stride_category": "I",
+        "attack_surface": "SessionStore via DF15"
+      }
+    },
+    {
+      "id": "T13.R",
+      "title": "Repudiation — Trace records are the closest thing to an audit trail and they are freely mutable, so they cannot support a...",
+      "description": "Trace records are the closest thing to an audit trail and they are freely mutable, so they cannot support a repudiation claim.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Keep security-relevant events in a separate append-only log rather than the same mutable database.",
+      "identity_key": {
+        "component_id": "SessionStore",
+        "data_flow_id": "DF_Server_to_SessionStore",
+        "stride_category": "R",
+        "attack_surface": "SessionStore via DF15"
+      }
+    },
+    {
+      "id": "T13.T",
+      "title": "Tampering — Any process running as the operator can edit the SQLite file directly, rewriting conversation history and t...",
+      "description": "Any process running as the operator can edit the SQLite file directly, rewriting conversation history and trace records with no integrity check on read.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Add a per-record MAC or an append-only trace log so history tampering is detectable.",
+      "identity_key": {
+        "component_id": "SessionStore",
+        "data_flow_id": "DF_Server_to_SessionStore",
+        "stride_category": "T",
+        "attack_surface": "SessionStore via DF15"
+      }
+    },
+    {
+      "id": "T14.A",
+      "title": "Abuse — `/rewind` is a legitimate feature that silently reverts files, so an injected instruction can use it to und...",
+      "description": "`/rewind` is a legitimate feature that silently reverts files, so an injected instruction can use it to undo a reviewer's edits or erase evidence of a prior tool call.",
+      "stride_category": "A",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Require explicit confirmation for a rewind that would discard changes made outside the agent's own tool calls.",
+      "identity_key": {
+        "component_id": "CheckpointStore",
+        "data_flow_id": "DF_Server_to_CheckpointStore",
+        "stride_category": "A",
+        "attack_surface": "CheckpointStore via DF16"
+      }
+    },
+    {
+      "id": "T14.D",
+      "title": "Denial of Service — Per-turn snapshots of a large workspace grow without a documented bound and can fill the disk.",
+      "description": "Per-turn snapshots of a large workspace grow without a documented bound and can fill the disk.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Cap total snapshot bytes per session and evict oldest first.",
+      "identity_key": {
+        "component_id": "CheckpointStore",
+        "data_flow_id": "DF_Server_to_CheckpointStore",
+        "stride_category": "D",
+        "attack_surface": "CheckpointStore via DF16"
+      }
+    },
+    {
+      "id": "T14.I",
+      "title": "Information Disclosure — Snapshots contain complete copies of workspace files, including any secrets present at snapshot time, and p...",
+      "description": "Snapshots contain complete copies of workspace files, including any secrets present at snapshot time, and persist after the session that created them.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Reap snapshots with the session, and apply owner-only permissions to the snapshot directory.",
+      "identity_key": {
+        "component_id": "CheckpointStore",
+        "data_flow_id": "DF_Server_to_CheckpointStore",
+        "stride_category": "I",
+        "attack_surface": "CheckpointStore via DF16"
+      }
+    },
+    {
+      "id": "T14.T",
+      "title": "Tampering — A modified snapshot is restored over live workspace files on rewind, so tampering with the store becomes ta...",
+      "description": "A modified snapshot is restored over live workspace files on rewind, so tampering with the store becomes tampering with the working tree.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Record a content digest per snapshot and verify it before restore.",
+      "identity_key": {
+        "component_id": "CheckpointStore",
+        "data_flow_id": "DF_Server_to_CheckpointStore",
+        "stride_category": "T",
+        "attack_surface": "CheckpointStore via DF16"
+      }
+    },
+    {
+      "id": "T15.E1",
+      "title": "Elevation of Privilege — The fingerprint deliberately excludes `.aegis/.env`, so a project can change the secrets loaded into the da...",
+      "description": "The fingerprint deliberately excludes `.aegis/.env`, so a project can change the secrets loaded into the daemon's environment without invalidating an existing trust grant.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Documented as a deliberate hole in `internal/config/fingerprint.go`; the load-order constraint that motivates it should be revisited so the file can be covered.",
+      "identity_key": {
+        "component_id": "WorkspaceTrustStore",
+        "data_flow_id": "DF_Server_to_WorkspaceTrustStore",
+        "stride_category": "E",
+        "attack_surface": "WorkspaceTrustStore via DF17"
+      }
+    },
+    {
+      "id": "T15.E2",
+      "title": "Elevation of Privilege — A grant written before fingerprints existed has an empty `Fingerprint` and would otherwise match any config...",
+      "description": "A grant written before fingerprints existed has an empty `Fingerprint` and would otherwise match any configuration.",
+      "stride_category": "E",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`Store.Check` treats an empty fingerprint as a pre-P66.25 grant and re-prompts once.",
+      "identity_key": {
+        "component_id": "WorkspaceTrustStore",
+        "data_flow_id": "DF_Server_to_WorkspaceTrustStore",
+        "stride_category": "E",
+        "attack_surface": "WorkspaceTrustStore via DF17"
+      }
+    },
+    {
+      "id": "T15.R",
+      "title": "Repudiation — An entry records only `TrustedAt` and the fingerprint",
+      "description": "An entry records only `TrustedAt` and the fingerprint — not who granted it or through which interface — so an inserted grant is indistinguishable from an operator decision.",
+      "stride_category": "R",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Record the granting interface and process identity alongside each entry.",
+      "identity_key": {
+        "component_id": "WorkspaceTrustStore",
+        "data_flow_id": "DF_Server_to_WorkspaceTrustStore",
+        "stride_category": "R",
+        "attack_surface": "WorkspaceTrustStore via DF17"
+      }
+    },
+    {
+      "id": "T15.T",
+      "title": "Tampering — The grant file is written `0o600` inside a `0o700` directory but carries no integrity protection, so a same...",
+      "description": "The grant file is written `0o600` inside a `0o700` directory but carries no integrity protection, so a same-user process can insert a grant for any directory and suppress the trust prompt.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Apply `fsguard.RestrictToOwner` to the store file and sign the entry set with a key held in the OS credential store.",
+      "identity_key": {
+        "component_id": "WorkspaceTrustStore",
+        "data_flow_id": "DF_Server_to_WorkspaceTrustStore",
+        "stride_category": "T",
+        "attack_surface": "WorkspaceTrustStore via DF17"
+      }
+    },
+    {
+      "id": "T16.D",
+      "title": "Denial of Service — An unwritable or full data directory prevents token generation and blocks daemon start.",
+      "description": "An unwritable or full data directory prevents token generation and blocks daemon start.",
+      "stride_category": "D",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "`generateAndWriteToken` returns the error and `ListenAndServe` refuses to start with an empty token, failing closed.",
+      "identity_key": {
+        "component_id": "DaemonTokenFile",
+        "data_flow_id": "DF_Server_to_DaemonTokenFile",
+        "stride_category": "D",
+        "attack_surface": "DaemonTokenFile via DF18"
+      }
+    },
+    {
+      "id": "T16.I1",
+      "title": "Information Disclosure — A world-readable token file would expose the daemon credential to every account on a shared host.",
+      "description": "A world-readable token file would expose the daemon credential to every account on a shared host.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Mitigated",
+      "mitigation": "Written `0o600` and then hardened by `fsguard.RestrictToOwner`, which applies a real non-inherited owner-only ACL on Windows where the mode bit is cosmetic.",
+      "identity_key": {
+        "component_id": "DaemonTokenFile",
+        "data_flow_id": "DF_Server_to_DaemonTokenFile",
+        "stride_category": "I",
+        "attack_surface": "DaemonTokenFile via DF18"
+      }
+    },
+    {
+      "id": "T16.I2",
+      "title": "Information Disclosure — The token never rotates for the life of the file, so a credential captured once (backup, snapshot, screen s...",
+      "description": "The token never rotates for the life of the file, so a credential captured once (backup, snapshot, screen share) stays valid indefinitely.",
+      "stride_category": "I",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Rotate on daemon restart, or on an interval, with clients re-reading the file.",
+      "identity_key": {
+        "component_id": "DaemonTokenFile",
+        "data_flow_id": "DF_Server_to_DaemonTokenFile",
+        "stride_category": "I",
+        "attack_surface": "DaemonTokenFile via DF18"
+      }
+    },
+    {
+      "id": "T16.S",
+      "title": "Spoofing — Possession of `daemon.token` is the entire identity model",
+      "description": "Possession of `daemon.token` is the entire identity model — there is no binding to a process, user session or client certificate.",
+      "stride_category": "S",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Add per-client tokens issued on an operator-confirmed handshake so a stolen credential is scoped and revocable.",
+      "identity_key": {
+        "component_id": "DaemonTokenFile",
+        "data_flow_id": "DF_Client_to_DaemonTokenFile",
+        "stride_category": "S",
+        "attack_surface": "DaemonTokenFile via DF25"
+      }
+    },
+    {
+      "id": "T16.T",
+      "title": "Tampering — Deleting `daemon.crt`/`daemon.key` makes the daemon regenerate them on next start, silently changing the ce...",
+      "description": "Deleting `daemon.crt`/`daemon.key` makes the daemon regenerate them on next start, silently changing the certificate every pinned client trusts.",
+      "stride_category": "T",
+      "tier": 3,
+      "prerequisites": "Host/OS Access",
+      "status": "Open",
+      "mitigation": "Treat regeneration of an existing pin as an event requiring explicit operator acknowledgement.",
+      "identity_key": {
+        "component_id": "DaemonTokenFile",
+        "data_flow_id": "DF_Server_to_DaemonTokenFile",
+        "stride_category": "T",
+        "attack_surface": "DaemonTokenFile via DF18"
+      }
+    },
+    {
+      "id": "T17.A",
+      "title": "Abuse — Legitimate agent behaviour drives unbounded metered spend, since every `cost.*` cap defaults to `0`.",
+      "description": "Legitimate agent behaviour drives unbounded metered spend, since every `cost.*` cap defaults to `0`.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "Ship non-zero `cost.session_cap_usd`/`cost.daily_cap_usd` defaults for cloud providers.",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "A",
+        "attack_surface": "AnthropicAPI via DF12"
+      }
+    },
+    {
+      "id": "T17.D",
+      "title": "Denial of Service — Vendor rate limiting, quota exhaustion or an outage stalls every run.",
+      "description": "Vendor rate limiting, quota exhaustion or an outage stalls every run.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Mitigated",
+      "mitigation": "Retry, failover and admission-control decorators wrap the adapter (`internal/provider/retry.go`, `failover.go`, `admission.go`).",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "D",
+        "attack_surface": "AnthropicAPI via DF12"
+      }
+    },
+    {
+      "id": "T17.I1",
+      "title": "Information Disclosure — Source code, configuration and any secrets present in read files leave the operator's machine for a third p...",
+      "description": "Source code, configuration and any secrets present in read files leave the operator's machine for a third party under that vendor's retention terms.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "Apply `internal/redact` to outbound provider payloads when the endpoint is not loopback, and surface a per-session indicator of what has been sent.",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "I",
+        "attack_surface": "AnthropicAPI via DF12"
+      }
+    },
+    {
+      "id": "T17.I2",
+      "title": "Information Disclosure — A `base_url` on plaintext HTTP would send the API key in the clear.",
+      "description": "A `base_url` on plaintext HTTP would send the API key in the clear.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Mitigated",
+      "mitigation": "`validateBaseURL` refuses outright when the scheme is `http`, the host is non-loopback and a real API key would be attached.",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "I",
+        "attack_surface": "AnthropicAPI via DF12"
+      }
+    },
+    {
+      "id": "T17.R",
+      "title": "Repudiation — There is no local, tamper-evident record of exactly what payload left the host for the vendor, so a later d...",
+      "description": "There is no local, tamper-evident record of exactly what payload left the host for the vendor, so a later data-exposure question cannot be answered from the machine.",
+      "stride_category": "R",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "Log a hash and byte count of each outbound provider payload to the audit sink.",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "R",
+        "attack_surface": "AnthropicAPI via DF12"
+      }
+    },
+    {
+      "id": "T17.S",
+      "title": "Spoofing — A `provider.base_url` override pointed at an attacker-controlled HTTPS host receives every request includin...",
+      "description": "A `provider.base_url` override pointed at an attacker-controlled HTTPS host receives every request including the API key; the override is warned about, not refused.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "`validateBaseURL` warns when a cloud provider's default host is overridden. Escalate to a confirmation prompt, or treat the override as a security-relevant config key frozen under workspace trust.",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "S",
+        "attack_surface": "AnthropicAPI via DF12"
+      }
+    },
+    {
+      "id": "T17.T",
+      "title": "Tampering — The model's response is trusted to shape tool calls",
+      "description": "The model's response is trusted to shape tool calls; a compromised or substituted endpoint controls what the agent does next.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "Keep destructive tool calls behind operator approval regardless of provider, which the default `build` mode does for execute-capable tools.",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "data_flow_id": "DF_Engine_to_AnthropicAPI",
+        "stride_category": "T",
+        "attack_surface": "AnthropicAPI via DF12"
+      }
+    },
+    {
+      "id": "T18.D",
+      "title": "Denial of Service — Model load, eviction, or a `num_ctx` mismatch between the Modelfile and the daemon's plan stalls or degrade...",
+      "description": "Model load, eviction, or a `num_ctx` mismatch between the Modelfile and the daemon's plan stalls or degrades every run.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "The `num_ctx` decorator and the persisted per-model capability cache (`internal/modelcaps`) detect and adapt; the turn-stall bound reclaims a wedged run.",
+      "identity_key": {
+        "component_id": "OllamaServer",
+        "data_flow_id": "DF_Engine_to_OllamaServer",
+        "stride_category": "D",
+        "attack_surface": "OllamaServer via DF13"
+      }
+    },
+    {
+      "id": "T18.E",
+      "title": "Elevation of Privilege — A pulled model file carries no signature, so a poisoned or backdoored model steers tool calls while appeari...",
+      "description": "A pulled model file carries no signature, so a poisoned or backdoored model steers tool calls while appearing to be the model the operator selected.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Platform",
+      "mitigation": "Model provenance is the model host's and Ollama's responsibility; Aegis can only record the digest it was served.",
+      "identity_key": {
+        "component_id": "OllamaServer",
+        "data_flow_id": "DF_Engine_to_OllamaServer",
+        "stride_category": "E",
+        "attack_surface": "OllamaServer via DF13"
+      }
+    },
+    {
+      "id": "T18.I",
+      "title": "Information Disclosure — Prompts containing workspace file contents traverse that same plaintext loopback hop.",
+      "description": "Prompts containing workspace file contents traverse that same plaintext loopback hop.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Same remediation as T18.T; the daemon's own listener already solved this with pinned TLS.",
+      "identity_key": {
+        "component_id": "OllamaServer",
+        "data_flow_id": "DF_Engine_to_OllamaServer",
+        "stride_category": "I",
+        "attack_surface": "OllamaServer via DF13"
+      }
+    },
+    {
+      "id": "T18.S",
+      "title": "Spoofing — Ollama listens on loopback with no authentication, so any local process that binds the port first",
+      "description": "Ollama listens on loopback with no authentication, so any local process that binds the port first — or wins a restart race — answers as the model and dictates the agent's tool calls.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Support a shared secret or Unix-socket path for the local provider, and record the endpoint's identity across restarts.",
+      "identity_key": {
+        "component_id": "OllamaServer",
+        "data_flow_id": "DF_Engine_to_OllamaServer",
+        "stride_category": "S",
+        "attack_surface": "OllamaServer via DF13"
+      }
+    },
+    {
+      "id": "T18.T",
+      "title": "Tampering — Completions traverse plaintext loopback HTTP and can be observed or modified by a local process with packet...",
+      "description": "Completions traverse plaintext loopback HTTP and can be observed or modified by a local process with packet-capture privilege.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Allow TLS to a local provider endpoint, and prefer a filesystem socket where the platform supports it.",
+      "identity_key": {
+        "component_id": "OllamaServer",
+        "data_flow_id": "DF_Engine_to_OllamaServer",
+        "stride_category": "T",
+        "attack_surface": "OllamaServer via DF13"
+      }
+    },
+    {
+      "id": "T19.A",
+      "title": "Abuse — A server writes its tool descriptions specifically to induce the model to call it with sensitive arguments,...",
+      "description": "A server writes its tool descriptions specifically to induce the model to call it with sensitive arguments, using a legitimate protocol feature as a social-engineering channel against the model.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Wrap server-supplied descriptions in the untrusted-content marker already applied to their results.",
+      "identity_key": {
+        "component_id": "ExternalMCPServer",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "A",
+        "attack_surface": "ExternalMCPServer via DF21"
+      }
+    },
+    {
+      "id": "T19.D",
+      "title": "Denial of Service — A hanging server stalls the tool round it participates in.",
+      "description": "A hanging server stalls the tool round it participates in.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "Per-call timeouts are enumerated and kept below the turn-stall bound.",
+      "identity_key": {
+        "component_id": "ExternalMCPServer",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "D",
+        "attack_surface": "ExternalMCPServer via DF21"
+      }
+    },
+    {
+      "id": "T19.E",
+      "title": "Elevation of Privilege — A server can advertise a tool whose name shadows or resembles a built-in, so the model calls the external o...",
+      "description": "A server can advertise a tool whose name shadows or resembles a built-in, so the model calls the external one believing it is calling the harness.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Namespace MCP tool names on exposure and reject collisions with built-in names.",
+      "identity_key": {
+        "component_id": "ExternalMCPServer",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "E",
+        "attack_surface": "ExternalMCPServer via DF21"
+      }
+    },
+    {
+      "id": "T19.I",
+      "title": "Information Disclosure — The model chooses tool arguments, so an injected instruction can move workspace file contents into an argum...",
+      "description": "The model chooses tool arguments, so an injected instruction can move workspace file contents into an argument sent to the server.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "`warnOutboundSecrets` warns only; add refusal for arguments matching known secret classes.",
+      "identity_key": {
+        "component_id": "ExternalMCPServer",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "I",
+        "attack_surface": "ExternalMCPServer via DF21"
+      }
+    },
+    {
+      "id": "T19.S",
+      "title": "Spoofing — A stdio server is authenticated only by the fact that the configured command started",
+      "description": "A stdio server is authenticated only by the fact that the configured command started; an HTTP server is authenticated only by TLS to a configured URL.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Pin an absolute command path and a binary digest for stdio servers; require a pinned certificate or token for HTTP servers.",
+      "identity_key": {
+        "component_id": "ExternalMCPServer",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "S",
+        "attack_surface": "ExternalMCPServer via DF21"
+      }
+    },
+    {
+      "id": "T19.T1",
+      "title": "Tampering — Tool results are attacker-controlled text placed directly into the model's context",
+      "description": "Tool results are attacker-controlled text placed directly into the model's context — the primary indirect prompt-injection vector in the system.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "`wrapUntrusted` always applies a provenance marker and `trust.ScanForInjection` annotates hits, but neither constrains the model mechanically.",
+      "identity_key": {
+        "component_id": "ExternalMCPServer",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "T",
+        "attack_surface": "ExternalMCPServer via DF21"
+      }
+    },
+    {
+      "id": "T19.T2",
+      "title": "Tampering — `tools/list_changed` lets a server swap a tool's schema and semantics after the operator has already approv...",
+      "description": "`tools/list_changed` lets a server swap a tool's schema and semantics after the operator has already approved calls to that name.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Re-prompt on a semantic change to an approved tool, not only on the first approval.",
+      "identity_key": {
+        "component_id": "ExternalMCPServer",
+        "data_flow_id": "DF_MCPClient_to_ExternalMCPServer",
+        "stride_category": "T",
+        "attack_surface": "ExternalMCPServer via DF21"
+      }
+    },
+    {
+      "id": "T20.A",
+      "title": "Abuse — `web_fetch` is a legitimate feature that doubles as an exfiltration channel: an injected instruction encode...",
+      "description": "`web_fetch` is a legitimate feature that doubles as an exfiltration channel: an injected instruction encodes file content into a URL the agent then fetches.",
+      "stride_category": "A",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "Combine the T20.I redaction with an operator-visible egress log of every fetched URL.",
+      "identity_key": {
+        "component_id": "ExternalWebService",
+        "data_flow_id": "DF_Engine_to_ExternalWebService",
+        "stride_category": "A",
+        "attack_surface": "ExternalWebService via DF14"
+      }
+    },
+    {
+      "id": "T20.D",
+      "title": "Denial of Service — A slow or very large response ties up the fetch path.",
+      "description": "A slow or very large response ties up the fetch path.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Mitigated",
+      "mitigation": "Bounded retries with `webBackoff`, a response-size limit via `defaultFetchLimit`, and per-call timeouts under the stall bound.",
+      "identity_key": {
+        "component_id": "ExternalWebService",
+        "data_flow_id": "DF_Engine_to_ExternalWebService",
+        "stride_category": "D",
+        "attack_surface": "ExternalWebService via DF14"
+      }
+    },
+    {
+      "id": "T20.E",
+      "title": "Elevation of Privilege — SSRF: a fetch to a loopback or private address reaches the operator's Ollama, the Aegis daemon itself, or a...",
+      "description": "SSRF: a fetch to a loopback or private address reaches the operator's Ollama, the Aegis daemon itself, or a cloud metadata endpoint.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Mitigated",
+      "mitigation": "`netblock.SafeDialer` blocks `0.0.0.0/8`, RFC1918, CGNAT, link-local, multicast, reserved space and the NAT64 prefix, and `CheckRedirect` re-validates every redirect hop.",
+      "identity_key": {
+        "component_id": "ExternalWebService",
+        "data_flow_id": "DF_Engine_to_ExternalWebService",
+        "stride_category": "E",
+        "attack_surface": "ExternalWebService via DF14"
+      }
+    },
+    {
+      "id": "T20.I",
+      "title": "Information Disclosure — The model chooses the URL, so workspace-derived data can be encoded into the request path or query string a...",
+      "description": "The model chooses the URL, so workspace-derived data can be encoded into the request path or query string and observed by the destination.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "Apply `internal/redact` classes to outbound URLs and refuse fetches whose URL contains material matching a secret pattern.",
+      "identity_key": {
+        "component_id": "ExternalWebService",
+        "data_flow_id": "DF_Engine_to_ExternalWebService",
+        "stride_category": "I",
+        "attack_surface": "ExternalWebService via DF14"
+      }
+    },
+    {
+      "id": "T20.S",
+      "title": "Spoofing — Search results are scraped from DuckDuckGo/Marginalia HTML and carry no origin authentication beyond transp...",
+      "description": "Search results are scraped from DuckDuckGo/Marginalia HTML and carry no origin authentication beyond transport TLS; a challenge page or a poisoned result set is parsed as authoritative.",
+      "stride_category": "S",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "`looksLikeDDGChallenge`/`looksLikeMarginaliaChallenge` detect interstitials; surface parse-confidence to the model rather than presenting scraped results as facts.",
+      "identity_key": {
+        "component_id": "ExternalWebService",
+        "data_flow_id": "DF_Engine_to_ExternalWebService",
+        "stride_category": "S",
+        "attack_surface": "ExternalWebService via DF14"
+      }
+    },
+    {
+      "id": "T20.T",
+      "title": "Tampering — Fetched HTML is converted to text and enters model context, making any page the model visits an injection v...",
+      "description": "Fetched HTML is converted to text and enters model context, making any page the model visits an injection vector.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "status": "Open",
+      "mitigation": "`trust.Wrap` marks the content and `ScanForInjection` annotates hits, including zero-width-obfuscated payloads; the marker is advisory.",
+      "identity_key": {
+        "component_id": "ExternalWebService",
+        "data_flow_id": "DF_Engine_to_ExternalWebService",
+        "stride_category": "T",
+        "attack_surface": "ExternalWebService via DF14"
+      }
+    },
+    {
+      "id": "T21.D",
+      "title": "Denial of Service — If the runtime is unavailable or a container fails to start, `SelectSandbox` degrades to a weaker backend r...",
+      "description": "If the runtime is unavailable or a container fails to start, `SelectSandbox` degrades to a weaker backend rather than failing the command, so a runtime outage becomes a silent loss of isolation.",
+      "stride_category": "D",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Make the degradation fatal by default (`sandbox.strict`) so an outage is a visible failure.",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "D",
+        "attack_surface": "ContainerRuntime via DF22"
+      }
+    },
+    {
+      "id": "T21.E1",
+      "title": "Elevation of Privilege — On Linux, membership of the `docker` group is equivalent to host root, so any process able to drive the run...",
+      "description": "On Linux, membership of the `docker` group is equivalent to host root, so any process able to drive the runtime — including the sandboxed command if the socket is reachable — can escape to the host.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Platform",
+      "mitigation": "Docker's group-equals-root model is the runtime's, not Aegis's; prefer rootless Podman and never mount the socket into a container.",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "E",
+        "attack_surface": "ContainerRuntime via DF22"
+      }
+    },
+    {
+      "id": "T21.E2",
+      "title": "Elevation of Privilege — A container running with default capabilities and privilege escalation enabled weakens the isolation the sa...",
+      "description": "A container running with default capabilities and privilege escalation enabled weakens the isolation the sandbox exists to provide.",
+      "stride_category": "E",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Mitigated",
+      "mitigation": "`OCIHardeningFlags` applies `--cap-drop=ALL` and `--security-opt=no-new-privileges` to every run, alongside memory, CPU and PID limits.",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "E",
+        "attack_surface": "ContainerRuntime via DF22"
+      }
+    },
+    {
+      "id": "T21.I",
+      "title": "Information Disclosure — The workspace bind mount makes every file under the root readable inside the container, including files the...",
+      "description": "The workspace bind mount makes every file under the root readable inside the container, including files the specific command had no need to see.",
+      "stride_category": "I",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Mount only the paths a command's classified argv requires.",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "I",
+        "attack_surface": "ContainerRuntime via DF22"
+      }
+    },
+    {
+      "id": "T21.T",
+      "title": "Tampering — `sandbox.image` defaults to the mutable tag `ubuntu:22.04`",
+      "description": "`sandbox.image` defaults to the mutable tag `ubuntu:22.04`; the image behind that tag can change between runs, and scanner images are likewise referenced by tag.",
+      "stride_category": "T",
+      "tier": 2,
+      "prerequisites": "Local Process Access",
+      "status": "Open",
+      "mitigation": "Pin images by digest and record the resolved digest in the scan/session record.",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "data_flow_id": "DF_SandboxBackend_to_ContainerRuntime",
+        "stride_category": "T",
+        "attack_surface": "ContainerRuntime via DF22"
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "FIND-01",
+      "title": "Indirect prompt injection is marked but not constrained",
+      "severity": "Critical",
+      "cvss_score": 8.7,
+      "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-1427",
+      "owasp": "A05:2025",
+      "tier": 2,
+      "effort": "High",
+      "related_threats": [
+        "T20.T",
+        "T20.S",
+        "T19.T1",
+        "T19.A",
+        "T09.A"
+      ],
+      "evidence_files": [
+        "internal/config/config.go",
+        "internal/mcp/trust.go",
+        "internal/server/auth.go",
+        "internal/tool/builtin/web.go",
+        "internal/trust/trust.go"
+      ],
+      "component": "External Web Service",
+      "identity_key": {
+        "component_id": "ExternalWebService",
+        "vulnerability": "CWE-1427",
+        "attack_surface": "internal/config/config.go"
+      }
+    },
+    {
+      "id": "FIND-02",
+      "title": "External MCP servers are trusted on configuration alone",
+      "severity": "Important",
+      "cvss_score": 8.2,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-1357",
+      "owasp": "A03:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T19.S",
+        "T19.E",
+        "T19.T2",
+        "T09.S",
+        "T09.E",
+        "T07.E2",
+        "T09.T"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "internal/mcp/mcp.go",
+        "internal/mcp/tool.go"
+      ],
+      "component": "External MCP Server",
+      "identity_key": {
+        "component_id": "ExternalMCPServer",
+        "vulnerability": "CWE-1357",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-03",
+      "title": "Configuration endpoints can disable command isolation with only the bearer token",
+      "severity": "Important",
+      "cvss_score": 8.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+      "cwe": "CWE-284",
+      "owasp": "A01:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T06.T1",
+        "T06.S",
+        "T06.A",
+        "T06.E",
+        "T05.A"
+      ],
+      "evidence_files": [
+        "internal/config/config.go",
+        "internal/config/config_server.go",
+        "internal/server/auth.go",
+        "internal/server/lifecycle.go"
+      ],
+      "component": "Aegis Daemon",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-284",
+        "attack_surface": "internal/config/config.go"
+      }
+    },
+    {
+      "id": "FIND-04",
+      "title": "The web UI hands the real daemon token to browser JavaScript",
+      "severity": "Important",
+      "cvss_score": 7.6,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:P/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-522",
+      "owasp": "A07:2025",
+      "tier": 2,
+      "effort": "High",
+      "related_threats": [
+        "T03.I2",
+        "T03.S",
+        "T03.E"
+      ],
+      "evidence_files": [
+        "internal/server/auth.go",
+        "internal/server/webui.go"
+      ],
+      "component": "Web UI",
+      "identity_key": {
+        "component_id": "WebUI",
+        "vulnerability": "CWE-522",
+        "attack_surface": "internal/server/auth.go"
+      }
+    },
+    {
+      "id": "FIND-05",
+      "title": "Outbound provider payloads and tool arguments are never redacted",
+      "severity": "Important",
+      "cvss_score": 7.5,
+      "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-200",
+      "owasp": "A04:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T17.I1",
+        "T17.R",
+        "T19.I",
+        "T09.I1",
+        "T07.I1",
+        "T02.I2"
+      ],
+      "evidence_files": [
+        "internal/config/config.go",
+        "internal/mcp/outbound.go",
+        "internal/provider/anthropic/anthropic.go",
+        "internal/redact/redact.go",
+        "internal/security/redact.go",
+        "internal/share/share.go"
+      ],
+      "component": "Anthropic API",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "vulnerability": "CWE-200",
+        "attack_surface": "internal/config/config.go"
+      }
+    },
+    {
+      "id": "FIND-06",
+      "title": "`provider.base_url` override redirects credentials and model control on a warning only",
+      "severity": "Important",
+      "cvss_score": 7.3,
+      "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-346",
+      "owasp": "A02:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T17.S",
+        "T17.T",
+        "T17.I2"
+      ],
+      "evidence_files": [
+        ".aegis/config.yaml",
+        "internal/config/fingerprint.go",
+        "internal/providerfactory/factory.go"
+      ],
+      "component": "Anthropic API",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "vulnerability": "CWE-346",
+        "attack_surface": ".aegis/config.yaml"
+      }
+    },
+    {
+      "id": "FIND-07",
+      "title": "The local model endpoint is unauthenticated plaintext HTTP on loopback",
+      "severity": "Important",
+      "cvss_score": 7.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-319",
+      "owasp": "A04:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T18.S",
+        "T18.T",
+        "T18.I",
+        "T06.I2",
+        "T18.D"
+      ],
+      "evidence_files": [
+        "internal/config/config_provider.go",
+        "internal/config/config_server.go",
+        "internal/provider/ollama/ollama.go",
+        "internal/providerfactory/factory.go"
+      ],
+      "component": "Ollama Server",
+      "identity_key": {
+        "component_id": "OllamaServer",
+        "vulnerability": "CWE-319",
+        "attack_surface": "internal/config/config_provider.go"
+      }
+    },
+    {
+      "id": "FIND-08",
+      "title": "`web_fetch` is an unreviewed egress channel",
+      "severity": "Important",
+      "cvss_score": 6.9,
+      "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-201",
+      "owasp": "A06:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T20.I",
+        "T20.A",
+        "T20.D",
+        "T20.E"
+      ],
+      "evidence_files": [
+        "internal/netblock/netblock.go",
+        "internal/tool/builtin/web.go"
+      ],
+      "component": "External Web Service",
+      "identity_key": {
+        "component_id": "ExternalWebService",
+        "vulnerability": "CWE-201",
+        "attack_surface": "internal/netblock/netblock.go"
+      }
+    },
+    {
+      "id": "FIND-09",
+      "title": "Session working-directory allowlist is not enforced on the default bind",
+      "severity": "Important",
+      "cvss_score": 6.8,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-22",
+      "owasp": "A01:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T06.T2"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "internal/config/config.go",
+        "internal/config/config_server.go",
+        "internal/server/lifecycle.go"
+      ],
+      "component": "Aegis Daemon",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-22",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-10",
+      "title": "The container workspace mount exposes the whole workspace to every command",
+      "severity": "Important",
+      "cvss_score": 6.5,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-668",
+      "owasp": "A01:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T21.I",
+        "T11.I2",
+        "T11.T2",
+        "T21.E2"
+      ],
+      "evidence_files": [
+        ".aegis/config.yaml",
+        "CLAUDE.md",
+        "internal/config/config.go",
+        "internal/sandbox/docker.go"
+      ],
+      "component": "Container Runtime",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "vulnerability": "CWE-668",
+        "attack_surface": ".aegis/config.yaml"
+      }
+    },
+    {
+      "id": "FIND-11",
+      "title": "Build, test, vulnerability and lint gates no longer run on push or pull request",
+      "severity": "Important",
+      "cvss_score": 6.3,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:L/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-693",
+      "owasp": "A03:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T03.T"
+      ],
+      "evidence_files": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/codeql.yml",
+        ".github/workflows/release.yml",
+        "ci.yml"
+      ],
+      "component": "Aegis Daemon",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-693",
+        "attack_surface": ".github/workflows/ci.yml"
+      }
+    },
+    {
+      "id": "FIND-12",
+      "title": "Release artifacts ship without checksums, signatures or provenance",
+      "severity": "Moderate",
+      "cvss_score": 6.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:P/PR:L/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+      "cwe": "CWE-494",
+      "owasp": "A08:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T03.T"
+      ],
+      "evidence_files": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/codeql.yml",
+        ".github/workflows/release.yml",
+        "ci.yml",
+        "release.yml"
+      ],
+      "component": "Aegis Daemon",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-494",
+        "attack_surface": ".github/workflows/ci.yml"
+      }
+    },
+    {
+      "id": "FIND-13",
+      "title": "Container and scanner images are referenced by mutable tag",
+      "severity": "Moderate",
+      "cvss_score": 5.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:P/PR:L/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-494",
+      "owasp": "A03:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T21.T",
+        "T21.D",
+        "T12.S",
+        "T12.E"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "internal/config/config.go",
+        "internal/security/multiscanner_build.go",
+        "internal/security/netscanner_verify.go"
+      ],
+      "component": "Container Runtime",
+      "identity_key": {
+        "component_id": "ContainerRuntime",
+        "vulnerability": "CWE-494",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-14",
+      "title": "No default audit trail for privileged operations, policy decisions or executed commands",
+      "severity": "Moderate",
+      "cvss_score": 5.7,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:N/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-778",
+      "owasp": "A09:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T06.R1",
+        "T06.R2",
+        "T08.R",
+        "T11.R",
+        "T01.R",
+        "T04.R",
+        "T05.R",
+        "T10.R",
+        "T13.R",
+        "T15.R",
+        "T07.R"
+      ],
+      "evidence_files": [
+        "internal/hooks/hooks.go",
+        "internal/server/auth.go",
+        "internal/server/lifecycle.go"
+      ],
+      "component": "Aegis Daemon",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-778",
+        "attack_surface": "internal/hooks/hooks.go"
+      }
+    },
+    {
+      "id": "FIND-15",
+      "title": "All cost and token budgets default to unlimited",
+      "severity": "Moderate",
+      "cvss_score": 5.3,
+      "cvss_vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+      "cwe": "CWE-770",
+      "owasp": "A10:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T17.A",
+        "T07.D1",
+        "T07.A2",
+        "T05.D",
+        "T07.A1",
+        "T07.D2",
+        "T09.D",
+        "T10.D",
+        "T17.D",
+        "T19.D"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "internal/config/config.go"
+      ],
+      "component": "Anthropic API",
+      "identity_key": {
+        "component_id": "AnthropicAPI",
+        "vulnerability": "CWE-770",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-16",
+      "title": "The unauthenticated `/ui` mint can be flooded to deny the operator's own UI",
+      "severity": "Moderate",
+      "cvss_score": 5.3,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+      "cwe": "CWE-770",
+      "owasp": "A10:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T03.D",
+        "T06.D1"
+      ],
+      "evidence_files": [
+        "internal/server/auth.go"
+      ],
+      "component": "Web UI",
+      "identity_key": {
+        "component_id": "WebUI",
+        "vulnerability": "CWE-770",
+        "attack_surface": "internal/server/auth.go"
+      }
+    },
+    {
+      "id": "FIND-17",
+      "title": "Web UI assets are served from a committed `dist/` whose drift check no longer runs",
+      "severity": "Moderate",
+      "cvss_score": 5.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:L/UI:P/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-353",
+      "owasp": "A08:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T03.T"
+      ],
+      "evidence_files": [
+        ".github/workflows/ci.yml",
+        "CLAUDE.md",
+        "ci.yml",
+        "internal/server/webui.go"
+      ],
+      "component": "Web UI",
+      "identity_key": {
+        "component_id": "WebUI",
+        "vulnerability": "CWE-353",
+        "attack_surface": ".github/workflows/ci.yml"
+      }
+    },
+    {
+      "id": "FIND-18",
+      "title": "The self-signed certificate warning conditions operators to click through",
+      "severity": "Low",
+      "cvss_score": 4.3,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:P/PR:L/UI:A/VC:H/VI:L/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-295",
+      "owasp": "A02:2025",
+      "tier": 2,
+      "effort": "Medium",
+      "related_threats": [
+        "T03.A",
+        "T03.I1"
+      ],
+      "evidence_files": [
+        "docs/installation.md",
+        "internal/config/config_server.go"
+      ],
+      "component": "Web UI",
+      "identity_key": {
+        "component_id": "WebUI",
+        "vulnerability": "CWE-295",
+        "attack_surface": "docs/installation.md"
+      }
+    },
+    {
+      "id": "FIND-19",
+      "title": "`/healthz` discloses daemon presence without authentication",
+      "severity": "Low",
+      "cvss_score": 2.3,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-200",
+      "owasp": "A02:2025",
+      "tier": 2,
+      "effort": "Low",
+      "related_threats": [
+        "T06.I1"
+      ],
+      "evidence_files": [
+        "internal/server/auth.go",
+        "internal/server/lifecycle.go"
+      ],
+      "component": "Aegis Daemon",
+      "identity_key": {
+        "component_id": "Server",
+        "vulnerability": "CWE-200",
+        "attack_surface": "internal/server/auth.go"
+      }
+    },
+    {
+      "id": "FIND-20",
+      "title": "Plan mode's read-only guarantee rests on a 1,129-line shell classifier",
+      "severity": "Important",
+      "cvss_score": 7.3,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-863",
+      "owasp": "A01:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T08.T",
+        "T08.E1",
+        "T08.E3",
+        "T08.A",
+        "T07.E1",
+        "T08.E2"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "argv_confine.go",
+        "docs/personas.md",
+        "internal/config/config_server.go",
+        "internal/tool/builtin/shell.go",
+        "internal/tool/builtin/shell_readonly.go",
+        "pathvalidator.go",
+        "research/roadmap.md",
+        "shell_readonly.go"
+      ],
+      "component": "Permission Gate",
+      "identity_key": {
+        "component_id": "PermissionGate",
+        "vulnerability": "CWE-863",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-21",
+      "title": "An MCP client can enumerate and post turns into sessions it did not create",
+      "severity": "Important",
+      "cvss_score": 7.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-639",
+      "owasp": "A01:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T05.E1",
+        "T05.E2",
+        "T05.I",
+        "T05.S",
+        "T04.S",
+        "T04.E"
+      ],
+      "evidence_files": [
+        "internal/acp/agent.go",
+        "internal/mcpserver/server.go",
+        "research/roadmap.md"
+      ],
+      "component": "MCP Server (aegis mcp-serve)",
+      "identity_key": {
+        "component_id": "MCPServer",
+        "vulnerability": "CWE-639",
+        "attack_surface": "internal/acp/agent.go"
+      }
+    },
+    {
+      "id": "FIND-22",
+      "title": "Command isolation silently degrades to unsandboxed host execution",
+      "severity": "Important",
+      "cvss_score": 6.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+      "cwe": "CWE-693",
+      "owasp": "A02:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T11.E1",
+        "T11.T1",
+        "T11.D2",
+        "T11.E3",
+        "T11.A",
+        "T11.D1",
+        "T11.E2"
+      ],
+      "evidence_files": [
+        "internal/config/config.go",
+        "internal/config/config_server.go",
+        "internal/sandbox/docker.go",
+        "internal/sandbox/local.go"
+      ],
+      "component": "Sandbox Backend",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "vulnerability": "CWE-693",
+        "attack_surface": "internal/config/config.go"
+      }
+    },
+    {
+      "id": "FIND-23",
+      "title": "Scheduled jobs run unattended in whatever mode they were created with",
+      "severity": "Important",
+      "cvss_score": 6.5,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-284",
+      "owasp": "A01:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T10.E1",
+        "T10.T",
+        "T10.I",
+        "T10.A",
+        "T04.A",
+        "T10.E2"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "internal/config/config.go",
+        "internal/cron/cron.go",
+        "internal/server/lifecycle.go",
+        "internal/tool/builtin/cron.go"
+      ],
+      "component": "Cron Scheduler",
+      "identity_key": {
+        "component_id": "CronScheduler",
+        "vulnerability": "CWE-284",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-24",
+      "title": "Conversation history and checkpoints persist secrets unencrypted",
+      "severity": "Important",
+      "cvss_score": 6.3,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-311",
+      "owasp": "A04:2025",
+      "tier": 3,
+      "effort": "High",
+      "related_threats": [
+        "T13.I1",
+        "T13.I2",
+        "T13.T",
+        "T14.T",
+        "T14.I",
+        "T07.I2",
+        "T01.I1",
+        "T01.I2",
+        "T02.I1",
+        "T04.I",
+        "T13.D"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "internal/checkpoint/checkpoint.go",
+        "internal/server/auth.go",
+        "internal/session/session.go",
+        "internal/sqlitestore/sqlitestore.go"
+      ],
+      "component": "Session Store",
+      "identity_key": {
+        "component_id": "SessionStore",
+        "vulnerability": "CWE-311",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-25",
+      "title": "The daemon token and pinned certificate never rotate and are not integrity-checked",
+      "severity": "Moderate",
+      "cvss_score": 5.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:P/PR:H/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-522",
+      "owasp": "A07:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T16.S",
+        "T16.T",
+        "T16.I2",
+        "T02.S",
+        "T02.T",
+        "T02.A",
+        "T06.D2",
+        "T16.D",
+        "T16.I1"
+      ],
+      "evidence_files": [
+        "internal/client/client.go",
+        "internal/config/config_server.go",
+        "internal/server/auth.go"
+      ],
+      "component": "Daemon Token File",
+      "identity_key": {
+        "component_id": "DaemonTokenFile",
+        "vulnerability": "CWE-522",
+        "attack_surface": "internal/client/client.go"
+      }
+    },
+    {
+      "id": "FIND-26",
+      "title": "Sandboxed commands inherit the daemon environment minus a denylist",
+      "severity": "Moderate",
+      "cvss_score": 5.7,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-526",
+      "owasp": "A04:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T11.I1"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "internal/sandbox/local.go"
+      ],
+      "component": "Sandbox Backend",
+      "identity_key": {
+        "component_id": "SandboxBackend",
+        "vulnerability": "CWE-526",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-27",
+      "title": "Workspace trust grants are unauthenticated local state and exclude `.aegis/.env`",
+      "severity": "Moderate",
+      "cvss_score": 5.5,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-345",
+      "owasp": "A08:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T15.T",
+        "T15.E1",
+        "T15.R",
+        "T09.I2",
+        "T15.E2"
+      ],
+      "evidence_files": [
+        ".aegis/config.yaml",
+        "internal/config/fingerprint.go",
+        "internal/workspacetrust/workspacetrust.go"
+      ],
+      "component": "Workspace Trust Store",
+      "identity_key": {
+        "component_id": "WorkspaceTrustStore",
+        "vulnerability": "CWE-345",
+        "attack_surface": ".aegis/config.yaml"
+      }
+    },
+    {
+      "id": "FIND-28",
+      "title": "Prose tool-call parsing can promote quoted untrusted text into real tool calls",
+      "severity": "Moderate",
+      "cvss_score": 5.4,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:P/PR:H/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-1427",
+      "owasp": "A05:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T07.S",
+        "T07.T1"
+      ],
+      "evidence_files": [
+        "docs/local-model-tuning.md",
+        "internal/config/config.go",
+        "internal/provider/prosetoolcall.go",
+        "internal/trust/trust.go"
+      ],
+      "component": "Agent Engine",
+      "identity_key": {
+        "component_id": "Engine",
+        "vulnerability": "CWE-1427",
+        "attack_surface": "docs/local-model-tuning.md"
+      }
+    },
+    {
+      "id": "FIND-29",
+      "title": "`recon_scan` auto-authorizes every loopback and RFC1918 target",
+      "severity": "Moderate",
+      "cvss_score": 5.1,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:L/VI:N/VA:L/SC:L/SI:N/SA:N",
+      "cwe": "CWE-284",
+      "owasp": "A01:2025",
+      "tier": 3,
+      "effort": "Low",
+      "related_threats": [
+        "T12.A"
+      ],
+      "evidence_files": [
+        "internal/config/config.go",
+        "internal/security/recon.go",
+        "internal/security/target.go"
+      ],
+      "component": "Security Multi-Scanner",
+      "identity_key": {
+        "component_id": "MultiScanner",
+        "vulnerability": "CWE-284",
+        "attack_surface": "internal/config/config.go"
+      }
+    },
+    {
+      "id": "FIND-30",
+      "title": "Parallel tool rounds do not order shell commands against concurrent writes",
+      "severity": "Moderate",
+      "cvss_score": 4.8,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:H/AT:P/PR:H/UI:N/VC:L/VI:H/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-362",
+      "owasp": "A10:2025",
+      "tier": 3,
+      "effort": "Medium",
+      "related_threats": [
+        "T07.T2"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "argv_confine.go",
+        "internal/engine/toolround.go",
+        "internal/tool/builtin/shell.go"
+      ],
+      "component": "Agent Engine",
+      "identity_key": {
+        "component_id": "Engine",
+        "vulnerability": "CWE-362",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-31",
+      "title": "Checkpoint growth is unbounded and `/rewind` can silently discard non-agent changes",
+      "severity": "Low",
+      "cvss_score": 4.4,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:N/VC:N/VI:L/VA:H/SC:N/SI:N/SA:N",
+      "cwe": "CWE-770",
+      "owasp": "A10:2025",
+      "tier": 3,
+      "effort": "Low",
+      "related_threats": [
+        "T14.D",
+        "T14.A"
+      ],
+      "evidence_files": [
+        "CLAUDE.md",
+        "internal/checkpoint/checkpoint.go",
+        "internal/server/lifecycle.go"
+      ],
+      "component": "Checkpoint Store",
+      "identity_key": {
+        "component_id": "CheckpointStore",
+        "vulnerability": "CWE-770",
+        "attack_surface": "CLAUDE.md"
+      }
+    },
+    {
+      "id": "FIND-32",
+      "title": "Scan reports embed source excerpts into the workspace",
+      "severity": "Low",
+      "cvss_score": 3.9,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:P/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N",
+      "cwe": "CWE-532",
+      "owasp": "A09:2025",
+      "tier": 3,
+      "effort": "Low",
+      "related_threats": [
+        "T12.I",
+        "T12.D",
+        "T12.T"
+      ],
+      "evidence_files": [
+        "internal/security/redact.go",
+        "internal/security/report_artifact.go",
+        "internal/security/sarif.go",
+        "internal/tool/builtin/scanreport.go"
+      ],
+      "component": "Security Multi-Scanner",
+      "identity_key": {
+        "component_id": "MultiScanner",
+        "vulnerability": "CWE-532",
+        "attack_surface": "internal/security/redact.go"
+      }
+    },
+    {
+      "id": "FIND-33",
+      "title": "The TUI render path is unbounded and repeated approvals invite blanket approval",
+      "severity": "Low",
+      "cvss_score": 3.6,
+      "cvss_vector": "CVSS:4.0/AV:L/AC:L/AT:N/PR:H/UI:P/VC:N/VI:L/VA:L/SC:N/SI:N/SA:N",
+      "cwe": "CWE-400",
+      "owasp": "A10:2025",
+      "tier": 3,
+      "effort": "Low",
+      "related_threats": [
+        "T01.D",
+        "T01.A",
+        "T01.T"
+      ],
+      "evidence_files": [
+        "internal/engine/toolround.go",
+        "internal/tool/builtin/truncate.go",
+        "internal/tui/tui.go"
+      ],
+      "component": "Terminal UI",
+      "identity_key": {
+        "component_id": "TUI",
+        "vulnerability": "CWE-400",
+        "attack_surface": "internal/engine/toolround.go"
+      }
+    }
+  ],
+  "metrics": {
+    "total_components": 22,
+    "total_boundaries": 4,
+    "total_flows": 25,
+    "total_threats": 138,
+    "total_findings": 33,
+    "threats_by_tier": {
+      "T1": 0,
+      "T2": 48,
+      "T3": 90
+    },
+    "findings_by_tier": {
+      "T1": 0,
+      "T2": 19,
+      "T3": 14
+    },
+    "threats_by_stride": {
+      "S": 13,
+      "T": 23,
+      "R": 12,
+      "I": 29,
+      "D": 20,
+      "E": 24,
+      "A": 17
+    },
+    "findings_by_severity": {
+      "Critical": 1,
+      "Important": 15,
+      "Moderate": 12,
+      "Low": 5
+    }
+  }
+}
