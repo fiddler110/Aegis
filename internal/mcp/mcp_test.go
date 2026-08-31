@@ -451,7 +451,7 @@ func TestReadLoopDeathFailsPendingAndFutureCalls(t *testing.T) {
 
 func TestRegisterServersSkipsBadConfig(t *testing.T) {
 	// A config with no command must be skipped without connecting.
-	clients := RegisterServers(context.Background(), nil, []ServerConfig{{Name: "x"}}, discardLogger())
+	clients := RegisterServers(context.Background(), nil, []ServerConfig{{Name: "x"}}, discardLogger(), nil)
 	if len(clients) != 0 {
 		t.Errorf("expected no clients for command-less config")
 	}

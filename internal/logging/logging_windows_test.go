@@ -80,9 +80,9 @@ func TestLogFileAppliesPermissionHardening(t *testing.T) {
 
 	t.Run("post-rotation reopen", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "aegis.log")
-		w, err := newRotatingWriter(path, 5, 1)
+		w, err := NewRotatingWriter(path, 5, 1)
 		if err != nil {
-			t.Fatalf("newRotatingWriter: %v", err)
+			t.Fatalf("NewRotatingWriter: %v", err)
 		}
 		defer w.Close()
 		if _, err := w.Write([]byte("aaaaa")); err != nil {

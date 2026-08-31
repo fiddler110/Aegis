@@ -23,6 +23,7 @@ import (
 	"github.com/fiddler110/aegis/internal/notify"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/trace"
 )
@@ -337,6 +338,10 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 	}
 	runCtx := swarm.WithParentMode(baseRunCtx, sess.Mode)
 	runCtx = swarm.WithCostTracker(runCtx, tracker)
+	// P81.14: stamp the session's creating surface onto the run context so the
+	// audit hook can record which surface drove each tool call, without
+	// threading an extra parameter through every hook signature.
+	runCtx = reqorigin.WithOrigin(runCtx, sess.Origin)
 	// Carry this session's per-task file-write scope (P46.1) so the `scope`
 	// tool and ScopeGate share one object across the turn's tool calls: a scope
 	// the model declares is enforced on every subsequent write this run.
@@ -944,6 +949,7 @@ func toAPIEvent(ev engine.Event) api.Event {
 		out.PromptEvalDurationMS = ev.Usage.PromptEvalDurationMS
 	}
 	out.CostUSD = ev.CostUSD
+	out.EgressBytes = ev.EgressBytes
 	return out
 }
 

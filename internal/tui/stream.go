@@ -265,6 +265,10 @@ func (m *model) applyEvent(ev api.Event) {
 		}
 		m.flushThinking()
 		m.flushLiveText() // render final prose through glamour
+		// P81.8: EgressBytes is a per-turn delta (unlike CostUSD's cumulative
+		// convention), so it accumulates unconditionally rather than gated on
+		// the usage-known check below.
+		m.egressBytes += ev.EgressBytes
 		if ev.OutputTokens > 0 || ev.TokensEstimated {
 			m.inputTokens = ev.InputTokens
 			m.inputTokensKnown = true

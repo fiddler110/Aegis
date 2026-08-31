@@ -43,7 +43,7 @@ func TestLegacyBlobMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	sess, err := st.Create(context.Background(), "legacy", "sys", "build", "", "")
+	sess, err := st.Create(context.Background(), "legacy", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestOpenAppliesPermissionHardening(t *testing.T) {
 	}
 	defer st.Close()
 
-	if _, err := st.Create(context.Background(), "hardening-check", "sys", "build", "", ""); err != nil {
+	if _, err := st.Create(context.Background(), "hardening-check", "sys", "build", "", "", ""); err != nil {
 		t.Fatalf("Create after Open: %v", err)
 	}
 
@@ -147,7 +147,7 @@ func TestSessionRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "first", "be helpful", "build", "", "")
+	sess, err := st.Create(ctx, "first", "be helpful", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -190,6 +190,55 @@ func TestSessionRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCreatePersistsOrigin verifies a session's creating surface (P81.14/
+// P80.1: tui/web/acp/mcp/cli) round-trips through Create, Get, and List, and
+// that leaving it empty (a pre-migration session) still round-trips as empty
+// rather than some other default — origin filtering (mcpserver/acp) depends
+// on being able to tell "recorded as mcp" from "unrecorded" apart.
+func TestCreatePersistsOrigin(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	withOrigin, err := st.Create(ctx, "with-origin", "sys", "build", "", "", "mcp")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	noOrigin, err := st.Create(ctx, "no-origin", "sys", "build", "", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := st.Get(ctx, withOrigin.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Origin != "mcp" {
+		t.Errorf("Get origin = %q, want %q", got.Origin, "mcp")
+	}
+	got2, err := st.Get(ctx, noOrigin.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got2.Origin != "" {
+		t.Errorf("Get origin = %q, want empty", got2.Origin)
+	}
+
+	metas, err := st.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	byID := map[string]Meta{}
+	for _, m := range metas {
+		byID[m.ID] = m
+	}
+	if byID[withOrigin.ID].Origin != "mcp" {
+		t.Errorf("List origin = %q, want %q", byID[withOrigin.ID].Origin, "mcp")
+	}
+	if byID[noOrigin.ID].Origin != "" {
+		t.Errorf("List origin = %q, want empty", byID[noOrigin.ID].Origin)
+	}
+}
+
 // TestCreatePersistsWorkdir verifies a session's own working directory
 // (P25.1) round-trips through Create, Get, and List, and that leaving it
 // empty (the pre-P25.1 default) still round-trips as empty rather than some
@@ -198,11 +247,11 @@ func TestCreatePersistsWorkdir(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	withWorkdir, err := st.Create(ctx, "with-workdir", "sys", "build", "", "/tmp/some-project")
+	withWorkdir, err := st.Create(ctx, "with-workdir", "sys", "build", "", "/tmp/some-project", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	noWorkdir, err := st.Create(ctx, "no-workdir", "sys", "build", "", "")
+	noWorkdir, err := st.Create(ctx, "no-workdir", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -241,7 +290,7 @@ func TestCreatePersistsWorkdir(t *testing.T) {
 
 func TestCreatePersistsPersona(t *testing.T) {
 	store := newTestStore(t) // existing helper in this test file
-	s, err := store.Create(context.Background(), "t", "sys", "build", "security-architect", "")
+	s, err := store.Create(context.Background(), "t", "sys", "build", "security-architect", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,8 +306,8 @@ func TestCreatePersistsPersona(t *testing.T) {
 func TestListAndDelete(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	a, _ := st.Create(ctx, "a", "", "plan", "", "")
-	_, _ = st.Create(ctx, "b", "", "plan", "", "")
+	a, _ := st.Create(ctx, "a", "", "plan", "", "", "")
+	_, _ = st.Create(ctx, "b", "", "plan", "", "", "")
 
 	metas, err := st.List(ctx)
 	if err != nil {
@@ -287,7 +336,7 @@ func TestAppendTraces(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "traced", "sys", "build", "", "")
+	sess, err := st.Create(ctx, "traced", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -344,7 +393,7 @@ func TestAppendMessagesIsIncremental(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "incremental", "sys", "build", "", "")
+	sess, err := st.Create(ctx, "incremental", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -395,7 +444,7 @@ func TestSaveMessagesTruncates(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "truncate", "sys", "build", "", "")
+	sess, err := st.Create(ctx, "truncate", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -443,7 +492,7 @@ func TestDeleteRemovesMessageAndTraceRows(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
 
-	sess, err := st.Create(ctx, "del", "sys", "build", "", "")
+	sess, err := st.Create(ctx, "del", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -481,7 +530,7 @@ func TestDeleteRemovesBGEventsAndCheckpoints(t *testing.T) {
 	cleaner := &fakeCheckpointCleaner{}
 	st.SetCheckpointCleaner(cleaner)
 
-	sess, err := st.Create(ctx, "del-bg", "sys", "build", "", "")
+	sess, err := st.Create(ctx, "del-bg", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -515,7 +564,7 @@ func TestPruneRemovesBGEventsAndCheckpoints(t *testing.T) {
 	cleaner := &fakeCheckpointCleaner{}
 	st.SetCheckpointCleaner(cleaner)
 
-	old, err := st.Create(ctx, "old", "sys", "build", "", "")
+	old, err := st.Create(ctx, "old", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -528,7 +577,7 @@ func TestPruneRemovesBGEventsAndCheckpoints(t *testing.T) {
 		t.Fatalf("backdate: %v", err)
 	}
 
-	fresh, err := st.Create(ctx, "fresh", "sys", "build", "", "")
+	fresh, err := st.Create(ctx, "fresh", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create fresh: %v", err)
 	}
@@ -567,7 +616,7 @@ func TestPruneArchivedCoversWhatPruneDeliberatelySkips(t *testing.T) {
 	cleaner := &fakeCheckpointCleaner{}
 	st.SetCheckpointCleaner(cleaner)
 
-	old, err := st.Create(ctx, "archived-long-ago", "sys", "build", "", "")
+	old, err := st.Create(ctx, "archived-long-ago", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -583,7 +632,7 @@ func TestPruneArchivedCoversWhatPruneDeliberatelySkips(t *testing.T) {
 		t.Fatalf("backdate: %v", err)
 	}
 
-	recent, err := st.Create(ctx, "archived-just-now", "sys", "build", "", "")
+	recent, err := st.Create(ctx, "archived-just-now", "sys", "build", "", "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

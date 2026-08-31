@@ -17,6 +17,7 @@ import (
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/enginecfg"
 	"github.com/fiddler110/aegis/internal/logging"
+	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/providerfactory"
@@ -210,6 +211,13 @@ func runChat(cmd *cobra.Command, args []string, o *chatOptions) error {
 		resolvedMode = o.mode
 	}
 	gate, engineHooks := buildChatGate(cfg, p, reg, resolvedMode, o.autoApprove, logger)
+	// P81.1: the same approver logic buildChatGate applied internally,
+	// recomputed here rather than changing buildChatGate's signature (its
+	// tests call it directly and only look at the gate).
+	chatApprover := enginecfg.Approver(cfg)
+	if o.autoApprove {
+		chatApprover = permission.AutoApprove{}
+	}
 
 	tracker := cost.NewTracker()
 
@@ -228,17 +236,18 @@ func runChat(cmd *cobra.Command, args []string, o *chatOptions) error {
 	compactor, ctxWin := driveCompaction(context.Background(), cfg, adapter, logger)
 
 	eng, err := buildChatEngine(chatEngineOptions{
-		cfg:     cfg,
-		adapter: adapter,
-		reg:     reg,
-		gate:    gate,
-		hooks:   engineHooks,
-		persona: p,
-		tracker: tracker,
-		logger:  logger,
-		cwd:     cwd,
-		ctxWin:  ctxWin,
-		compact: compactor,
+		cfg:      cfg,
+		adapter:  adapter,
+		reg:      reg,
+		gate:     gate,
+		hooks:    engineHooks,
+		approver: chatApprover,
+		persona:  p,
+		tracker:  tracker,
+		logger:   logger,
+		cwd:      cwd,
+		ctxWin:   ctxWin,
+		compact:  compactor,
 	})
 	if err != nil {
 		return err

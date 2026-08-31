@@ -250,6 +250,7 @@ type model struct {
 	cacheCreationTokens   int  // prompt-cache writes (last turn)
 	tokensEstimated       bool // true when token counts are derived from heuristic
 	costUSD               float64
+	egressBytes           int64  // P81.8: cumulative web_fetch bytes this session, server-reported
 	srvCtxWin             int    // effective context window from daemon /status; 0 = unknown (fall back to name-based guess)
 	srvCtxWinSrc          string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default", "ollama:compat-default"
 

@@ -63,12 +63,18 @@ type chatEngineOptions struct {
 	reg     *tool.Registry
 	gate    engine.Gate
 	hooks   engine.Hooks
-	persona persona.Persona
-	tracker *cost.Tracker
-	logger  *slog.Logger
-	cwd     string
-	ctxWin  int
-	compact engine.Compactor
+	// approver is the same approver buildChatGate resolved for the gate above
+	// (P81.1) — reused for the scan-hit decision point rather than threading
+	// a second one. Nil (an autoApprove-less zero value never reaches here in
+	// practice, but a caller that omits it) leaves the check off, same as
+	// before this field existed.
+	approver engine.Approver
+	persona  persona.Persona
+	tracker  *cost.Tracker
+	logger   *slog.Logger
+	cwd      string
+	ctxWin   int
+	compact  engine.Compactor
 }
 
 // buildChatEngine constructs the CLI drive engine.
@@ -81,10 +87,11 @@ type chatEngineOptions struct {
 func buildChatEngine(o chatEngineOptions) (*engine.Engine, error) {
 	cfg := o.cfg
 	opts := engine.Options{
-		Adapter: o.adapter,
-		Tools:   o.reg,
-		Gate:    o.gate,
-		Hooks:   o.hooks,
+		Adapter:  o.adapter,
+		Tools:    o.reg,
+		Gate:     o.gate,
+		Hooks:    o.hooks,
+		Approver: o.approver,
 		// P67.3: the CLI drive is a person waiting at a terminal, same
 		// as a TUI session — the one call class worth retrying harder.
 		Purpose:   provider.PurposeForeground,

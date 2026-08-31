@@ -19,6 +19,12 @@ type CreateSessionRequest struct {
 	// allowed scope), and confines this session's tools/shell to. Empty
 	// keeps the daemon's own default workspace, matching pre-P25.1 behavior.
 	Workdir string `json:"workdir,omitempty"`
+	// Origin names which surface is creating this session (internal/reqorigin:
+	// tui/web/acp/mcp/cli), P81.14/P80.1. Set by the daemon's own Go
+	// integration for each surface, not by a remote protocol argument — an MCP
+	// or ACP tool call has no way to set this itself. An empty or unrecognized
+	// value is normalized to "web" server-side.
+	Origin string `json:"origin,omitempty"`
 }
 
 // SessionMeta describes a session without its messages.
@@ -30,6 +36,7 @@ type SessionMeta struct {
 	Model        string     `json:"model,omitempty"`      // P14.7: per-session override; "" = persona/global default
 	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
+	Origin       string     `json:"origin,omitempty"` // P81.14/P80.1: internal/reqorigin
 	InputTokens  int        `json:"input_tokens,omitempty"`
 	OutputTokens int        `json:"output_tokens,omitempty"`
 	CostUSD      float64    `json:"cost_usd,omitempty"`
@@ -270,7 +277,11 @@ type Event struct {
 	InputTokens  int     `json:"input_tokens,omitempty"`
 	OutputTokens int     `json:"output_tokens,omitempty"`
 	CostUSD      float64 `json:"cost_usd,omitempty"`
-	Error        string  `json:"error,omitempty"`
+	// EgressBytes is the web_fetch byte count pulled in this turn (P81.8) — a
+	// delta, safe to sum across every turn of a run — mirroring the durable
+	// per-call record written to the audit sink for the same calls.
+	EgressBytes int64  `json:"egress_bytes,omitempty"`
+	Error       string `json:"error,omitempty"`
 	// Cache token usage (Anthropic prompt caching), surfaced for observability.
 	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`

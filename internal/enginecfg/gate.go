@@ -110,12 +110,13 @@ func BuildGate(o GateOptions) (engine.Gate, engine.Hooks) {
 	engineHooks := o.Hooks
 
 	// Wrap with contextual security policies if any are enabled.
-	if o.Security.EgressThenWrite || len(o.Security.NetworkAllowList) > 0 {
+	if o.Security.EgressThenWrite || len(o.Security.NetworkAllowList) > 0 || o.Security.TaintAfterUntrustedContent {
 		ctxGate := permission.NewContextualGate(baseGate, permission.ContextualOpts{
-			EgressThenWrite:  o.Security.EgressThenWrite,
-			NetworkAllowList: o.Security.NetworkAllowList,
-			Registry:         o.Registry,
-			OnDecision:       o.OnDecision,
+			EgressThenWrite:            o.Security.EgressThenWrite,
+			NetworkAllowList:           o.Security.NetworkAllowList,
+			TaintAfterUntrustedContent: o.Security.TaintAfterUntrustedContent,
+			Registry:                   o.Registry,
+			OnDecision:                 o.OnDecision,
 		})
 		gate = ctxGate
 		// Compose rather than replace. The daemon's version of this line built

@@ -92,6 +92,14 @@ func TestLoadDefaults(t *testing.T) {
 	if !cfg.Security.RedactSecrets {
 		t.Error("security.redact_secrets default = false, want true (P27.3/FIND-05)")
 	}
+	// P81.5/FIND-05: on by default — a redaction pass over outbound provider
+	// payloads and tool-call arguments (the gap RedactSecrets structurally
+	// cannot close: it only ever sees a CapRead tool's result) only actually
+	// runs against a non-loopback endpoint, so the default only bites when
+	// there is somewhere for a secret to leak to.
+	if !cfg.Security.RedactOutboundPayloads {
+		t.Error("security.redact_outbound_payloads default = false, want true (P81.5/FIND-05)")
+	}
 	// P27.5/FIND-13: pinned-cert loopback TLS on by default — plain HTTP
 	// otherwise leaves the bearer token and conversation content readable to
 	// another local account on a shared host with packet-capture privilege.

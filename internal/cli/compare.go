@@ -15,6 +15,7 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/spf13/cobra"
 )
 
@@ -196,7 +197,7 @@ func runOneCompare(ctx context.Context, cl *client.Client, label, model, mode, p
 	res.label = label
 	res.model = model
 
-	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: mode})
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: mode, Origin: reqorigin.CLI})
 	if err != nil {
 		res.err = err
 		return
@@ -335,7 +336,7 @@ func runCompareSynthesis(ctx context.Context, cl *client.Client, cfg *config.Con
 		prompt, modelA, answerA, modelB, answerB,
 	)
 
-	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: mode})
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: mode, Origin: reqorigin.CLI})
 	if err != nil {
 		return err
 	}

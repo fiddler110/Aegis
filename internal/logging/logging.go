@@ -40,7 +40,7 @@ func New(opts Options) (*slog.Logger, io.Closer, error) {
 		var f io.WriteCloser
 		var err error
 		if opts.MaxSizeBytes > 0 {
-			f, err = newRotatingWriter(opts.Path, opts.MaxSizeBytes, opts.MaxBackups)
+			f, err = NewRotatingWriter(opts.Path, opts.MaxSizeBytes, opts.MaxBackups)
 		} else {
 			f, err = os.OpenFile(opts.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 			// GAP-3.1: 0o600 alone is cosmetic on Windows (new files inherit
@@ -83,11 +83,12 @@ type nopCloser struct{}
 
 func (nopCloser) Close() error { return nil }
 
-// rotatingWriter is a size-capped, backup-rotated append writer for a single
-// log file. It has no external dependency — CLAUDE.md's build story is
+// RotatingWriter is a size-capped, backup-rotated append writer for a single
+// file. It has no external dependency — CLAUDE.md's build story is
 // deliberately container/Node-free, and the rotation logic itself is small
-// enough not to warrant one.
-type rotatingWriter struct {
+// enough not to warrant one. Exported so internal/hooks' audit sink
+// (P81.14) can reuse it rather than re-implement rotation a second time.
+type RotatingWriter struct {
 	mu         sync.Mutex
 	path       string
 	maxSize    int64
@@ -96,7 +97,7 @@ type rotatingWriter struct {
 	size       int64
 }
 
-func newRotatingWriter(path string, maxSize int64, maxBackups int) (*rotatingWriter, error) {
+func NewRotatingWriter(path string, maxSize int64, maxBackups int) (*RotatingWriter, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
@@ -107,14 +108,14 @@ func newRotatingWriter(path string, maxSize int64, maxBackups int) (*rotatingWri
 		f.Close()
 		return nil, err
 	}
-	return &rotatingWriter{path: path, maxSize: maxSize, maxBackups: maxBackups, f: f, size: info.Size()}, nil
+	return &RotatingWriter{path: path, maxSize: maxSize, maxBackups: maxBackups, f: f, size: info.Size()}, nil
 }
 
 // Write appends p, rotating first if the file has already reached maxSize —
 // so a single Write is never split across the boundary, and a write larger
 // than maxSize still lands whole in the fresh file rather than being
 // rejected.
-func (w *rotatingWriter) Write(p []byte) (int, error) {
+func (w *RotatingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.size > 0 && w.size+int64(len(p)) > w.maxSize {
@@ -130,7 +131,7 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 // rotateLocked shifts path.N -> path.N+1 down to maxBackups (dropping
 // whatever would fall past it), moves the live file to path.1, and reopens a
 // fresh path. Called with w.mu held.
-func (w *rotatingWriter) rotateLocked() error {
+func (w *RotatingWriter) rotateLocked() error {
 	if err := w.f.Close(); err != nil {
 		return err
 	}
@@ -158,7 +159,7 @@ func (w *rotatingWriter) rotateLocked() error {
 	return nil
 }
 
-func (w *rotatingWriter) Close() error {
+func (w *RotatingWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.f.Close()

@@ -320,10 +320,14 @@ func (s *Server) newEngine(sessionID, mode string, approver permission.Approver,
 		// row before the run appends anything. It is what makes the *resume*
 		// case visible — the engine's own clock starts here and would measure a
 		// gap of zero no matter how long the session had been sitting idle.
-		LastActivityAt:          lastActivity,
-		Compactor:               s.compactor,
-		Hooks:                   engineHooks,
-		Cost:                    tracker,
+		LastActivityAt: lastActivity,
+		Compactor:      s.compactor,
+		Hooks:          engineHooks,
+		Cost:           tracker,
+		// P81.1: the same interactive approver the permission gate uses for an
+		// Ask decision, reused here for the scan-hit decision point — one
+		// approval round trip (KindApprovalRequest/TUI dialog), two callers.
+		Approver:                approver,
 		Model:                   model,
 		ContextWindowTokens:     ctxWin,
 		ContextWindowFloor:      func() int { return provider.RaisedContextWindow(s.adapter) },

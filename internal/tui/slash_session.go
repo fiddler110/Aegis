@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 )
 
 func (d *SlashDispatcher) cmdSession(args []string) SlashResult {
@@ -213,7 +214,7 @@ func (d *SlashDispatcher) cmdSide(args []string) SlashResult {
 	defer cancel()
 
 	title := "[side] " + truncate(oneLine(question), 60)
-	meta, err := d.client.CreateSession(ctx, api.CreateSessionRequest{Title: title, Mode: "plan"})
+	meta, err := d.client.CreateSession(ctx, api.CreateSessionRequest{Title: title, Mode: "plan", Origin: reqorigin.TUI})
 	if err != nil {
 		return SlashResult{Output: fmt.Sprintf("/side: failed to open a side session: %v", err), IsError: true}
 	}

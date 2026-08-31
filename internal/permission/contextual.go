@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/trust"
 )
 
 // ContextualGate wraps a base Gate and applies stateful security rules that
@@ -34,13 +35,15 @@ import (
 // guarantee, run the agent with the container sandbox backend and enforce
 // network policy there (e.g. `--network none` or an egress proxy).
 type ContextualGate struct {
-	base            Gate
-	registry        ToolRegistry // look up tool capability by name
-	mu              sync.Mutex
-	networkUsed     bool                     // true after any CapNetwork call succeeds
-	egressThenWrite bool                     // enable the egress→write rule
-	allowList       map[string]bool          // normalized domain allowlist; nil = no restriction
-	onDecision      func(ContextualDecision) // optional observer (for audit)
+	base                       Gate
+	registry                   ToolRegistry // look up tool capability by name
+	mu                         sync.Mutex
+	networkUsed                bool                     // true after any CapNetwork call succeeds
+	tainted                    bool                     // true once any tool result carried the untrusted-content marker (P81.1)
+	egressThenWrite            bool                     // enable the egress→write rule
+	taintAfterUntrustedContent bool                     // enable the taint→write/execute/network rule (P81.1)
+	allowList                  map[string]bool          // normalized domain allowlist; nil = no restriction
+	onDecision                 func(ContextualDecision) // optional observer (for audit)
 }
 
 // ToolRegistry resolves a tool's capability by name, avoiding hardcoded
@@ -68,6 +71,13 @@ type ContextualOpts struct {
 	// leading dot matches subdomains (e.g. ".example.com" matches
 	// "api.example.com").
 	NetworkAllowList []string
+	// TaintAfterUntrustedContent enables the rule: once any tool result in
+	// this turn has carried the untrusted-content provenance marker
+	// (internal/trust.Wrap — web_fetch/web_search, MCP results, and every
+	// other channel that wraps its output), every subsequent write/execute/
+	// network call this turn requires approval, regardless of mode
+	// (security.taint_after_untrusted_content, P81.1/FIND-01).
+	TaintAfterUntrustedContent bool
 	// OnDecision is called for each contextual rule evaluation (for audit).
 	OnDecision func(ContextualDecision)
 	// Registry resolves tool capabilities by name. When set, PostToolUse uses
@@ -85,11 +95,12 @@ func NewContextualGate(base Gate, opts ContextualOpts) *ContextualGate {
 		}
 	}
 	return &ContextualGate{
-		base:            base,
-		registry:        opts.Registry,
-		egressThenWrite: opts.EgressThenWrite,
-		allowList:       allowList,
-		onDecision:      opts.OnDecision,
+		base:                       base,
+		registry:                   opts.Registry,
+		egressThenWrite:            opts.EgressThenWrite,
+		taintAfterUntrustedContent: opts.TaintAfterUntrustedContent,
+		allowList:                  allowList,
+		onDecision:                 opts.OnDecision,
 	}
 }
 
@@ -138,6 +149,30 @@ func (g *ContextualGate) Check(ctx context.Context, t tool.Tool, input json.RawM
 		}
 	}
 
+	// Taint-after-untrusted-content rule (P81.1/FIND-01). Once this turn has
+	// seen a tool result carrying the untrusted-content wrapper, a
+	// write/execute/network call is exactly the shape an indirect prompt
+	// injection needs to act on what it just read — gate it regardless of
+	// mode, the same way egress-then-write gates a write regardless of mode.
+	if g.taintAfterUntrustedContent && (cap == tool.CapWrite || cap == tool.CapExecute || cap == tool.CapNetwork) {
+		g.mu.Lock()
+		isTainted := g.tainted
+		g.mu.Unlock()
+		if isTainted {
+			reason := fmt.Sprintf(
+				"%s requires approval: untrusted content (web/MCP/other external result) entered context earlier this turn",
+				t.Name())
+			g.emitDecision(ContextualDecision{
+				Tool: t.Name(), Cap: string(cap),
+				Rule: "taint_after_untrusted_content", Decision: Ask, Reason: reason,
+			})
+			if g.base.Approver.Approve(ctx, t.Name(), reason, input) {
+				return true, ""
+			}
+			return false, reason
+		}
+	}
+
 	return true, ""
 }
 
@@ -148,9 +183,14 @@ func (g *ContextualGate) PreToolUse(_ context.Context, _ string, _ json.RawMessa
 
 // PostToolUse implements hooks.Hook. It updates internal state after a
 // successful tool call.
-func (g *ContextualGate) PostToolUse(_ context.Context, toolName string, input json.RawMessage, _ string, isError bool) {
+func (g *ContextualGate) PostToolUse(_ context.Context, toolName string, input json.RawMessage, result string, isError bool) {
 	if isError {
 		return
+	}
+	if g.taintAfterUntrustedContent && trust.IsWrapped(result) {
+		g.mu.Lock()
+		g.tainted = true
+		g.mu.Unlock()
 	}
 	if g.isNetworkCapable(toolName) {
 		g.mu.Lock()
@@ -175,7 +215,17 @@ func (g *ContextualGate) isNetworkCapable(name string) bool {
 func (g *ContextualGate) Reset() {
 	g.mu.Lock()
 	g.networkUsed = false
+	g.tainted = false
 	g.mu.Unlock()
+}
+
+// Tainted reports whether untrusted content has entered context on this
+// gate instance (P81.1). Since buildGate constructs a fresh ContextualGate
+// per turn, this is scoped to "so far this turn" by construction.
+func (g *ContextualGate) Tainted() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.tainted
 }
 
 // NetworkUsed reports whether a network egress has occurred in this session.

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/cost"
+	"github.com/fiddler110/aegis/internal/egress"
 	"github.com/fiddler110/aegis/internal/guard"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -124,8 +125,13 @@ type Event struct {
 	// Usage carries per-turn counts on KindTurnDone and the run-cumulative
 	// total (IsEstimated set if any contributing turn lacked real
 	// provider-reported usage) on the terminal KindDone (P25.5).
-	Usage       *provider.Usage
-	CostUSD     float64          // KindTurnDone: cumulative run cost (0 if untracked)
+	Usage   *provider.Usage
+	CostUSD float64 // KindTurnDone: cumulative run cost (0 if untracked)
+	// EgressBytes is the web_fetch byte count pulled in *this turn* (P81.8) —
+	// the live counterpart to the durable record hooks.Audit writes to the
+	// audit sink for the same calls. A per-turn delta, not a running total, so
+	// a consumer can safely sum it across every turn of a run.
+	EgressBytes int64            // KindTurnDone: this turn's egress bytes
 	Trace       *trace.TurnTrace // KindTrace: per-turn observability record
 	Err         error            // KindError
 	GuardReason string           // KindGuard: why validation failed
@@ -151,6 +157,18 @@ type EmitFunc func(Event)
 // the model as an error result rather than aborting the run.
 type Gate interface {
 	Check(ctx context.Context, t tool.Tool, input json.RawMessage) (allowed bool, reason string)
+}
+
+// Approver answers a prompt-worthy question about one call — a call itself
+// (via Gate, which owns its own approver internally) or, here, a call's
+// *result* (P81.1's scan-hit decision point). Declared locally rather than as
+// a reference to permission.Approver so the engine package keeps not
+// importing internal/permission (the same reason Gate above is its own
+// minimal interface) — permission.Approver already satisfies this shape
+// structurally, so the daemon's existing approvers (the interactive
+// sseApprover, AutoApprove, AutoDeny) need no adapter.
+type Approver interface {
+	Approve(ctx context.Context, toolName, reason string, input json.RawMessage) bool
 }
 
 // Compactor optionally shortens a conversation (e.g. by summarizing old turns)
@@ -236,12 +254,19 @@ type PrepareStepFunc func(ctx context.Context, msgs []provider.Message) []provid
 
 // Options configures an Engine.
 type Options struct {
-	Adapter               provider.Adapter
-	Tools                 *tool.Registry
-	Gate                  Gate            // optional; nil means all tool calls are allowed
-	Compactor             Compactor       // optional; nil disables context compaction
-	Hooks                 Hooks           // optional; nil disables hooks
-	Cost                  *cost.Tracker   // optional; nil disables cost tracking
+	Adapter   provider.Adapter
+	Tools     *tool.Registry
+	Gate      Gate          // optional; nil means all tool calls are allowed
+	Compactor Compactor     // optional; nil disables context compaction
+	Hooks     Hooks         // optional; nil disables hooks
+	Cost      *cost.Tracker // optional; nil disables cost tracking
+	// Approver, when set, is asked to approve a tool result that the heuristic
+	// prompt-injection scan flagged (trust.Flagged), before that result is
+	// appended to the conversation (P81.1's scan-hit decision point — the
+	// third of the item's three asks, and the one that stayed unshipped when
+	// the taint rule and the egress ledger landed 2026-08-31). Nil skips the
+	// check, leaving the scan's warning purely annotational, as before.
+	Approver              Approver
 	PrepareStep           PrepareStepFunc // optional; called before every model turn
 	OutputGuard           guard.Func      // optional; validates the final answer (and any files written this turn)
 	OutputGuardMaxRetries int             // corrective retries on guard failure; 0 -> 1 when a guard is set
@@ -444,12 +469,20 @@ type Options struct {
 
 // Engine runs the agent loop.
 type Engine struct {
-	adapter          provider.Adapter
-	tools            *tool.Registry
-	gate             Gate
-	compactor        Compactor
-	hooks            Hooks
-	cost             *cost.Tracker
+	adapter   provider.Adapter
+	tools     *tool.Registry
+	gate      Gate
+	compactor Compactor
+	hooks     Hooks
+	cost      *cost.Tracker
+	approver  Approver
+	egress    *egress.Tracker
+	// egressReported is the egress.Tracker total as of the last KindTurnDone
+	// emission, so each event can carry this *turn's* delta rather than a
+	// running total a multi-turn tool-calling run would otherwise sum
+	// repeatedly on the receiving end (the same shape CostUSD's cumulative
+	// convention relies on the caller not re-summing across turns of one run).
+	egressReported   int64
 	prepareStep      PrepareStepFunc
 	outputGuard      guard.Func
 	outputGuardMax   int
@@ -653,6 +686,8 @@ func New(opts Options) (*Engine, error) {
 		compactor:           opts.Compactor,
 		hooks:               opts.Hooks,
 		cost:                opts.Cost,
+		approver:            opts.Approver,
+		egress:              egress.NewTracker(),
 		prepareStep:         opts.PrepareStep,
 		outputGuard:         opts.OutputGuard,
 		outputGuardMax:      opts.OutputGuardMaxRetries,
@@ -1062,7 +1097,10 @@ func (e *Engine) runIteration(ctx context.Context, rl *runLoopState, iter int) (
 			runCost = e.cost.Add(e.model, *usage)
 		}
 	}
-	rl.emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost})
+	egressTotal := e.egress.Snapshot().TotalBytes
+	egressDelta := egressTotal - e.egressReported
+	e.egressReported = egressTotal
+	rl.emit(Event{Kind: KindTurnDone, Usage: usage, CostUSD: runCost, EgressBytes: egressDelta})
 	if usage != nil {
 		rl.runUsageSeen = true
 		rl.runUsage.InputTokens += usage.InputTokens

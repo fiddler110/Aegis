@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -155,6 +156,65 @@ func TestReadOnlyShellCommandWindowsPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestShellToolCapabilityForRejectsWindowsAbsolutePathEscapes is the P79.1
+// real-path-exploitability check the roadmap entry named as still
+// outstanding: TestReadOnlyShellCommandWindowsPaths (above) and the other
+// three regression tests exercise readOnlyShellCommand/classifyShellCommand
+// directly, never shellTool.CapabilityFor — the actual seam
+// permission.Gate.Check consults via tool.EffectiveCapability. This drives
+// the exact Windows absolute-path escape shapes through that real seam and
+// then through a full plan-mode Gate.Check, confirming the classifier fix
+// verified at the unit level actually reaches the production capability
+// downgrade path, and that a plan-mode session cannot silently read outside
+// its workspace root through it.
+func TestShellToolCapabilityForRejectsWindowsAbsolutePathEscapes(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-drive-letter absolute paths only apply on windows")
+	}
+	root := t.TempDir()
+	st := newShellTool(root, 5, nil, nil)
+
+	escapes := []string{
+		`Get-Content C:\Users\x\.ssh\id_rsa`,
+		`Get-Content -Path C:\Users\x\.ssh\id_rsa`,
+		`Get-Content -Path:C:\Windows\System32\drivers\etc\hosts`,
+		`Get-ChildItem C:\Windows\System32`,
+	}
+	for _, cmd := range escapes {
+		t.Run(cmd, func(t *testing.T) {
+			raw, err := json.Marshal(struct {
+				Command string `json:"command"`
+			}{cmd})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := json.RawMessage(raw)
+
+			// The classifier must not downgrade this to CapRead.
+			if got := st.CapabilityFor(context.Background(), input); got != tool.CapExecute {
+				t.Fatalf("CapabilityFor(%q) = %s, want %s — a plan-mode session could read this file with no approval", cmd, got, tool.CapExecute)
+			}
+			if got := tool.EffectiveCapability(context.Background(), st, input); got != tool.CapExecute {
+				t.Fatalf("EffectiveCapability(%q) = %s, want %s", cmd, got, tool.CapExecute)
+			}
+
+			// And the production plan-mode gate must therefore deny it
+			// outright (plan mode denies CapExecute), never silently allow it
+			// the way a CapRead classification would.
+			gate := permission.New(permission.ModePlan, denyAllApprover{})
+			if allowed, reason := gate.Check(context.Background(), st, input); allowed {
+				t.Fatalf("plan-mode gate allowed %q, reason=%q — expected a denial", cmd, reason)
+			}
+		})
+	}
+}
+
+// denyAllApprover refuses every Ask decision, so a test using it asserts a
+// call was denied outright rather than merely requiring approval.
+type denyAllApprover struct{}
+
+func (denyAllApprover) Approve(context.Context, string, string, json.RawMessage) bool { return false }
 
 // TestShellToolCapabilityFor exercises the tool.CapabilityOverrider seam
 // end-to-end through the shell tool, including that tool.EffectiveCapability

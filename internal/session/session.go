@@ -31,6 +31,7 @@ type Session struct {
 	Model        string             `json:"model,omitempty"`      // P14.7: per-session model override; "" = persona/global default
 	Background   bool               `json:"background,omitempty"` // P3.2: runs detached from TUI
 	Archived     bool               `json:"archived,omitempty"`   // soft-deleted; hidden from normal listings
+	Origin       string             `json:"origin,omitempty"`     // P81.14/P80.1: who created it — tui/web/acp/mcp/cli; "" for pre-migration rows
 	Messages     []provider.Message `json:"messages"`
 	Traces       []trace.TurnTrace  `json:"traces,omitempty"`
 	InputTokens  int                `json:"input_tokens"`
@@ -51,6 +52,7 @@ type Meta struct {
 	Model        string     `json:"model,omitempty"`      // P14.7
 	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
+	Origin       string     `json:"origin,omitempty"` // P81.14/P80.1
 	InputTokens  int        `json:"input_tokens"`
 	OutputTokens int        `json:"output_tokens"`
 	CostUSD      float64    `json:"cost_usd"`
@@ -228,6 +230,7 @@ CREATE TABLE IF NOT EXISTS daily_tokens (
 		`ALTER TABLE sessions ADD COLUMN archived_at INTEGER`,                   // NULL = active
 		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,        // P14.7: per-session override
 		`ALTER TABLE sessions ADD COLUMN workdir TEXT NOT NULL DEFAULT ''`,      // P25.1: per-session working directory
+		`ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT ''`,       // P81.14/P80.1: creating surface (tui/web/acp/mcp/cli)
 	} {
 		_, _ = s.db.Exec(col) // "duplicate column name" error expected on fresh schema
 	}
@@ -329,8 +332,13 @@ func (s *Store) migrateSessionBlobs(id string, msgBlob, traceBlob []byte) error 
 }
 
 // Create stores a new session and returns it. workdir is the session's own
-// working directory (P25.1); "" keeps the daemon's default workspace.
-func (s *Store) Create(ctx context.Context, title, system, mode, persona, workdir string) (*Session, error) {
+// working directory (P25.1); "" keeps the daemon's default workspace. origin
+// records which surface created it — tui/web/acp/mcp/cli (internal/reqorigin)
+// — durably, so it survives a daemon restart; "" is a legacy/unrecognised
+// caller. P81.14/P80.1: this is what lets an MCP or ACP client's session
+// enumeration be filtered to sessions it (or its kind) actually created,
+// rather than every session on the daemon including a human's TUI session.
+func (s *Store) Create(ctx context.Context, title, system, mode, persona, workdir, origin string) (*Session, error) {
 	now := time.Now()
 	sess := &Session{
 		ID:        uuid.NewString(),
@@ -339,12 +347,13 @@ func (s *Store) Create(ctx context.Context, title, system, mode, persona, workdi
 		Mode:      mode,
 		Persona:   persona,
 		Workdir:   workdir,
+		Origin:    origin,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, title, system, mode, persona, workdir, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?)`,
-		sess.ID, sess.Title, sess.System, sess.Mode, sess.Persona, sess.Workdir, now.UnixMilli(), now.UnixMilli())
+		`INSERT INTO sessions (id, title, system, mode, persona, workdir, origin, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)`,
+		sess.ID, sess.Title, sess.System, sess.Mode, sess.Persona, sess.Workdir, sess.Origin, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
@@ -354,14 +363,14 @@ func (s *Store) Create(ctx context.Context, title, system, mode, persona, workdi
 // Get loads a full session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, title, system, mode, persona, workdir, model, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
+		`SELECT id, title, system, mode, persona, workdir, model, origin, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
 		sess         Session
 		created, upd int64
 		background   int
 		archivedAtMS sql.NullInt64
 	)
-	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &sess.Workdir, &sess.Model, &background, &archivedAtMS,
+	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &sess.Workdir, &sess.Model, &sess.Origin, &background, &archivedAtMS,
 		&sess.InputTokens, &sess.OutputTokens, &sess.CostUSD, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -556,7 +565,7 @@ func (s *Store) ListAll(ctx context.Context) ([]Meta, error) {
 }
 
 func (s *Store) listSessions(ctx context.Context, includeArchived bool) ([]Meta, error) {
-	q := `SELECT id, title, mode, persona, workdir, model, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions`
+	q := `SELECT id, title, mode, persona, workdir, model, origin, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions`
 	if !includeArchived {
 		q += ` WHERE archived_at IS NULL`
 	}
@@ -572,7 +581,7 @@ func (s *Store) listSessions(ctx context.Context, includeArchived bool) ([]Meta,
 		var created, upd int64
 		var background int
 		var archivedAtMS sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &m.Workdir, &m.Model, &background, &archivedAtMS, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
+		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &m.Workdir, &m.Model, &m.Origin, &background, &archivedAtMS, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
 			return nil, err
 		}
 		m.Background = background == 1

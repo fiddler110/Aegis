@@ -152,11 +152,16 @@ func newDebateCmd() *cobra.Command {
 					seatAdapter = provider.WithNumCtx(adapter, win)
 				}
 				opts := engine.Options{
-					Adapter:        seatAdapter,
-					Tools:          reg,
-					Gate:           gate,
-					Hooks:          engineHooks,
-					Cost:           tracker,
+					Adapter: seatAdapter,
+					Tools:   reg,
+					Gate:    gate,
+					Hooks:   engineHooks,
+					Cost:    tracker,
+					// P81.1: same AutoDeny{} as the gate above, and for the same
+					// reason — a headless debate role must never sit waiting for
+					// an approval nobody is watching for, so a scan hit is
+					// withheld rather than blocked on.
+					Approver:       permission.AutoDeny{},
 					Purpose:        provider.PurposeDebate, // P67.3
 					RoundResultCap: roundCapFor(cwd),       // P67.1
 					Model:          model,

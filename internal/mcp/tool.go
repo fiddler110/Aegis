@@ -32,7 +32,9 @@ func (t *mcpTool) InputSchema() json.RawMessage {
 }
 func (t *mcpTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	if t.scanArgs {
-		warnOutboundSecrets(t.logger, t.client.Server(), t.info.Name, input)
+		if classes := warnOutboundSecrets(t.logger, t.client.Server(), t.info.Name, input); len(classes) > 0 {
+			return tool.Result{Content: outboundSecretRefusal(classes), IsError: true}, nil
+		}
 	}
 	text, isErr, err := t.client.CallTool(ctx, t.info.Name, input)
 	if err != nil {
@@ -88,7 +90,9 @@ func (t *mcpResourceReadTool) InputSchema() json.RawMessage {
 }
 func (t *mcpResourceReadTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	if t.scanArgs {
-		warnOutboundSecrets(t.logger, t.client.Server(), t.exposedName, input)
+		if classes := warnOutboundSecrets(t.logger, t.client.Server(), t.exposedName, input); len(classes) > 0 {
+			return tool.Result{Content: outboundSecretRefusal(classes), IsError: true}, nil
+		}
 	}
 	var params struct {
 		URI string `json:"uri"`
@@ -154,7 +158,9 @@ func (t *mcpPromptGetTool) InputSchema() json.RawMessage {
 }
 func (t *mcpPromptGetTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
 	if t.scanArgs {
-		warnOutboundSecrets(t.logger, t.client.Server(), t.exposedName, input)
+		if classes := warnOutboundSecrets(t.logger, t.client.Server(), t.exposedName, input); len(classes) > 0 {
+			return tool.Result{Content: outboundSecretRefusal(classes), IsError: true}, nil
+		}
 	}
 	var params struct {
 		Name      string            `json:"name"`
@@ -251,11 +257,24 @@ func resolveCapability(sc ServerConfig, toolName string) tool.Capability {
 //
 // Dynamic refresh: if the server sends a notifications/tools/list_changed
 // notification, the tool list is re-fetched and the registry is updated.
-func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerConfig, logger *slog.Logger) []*Client {
+//
+// trust, when non-nil, gates a stdio server's resolved binary against its
+// last-approved digest and a server's advertised tool set against its
+// last-approved names (P81.2/FIND-02) — see TrustStore's doc comment. nil
+// skips both checks, which is what every caller besides the daemon's own
+// wireMCP passes (tests, and any future caller with no durable trust store
+// of its own): the checks are additive safety, not a required argument.
+func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerConfig, logger *slog.Logger, trust *TrustStore) []*Client {
 	var clients []*Client
 	for _, sc := range servers {
 		if sc.Command == "" || sc.Name == "" {
 			continue
+		}
+		if trust != nil && !isHTTPEndpoint(sc.Command) {
+			if _, ok, reason := trust.CheckBinary(sc.Name, sc.Command); !ok {
+				logger.Warn("mcp server binary trust check failed; refusing to start", "server", sc.Name, "reason", reason)
+				continue
+			}
 		}
 		client, err := NewHTTPOrStdio(ctx, sc)
 		if err != nil {
@@ -273,11 +292,32 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 			_ = client.Close()
 			continue
 		}
+		byName := make(map[string]ToolInfo, len(tools))
+		names := make([]string, 0, len(tools))
 		for _, info := range tools {
 			name := fmt.Sprintf("mcp__%s__%s", sc.Name, info.Name)
+			byName[name] = info
+			names = append(names, name)
+		}
+		approvedNames := names
+		if trust != nil {
+			var held []string
+			approvedNames, held = trust.FilterApproved(sc.Name, names)
+			if len(held) > 0 {
+				logger.Warn("mcp server advertised tools beyond its approved set; withholding until re-approved",
+					"server", sc.Name, "held", held)
+			}
+		}
+		for _, name := range approvedNames {
+			info := byName[name]
 			cap := resolveCapability(sc, info.Name)
 			if err := reg.Register(&mcpTool{client: client, info: info, exposedName: name, capability: cap, scanOutput: sc.ScanOutput, scanArgs: sc.ScanArguments, logger: logger}); err != nil {
 				logger.Warn("mcp tool register failed", "tool", name, "err", err)
+			}
+		}
+		if trust != nil {
+			if err := trust.Approve(sc.Name, approvedNames); err != nil {
+				logger.Warn("mcp tool trust store update failed", "server", sc.Name, "err", err)
 			}
 		}
 
@@ -315,11 +355,38 @@ func RegisterServers(ctx context.Context, reg *tool.Registry, servers []ServerCo
 					logger.Warn("mcp tool refresh failed", "server", serverName, "err", err)
 					return
 				}
+				byName := make(map[string]ToolInfo, len(newTools))
+				names := make([]string, 0, len(newTools))
 				for _, info := range newTools {
 					name := fmt.Sprintf("mcp__%s__%s", serverName, info.Name)
+					byName[name] = info
+					names = append(names, name)
+				}
+				approvedNames := names
+				if trust != nil {
+					var held []string
+					approvedNames, held = trust.FilterApproved(serverName, names)
+					if len(held) > 0 {
+						// P81.2/FIND-02: a live tools/list_changed notification
+						// is exactly the case the "re-ask when it grows" ask
+						// names — a schema change to an already-approved tool
+						// still upserts below, but a name the server never
+						// advertised before is withheld rather than exposed
+						// on the server's say-so alone.
+						logger.Warn("mcp server grew its tool set beyond what was approved; withholding new tools until re-approved",
+							"server", serverName, "held", held)
+					}
+				}
+				for _, name := range approvedNames {
+					info := byName[name]
 					reg.Upsert(&mcpTool{client: cl, info: info, exposedName: name, capability: resolveCapability(serverCfg, info.Name), scanOutput: serverCfg.ScanOutput, scanArgs: serverCfg.ScanArguments, logger: logger})
 				}
-				logger.Info("mcp tools refreshed", "server", serverName, "tools", len(newTools))
+				if trust != nil {
+					if err := trust.Approve(serverName, approvedNames); err != nil {
+						logger.Warn("mcp tool trust store update failed", "server", serverName, "err", err)
+					}
+				}
+				logger.Info("mcp tools refreshed", "server", serverName, "tools", len(approvedNames))
 			}
 		}
 

@@ -90,6 +90,47 @@ func TestOwnSessionIsNotSubjectToTheBorrowedCheck(t *testing.T) {
 	}
 }
 
+// P81.14: a session with a durable origin recorded by a different surface
+// (a human's TUI session) is refused outright, not merely mode-ceilinged —
+// this is the real fix P80.1 named as still open (the schema decision), now
+// closed rather than left to enumeration control alone.
+func TestPromptIntoBorrowedSessionFromADifferentOriginIsRefused(t *testing.T) {
+	backend := &fakeBackend{
+		sessionID: "sess-1",
+		events:    []api.Event{{Kind: api.KindText, Text: "ok"}},
+		sessions:  []api.SessionMeta{{ID: "human-tui", Mode: "plan", Origin: "tui"}},
+	}
+	peer, cleanup := newTestPeer(t, backend, Options{DefaultMode: "plan"})
+	defer cleanup()
+
+	peer.request("tools/call", toolsCallParams{Name: "aegis_prompt", Arguments: mustJSON(promptArgs{Text: "hi", SessionID: "human-tui"})})
+	out := peer.readResponse()
+	if out.Error == nil {
+		t.Fatalf("expected a refusal posting into a tui-origin session even at/below default_mode, got %+v", out)
+	}
+	if !strings.Contains(out.Error.Message, "not created by an MCP client") {
+		t.Errorf("error message does not explain the origin refusal: %q", out.Error.Message)
+	}
+}
+
+// A session predating the origin column (Origin == "") is treated the same
+// as before — mode-ceilinged, not refused — so an upgrade doesn't strand an
+// editor plugin's pre-existing session.
+func TestPromptIntoBorrowedSessionWithEmptyOriginIsOnlyModeChecked(t *testing.T) {
+	backend := &fakeBackend{
+		sessionID: "sess-1",
+		events:    []api.Event{{Kind: api.KindText, Text: "ok"}},
+		sessions:  []api.SessionMeta{{ID: "legacy", Mode: "plan"}}, // Origin left zero-value
+	}
+	peer, cleanup := newTestPeer(t, backend, Options{DefaultMode: "plan"})
+	defer cleanup()
+
+	peer.request("tools/call", toolsCallParams{Name: "aegis_prompt", Arguments: mustJSON(promptArgs{Text: "hi", SessionID: "legacy"})})
+	if out := peer.readResponse(); out.Error != nil {
+		t.Fatalf("a pre-migration session at or below the ceiling must still work, got %+v", out.Error)
+	}
+}
+
 // An id the daemon does not list is unverifiable, not evidence of escalation:
 // the enumeration this defends against only reaches listed sessions, and
 // PostMessageReq rejects an id that does not exist.

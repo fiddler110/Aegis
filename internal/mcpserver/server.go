@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 )
 
 // Backend is the subset of the daemon client the MCP server needs. *client.Client
@@ -400,7 +401,7 @@ func (s *Server) callNewSession(ctx context.Context, raw json.RawMessage) (any, 
 			return nil, &rpcErr{Code: codeInvalidParams, Message: "invalid arguments: " + err.Error()}
 		}
 	}
-	meta, err := s.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: s.resolveMode(a.Mode), Persona: a.Persona})
+	meta, err := s.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: s.resolveMode(a.Mode), Persona: a.Persona, Origin: reqorigin.MCP})
 	if err != nil {
 		return errResult(fmt.Errorf("create session: %w", err)), nil
 	}
@@ -421,37 +422,52 @@ func (s *Server) isOwnSession(id string) bool {
 	return ok
 }
 
-// checkBorrowedSessionMode enforces mcp_server.default_mode as a ceiling on a
-// session this server did not create (P80.1 / FIND-21).
+// checkBorrowedSession enforces mcp_server.default_mode as a ceiling on a
+// session this server did not create, and — since P81.14 gave sessions a
+// durable origin — refuses outright a session a different surface created
+// (P80.1 / FIND-21, both now closed rather than left as an open schema
+// decision: origin is recorded at creation and durable across a restart, the
+// fix the entry named as the real one).
 //
-// aegis_list_sessions proxies the daemon's whole session list, so a caller can
-// see the interactive auto-mode session a human started in the TUI and name
-// its id here. F1's clamp binds only sessions this server *creates*; a
-// borrowed one carried whatever mode it already had, which made the clamp
-// bypassable by reuse. The ceiling is applied at prompt time instead, which
-// needs no schema change and leaves the real fix — a session origin recorded
-// at creation and filtered server-side — an open product decision.
+// aegis_list_sessions used to proxy the daemon's whole session list, so a
+// caller could see the interactive auto-mode session a human started in the
+// TUI and name its id here; callListSessions now filters that list to
+// Origin == mcp, so enumeration itself no longer reaches those sessions. This
+// check is the second layer, for an id a caller already knows (from a prior
+// call, a config file, guesswork) without having enumerated it here — refuse
+// a non-MCP-origin session outright rather than only ceiling its mode, since
+// there is no legitimate reason an MCP client would need to post into a
+// session it did not create and that was not itself created by an MCP client.
 //
 // It refuses rather than silently downgrading: the session belongs to someone
 // else, and quietly moving a human's TUI session from auto to plan is a
-// side effect no MCP caller should be able to cause. A session at or below the
-// ceiling is untouched, which is what keeps cross-restart resume working.
+// side effect no MCP caller should be able to cause. A session at or below
+// the mode ceiling, of MCP origin (or predating the origin column —
+// Origin == ""), is untouched, which is what keeps cross-restart resume
+// working.
 //
 // A session id that is not in the list is allowed through: it is unverifiable,
 // not evidence of escalation, and the enumeration this defends against only
 // reaches listed sessions. PostMessageReq rejects an id that does not exist.
-func (s *Server) checkBorrowedSessionMode(ctx context.Context, id string) *rpcErr {
+func (s *Server) checkBorrowedSession(ctx context.Context, id string) *rpcErr {
 	if s.allowEscalation || s.isOwnSession(id) {
 		return nil
 	}
 	metas, err := s.backend.ListSessions(ctx)
 	if err != nil {
-		s.logger.Warn("mcp-serve: could not check a borrowed session's mode against default_mode", "session", id, "err", err)
+		s.logger.Warn("mcp-serve: could not check a borrowed session against default_mode/origin", "session", id, "err", err)
 		return nil
 	}
 	for _, m := range metas {
 		if m.ID != id {
 			continue
+		}
+		if m.Origin != "" && m.Origin != reqorigin.MCP {
+			s.logger.Warn("mcp-serve: refusing a prompt into a session this server did not create, created by a different surface",
+				"session", id, "session_origin", m.Origin)
+			return &rpcErr{Code: codeInvalidParams, Message: fmt.Sprintf(
+				"session %s was not created by an MCP client, and was not created by this server; start your own session with aegis_new_session",
+				id)}
 		}
 		if permModeRank(m.Mode) <= permModeRank(s.defaultMode) {
 			return nil
@@ -465,21 +481,32 @@ func (s *Server) checkBorrowedSessionMode(ctx context.Context, id string) *rpcEr
 	return nil
 }
 
+// callListSessions returns only sessions of MCP origin (P81.14/P80.1): an MCP
+// client used to see and could enumerate every session on the daemon,
+// including a human's interactive TUI session. Origin == "" (pre-migration,
+// created before this column existed) is excluded too — deliberately: it is
+// the safe direction to be wrong in, and the alternative would list sessions
+// this mechanism cannot prove were ever MCP-created.
 func (s *Server) callListSessions(ctx context.Context) (any, *rpcErr) {
 	metas, err := s.backend.ListSessions(ctx)
 	if err != nil {
 		return errResult(fmt.Errorf("list sessions: %w", err)), nil
 	}
-	if len(metas) == 0 {
-		return textResult("No sessions."), nil
-	}
 	var b strings.Builder
+	var shown int
 	for _, m := range metas {
+		if m.Origin != reqorigin.MCP {
+			continue
+		}
+		shown++
 		title := m.Title
 		if title == "" {
 			title = "(untitled)"
 		}
 		fmt.Fprintf(&b, "%s — %s [%s] updated %s\n", m.ID, title, m.Mode, m.UpdatedAt.Format(time.RFC3339))
+	}
+	if shown == 0 {
+		return textResult("No sessions."), nil
 	}
 	return textResult(strings.TrimRight(b.String(), "\n")), nil
 }
@@ -495,13 +522,13 @@ func (s *Server) callPrompt(ctx context.Context, raw json.RawMessage) (any, *rpc
 
 	sessionID := a.SessionID
 	if sessionID == "" {
-		meta, err := s.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: s.resolveMode(a.Mode), Persona: a.Persona})
+		meta, err := s.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: s.resolveMode(a.Mode), Persona: a.Persona, Origin: reqorigin.MCP})
 		if err != nil {
 			return errResult(fmt.Errorf("create session: %w", err)), nil
 		}
 		sessionID = meta.ID
 		s.rememberCreated(sessionID)
-	} else if rerr := s.checkBorrowedSessionMode(ctx, sessionID); rerr != nil {
+	} else if rerr := s.checkBorrowedSession(ctx, sessionID); rerr != nil {
 		return nil, rerr
 	}
 

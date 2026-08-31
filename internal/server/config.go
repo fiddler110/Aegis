@@ -149,6 +149,16 @@ func patchConfigSection[Req any, T any](
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// P81.14/P81.3: every accepted config PATCH weakens or strengthens a
+	// security posture (sandbox backend, redaction, cost ceilings, ...) and
+	// previously left no record at all. requested is the caller's own body;
+	// patch is what was actually applied — the fully-resolved value after
+	// merging with whatever the section's build func carried forward from
+	// loadCfg(), so it reflects the real after-state even for a
+	// partial-update section.
+	if s.audit != nil {
+		s.audit.ConfigPatch(r.URL.Path, r.RemoteAddr, req, patch)
+	}
 	writeJSON(w, http.StatusOK, respond(scope, patch))
 }
 
@@ -227,6 +237,21 @@ func (s *Server) handlePatchConfigSandbox(w http.ResponseWriter, r *http.Request
 				return config.SandboxPatch{}, &configHTTPError{status: http.StatusBadRequest, msg: err.Error()}
 			}
 			patch.Backend, patch.Runtime = normalized.Backend, normalized.Runtime
+			// P81.3/FIND-03: the same refusal Server.New already applies at
+			// startup (wireSecurityWarnings -> unsandboxedAutoExecError) was
+			// never consulted here, so a daemon that started with a real
+			// sandbox could be PATCHed straight into the one combination that
+			// means unattended RCE — auto-approved execution over an
+			// unsandboxed backend — through an entirely legitimate API call.
+			// "" and "local" both mean the unsandboxed local backend
+			// (sandboxKnownBackends' own comment); sandboxFallback/reason are
+			// false/"" because this is an explicit operator choice, not the
+			// runtime's own detection falling back to local.
+			if patch.Backend == "" || patch.Backend == "local" {
+				if err := unsandboxedAutoExecError(cfg.Permission, patch.Backend, false, ""); err != nil {
+					return config.SandboxPatch{}, &configHTTPError{status: http.StatusBadRequest, msg: err.Error()}
+				}
+			}
 			return patch, nil
 		},
 		func(scope string) func(config.SandboxPatch) error {

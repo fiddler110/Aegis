@@ -338,6 +338,57 @@ func TestBuildOne_OllamaThinkExplicitFalseWins(t *testing.T) {
 // TestBuild_AdmissionBoundsLocalNotCloud is the P59.9 wiring check: the queue
 // depth is resolved per backend, so an unconfigured local primary is bounded by
 // default and an unconfigured cloud primary is not.
+// TestBuild_RedactsOutboundOnCloudProvider is P81.5/FIND-05's plumbing
+// guard: a non-loopback endpoint with the config default (on) gets the
+// redaction decorator wired in.
+func TestBuild_RedactsOutboundOnCloudProvider(t *testing.T) {
+	cfg := &config.Config{
+		Provider: config.ProviderConfig{Default: "anthropic", APIKey: "fake-key", MaxRetries: 2},
+		Security: config.SecurityConfig{RedactOutboundPayloads: true},
+	}
+	a, err := Build(cfg, nil)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !provider.IsRedacted(a) {
+		t.Error("expected the redaction decorator on a non-loopback cloud provider")
+	}
+}
+
+// TestBuild_NoRedactionOnLoopback: a local Ollama deployment sends nothing
+// off the machine, so the decorator is skipped regardless of the config
+// default — config.IsLoopbackBaseURL is the same gate MeteredCloudEndpoint
+// (P81.15) uses to draw this line.
+func TestBuild_NoRedactionOnLoopback(t *testing.T) {
+	cfg := &config.Config{
+		Provider: config.ProviderConfig{Default: "ollama", BaseURL: "http://localhost:11434/v1", MaxRetries: 2},
+		Security: config.SecurityConfig{RedactOutboundPayloads: true},
+	}
+	a, err := Build(cfg, nil)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if provider.IsRedacted(a) {
+		t.Error("expected no redaction decorator on a loopback endpoint")
+	}
+}
+
+// TestBuild_NoRedactionWhenDisabled: an operator who turned the setting off
+// gets exactly that, even against a cloud endpoint.
+func TestBuild_NoRedactionWhenDisabled(t *testing.T) {
+	cfg := &config.Config{
+		Provider: config.ProviderConfig{Default: "anthropic", APIKey: "fake-key", MaxRetries: 2},
+		Security: config.SecurityConfig{RedactOutboundPayloads: false},
+	}
+	a, err := Build(cfg, nil)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if provider.IsRedacted(a) {
+		t.Error("expected no redaction decorator when security.redact_outbound_payloads is false")
+	}
+}
+
 func TestBuild_AdmissionBoundsLocalNotCloud(t *testing.T) {
 	local, err := Build(&config.Config{Provider: config.ProviderConfig{Default: "ollama", MaxRetries: 2}}, nil)
 	if err != nil {

@@ -19,6 +19,7 @@ import (
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/fiddler110/aegis/internal/trace"
+	"github.com/fiddler110/aegis/internal/trust"
 )
 
 // redactSecretsFn is a seam over security.RedactText so tests can stub in
@@ -439,6 +440,7 @@ func (e *Engine) toolCtx(ctx context.Context) context.Context {
 		ctx = tool.WithWorkdir(ctx, e.workdir)
 	}
 	ctx = tool.WithExtraRoots(ctx, e.extraRoots)
+	ctx = tool.WithEgressTracker(ctx, e.egress)
 	return tool.WithContextWindow(ctx, e.effectiveContextWindow())
 }
 
@@ -536,6 +538,31 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 		if redacted, findings, scanErr := redactSecretsFn(ctx, content); scanErr == nil && len(findings) > 0 {
 			content = redacted
 			e.logger.Info("redacted secret pattern(s) from tool output", "tool", tu.Name, "count", len(findings))
+		}
+	}
+	// P81.1: promote a heuristic scan hit from an annotation to a decision
+	// point — ask *before* the flagged content enters context, not after.
+	// e.approver is the same interactive approver a permission-gate Ask
+	// decision uses, so this reuses the existing KindApprovalRequest/TUI-
+	// dialog round trip rather than a parallel mechanism (P81.1's own note
+	// that this needed the tool layer to reach the approval system directly
+	// — it now does, via the engine rather than the permission package, since
+	// only the engine sees a tool's *result*). Gated on !isErr: a failed call
+	// has nothing worth withholding, and content is the error message rather
+	// than tool output.
+	if !isErr && e.approver != nil && trust.Flagged(content) {
+		reason := "This tool call already ran; its result was flagged by a heuristic prompt-injection scan. " +
+			"Approve to let the result enter context, or deny to withhold it (the call itself cannot be undone)."
+		if !e.approver.Approve(ctx, tu.Name, reason, tu.Input) {
+			e.logger.Info("tool result withheld: scan-hit approval denied", "tool", tu.Name)
+			// The audit trail still gets the real content — withholding it
+			// from the model's context is not the same as losing the forensic
+			// record of what the call actually returned.
+			if e.hooks != nil {
+				e.hooks.PostToolUse(ctx, tu.Name, tu.Input, content, isErr)
+			}
+			return "tool result withheld: a heuristic prompt-injection scan flagged this output and the operator " +
+				"denied it entering context. If this looks like a false positive, ask the user to retry and approve it.", true
 		}
 	}
 	if e.hooks != nil {

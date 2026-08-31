@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/netblock"
+	"github.com/fiddler110/aegis/internal/redact"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/trust"
 	"golang.org/x/net/html"
@@ -74,10 +75,32 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return tool.Result{Content: "url must be a valid http(s) URL", IsError: true}, nil
 	}
+	// P81.8/FIND-08: the inbound half of web_fetch is thoroughly guarded
+	// (internal/netblock blocks the destination), but nothing inspected the
+	// payload — the model chooses the URL, so workspace-derived data can be
+	// encoded into a path or query string aimed at an otherwise-legitimate
+	// public host. Refuse outright rather than merely warn: unlike a
+	// provider payload, there is no legitimate reason a fetch *destination*
+	// should itself contain something matching a credential pattern.
+	if classes := redact.Classes(u.String()); len(classes) > 0 {
+		return tool.Result{
+			Content: fmt.Sprintf(
+				"refusing to fetch: the URL itself appears to contain %s — this looks like an attempt to exfiltrate a credential via the request path rather than a legitimate fetch target",
+				strings.Join(classes, ", ")),
+			IsError: true,
+		}, nil
+	}
 
 	body, ctype, err := t.get(ctx, u.String())
 	if err != nil {
 		return tool.Result{Content: fmt.Sprintf("fetch failed: %v", err), IsError: true}, nil
+	}
+	// P81.8: the durable record of this fetch lives in the audit sink
+	// (hooks.Audit); this is the live counterpart a TUI/UI reads without
+	// parsing JSONL. Recorded on success only — a refused or failed fetch
+	// moved no bytes.
+	if tracker, ok := tool.EgressTrackerFromContext(ctx); ok {
+		tracker.Add(u.Hostname(), len(body))
 	}
 
 	text := string(body)

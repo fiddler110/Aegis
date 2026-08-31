@@ -23,6 +23,24 @@ type SecurityConfig struct {
 	// docs/providers.md "Data Exposure & Redaction".
 	RedactSecrets bool `koanf:"redact_secrets"`
 
+	// RedactOutboundPayloads runs internal/redact's lightweight pattern set
+	// over every outbound provider request — system prompt, every message,
+	// and a tool call's own arguments — before it leaves the process
+	// (P81.5/FIND-05). It is the backstop RedactSecrets structurally cannot
+	// be: RedactSecrets only ever sees a CapRead tool's *result*, so a
+	// credential the model echoes into ordinary text, or passes as an
+	// argument to a *different* tool call, reaches the wire untouched today.
+	// Only applied when the resolved provider endpoint is not loopback
+	// (config.IsLoopbackBaseURL) — a local Ollama deployment sends nothing
+	// off the machine to redact from, so the pass is skipped there
+	// regardless of this setting. Defaults to true for the same reason
+	// RedactSecrets does: a cloud provider is a third party under its own
+	// retention terms, and this is a best-effort regex pass (the same
+	// pattern set web_fetch's URL refusal and MCP's outbound argument scan
+	// already use), not a guarantee — set false only when the cost is
+	// unacceptable and content is otherwise known-safe.
+	RedactOutboundPayloads bool `koanf:"redact_outbound_payloads"`
+
 	// ScanFileReads runs read_file and grep results through the heuristic
 	// prompt-injection scan, attaching the untrusted-content provenance marker
 	// only when it fires (DR-1). Defaults to true.
@@ -40,6 +58,26 @@ type SecurityConfig struct {
 	// (mcp.servers[].scan_output, search.scan_output). Turning it off restores
 	// exactly the pre-DR-1 behavior: file contents reach the model unmarked.
 	ScanFileReads bool `koanf:"scan_file_reads"`
+
+	// TaintAfterUntrustedContent requires approval for the rest of the turn's
+	// write/execute/network calls once any tool result has carried the
+	// untrusted-content provenance wrapper (internal/trust.Wrap) — regardless
+	// of permission mode, including build/auto (P81.14/P81.1, FIND-01, the
+	// threat model's one Critical). Defaults to true.
+	//
+	// Today the wrapper marks content as untrusted but enforces nothing: an
+	// injected instruction in a fetched page or an MCP result can be acted on
+	// in the exact same turn with no approval prompt in build mode and none
+	// at all in auto mode. This closes that gap the way security.egress_then_
+	// write already closes an adjacent one (both are internal/permission.
+	// ContextualGate rules; see its doc comment), and it is turn-scoped by
+	// construction: the gate is rebuilt fresh each turn (newEngine calls
+	// buildGate per turn, not once per session), so the taint flag never
+	// needs to survive compaction or a later turn — it protects exactly the
+	// window the finding names ("tainted for the remainder of the turn").
+	// A session-wide version that does survive compaction is a larger,
+	// separately-tracked follow-up (see the roadmap entry).
+	TaintAfterUntrustedContent bool `koanf:"taint_after_untrusted_content"`
 
 	// Tools configures per-scanner behavior for `aegis scan`/the security_scan
 	// tool (P11.11): whether it's enabled, how it runs (host binary vs

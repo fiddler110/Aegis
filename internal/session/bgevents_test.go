@@ -33,7 +33,7 @@ func TestBGEventsBoundedOnADefaultInstall(t *testing.T) {
 	}
 	defer st.Close()
 
-	sess, err := st.Create(ctx, "", "", "build", "", "")
+	sess, err := st.Create(ctx, "", "", "build", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestBGEventRetentionKeepsTheNewestSuffix(t *testing.T) {
 	defer st.Close()
 	st.SetBGEventRetention(10)
 
-	sess, err := st.Create(ctx, "", "", "build", "", "")
+	sess, err := st.Create(ctx, "", "", "build", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestBGEventPruneSweepsOnAProcessFirstAppend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.Create(ctx, "", "", "build", "", "")
+	sess, err := st.Create(ctx, "", "", "build", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,11 +166,11 @@ func TestBGEventPruneIsPerSession(t *testing.T) {
 	defer st.Close()
 	st.SetBGEventRetention(3)
 
-	a, err := st.Create(ctx, "", "", "build", "", "")
+	a, err := st.Create(ctx, "", "", "build", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := st.Create(ctx, "", "", "build", "", "")
+	b, err := st.Create(ctx, "", "", "build", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -420,7 +420,13 @@ func (s *Server) wireMCP(cfg *config.Config, logger *slog.Logger) {
 			ScanArguments:    m.ScanArguments,
 		})
 	}
-	s.mcpClients = mcp.RegisterServers(context.Background(), s.tools, mcpServers, logger)
+	// P81.2/FIND-02: pins each stdio server's resolved binary digest and
+	// advertised tool-name set across restarts and live tools/list_changed
+	// notifications — see mcp.TrustStore's doc comment for why this is
+	// trust-on-first-use rather than a second approval prompt for the same
+	// act of adding the server to config.
+	mcpTrust := mcp.OpenTrustStore(filepath.Join(cfg.DataDir, "mcp_trust.json"))
+	s.mcpClients = mcp.RegisterServers(context.Background(), s.tools, mcpServers, logger, mcpTrust)
 
 	if s.adapter != nil {
 		samplingFn := buildSamplingHandler(s.adapter, cfg.Provider.Model, cfg.Provider.MaxTokens, logger)

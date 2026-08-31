@@ -392,8 +392,8 @@ func TestListSessionsTool(t *testing.T) {
 
 func TestListSessionsToolWithEntries(t *testing.T) {
 	backend := &fakeBackend{sessions: []api.SessionMeta{
-		{ID: "s1", Title: "fix the bug", Mode: "build", UpdatedAt: time.Now()},
-		{ID: "s2", Mode: "plan", UpdatedAt: time.Now()},
+		{ID: "s1", Title: "fix the bug", Mode: "build", Origin: "mcp", UpdatedAt: time.Now()},
+		{ID: "s2", Mode: "plan", Origin: "mcp", UpdatedAt: time.Now()},
 	}}
 	peer, cleanup := newTestPeer(t, backend, Options{})
 	defer cleanup()

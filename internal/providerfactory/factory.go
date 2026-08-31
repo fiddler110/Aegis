@@ -153,10 +153,25 @@ func decorate(base provider.Adapter, cfg *config.Config, providerName, baseURL s
 	policy := provider.DefaultRetryPolicy()
 	policy.MaxRetries = cfg.Provider.MaxRetries
 	resolve := profile.NewResolver(cfg.Provider.LocalPromptProfile(), cfg.Provider.ModelHarness)
-	return provider.WithHarness(
+	adapted := provider.WithHarness(
 		provider.WithRetry(admit(cfg, providerName, baseURL, base, logger), policy, logger),
 		resolve,
 	)
+	return redactOutbound(cfg, providerName, baseURL, adapted, logger)
+}
+
+// redactOutbound wraps adapted with provider.WithRedaction (P81.5/FIND-05)
+// when the resolved endpoint is not loopback and
+// security.redact_outbound_payloads (on by default) hasn't been turned off —
+// the same config.IsLoopbackBaseURL gate MeteredCloudEndpoint (P81.15) uses
+// to draw the local/remote line. Applied outermost, once per built adapter,
+// so provider.WithRetry's own retries replay the same already-redacted
+// request rather than re-running the pass per attempt.
+func redactOutbound(cfg *config.Config, providerName, baseURL string, adapted provider.Adapter, logger *slog.Logger) provider.Adapter {
+	if !cfg.Security.RedactOutboundPayloads || config.IsLoopbackBaseURL(baseURL) {
+		return adapted
+	}
+	return provider.WithRedaction(adapted, providerName, logger)
 }
 
 // admit wraps base in the P59.9 admission-control decorator when the resolved

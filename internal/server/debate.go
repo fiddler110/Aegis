@@ -160,6 +160,7 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.
 			Compactor: s.compactor,
 			Hooks:     engineHooks,
 			Cost:      tracker,
+			Approver:  s.approver(),           // P81.1: same approver buildGate above just used
 			Purpose:   provider.PurposeDebate, // P67.3
 			Model:     model,
 			// A role had a Compactor but no window to measure against, so the

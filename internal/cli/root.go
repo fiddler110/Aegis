@@ -11,6 +11,7 @@ import (
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/logging"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/tui"
 	"github.com/spf13/cobra"
@@ -114,6 +115,7 @@ Use "aegis <command> --help" for details on any command below.`,
 					Mode:    resolvedMode,
 					Persona: resolvedPersona,
 					Workdir: cwd,
+					Origin:  reqorigin.TUI,
 				})
 				if err != nil {
 					return err

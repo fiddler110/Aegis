@@ -14,20 +14,25 @@ import (
 // is opt-in per server, warns without blocking, and names the class rather than
 // the match — which is this package's concern and not the pattern set's.
 
-// TestMCPToolOutboundArgumentScan is the FIND-12 regression, table-driven
-// over the three behaviors that matter: scan off = secret passes with no
-// warning; scan on + secret = Warn log naming server, tool, and pattern
-// class while the call still proceeds; scan on + clean args = no warning.
+// TestMCPToolOutboundArgumentScan is the FIND-12/P81.5 regression,
+// table-driven over the three behaviors that matter: scan off = secret
+// passes through with no warning and no refusal; scan on + secret = Warn log
+// naming server, tool, and pattern class AND the call is refused before
+// reaching the server (P81.5/FIND-05 escalated this from flag-only to a
+// gate — forwarding a flagged argument to the untrusted server an operator
+// opted into scanning defeated the point of scanning it); scan on + clean
+// args = no warning, call proceeds.
 func TestMCPToolOutboundArgumentScan(t *testing.T) {
 	cases := []struct {
-		name     string
-		scanArgs bool
-		args     string
-		wantWarn bool
+		name       string
+		scanArgs   bool
+		args       string
+		wantWarn   bool
+		wantRefuse bool
 	}{
-		{"disabled: secret in args, no warning", false, `{"data":"-----BEGIN RSA PRIVATE KEY-----"}`, false},
-		{"enabled: secret in args warns", true, `{"data":"-----BEGIN RSA PRIVATE KEY-----"}`, true},
-		{"enabled: clean args, no warning", true, `{"query":"weather in Paris"}`, false},
+		{"disabled: secret in args, no warning, not refused", false, `{"data":"-----BEGIN RSA PRIVATE KEY-----"}`, false, false},
+		{"enabled: secret in args warns and is refused", true, `{"data":"-----BEGIN RSA PRIVATE KEY-----"}`, true, true},
+		{"enabled: clean args, no warning, not refused", true, `{"query":"weather in Paris"}`, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,9 +45,14 @@ func TestMCPToolOutboundArgumentScan(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
-			// Flag-only: the call must always still be forwarded and its
-			// result returned, warning or not.
-			if !strings.Contains(res.Content, "called echo with") {
+			if tc.wantRefuse {
+				if !res.IsError || !strings.Contains(res.Content, "refusing to forward") {
+					t.Errorf("expected a refusal, got isErr=%v content=%q", res.IsError, res.Content)
+				}
+				if strings.Contains(res.Content, "BEGIN RSA PRIVATE KEY") {
+					t.Errorf("refusal leaked the matched secret text: %q", res.Content)
+				}
+			} else if !strings.Contains(res.Content, "called echo with") {
 				t.Errorf("call did not proceed, content: %q", res.Content)
 			}
 
@@ -69,27 +79,35 @@ func TestMCPToolOutboundArgumentScan(t *testing.T) {
 
 // TestOutboundArgumentScanCoversResourceAndPromptTools checks the other two
 // argument-forwarding adapters (resources/read, prompts/get) honor
-// scan_arguments the same way tools/call does, mirroring how scan_output
-// covers all three.
+// scan_arguments the same way tools/call does — both the Warn log and the
+// P81.5 refusal — mirroring how scan_output covers all three.
 func TestOutboundArgumentScanCoversResourceAndPromptTools(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	c := newPipeClient(t)
 
 	rt := &mcpResourceReadTool{client: c, exposedName: "mcp__test__read_resource", scanArgs: true, logger: logger}
-	if _, err := rt.Execute(context.Background(), json.RawMessage(`{"uri":"https://x.test/?k=AKIAIOSFODNN7EXAMPLE"}`)); err != nil {
+	res, err := rt.Execute(context.Background(), json.RawMessage(`{"uri":"https://x.test/?k=AKIAIOSFODNN7EXAMPLE"}`))
+	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if !strings.Contains(buf.String(), "AWS access key ID") {
 		t.Errorf("resource read args not scanned: %q", buf.String())
 	}
+	if !res.IsError || !strings.Contains(res.Content, "refusing to forward") {
+		t.Errorf("resource read with flagged args should be refused, got isErr=%v content=%q", res.IsError, res.Content)
+	}
 
 	buf.Reset()
 	pt := &mcpPromptGetTool{client: c, exposedName: "mcp__test__get_prompt", scanArgs: true, logger: logger}
-	if _, err := pt.Execute(context.Background(), json.RawMessage(`{"name":"greet","arguments":{"who":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}`)); err != nil {
+	res, err = pt.Execute(context.Background(), json.RawMessage(`{"name":"greet","arguments":{"who":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}`))
+	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if !strings.Contains(buf.String(), "GitHub token") {
 		t.Errorf("prompt get args not scanned: %q", buf.String())
+	}
+	if !res.IsError || !strings.Contains(res.Content, "refusing to forward") {
+		t.Errorf("prompt get with flagged args should be refused, got isErr=%v content=%q", res.IsError, res.Content)
 	}
 }

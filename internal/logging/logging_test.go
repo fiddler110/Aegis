@@ -161,9 +161,9 @@ func TestNewAppliesPermissionHardening(t *testing.T) {
 // aegis.log.1 and the new write starts a fresh, short file.
 func TestRotatingWriterRotatesOnSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "aegis.log")
-	w, err := newRotatingWriter(path, 10, 3)
+	w, err := NewRotatingWriter(path, 10, 3)
 	if err != nil {
-		t.Fatalf("newRotatingWriter: %v", err)
+		t.Fatalf("NewRotatingWriter: %v", err)
 	}
 	defer w.Close()
 
@@ -195,9 +195,9 @@ func TestRotatingWriterRotatesOnSize(t *testing.T) {
 // rotation rather than growing without bound.
 func TestRotatingWriterDropsOldestBackup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "aegis.log")
-	w, err := newRotatingWriter(path, 5, 2)
+	w, err := NewRotatingWriter(path, 5, 2)
 	if err != nil {
-		t.Fatalf("newRotatingWriter: %v", err)
+		t.Fatalf("NewRotatingWriter: %v", err)
 	}
 	defer w.Close()
 

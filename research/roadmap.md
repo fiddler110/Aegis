@@ -10,8 +10,6 @@
   - [Open Work — Tier 1](#open-work--tier-1)
     - [P81.6 — `provider.base_url` is already security-relevant — REFUTED (FIND-06)](#p816--providerbase_url-is-already-security-relevant--refuted-find-06)
   - [Open Work — Tier 2](#open-work--tier-2)
-    - [P76.2 — Quit doesn't cancel a running interactive-terminal command](#p762--quit-doesnt-cancel-a-running-interactive-terminal-command)
-    - [P79.1 — Windows read-only-shell classifier no longer detects absolute-path escapes (regression, PR #51)](#p791--windows-read-only-shell-classifier-no-longer-detects-absolute-path-escapes-regression-pr-51)
     - [P81.9 — The session workdir allowlist is skipped on exactly the bind it ships with (FIND-09)](#p819--the-session-workdir-allowlist-is-skipped-on-exactly-the-bind-it-ships-with-find-09)
     - [P81.13 — Sandbox and scanner images are mutable tags, and `verify-image` is a separate command (FIND-13)](#p8113--sandbox-and-scanner-images-are-mutable-tags-and-verify-image-is-a-separate-command-find-13)
     - [P81.15 — Every cost and token budget defaults to unlimited (FIND-15)](#p8115--every-cost-and-token-budget-defaults-to-unlimited-find-15)
@@ -25,8 +23,6 @@
     - [P81.33 — The TUI render path is unbounded, and a parallel round trains click-through (FIND-33)](#p8133--the-tui-render-path-is-unbounded-and-a-parallel-round-trains-click-through-find-33)
   - [Open Work — Tier 3](#open-work--tier-3)
     - [P76.1 — Audit the codebase's unread 26%: `internal/tui` and `internal/security`](#p761--audit-the-codebases-unread-26-internaltui-and-internalsecurity)
-    - [P76.3 — A hostile repo can plant its own security-scan baseline to hide its own findings](#p763--a-hostile-repo-can-plant-its-own-security-scan-baseline-to-hide-its-own-findings)
-    - [P80.1 — An MCP client can list, and post turns into, sessions it did not create](#p801--an-mcp-client-can-list-and-post-turns-into-sessions-it-did-not-create)
     - [P81.1 — Untrusted content is marked, not contained (FIND-01)](#p811--untrusted-content-is-marked-not-contained-find-01)
     - [P81.8 — `web_fetch` is an unreviewed egress channel (FIND-08)](#p818--web_fetch-is-an-unreviewed-egress-channel-find-08)
     - [P81.5 — Outbound provider payloads and tool arguments are never redacted (FIND-05)](#p815--outbound-provider-payloads-and-tool-arguments-are-never-redacted-find-05)
@@ -35,7 +31,6 @@
     - [P81.4 — The web UI hands the real daemon token to browser JavaScript (FIND-04)](#p814--the-web-ui-hands-the-real-daemon-token-to-browser-javascript-find-04)
     - [P81.10 — The container workspace mount is broader than any single command needs (FIND-10)](#p8110--the-container-workspace-mount-is-broader-than-any-single-command-needs-find-10)
     - [P81.12 — Release artifacts ship without checksums, signatures or provenance (FIND-12)](#p8112--release-artifacts-ship-without-checksums-signatures-or-provenance-find-12)
-    - [P81.14 — There is no default audit trail for anything privileged (FIND-14)](#p8114--there-is-no-default-audit-trail-for-anything-privileged-find-14)
     - [P81.20 — Plan mode's guarantee rests on a 1,129-line classifier, structurally (FIND-20)](#p8120--plan-modes-guarantee-rests-on-a-1129-line-classifier-structurally-find-20)
     - [P81.22 — Command isolation degrades to unsandboxed host execution on a warning line (FIND-22)](#p8122--command-isolation-degrades-to-unsandboxed-host-execution-on-a-warning-line-find-22)
     - [P81.23 — Scheduled jobs run unattended in whatever mode they were created with (FIND-23)](#p8123--scheduled-jobs-run-unattended-in-whatever-mode-they-were-created-with-find-23)
@@ -87,16 +82,25 @@
     - [P65.2 — Compaction summaries are free prose, and nothing carries the file set forward (prompt half)](#p652--compaction-summaries-are-free-prose-and-nothing-carries-the-file-set-forward-prompt-half)
     - [P62.8 — The prefix-cache gate's large-window regime has never been measured](#p628--the-prefix-cache-gates-large-window-regime-has-never-been-measured)
 
-**Last updated:** 2026-08-31 (third entry the same day) — **the three items that had led [Up
-next](#up-next) since 23/30 August are worked**: **P76.2** (closed — the fix was already in the tree;
-what shipped is `TestQuitPathsCancelTheTerminalRun`, which is what keeps it there), **P76.3** (closed —
-a security-scan baseline read out of an untrusted scan target now suppresses nothing and is printed
-entry by entry, so a repo shipping one to hide its own planted finding is louder than a repo shipping
-none) and **P80.1**'s interim on both surfaces (`mcp_server.default_mode`, and `aegis acp --mode`, are
-now ceilings on a session the caller _borrowed_, so the C1/F1 clamp is no longer bypassable by posting
-into someone else's session; the session-origin schema decision stays open and stays Tier 3). Two of
-the three were part-built already — the same thing the first wave found hours earlier, and now the
-standing caution at the top of [Up next](#up-next). **P81.14** leads the table.
+**Last updated:** 2026-08-31 (fourth entry the same day) — **P82 and P83 shipped**, filed from an
+operator report rather than the threat model: `internal/modelpick` now ranks candidate models by size
+under a memory ceiling instead of three call sites each taking Ollama's unranked "first" entry, and a
+KV-cache formula that miscounted hybrid-attention layers by 4x — silently capping every solo session's
+context window and undervaluing model weights by 27% — is fixed and live-verified. Neither was on the
+[Up next](#up-next) ranking; both are gone from open work the same sitting they were filed. Full
+record: [P82 and P83 shipped, 2026-08-31](releases.md#p82-and-p83-shipped-2026-08-31).
+
+**Last updated (previous):** 2026-08-31 (third entry the same day) — **the three items that had led [Up
+next](#up-next) since 23/30 August are worked**: **P76.2** and **P76.3** shipped in full and their
+records moved to [releases.md](releases.md#p762-and-p763-shipped-2026-08-31) — **P76.2**'s fix was
+already in the tree (what shipped is `TestQuitPathsCancelTheTerminalRun`, which is what keeps it
+there); **P76.3**'s disclosure half was already shipped, and the trust gate on top is this sitting's
+code, so a security-scan baseline read out of an untrusted scan target now suppresses nothing and is
+printed entry by entry. **P80.1** shipped its interim on both surfaces (`mcp_server.default_mode`, and
+`aegis acp --mode`, are now ceilings on a session the caller _borrowed_, so the C1/F1 clamp is no
+longer bypassable by posting into someone else's session; the session-origin schema decision stays open
+and stays Tier 3). Two of the three were part-built already — the same thing the first wave found hours
+earlier, and now the standing caution at the top of [Up next](#up-next). **P81.14** leads the table.
 
 **Last updated (previous):** 2026-08-31 (second entry the same day) — **the P81 batch's first wave is worked**:
 **P81.15**, **P81.16**, **P81.19**, **P81.29** and **P81.32** shipped, **P81.24**, **P81.25** and
@@ -206,21 +210,26 @@ adding items.
 
 ## Status
 
-**62 open items: 53 build + 9 verification-only.** Eight P81 items closed on 2026-08-31 (five
+**57 open items: 48 build + 9 verification-only.** Eight P81 items closed on 2026-08-31 (five
 shipped, two closed without code, one — **P81.19** — shipped and superseded by the larger gap it
 uncovered); three more shipped in part and stay open for their remainder. Later the same day
-**P76.2** and **P76.3** closed and **P80.1** shipped its interim (open for the schema decision only),
-clearing the three items that had led [Up next](#up-next). Tier 1: **0**. Both of the P81 batch's Tier 1
-items closed on 2026-08-31 without production code: **P81.6** was **refuted** (the trust freeze
-already covers `provider.base_url` — the report looked in `fingerprint.go`, the policy table is in
-`freeze.go`), and **P81.11** is an **accepted risk** re-tiered to 4 after the operator confirmed the
-CI disablement is deliberate. Two of the report's own Quick Wins, neither of which was a defect. Tier 2: 12 (**P79.1**, filed
-2026-08-30, a Windows read-only-shell confinement regression; and 11 from the P81 threat-model batch —
-**P76.2** closed 2026-08-31). Tier 3: 17 (**P76.1**, filed
-2026-08-21, both sessions now done — see its entry; **P80.1**, filed 2026-08-30, whose interim shipped
-2026-08-31 and which is now open only for the session-origin schema decision, not for the escalation
-it described; and 15 from the P81 batch, including **P81.1**, the threat model's one `Critical`.
-**P76.3** closed 2026-08-31). Tier 4: 31 (**P80.2** and
+**P76.2** and **P76.3** shipped in full — their records moved to
+[releases.md](releases.md#p762-and-p763-shipped-2026-08-31). Also the same
+day, **P82** and **P83** were filed and shipped from an operator report without ever entering this
+table — see [their record](releases.md#p82-and-p83-shipped-2026-08-31). Later still the same day,
+**P81.14**, **P81.8**, **P80.1** and **P79.1** shipped in full and **P81.1** shipped in part — see
+[their record](releases.md#p8114-p818-p811-p791-and-p801-2026-08-31) — clearing the top of
+[Up next](#up-next)'s ranking. Tier 1: **0**. Both of the P81
+batch's Tier 1 items closed on 2026-08-31 without production code: **P81.6** was **refuted** (the trust
+freeze already covers `provider.base_url` — the report looked in `fingerprint.go`, the policy table is
+in `freeze.go`), and **P81.11** is an **accepted risk** re-tiered to 4 after the operator confirmed the
+CI disablement is deliberate. Two of the report's own Quick Wins, neither of which was a defect. Tier 2:
+11 (all from the P81
+threat-model batch — **P79.1** closed 2026-08-31). Tier 3: 15 (**P76.1**, filed
+2026-08-21, both sessions now done — see its entry;
+and 14 from the P81 batch, including **P81.1**, the threat model's one `Critical`, now shipped in part —
+**P80.1** and **P81.14** closed 2026-08-31).
+Tier 4: 31 (**P80.2** and
 **P80.3** added 2026-08-30; **P81.7**, **P81.18**, **P81.28** and **P81.31** added 2026-08-31, plus
 **P81.11** re-tiered there the same day).
 Verification: 9 (**P80.4** added 2026-08-30).
@@ -450,93 +459,59 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
-**Updated 2026-08-31 (fifth entry the same day)**: **P83 — the KV-cache formula was 4x wrong on
-hybrid-attention models, and nothing in the tree could see it.** Found by building
-`aegis models --calibrate`, which measures `provider.vram_budget_gb` instead of asking for it: it
-loads the model at a ladder of windows and reads Ollama's own placement verdict, so the binding
-constraint is discovered rather than predicted. P17.5 is untouched — no GPU introspection, and the
-authority consulted is the process actually doing the placing.
+**Updated 2026-08-31 (eighth entry the same day)**: **the five items this table's ranking named next are
+all worked.** **P81.8**'s TUI surfacing shipped (a new `internal/egress.Tracker`, live per-run web_fetch
+byte count in the TUI status line/sidebar); **P81.1**'s scan-hit decision point shipped (a heuristic
+scan hit now consults `engine.Approver` — the same interactive round trip a permission-gate Ask
+decision uses — before the flagged result enters context, closing the item in full); **P81.5** shipped
+(`provider.WithRedaction`, wired at `providerfactory`'s one shared construction point for every entry
+point, redacting outbound payloads and tool-call arguments when the endpoint isn't loopback; MCP's
+`warnOutboundSecrets` escalated from log-only to refusal), with one named gap — the payload hash/byte
+count landed as a structured log line rather than a durable `audit.jsonl` record; **P81.2** shipped (a
+new `mcp.TrustStore` pins each stdio server's resolved binary digest and advertised tool-name set,
+refusing a changed binary and withholding tool-set growth until the store is re-approved — the
+namespacing bullet turned out to already be satisfied by the existing `mcp__<server>__<tool>`
+convention, refuted rather than built); and **P81.3**'s runtime-transition-refusal bullet shipped
+(`PATCH /config/sandbox` now calls the same `unsandboxedAutoExecError` startup-refusal function before
+accepting a transition into unsandboxed local execution with auto-approved execution live) — its
+credential-split bullet is a genuine design decision (a second daemon secret, or an interactive
+confirmation flow) left open rather than decided unilaterally. Every change is covered by new tests and
+the full suite passes. Nothing in this batch is filed in releases.md yet — the entries above carry the
+full record for now.
 
-The first live run reported a **38 GiB capacity for a 16 GB card**, which is how the real defect
-surfaced. `KVGeometry.BytesPerToken` computed `block_count x kv_heads x (k+v) x bytes`, and the first
-factor is not the block count. Qwen3.5 uses state-space attention in three layers of four, which hold
-a fixed per-sequence state and no per-token cache. Ollama has been reporting the period the whole
-time — `qwen35.full_attention_interval = 4` — and nothing read it. `KVLayers()` now does:
-`(33 blocks - 1 MTP block) / 4 = 8`, predicting 32.00 KiB/token against 32.66 measured, in place of
-132.
+**Updated 2026-08-31 (seventh entry the same day)**: **the top of this table's ranking is worked.**
+**P81.14**, **P81.8** and **P80.1** shipped in full; **P81.1** shipped its containment rule (on by
+default) but not the pre-context scan-hit gate its third bullet asked for. **P79.1**, outside the
+table, closed on a negative result: the real-path exploitability question is answered, and the escape
+is not reachable through `shellTool.CapabilityFor` in production. Full record:
+[P81.14, P81.8, P81.1, P79.1 and P80.1, 2026-08-31](releases.md#p8114-p818-p811-p791-and-p801-2026-08-31).
+Two residual pieces of scope stay open in their own entries rather than getting new numbers: **P81.8**'s
+egress ledger needs TUI/UI surfacing (it's in the audit sink only), and **P81.1**'s scan-hit-as-
+decision-point needs the tool layer to reach the approval system, a structural change neither this
+sitting nor the one that filed the item scoped out. Both are small next steps, not new redesigns.
 
-The blast radius was every consumer of that formula. Measured on the reporting machine:
+The ranking's next row is **P81.5** — outbound provider-payload redaction — next in the Tier 3 take
+order the threat model batch was filed in, and one of its own asks (recording outbound payloads in the
+audit sink) is now cheaper to build since **P81.14** put that sink's `ConfigPatch`-style pattern in
+place. **P81.3**'s audit-logging bullet ("log every accepted `PATCH /config/*` ... with before/after
+values") is already satisfied as a side effect of **P81.14**'s `patchConfigSection` change, which covers
+every config section, not just the ones P81.3 named — its own entry is updated to say so; the credential-
+split and runtime-transition-refusal halves of P81.3 remain unbuilt.
 
-| | before | after |
-|---|---|---|
-| solo window at a 14.5 GiB budget | 70,656 | **262,144** (the model's entire training context) |
-| debate seat, three seats co-resident | 29,184 | **37,888** |
-| derived model weights | 4.14 GiB | **5.63 GiB** |
-
-That last row is why this survived so long. `WeightsBytes` derives weights as `size - KV(window)`, so
-an inflated KV term deflated the weights by the same amount and the *total* stayed plausible. Two
-compensating errors, and the one test that would have caught them — `TestBytesPerTokenMatchesThe
-MeasuredQwen35` — built its geometry by hand without `full_attention_interval` and asserted the
-formula against itself, under a name claiming it matched a measurement. It has been rewritten against
-the model_info Ollama really returns. The corrected weights now agree with `--calibrate`'s
-independently-fitted intercept (5.617 GiB) to 0.2%; the old figure was 27% low.
-
-Also settled here: **the single-model default the operator asked for already existed** and was inert.
-`claimResidentSet` (P69.6/P72.3) plans seat windows for a debate's duration, restores the solo window
-on release and unloads only the seats it brought in — but the whole cycle is gated on
-`vram_budget_gb`, which was unset. So the static `context_window: 16000` pin was the only thing
-holding the debate topology together, and it was capping every solo session to do it. The pin's own
-comment was half right in an instructive way: its *measured* figure (11.06 GiB at 16k) was correct,
-while its projection ("at 64000 the 9B's KV alone is ~8 GiB") came from the broken formula. Measured,
-the 9B at 65536 is 7.61 GiB resident in total.
-
-**Updated 2026-08-31 (fourth entry the same day)**: **P82 — first-run model selection and the
-`/config` menu — is worked and shipped**, filed from an operator report rather than from the threat
-model. The report was three symptoms: `--first-init` picked the smallest model on the machine,
-`think` stayed `false` under a qwen, and `small_model` went unset. All three were one defect. *Three*
-places answered "which model" and none of them ranked anything: `--first-init` and
-`provider.model: "auto"` took `GET /api/tags`' first entry — Ollama orders that **most-recently-
-modified**, so pulling a 3B for one experiment re-pinned the machine to it — and the `/config` wizard
-took `discover.Discover`'s first entry, which is alphabetical. `internal/modelpick` is now the single
-answer all three use.
-
-One measurement changed the design mid-flight and is the reason this entry exists rather than a
-one-line fix. Querying the reporting machine's own Ollama showed `aegis-qwen35-9b` — the model the
-operator wanted chosen — advertising `capabilities: ["completion","vision"]` with **no `tools`**,
-while the 3B it lost to advertises them. A model imported from a raw GGUF via a custom Modelfile
-loses the manifest claim and keeps the ability. So tool capability is a **tiebreak, never a filter**:
-ranking on it would have rejected the best model on the machine in favour of the one with the more
-complete manifest, which is precisely the bug being fixed, arrived at from the other direction.
-
-The memory ceiling holds the P17.5 line: `provider.vram_budget_gb` when stated, 75% of detected
-system RAM as a sanity bound otherwise, and **no GPU/VRAM introspection on any platform, ever**. The
-RAM figure is not a claim about the card — its only job is to stop a 70B being pinned on a 16 GB
-laptop. Sizing a window remains `internal/ollamainfo/kvfit.go`'s exact arithmetic.
-
-`think` now reads Ollama's own `thinking` capability where the manifest reports one, and falls back
-to a name/family heuristic that finally covers the qwen3 family (the old list — `thinking`, `-deep`,
-`deepseek`, `-r1`, `qwq`, `o1-`, `o3-` — contained neither `qwen3` nor `reasoning`), with the
-non-thinking variants of those same families excluded so `qwen3-coder` is not flipped on. `aegis
-doctor` and `--first-init` now share that one list rather than keeping two that disagreed.
-
-`/config` became a raspi-config-style menu in the same pass, because the linear wizard was the
-*other* half of the same complaint: it walked all five questions every time, started from an empty
-form rather than the file on disk (so pressing enter through re-wrote hand-tuned settings), and had
-no way to reach `small_model` at all — leaving the output guard's own documented precondition
-unreachable from the UI that offers the guard. Each section now shows its current value, is entered
-and left independently, and nothing is written until save; a section never opened is not rewritten,
-so changing a model no longer reflows an annotated `cost:` block. `--init`'s project template was
-realigned to mirror the global template section-for-section, commented throughout, with the three
-keys a project scope cannot set (`server.addr`, `log_level`, `security.dast.allowed_targets`)
-absent and *explained* rather than silently missing.
+**Updated 2026-08-31 (sixth entry the same day)**: **P82 and P83 — first-run model selection, the
+`/config` menu, and a 4x KV-cache sizing defect — filed from an operator report and shipped the same
+sitting.** Neither came from the threat model or this table's ranking; both are gone from open work.
+`internal/modelpick` now ranks by size under a memory ceiling instead of three call sites each taking
+an unranked "first" entry, and the KV-cache formula's hybrid-attention miscount — which had been
+silently capping every solo session's context window and undervaluing model weights by 27% — is fixed
+and re-verified against a live measurement. Full record: [P82 and P83 shipped,
+2026-08-31](releases.md#p82-and-p83-shipped-2026-08-31).
 
 **Updated 2026-08-31 (third entry the same day)**: **P76.2, P76.3 and P80.1 — the three items that
 had sat at the top of this table since 23 and 30 August — are worked and off it.** Two of the three
 turned out to be part-built already, which is the same pattern the P81 first wave found hours earlier
-and is now worth stating as a rule: *read the tree before estimating the work.* **P76.2**'s three quit
-paths already cancelled the terminal run; what was missing was the test that keeps them doing it.
-**P76.3**'s disclosure half was already shipped inside `Report.Format`; the trust gate on top of it is
-this sitting's code, and the two halves the entry called "not necessarily exclusive" are both in.
+and is now worth stating as a rule: *read the tree before estimating the work.* **P76.2** and **P76.3**
+shipped in full and their records moved to [releases.md](releases.md#p762-and-p763-shipped-2026-08-31).
 **P80.1** shipped its _interim_ on both the MCP and ACP surfaces — `default_mode` is now a ceiling on a
 borrowed session, so F1's clamp is no longer bypassable by reuse — while the session-origin schema
 decision it was really filed for stays open and stays Tier 3. That moves **P81.14** to the top.
@@ -579,8 +554,8 @@ See [releases.md](releases.md) for every record.
 
 | #   | Item                                                                                              | Tier / size          | Why now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | --- | ------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | **P81.14** — no default audit trail for anything privileged                                       | Tier 3 — M           | Filed 2026-08-31, threat model FIND-14. Ranked above its own severity: **P81.3**, **P81.5**, **P81.8**, **P81.23**, **P81.29** and **P80.1** all want its message-origin stamp or its sink. Build it before the six things that depend on it.                                                                                                                                                                                                                                                                                                                |
-| 2   | **P81.8** then **P81.1** — the egress ledger, then containment for untrusted content              | Tier 3 — M then High | Filed 2026-08-31, threat model FIND-08 and FIND-01 (the report's one `Critical`). In this order deliberately: the ledger is useful standalone and is the instrument the taint work is measured with. Together they close the exfiltration path the report describes end to end.                                                                                                                                                                                                                                                                              |
+| 1   | **P81.3**'s credential split — a second daemon secret or an interactive confirmation for posture-weakening PATCH endpoints | Tier 3 — design decision | The runtime-transition-refusal half shipped 2026-08-31; this is what's left, and it needs an operator decision (how many secrets this daemon has) before code, not more research. |
+| 2   | **P81.4** — the web UI hands the real daemon token to browser JavaScript                          | Tier 3 — High         | Next fresh item in the Tier 3 take order (P81.1/P81.8/P81.5/P81.2/P81.3 all worked 2026-08-31). `High` effort, `Redesign` mitigation — larger than it looks because the SPA's whole call path changes, and it wants **P81.25**'s revocation story to be useful.                                                                                                                                                                                                                                                                                              |
 | 3   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2, P80.4) — _parked by choice, 2026-08-16_ | Verification         | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** now have what they needed — a surviving data dir and `aegis sessions trace <id>`, shipped as **P68.1** (2026-08-22) — so whenever this row is next picked up, the next sitting can actually judge them instead of reproducing the same unreadable evidence. |
 
 **One item is deliberately off this list, Tier 4 with no fired trigger.** **P74.21** (filed
@@ -640,27 +615,27 @@ of FIND-21 belonging to P80.1.
 
 | Finding | CVSS / SDL      | Item          | Work tier | One line                                                                                                         |
 | ------- | --------------- | ------------- | --------- | ---------------------------------------------------------------------------------------------------------------- |
-| FIND-01 | 8.7 `Critical`  | **P81.1**     | Tier 3    | Untrusted content is marked, not contained                                                                       |
+| FIND-01 | 8.7 `Critical`  | **P81.1**     | Tier 3    | Untrusted content is marked, not contained — **shipped in part 2026-08-31**, containment rule only               |
 | FIND-02 | 8.2 `Important` | **P81.2**     | Tier 3    | External MCP servers are trusted on configuration alone                                                          |
 | FIND-03 | 8.1 `Important` | **P81.3**     | Tier 3    | Config PATCH endpoints can disable isolation with only the bearer token                                          |
 | FIND-04 | 7.6 `Important` | **P81.4**     | Tier 3    | The web UI hands the real daemon token to browser JavaScript                                                     |
 | FIND-05 | 7.5 `Important` | **P81.5**     | Tier 3    | Outbound provider payloads and tool arguments are never redacted                                                 |
 | FIND-06 | 7.3 `Important` | **P81.6**     | —         | `provider.base_url` redirects credentials on a warning only — **REFUTED 2026-08-31**, the control already exists |
 | FIND-07 | 7.1 `Important` | **P81.7**     | Tier 4    | The local model endpoint is unauthenticated plaintext HTTP                                                       |
-| FIND-08 | 6.9 `Important` | **P81.8**     | Tier 3    | `web_fetch` is an unreviewed egress channel                                                                      |
+| FIND-08 | 6.9 `Important` | **P81.8**     | Tier 3    | `web_fetch` is an unreviewed egress channel — **shipped in part 2026-08-31**, TUI/UI surfacing left              |
 | FIND-09 | 6.8 `Important` | **P81.9**     | Tier 2    | The session workdir allowlist is skipped on the default bind                                                     |
 | FIND-10 | 6.5 `Important` | **P81.10**    | Tier 3    | The container workspace mount is broader than any command needs                                                  |
 | FIND-11 | 6.3 `Important` | **P81.11**    | Tier 4    | The merge gate exists, passes, and does not run — **accepted risk 2026-08-31**                                   |
 | FIND-12 | 6.1 `Moderate`  | **P81.12**    | Tier 3    | Release artifacts ship without checksums, signatures or provenance                                               |
 | FIND-13 | 5.9 `Moderate`  | **P81.13**    | Tier 2    | Sandbox and scanner images are mutable tags                                                                      |
-| FIND-14 | 5.7 `Moderate`  | **P81.14**    | Tier 3    | No default audit trail for anything privileged                                                                   |
+| FIND-14 | 5.7 `Moderate`  | **P81.14**    | —         | No default audit trail for anything privileged — **SHIPPED 2026-08-31**                                          |
 | FIND-15 | 5.3 `Moderate`  | **P81.15**    | Tier 2    | Every cost and token budget defaults to unlimited                                                                |
 | FIND-16 | 5.3 `Moderate`  | **P81.16**    | Tier 2    | The unauthenticated `/ui` mint can be flooded                                                                    |
 | FIND-17 | 5.1 `Moderate`  | **P81.17**    | Tier 2    | The committed `dist/` has no drift check that runs                                                               |
 | FIND-18 | 4.3 `Low`       | **P81.18**    | Tier 4    | The self-signed certificate warning conditions click-through                                                     |
 | FIND-19 | 2.3 `Low`       | **P81.19**    | Tier 2    | `/healthz` is fine today and has no test keeping it that way                                                     |
 | FIND-20 | 7.3 `Important` | **P81.20**    | Tier 3    | Plan mode's guarantee rests on a 1,129-line classifier                                                           |
-| FIND-21 | 7.1 `Important` | _(**P80.1**)_ | Tier 3    | An MCP client can post turns into sessions it did not create                                                     |
+| FIND-21 | 7.1 `Important` | _(**P80.1**)_ | —         | An MCP client can post turns into sessions it did not create — **SHIPPED 2026-08-31**                            |
 | FIND-22 | 6.9 `Important` | **P81.22**    | Tier 3    | Command isolation degrades to unsandboxed execution on a warning                                                 |
 | FIND-23 | 6.5 `Important` | **P81.23**    | Tier 3    | Scheduled jobs run unattended in the mode they were created with                                                 |
 | FIND-24 | 6.3 `Important` | **P81.24**    | Tier 2    | History, checkpoints and spill are unprotected on Windows                                                        |
@@ -674,14 +649,18 @@ of FIND-21 belonging to P80.1.
 | FIND-32 | 3.9 `Low`       | **P81.32**    | Tier 2    | Scan reports land inside the repository they describe                                                            |
 | FIND-33 | 3.6 `Low`       | **P81.33**    | Tier 2    | The TUI render path is unbounded; rounds train click-through                                                     |
 
-**Suggested order, which is not severity order and says why.** **Both Tier 1 items are already
+**Suggested order, which is not severity order and says why — updated 2026-08-31 now that the first
+three rows are worked.** **Both Tier 1 items are already
 closed** and neither took production code: **P81.11** is an accepted risk, **P81.6** was refuted (the
-freeze already covers `provider.base_url`). Start at **P81.14**, ranked above its own `Moderate` severity because P81.3, P81.5, P81.8, P81.23, P81.29 and
-P80.1 all want its message-origin stamp or its sink, and building it late means six half-solutions.
-Then **P81.8** _before_ **P81.1**, because the egress ledger is useful standalone and is the instrument
-the containment work is judged with — the reverse order designs containment with nothing to measure it.
-Everything else in Tier 2 is opportunistic: take it when its file is already open, which each entry
-names.
+freeze already covers `provider.base_url`). **P81.14** shipped in full (audit rotation, the
+message-origin stamp, and a `config_patch` audit record — the six items that wanted it, **P81.3**,
+**P81.5**, **P81.8**, **P81.23**, **P81.29** and **P80.1**, can now build against a real sink instead of
+a planned one; **P80.1** itself closed in full the same sitting). **P81.8** shipped before **P81.1**,
+as planned — the egress ledger (folded into P81.14's sink) is the instrument P81.1's containment rule
+was judged with. **P81.1** shipped its containment rule but not the pre-context scan-hit gate. Next in
+this order: **P81.5**, then **P81.2** through **P81.30** as listed in
+[Open Work — Tier 3](#open-work--tier-3). Everything in Tier 2 is opportunistic: take it when its file
+is already open, which each entry names.
 
 **Three clusters worth taking as single sittings rather than as separate items.** The
 `fsguard.RestrictToOwner` asymmetry appears three times — the session DB and its `-wal`/`-shm`
@@ -691,14 +670,16 @@ Windows specifically, which is this machine. The supply-chain items (**P81.12**,
 longer cluster with **P81.11** now that it is accepted — and what is left of them is deliberately _not_
 workflow edits, which is the point of reading their updated entries rather than the original findings.
 And the `internal/security` target-policy work
-(**P81.13**, **P81.29**, **P81.32**) sits in the same files as **P76.3**.
+(**P81.13**, **P81.29**, **P81.32**) sits in the same files **P76.3** (shipped) touched.
 
 **Six items the report flagged as unverified, and they change conclusions if wrong.** The report's own
 "Needs Verification" table is reproduced in
 [0-assessment.md](../threat-model-20260831-002123/0-assessment.md#needs-verification) and the ones with
-teeth are: whether any audit sink is wired by default (**P81.14**'s whole premise), whether
+teeth are: whether any audit sink is wired by default (**P81.14**'s whole premise — **checked
+2026-08-31: it was wrong**, `wireHooks` already built one unconditionally for tool calls; what actually
+shipped was rotation, the origin stamp and config-PATCH coverage, not "turn one on"), whether
 `redact.Text` is applied anywhere on the outbound provider path (**P81.5**'s, and explicitly "absence
-of evidence, not proof of absence"), what the SQLite `-wal`/`-shm` ACLs actually are on Windows
+of evidence, not proof of absence" — still to check), what the SQLite `-wal`/`-shm` ACLs actually are on Windows
 (**P81.24**), and whether disabling `ci.yml` was deliberate and permanent (**P81.11** — **answered
 2026-08-31: it was**, so that item closed as an accepted risk rather than a fix, exactly as this row
 anticipated). Check the premise before building the fix in each of the remaining cases.
@@ -829,8 +810,8 @@ stable per-agent colour) have all shipped (see
 **P68.1** (the live tier can now run a measurement it can read back) shipped 2026-08-22, closing this
 tier out — record in [releases.md](releases.md).
 
-**P76.2** (filed 2026-08-23, first survivor of **P76.1** Session B) is now open in this tier — see
-below.
+**P76.2** (filed 2026-08-23, first survivor of **P76.1** Session B) opened in this tier and shipped
+2026-08-31 — see [its record](releases.md#p762-and-p763-shipped-2026-08-31).
 
 **Eleven arrived 2026-08-31 with the P81 threat-model batch, and six closed the same day.** Shipped:
 **P81.15** (cloud spend ceilings, plus the `projectMayTighten` policy that makes them a bound rather
@@ -840,83 +821,10 @@ need an allowlist entry) and **P81.32** (scan reports default out of the workspa
 **P81.25** and **P81.27** shipped in part and remain open for their remainders. Still untouched:
 **P81.9**, **P81.13**, **P81.17** and **P81.33**.
 They are individually small and mostly independent, and several are explicitly worth taking while
-their file is already open for something else — **P81.33** with **P76.2**/**P80.2** in `internal/tui`,
-**P81.32** with **P76.3** and **P81.13** in `internal/security`, and the three
+their file is already open for something else — **P81.33** with **P80.2** in `internal/tui`,
+**P81.32** with **P81.13** in `internal/security`, and the three
 `fsguard.RestrictToOwner` fixes (**P81.24**, **P81.25**, **P81.27**) as one sitting. **Status is
-therefore 13 open**, not 2.
-
-### P76.2 — Quit doesn't cancel a running interactive-terminal command
-
-**Filed 2026-08-23, out of P76.1 Session B** (the read-only `internal/tui` audit). `Run()`'s doc
-comment at `internal/tui/tui.go:90-98` claims every quit path cancels the in-flight request's context.
-That's true for `m.cancel` (the model-turn context) but not for `m.termRun.cancel` — the context behind
-a command running in the interactive terminal pane (`ctrl+t`, `internal/tui/terminal.go:38-82`). None
-of the three quit paths (`update_key.go:158-170`, `update_overlay.go:152-157`,
-`update_slash.go:25-28`) touch it.
-
-**Effect:** if a shell command is running in the terminal pane when the user quits — ctrl+c-to-quit,
-confirming quit with "y", or `/quit`/`/exit` — the `execTermCmd` goroutine and the child process behind
-it (via `sandbox.NewLocalBackend().ExecStreaming`) are never cancelled. They're orphaned past `p.Run()`
-returning: a resource leak on exit, not a data-loss or security issue, and only reachable while
-`termOpen` with a command actually running.
-
-**Fix is mechanical, not a design question** — add `if m.termRun != nil { m.termRun.cancel() }` (or
-equivalent) to each of the three quit paths, matching what `m.cancel` already does there, and update
-the `Run()` doc comment's claim to match once it's actually true again.
-
-**SHIPPED 2026-08-31 — and the code half was already in the tree.** All three quit paths
-(`update_key.go`'s `ctrl+c`, `update_overlay.go`'s quit confirmation, `update_slash.go`'s
-`/quit`/`/exit`) already cancelled `m.termRun`, and `Run()`'s doc comment already claimed it; the fix
-went in incidentally during a later `internal/tui` sitting and this entry was never closed. What was
-missing is the part that keeps it true: **nothing pinned it**, and a fourth quit path added later
-would have re-opened the leak silently against a doc comment still promising otherwise.
-`TestQuitPathsCancelTheTerminalRun` (`internal/tui/quit_termrun_test.go`) now drives each of the three
-paths with a live `termRun` and asserts its context is cancelled. Mutation-checked: deleting the
-cancel from `update_slash.go` fails the `/quit` case. No production code changed.
-
-Priority: Tier 2 — S, no dependency, self-contained. **Closed.**
-
-### P79.1 — Windows read-only-shell classifier no longer detects absolute-path escapes (regression, PR #51)
-
-**Filed 2026-08-30, surfaced incidentally** while committing an unrelated gap-fix batch
-(`research/gaps.md`'s security/quality review) — `go test ./...` on a freshly-pulled `main` showed
-four failing tests in `internal/tool/builtin`:
-`TestReadOnlyGitArgvAgreesAcrossBothPaths/pathspec_escape`,
-`TestReadOnlyShellAttachedValueConfinement` (ten subtests — `grep --file=`, `rg --ignore-file=`,
-`fd --base-directory=`, `file --magic-file=`, attached-short forms, `tree`/`uniq` operands, …),
-`TestReadOnlyShellPowerShellPathConfinement` (`Get-Content -Path`/`-Path:`), and
-`TestReadOnlyShellCommandWindowsPaths` (`Get-Content`, `Get-ChildItem` with a bare absolute operand).
-All assert `readOnlyShellCommand`/`classifyShellCommand` (`internal/tool/builtin/shell_readonly.go`)
-reject a command whose operand or attached-flag value is an absolute Windows path outside the
-confinement root; all instead accept it.
-
-**Isolated to before this session's own changes**: stashed everything (tracked and untracked),
-fast-forward-pulled to `main`'s tip at the time (`519efbd`, "enginecfg bypass fix, round-deadlock fix,
-and security hardening sweep (#51)" — the PR that added 85 lines to
-`internal/sandbox/pathvalidator.go` and touched `shell_readonly.go` itself), and ran the same four
-tests against that commit alone with nothing else applied. They failed identically, confirming the
-regression predates and is unrelated to the gap-fix commit — not root-caused further; the likely seam
-is `internal/tool/builtin/argv_confine.go`'s `firstArgvEscape` → `sandbox.ValidatePath`, since that's
-the one confinement primitive both the git-argv and shell-argv paths share and PR #51 touched
-`pathvalidator.go` directly, but that's a hypothesis to verify, not a finding.
-
-**Why this matters more than a typical failing test**: `shellTool.CapabilityFor`
-(`internal/tool/builtin/shell.go:54-68`) uses this same classifier to downgrade a shell call from
-`tool.CapExecute` to `tool.CapRead` — a `CapRead` classification is _silently allowed_ under the
-plan-mode read gate instead of requiring execute approval (`internal/permission`). If the classifier
-now accepts a command whose real target resolves outside the workspace root as if it were a safe
-read-only-within-root command, a plan-mode session on Windows could have a shell read arbitrary
-host files (an SSH key, `/etc/hosts`-equivalent) without an approval prompt. Whether that path is
-_actually_ reachable in production (vs. only in the two test files calling the classifier directly)
-has not been checked — the four failing tests exercise `readOnlyShellCommand`/`classifyShellCommand`
-directly, not `shellTool.CapabilityFor` end-to-end, so confirming exploitability through the real
-tool call is the first thing a build session on this item should do.
-
-Priority: Tier 2 — S, no dependency, self-contained, but confirm real-path exploitability (not just
-the unit-level classifier) before treating severity as settled — it may belong in Tier 1 once that's
-known. The threat model's **FIND-20** (filed here as **P81.20**) is the structural half of this item
-and verified on 2026-08-31 that the four named tests now pass in the working tree — which addresses
-the specific regression and leaves this item's real-path reachability question exactly where it was.
+therefore 12 open.**
 
 ### P81.9 — The session workdir allowlist is skipped on exactly the bind it ships with (FIND-09)
 
@@ -937,12 +845,13 @@ mechanism, `workspace.additional_roots`, does require a trust grant per root; th
 **What to do.** Apply the allowlist unconditionally, defaulting it to the daemon's own workspace plus
 anything nested under it, and route a legitimate request for another directory through the same
 `config.WorkspaceTrusted`/`TrustWorkspace` prompt `additional_roots` already uses. If the interactive
-TUI path is meant to keep the exemption, key it on request origin rather than on bind address — which
-is the same origin-stamping **P81.14** needs anyway.
+TUI path is meant to keep the exemption, key it on request origin rather than on bind address —
+`internal/reqorigin` now exists for exactly this (shipped for **P81.14**, 2026-08-31): sessions carry a
+durable `tui`/`web`/`acp`/`mcp`/`cli` origin, so a TUI carve-out here is a one-field check away rather
+than a design question.
 
 Priority: Tier 2 — S. The allowlist logic is already written; this is removing an exemption and
-picking what the default allowlist contains. Sequenced loosely behind **P81.14**'s origin stamp if the
-TUI carve-out is wanted.
+picking what the default allowlist contains. The origin stamp it wanted is now available.
 
 ### P81.13 — Sandbox and scanner images are mutable tags, and `verify-image` is a separate command (FIND-13)
 
@@ -1146,7 +1055,7 @@ directory and say so in the tool result. Keep the redaction pass and add a test 
 credential in scanned source does not reach the emitted report.
 
 Priority: Tier 2 — S. A default path change plus a `.gitignore` write. Worth taking alongside
-**P81.13** and **P76.3**, which are in the same files.
+**P81.13**, in the same files **P76.3** (shipped) touched.
 
 ### P81.33 — The TUI render path is unbounded, and a parallel round trains click-through (FIND-33)
 
@@ -1169,14 +1078,15 @@ listing every call rather than prompting serially. Show the resolved argv and th
 backend in the prompt (shared with **P81.22**), so what is being approved is legible at a glance.
 
 Priority: Tier 2 — M. The render bound is small; the batched-approval surface is a real UI change and
-the reason this is not XS. Take it while `internal/tui` is open for **P76.2** or **P80.2**.
+the reason this is not XS. Take it while `internal/tui` is open for **P80.2**.
 
 ---
 
 ## Open Work — Tier 3
 
-**Status: 18 open.** Three pre-existing — **P76.1** (both sessions done, entry kept as a pointer),
-**P76.3** (its Session A survivor), and **P80.1** (filed 2026-08-30, the one `internal/mcpserver`
+**Status: 17 open.** Two pre-existing — **P76.1** (both sessions done, entry kept as a pointer; its
+Session A survivor, **P76.3**, shipped 2026-08-31 — see [its record](releases.md#p762-and-p763-shipped-2026-08-31))
+and **P80.1** (filed 2026-08-30, the one `internal/mcpserver`
 audit finding whose fix is a product decision rather than a defect repair). Fifteen arrived 2026-08-31
 with the P81 threat-model batch: **P81.1**, **P81.8**, **P81.5**, **P81.2**, **P81.3**, **P81.4**,
 **P81.10**, **P81.12**, **P81.14**, **P81.20**, **P81.22**, **P81.23**, **P81.26**, **P81.27** and
@@ -1275,74 +1185,14 @@ fail-open posture confirmed as the deliberate P24.12/FIND-09 design. VULN-06 (al
 the XML recursion sweep, and nmap/nuclei flag-injection defenses were all correctly excluded as
 already-covered.
 
-**P76.1 itself is done** — both sessions complete, survivors filed as their own entries above/below.
-This item's remaining value is as a pointer for anyone asking "has `internal/tui`/`internal/security`
-had a structural pass" — yes, 2026-08-23, see `releases.md` for the closure record and **P76.2**/
-**P76.3** for what it found.
+**P76.1 itself is done** — both sessions complete, survivors filed and since shipped and closed
+(**P76.2**, **P76.3** — see [their record](releases.md#p762-and-p763-shipped-2026-08-31)). This item's
+remaining value is as a pointer for anyone asking "has `internal/tui`/`internal/security` had a
+structural pass" — yes, 2026-08-23.
 
 Priority: Tier 3 — L, multi-session by design. No dependency, but Session A and B should not be
 collapsed into one sitting — the prompt budget discipline `CLAUDE.md` documents elsewhere is the same
 reason the original six-specialist review didn't run as one pass either.
-
-### P76.3 — A hostile repo can plant its own security-scan baseline to hide its own findings
-
-**Filed 2026-08-23, out of P76.1 Session A** (the read-only `internal/security` audit). `applyBaseline`
-(`internal/security/security.go:397-424`, `internal/security/baseline.go`) reads
-`.aegis/security-baseline.yaml` straight from the scan **target** directory, with no workspace-trust
-gate. `Report.Format()` (`security.go:541-542`) then surfaces every suppression as a bare count —
-`"Suppressed by baseline: N"` — never the rule ID, CVE, severity, or location of what was hidden.
-
-**Why this matters here specifically:** the whole scanner subsystem is built around one threat model —
-`gosec.go`'s own comments call out "an exfiltration path out of a hostile repo," which is why
-multiscanner runs `--network none` with the workspace mounted. A baseline file is a gap in that same
-model: a hostile or untrusted repository can ship a `.aegis/security-baseline.yaml` that pre-suppresses
-the CVE/SAST finding for a vulnerability it planted itself. The operator, or a model reviewing the scan
-output, sees what looks like a clean report plus an easy-to-miss count line — with no way to tell what
-was suppressed without manually opening the baseline YAML. Nothing today distinguishes an
-operator-authored baseline (legitimate: "we've triaged this and accept the risk") from a
-repo-planted one (the exact thing the scanner exists to catch).
-
-**Needs a design decision before code, not a one-line fix** — the two candidate directions don't have
-to be exclusive:
-
-- Gate baseline application on `config.WorkspaceTrusted`/`TrustWorkspace` (see `internal/workspacetrust`
-  and the `CLAUDE.md` note on how that question must be asked), the same way `.aegis/.env` is already a
-  documented, deliberate hole gated on trust rather than an oversight.
-- Always list suppressed findings' identity (rule/CVE/severity/location) in the report regardless of
-  trust — a baseline that can silently hide _what_ it hid is the sharper problem even before trust
-  enters into it.
-
-**SHIPPED 2026-08-31 — both halves, and they were not exclusive after all.**
-
-The **disclosure half** was already in the tree (`Report.Format`, `security.go`): every suppressed
-finding is printed with its severity, tool, title, location and rule ID, not just counted. That closed
-the sharper problem — a baseline that can hide _what_ it hid — and is now documented as behaviour in
-[docs/security_scan.md](../docs/security_scan.md) rather than being an undocumented side effect.
-
-The **trust-gate half** is this sitting's code. `Report.applyBaseline` now asks
-`config.WorkspaceTrusted` (through a `baselineTrustCheck` var, so tests pin both answers without
-touching the real trust store — the question is still asked the one way `CLAUDE.md` requires) before
-any entry may suppress anything. Untrusted, nothing is hidden: every entry is recorded in the new
-`Report.BaselineUntrusted` and the report prints `Baseline IGNORED (scan target is not a trusted
-workspace)` followed by each skipped entry and the remedy (`aegis trust`). Trusted, P11.8's
-accepted-risk workflow is unchanged.
-
-The direction the entry proposed and the tree accepted: a suppression is an _operator_ decision, and
-the one thing separating an operator-authored baseline from a repo-planted one is that the operator
-trusted the directory. Deliberately a **refusal to apply**, not a downgrade of the file — the baseline
-is read and reported either way, so a hostile repo shipping one is now _louder_ in the report than a
-repo shipping none, which inverts the incentive the finding described.
-
-Tests: `internal/security/baseline_trust_test.go` covers both sides of the gate plus the
-no-baseline-file case (which must stay silent, trusted or not). Two existing tests
-(`TestRunWithOptionsAppliesBaselineSuppression`, `TestScanRegressionAcrossRecordedOutputs`) now pin the
-gate open with a comment saying why — their fixtures stand in for an operator-authored baseline, and
-the golden records aggregation behaviour, not the trust decision.
-
-Priority: Tier 3 — real, currently exploitable against the exact adversarial case the subsystem is
-designed to defend, but not small-effort/no-dependency (disqualifying Tier 1) and not a one-line fix
-(disqualifying Tier 2) — the report-disclosure half and the trust-gate half both need scoping first.
-**Closed.**
 
 **The un-numbered inline-truncation/blackbox request closed out 2026-08-23.** Everything it asked for
 was already shipped by the time it was reviewed — P74.2/P74.3/P74.4 (chrome removal, collapse-with-
@@ -1352,83 +1202,6 @@ reasoning before it acts — is not covered by any of those and is real; it's fi
 **P77.1**, since it's a design question rather than a continuation of that UI-polish work — shipped
 2026-08-25, see [its record](releases.md#p771-shipped-2026-08-25). Full closure record for this
 request: [releases.md](releases.md#the-inline-truncation-request-closes-out-2026-08-23-pxx1).
-
-### P80.1 — An MCP client can list, and post turns into, sessions it did not create
-
-**Filed 2026-08-30**, the one `internal/mcpserver` finding from the comprehensive audit's C1 pass that
-was written up rather than fixed, because closing it the obvious way breaks a legitimate use. Full
-context in [releases.md](releases.md#comprehensive-architecture-and-security-audit-remediated-in-full-2026-08-30)
-(finding **F3**); the two findings either side of it, F1 (a caller could escalate its own permission
-mode past `mcp_server.default_mode`, which also made `auto_approve` vacuous) and F2 (auto-approve was
-one undiscriminated yes), both shipped the same day.
-
-`aegis_list_sessions` (`internal/mcpserver/server.go`) proxies `Backend.ListSessions`, which is the
-daemon's `store.List` — **every** session on the daemon, including ones the human created in the TUI.
-`callPrompt` then accepts any `session_id` verbatim and posts to it. So an authenticated MCP client
-can enumerate an interactive `auto`-mode session and inject a turn into it, inheriting that session's
-mode, persona and workdir — including an `additional_roots` workspace the MCP path could never have
-created for itself, since `callPrompt` never sets `CreateSessionRequest.Workdir`.
-
-It also bounds what F1's clamp is worth. That clamp binds sessions this server _creates_; a session it
-merely borrows carries whatever mode it already had.
-
-**Why it is not a one-line fix.** Tracking the session IDs this `Server` instance created and rejecting
-the rest is about twenty lines, and it breaks an editor plugin resuming a session across an
-`mcp-serve` restart — the in-memory set does not survive the process. The version that does survive is
-a session _origin_ recorded at creation and filtered server-side, which is a schema and API decision,
-not a defect fix. Deciding which of those two the product wants — or that today's reach is intended and
-the package doc should say so — is the work here.
-
-Priority: Tier 3 — real and currently reachable by any authenticated MCP client, but needs a product
-decision about cross-restart session continuation before any code. Same shape as **P76.3**: a genuine
-gap whose fix is a design choice.
-
-**Independently confirmed 2026-08-31.** The STRIDE-A threat model reached this item's exact mechanism
-from a cold read and filed it as
-[**FIND-21**](../threat-model-20260831-002123/3-findings.md#find-21-an-mcp-client-can-enumerate-and-post-turns-into-sessions-it-did-not-create)
-(CVSS 7.1, `Important`, CWE-639), citing this entry back. **It got no P81 number — this is that item.**
-Two things the report adds. It agrees the session-_origin_ record is the right fix and the in-memory
-set is not, and it proposes an interim that does not need the schema decision: **clamp a borrowed
-session's effective mode to `mcp_server.default_mode` at prompt time rather than at creation time**, so
-F1's clamp is not bypassable by reuse while the design question stays open. It also extends the finding
-to the ACP path — `internal/acp/agent.go:167`'s `handleNewSession` takes a client-supplied mode with no
-configured ceiling at all — which is a second instance of the same gap and should be fixed with this
-one, not separately.
-
-**The interim SHIPPED 2026-08-31, on both surfaces; the design question stays open.**
-
-`mcp_server.default_mode` is now a ceiling on a _borrowed_ session, applied at prompt time
-(`Server.checkBorrowedSessionMode`, `internal/mcpserver/server.go`). Prompting into a session this
-server did not create whose mode exceeds `default_mode` is refused with an error naming both modes and
-the way out; a session at or below the ceiling is untouched. `allow_caller_mode_escalation` turns it
-off, exactly as it turns F1's clamp off — one switch, one meaning.
-
-Three decisions worth keeping. It **refuses rather than downgrading**: the session belongs to someone
-else, and silently moving a human's TUI session from `auto` to `plan` is a side effect no MCP caller
-should be able to cause. The in-memory created-set is present but is a **fast path, not the control** —
-it does not survive an `mcp-serve` restart, which is precisely why rejecting everything outside it
-would break the editor-plugin resume this entry protects; an unrecognised id is checked against the
-ceiling instead. And an id the daemon does not list is **allowed through**: it is unverifiable, not
-evidence of escalation, and the enumeration this defends against only reaches listed sessions.
-
-The ACP half is fixed with it, as the report asked. The entry's description of it was slightly
-off — `handleNewSession` takes its mode from `aegis acp --mode`/`permission.mode`, not from the
-client — but the same gap is there one method along: `session/prompt` takes the client's `sessionId`
-verbatim, so `--mode` described only the sessions the agent creates. `Agent.checkBorrowedSessionMode`
-applies the configured mode as the same ceiling (`internal/acp/agent.go`), and `acp.Backend` gained
-`ListSessions` for the mode lookup only — nothing in the ACP protocol surface exposes the list. Lower
-reach than the MCP surface, since ACP has no session enumeration and a caller must already know an id;
-same finding, fixed in the same sitting rather than left as the second instance.
-
-Tests: `internal/mcpserver/borrowed_session_test.go` (refusal above the ceiling, resume at or below it,
-the escalation opt-in, this server's own session, an unlisted id) and
-`internal/acp/borrowed_session_test.go` (both directions over the wire).
-
-**What is still open, and it is the reason this stays Tier 3:** `aegis_list_sessions` still lists every
-session on the daemon, and the fix for that is the session _origin_ recorded at creation and filtered
-server-side — a schema and API decision, unchanged by this work. What changed is the blast radius: a
-borrowed session can no longer carry a mode past what the operator configured, so the open question is
-now enumeration and cross-restart continuation rather than privilege.
 
 ### P81.1 — Untrusted content is marked, not contained (FIND-01)
 
@@ -1474,6 +1247,43 @@ Priority: Tier 3 — the highest-severity item in the batch, `High` remediation 
 mitigation type, and genuinely sequence-dependent: it wants **P81.8**'s ledger and interacts with
 **P81.20**'s ordering. Not a defect fix; a containment model this system does not currently have.
 
+**SHIPPED IN PART 2026-08-31 — the containment rule, not the pre-context scan gate.**
+`permission.ContextualGate` gained `taint_after_untrusted_content` (on by default): once a tool result
+in a turn has carried the untrusted-content marker (`trust.IsWrapped`, keyed on the fixed sentence
+`Wrap` always emits), every subsequent write/execute/network call that turn requires approval
+regardless of mode — including `auto`, where nothing else in the stack prompts for anything. This
+closes the first "what to do" bullet and, folded into **P81.8**'s work the same sitting, the egress
+ledger too. **Turn-scoped by construction sidesteps the compaction question this entry raised**:
+`buildGate` is called fresh every turn, so the taint flag never needs to survive one — it only needs to
+outlive the turn it was set in, which is exactly "tainted for the remainder of the turn." Details and
+tests: [releases.md](releases.md#p8114-p818-p811-p791-and-p801-2026-08-31).
+
+**SHIPPED IN FULL 2026-08-31 — the scan-hit decision point.** The third bullet's blocker ("the tool
+layer needs to reach the approval system directly, which the current tool/permission separation
+doesn't support") turned out to be solvable without touching that separation at all: the seam is in
+`internal/engine`, not `internal/permission` — `executeTool` already sees a tool's *result* (`Gate.Check`
+only ever sees the call), so a second, independent optional capability was added there rather than
+threading one through the gate stack. `trust.Flagged(content)` (a new predicate keyed on the
+`[SECURITY WARNING]` marker `Wrap` already emits, mirroring how `IsWrapped` keys on the untrusted-content
+sentence) is checked once `Execute` returns and before the result is appended to the conversation or
+`hooks.PostToolUse` fires; a hit consults a new `engine.Approver` (`Approve(ctx, toolName, reason,
+input) bool` — structurally identical to `permission.Approver`, so the daemon's existing `sseApprover`,
+`AutoApprove` and `AutoDeny` satisfy it with no adapter) over the *same* `KindApprovalRequest`/TUI-dialog
+round trip a permission-gate Ask decision already uses. Approved content passes through unchanged
+(warning and all); denied content is replaced with a withheld-notice error result before it ever reaches
+context, while the real content still reaches the audit sink via `PostToolUse` — the forensic record and
+the model's context are no longer the same question. Wired at every `engine.Options` construction site
+with the same approver each site's gate already resolved: the daemon session/debate/sub-agent paths get
+the interactive `sseApprover` (or the operator's configured non-interactive default), `aegis chat` gets
+its own resolved approver, and the two batch paths that deliberately use `AutoDeny{}` for their gate
+(`aegis debate`, the subprocess worker) get the same `AutoDeny{}` here — a flagged result is withheld
+rather than the run hanging on an approval nobody is watching for. Tests:
+`internal/trust/trust_test.go`'s `TestFlagged`, `internal/engine/engine_test.go`'s
+`TestExecuteToolScanHitRequiresApproval` (five subtests: approved, denied, no approver configured,
+unflagged content never consults the approver, an error result is never gated).
+
+Priority: Tier 3 — **closed**. All three "what to do" bullets shipped.
+
 ### P81.8 — `web_fetch` is an unreviewed egress channel (FIND-08)
 
 **Filed 2026-08-31**, from the threat model
@@ -1494,6 +1304,38 @@ merely recorded.
 Priority: Tier 3 — M, and the enabling half of **P81.1**: the ledger is what makes an injected
 exfiltration attempt visible whether or not the taint rule catches it. Worth building first of the
 two, because it is useful standalone and the taint work is not.
+
+**SHIPPED IN PART 2026-08-31.** The outbound secret-pattern refusal shipped (`redact.Classes` over the
+resolved URL, refusing before any request is made). The egress ledger shipped folded into **P81.14**'s
+audit sink rather than as a separate mechanism — `PostToolUse` now records `result_bytes` alongside
+the already-redacted URL `PreToolUse` records — but it is **not yet surfaced in the TUI/UI**, only in
+the audit sink; that's the real gap still open against this entry's full ask. The opt-in host/suffix
+allowlist bullet turned out to already exist (`security.network_allowlist`, enforced by
+`ContextualGate`'s pre-existing rule) — checked against the tree rather than rebuilt. Details and
+tests: [releases.md](releases.md#p8114-p818-p811-p791-and-p801-2026-08-31).
+
+**TUI half SHIPPED 2026-08-31.** A new `internal/egress` package (mirroring `cost.Tracker`'s shape) is
+a live, run-scoped counter fed at `fetchTool.Execute`'s call site — the same place the P81.8 refusal
+already sits — via `tool.WithEgressTracker`/`EgressTrackerFromContext` on `ctx`, the same context-carry
+pattern `tool.WithContextWindow` already used. `engine.Engine` creates one per Run (a fresh instance
+each `newEngine` call, exactly like `cost.Tracker`'s per-Run lifetime), and `KindTurnDone` now carries
+`EgressBytes` — **a per-turn delta, not a running total**: a turn's own tool calls execute *after* that
+turn's `KindTurnDone` fires (the model has to finish requesting them first), so naively reporting the
+tracker's cumulative snapshot on every turn would double-count exactly the way `CostUSD`'s existing
+cumulative convention would if a consumer summed it across a multi-turn tool-calling run — this entry
+chose the delta instead of reproducing that shape. The TUI accumulates it session-wide (`m.egressBytes
++= ev.EgressBytes`, reset alongside `costUSD` on new session/`/clear`) and renders it in the compact
+status line (`↓128.0KiB`) and the expanded sidebar's COST section (`web ↓128.0KiB`) once non-zero. The
+web UI is **not** updated — `sessInfo`-driven display there reads persisted session metadata, and
+egress is deliberately not persisted (a live run-scoped counter, same non-durability the audit sink
+already covers durably), so wiring it into the web UI is a separate, larger piece of work than this
+entry's remaining "S" sizing implied and is left for whoever picks up a webui-specific pass. Tests:
+`internal/egress/egress_test.go`, `TestFetchToolRecordsEgress` (web_test.go), and
+`TestRunEmitsPerTurnEgressDelta` (engine_test.go) — the last one pins the per-turn-delta semantics
+directly, since that was the one non-obvious design choice.
+
+Priority: Tier 3 — **closed**. TUI surfacing shipped; web UI surfacing is a new, unscoped follow-on
+(persisting egress the way cost is persisted) rather than a residual of this entry.
 
 ### P81.5 — Outbound provider payloads and tool arguments are never redacted (FIND-05)
 
@@ -1524,8 +1366,62 @@ that the absence of a redaction call on the provider path is "absence of evidenc
 not proof of absence across all 896 files" — grep the adapter request-construction paths before
 building.
 
-Priority: Tier 3 — M. Real, but the trigger is a cloud provider, and this machine runs local models by
-default. Promote the moment a cloud key becomes the working default.
+**Verified, then SHIPPED IN FULL 2026-08-31.** The uncertainty resolved as filed: the three repo-wide
+`redact.Text` call sites (`hooks.go`'s audit-record input, `internal/share`'s exported-transcript
+filter, `internal/security/redact.go`'s read-tool-output floor) are all genuinely elsewhere — nothing
+touches `internal/provider/anthropic`'s or `internal/provider/openai`'s request marshaling.
+
+A new `provider.WithRedaction` decorator (`internal/provider/redaction.go`), following the same
+wrap-`Adapter` shape as `WithRetry`/`WithHarness`/`WithNumCtx`, redacts `Request.System`, every
+message's `TextBlock`/`ToolResultBlock` text, and — the half `security.redact_secrets` structurally
+cannot reach, since that flag only ever sees a `CapRead` tool's *result*, never a call's own arguments
+— each assistant message's `ToolUseBlock.Input`, before delegating to the base adapter. Wired at the one
+shared assembly point every entry point already funnels through, `providerfactory.decorate` (not just
+the daemon: `aegis chat`, `aegis debate`, and the subprocess worker all call `providerfactory.Build`),
+gated on `!config.IsLoopbackBaseURL(baseURL) && cfg.Security.RedactOutboundPayloads` — the same loopback
+line **P81.15**'s `MeteredCloudEndpoint` already draws, so a local Ollama deployment sends nothing off
+the machine to redact from and pays neither the pass nor its false-positive risk. New config key
+`security.redact_outbound_payloads`, default **true**, alongside `RedactSecrets` on `SecurityConfig`.
+
+A tool call's `Input` gets one extra safeguard past `redact.Text`'s plain substitution: it is JSON, and
+a match can straddle a delimiter and leave the field invalid (`internal/hooks.auditInput` already
+guards the same failure mode for the audit record — confirmed live against `{"api_key":"AKIA..."}`,
+whose match spans the colon and collapses a key:value pair into a bare string, `{"[redacted: ...]"}`,
+which has no colon and is not a valid JSON object even though every quote stays paired). For the audit
+record the fix is to re-wrap the redacted text as a JSON string; here it can't be — a provider's
+`tool_use.input` must stay whatever type the schema declared — so an invalid-JSON result is discarded
+and the original, unredacted `Input` is sent instead: a working request over a redaction guarantee for
+this one field, the same conservative direction every other best-effort transform in this codebase
+takes when it can't apply safely.
+
+The second bullet — escalating `warnOutboundSecrets` from a log line to a gate — shipped as **refuse**,
+not approve: `internal/mcp/tool.go`'s three argument-forwarding call sites (`mcpTool`,
+`mcpResourceReadTool`, `mcpPromptGetTool`) now withhold the call (`tool.Result{IsError: true}`) when a
+high-confidence class matches, rather than forwarding it anyway after only logging. Approval was the
+other option the entry named, but no `Gate`/`Approver` reaches `mcp.Client`'s call path today — refusal
+needed no new plumbing, and an operator who opted a server into `scan_arguments` is asking for that
+server not to receive a flagged argument, not to be asked about it after the fact.
+
+The third bullet — a hash and byte count in the audit sink — shipped as a structured log line
+(`provider`, `bytes`, `sha256`) on every outbound request from `redactionAdapter.Stream`, **not** routed
+through `hooks.Audit`'s JSONL sink: `providerfactory.Build`/`Decorate` is the one shared construction
+point every entry point (daemon, `aegis chat`, `aegis debate`, the subprocess worker) calls, and none of
+those besides the daemon carry an audit sink to thread through — doing that properly is a larger
+plumbing change than this sitting's scope, honestly short of the letter of the ask though not its
+intent ("what left this machine is answerable after the fact" — it is, via the daemon's structured log,
+just not via `audit.jsonl` specifically).
+
+Tests: `internal/provider/redaction_test.go` (scrubs messages/system/tool-args, leaves clean content
+and invalid-JSON-would-result inputs unchanged, logs hash+bytes, nil-base and Unwrap-chain contracts),
+`internal/providerfactory/factory_test.go`'s three `TestBuild_*Redact*` cases (cloud wraps, loopback
+doesn't, disabled doesn't), `internal/mcp/outbound_test.go`'s updated refusal assertions, and
+`internal/config/config_test.go`'s default-true check.
+
+Priority: Tier 3 — **closed**, with one named gap: the audit-sink bullet landed as a log line rather
+than an `audit.jsonl` record. Promote a follow-up only if an operator actually wants to correlate
+outbound-payload hashes with the rest of the audit trail — threading a sink through
+`providerfactory.Build`'s shared construction point (used by every entry point, not just the daemon)
+is real plumbing, not a one-line fix.
 
 ### P81.2 — External MCP servers are trusted on configuration alone (FIND-02)
 
@@ -1551,9 +1447,46 @@ MCP tool names on exposure (`mcp__<server>__<tool>`) and reject an exposure that
 built-in. Record the approved tool set per server and re-ask when it grows, not only when a schema
 changes.
 
-Priority: Tier 3 — M, and sequence-dependent on **P80.1**: both are decisions about what an MCP peer
-is allowed to be, and the namespacing change touches the same exposure path P80.1's origin record
-will. Take them in one sitting.
+**SHIPPED 2026-08-31, with one bullet refuted against the tree.** The namespacing bullet was checked
+before being built: `mcp__<server>__<tool>` was **already** the exposure convention
+(`internal/mcp/tool.go`, both the initial-registration and dynamic-refresh paths), which structurally
+already prevents a built-in collision — no built-in is named starting with `mcp__`, so an MCP tool name
+can never equal one. Nothing to build there; the finding's premise was already false, the same shape
+**P81.6** and two of the P81 first wave's items took.
+
+The other two bullets were real and shipped as a new `internal/mcp.TrustStore`
+(`internal/mcp/servertrust.go`), keyed by server name and following `internal/workspacetrust.Store`'s
+shape (JSON-backed map, `fsguard.RestrictToOwner`'d) rather than extending that package directly — a
+binary/tool-set grant is a property of a *server*, not a directory, and `workspacetrust` deliberately
+doesn't import `internal/config`, so a new store was the right split. It is **trust-on-first-use**,
+deliberately: the operator already made the trust decision once by adding the server to their own
+config (itself gated by `workspacetrust` for a project-sourced one) — this store adds *drift* detection
+on top, not a second prompt for the same act.
+
+`TrustStore.CheckBinary` resolves a stdio server's `command` via `exec.LookPath` (a no-op resolution
+when already absolute) and hashes the resolved file (SHA-256); a server seen for the first time is
+trusted and the path+digest recorded as the baseline, and a server whose resolved digest no longer
+matches its recorded baseline is refused — the server is skipped exactly the way a connect failure
+already is, logged with the mismatch. `TrustStore.CheckToolNames`/`FilterApproved` do the equivalent for
+tool names: a server's first-ever advertised set becomes its baseline via `Approve`, and every
+subsequent sighting — a daemon restart re-registering the same server, or a live
+`notifications/tools/list_changed` — withholds any name outside that baseline from exposure rather than
+registering or `Upsert`-ing it, logging what was held back. **Recovery for either kind of drift is the
+same manual action**: there is no interactive re-approval flow for a background daemon process to drive
+(the same reasoning `workspacetrust`'s own Stale-grant recovery — calling `Trust` again — already
+accepts), so accepting a changed binary or a grown tool set means editing or removing that server's
+entry in `mcp_trust.json` (`cfg.DataDir`), which re-baselines on the next connection. Wired at the one
+call site, `Server.wireMCP` → `mcp.RegisterServers`, which now takes an optional `*TrustStore` (nil
+skips both checks — what every other caller, including the package's own tests, passes).
+
+Tests: `internal/mcp/servertrust_test.go` (trust-on-first-use, digest-change refusal — constructed
+against a real temp-directory binary since `exec.LookPath` needs one, growth detection, `FilterApproved`
+partitioning, cross-reload persistence, POSIX file-mode check skipped on Windows since
+`fsguard.RestrictToOwner` there is ACL-based).
+
+Priority: Tier 3 — **closed**. The `P80.1` sequencing note no longer applies: **P80.1** shipped
+2026-08-31 (its own origin-record work touched session/message provenance, not the MCP exposure path),
+and the namespacing bullet this note anchored on turned out to need no code.
 
 ### P81.3 — Config PATCH endpoints can disable command isolation with only the bearer token (FIND-03)
 
@@ -1571,13 +1504,47 @@ command isolation and then drive unattended host execution through entirely legi
 
 **What to do.** Split the credential — a second, separately-stored token for endpoints that weaken a
 security posture, or an interactive operator confirmation surfaced through the TUI/UI for those
-endpoints. Log every accepted `PATCH /config/*` as a structured audit event with before/after values
-(**P81.14**). And refuse at _runtime_ the transitions the daemon already refuses at _startup_, in
+endpoints. ~~Log every accepted `PATCH /config/*` as a structured audit event with before/after values
+(**P81.14**).~~ And refuse at _runtime_ the transitions the daemon already refuses at _startup_, in
 particular moving to the `local` sandbox backend while `auto_approve_exec` is set without
 `allow_unsandboxed_auto_exec` — that check exists and simply is not consulted on the PATCH path.
 
-Priority: Tier 3 — M. The runtime-transition refusal is the small, obviously-correct half and could be
-taken alone; the credential split is a design decision about how many secrets this daemon has.
+**The audit-logging bullet shipped 2026-08-31 as a side effect of P81.14**, and covers more than this
+entry asked for: `patchConfigSection` (`internal/server/config.go`) now calls `hooks.Audit.ConfigPatch`
+on every accepted PATCH with the endpoint path, the caller's remote address, the request body and the
+resolved applied value — every `/config/<section>` endpoint the generic backs, not only the four named
+here. See [releases.md](releases.md#p8114-p818-p811-p791-and-p801-2026-08-31). What's left is the
+credential split and the runtime-transition refusal, neither of which this pass touched.
+
+**The runtime-transition refusal SHIPPED 2026-08-31.** `unsandboxedAutoExecError`
+(`internal/server/sandboxselect.go`) — the plain function of config `wireSecurityWarnings` already calls
+at startup to refuse `auto_approve_exec`/`mode: auto` over an unsandboxed local backend — is now also
+called from `handlePatchConfigSandbox`'s build func (`internal/server/config.go`), right after the
+existing backend alias/validation normalization, whenever the patched `Backend` normalizes to `""` or
+`"local"` (`sandboxKnownBackends`' own comment: both mean unsandboxed local). It reads
+`cfg.Permission` from the same `loadCfg()` the handler already had in scope — no new config read — and
+a refusal returns the same `configHTTPError{StatusBadRequest}` the unknown-backend case already uses,
+so a rejected transition is never written to disk. `sandboxFallback`/`reason` are passed
+`false`/`""`: this is an explicit operator PATCH, not the runtime's own detection falling back to
+local, so the error names the *configured* backend rather than a fallback reason. No change was needed
+to `unsandboxedAutoExecError` itself — same signature, same function, two call sites now instead of
+one.
+
+Tests: `TestConfigSandboxPatchRefusesUnsandboxedAutoExecTransition` (refused, nothing persisted),
+`TestConfigSandboxPatchAllowsUnsandboxedAutoExecWithOptOut` (the explicit opt-out still works, mirroring
+the startup WARN-not-refuse path), `TestConfigSandboxPatchRefusesModeAutoTransition` (the
+`permission.mode: auto` half of the same check, SEC-09), and
+`TestConfigSandboxPatchAllowsSandboxedBackendRegardlessOfAutoExec` (the check is specific to the
+unsandboxed backend — a `container`/`os` transition is never blocked by `auto_approve_exec`). Since
+there is no `PATCH /config/permission` endpoint, the fixtures seed `permission.auto_approve_exec` by
+writing the redirected global `config.yaml` directly before the sandbox PATCH — the only way to get
+that state onto disk at all today.
+
+Priority: Tier 3 — **the runtime-transition refusal is closed.** The credential split is a genuine
+design decision — a second, separately-stored token, or an interactive TUI/UI confirmation for
+posture-weakening endpoints — that changes the daemon's secret/deployment model and was deliberately
+left to the operator rather than decided unilaterally in this sitting; it stays open, Tier 3, until
+that decision is made.
 
 ### P81.4 — The web UI hands the real daemon token to browser JavaScript (FIND-04)
 
@@ -1659,41 +1626,6 @@ behind a trigger. The `codeql.yml` action-pinning half is **Tier 2 — XS** and 
 taken with **P81.17**; it is the only supply-chain work in this batch that touches a workflow that
 actually runs.
 
-### P81.14 — There is no default audit trail for anything privileged (FIND-14)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-14**](../threat-model-20260831-002123/3-findings.md#find-14-no-default-audit-trail-for-privileged-operations-policy-decisions-or-executed-commands),
-CVSS 5.7, `Moderate`, CWE-778) — and the item the largest number of other findings depend on.
-`internal/hooks` contains an `Audit` sink with exactly the right record types (`PreToolUse`,
-`PostToolUse`, `PolicyDecision`, `SubagentStop`) and an `auditInput` that already scrubs tool inputs
-before writing. Nothing constructs it unless configured. A default deployment therefore keeps no
-durable record of which commands the agent executed, which policy decisions the gate made, or which
-privileged configuration changes were accepted.
-
-**The inversion is worth stating plainly**, because it is what makes this a finding rather than a
-feature request: the daemon reliably records that someone guessed a token wrong (`invalidAuthLogEvery
-= 5`, sampled but on by default) and records nothing at all when someone holding the right token
-switched the sandbox off and ran a command.
-
-This is also why every repudiation threat in the model has no answer — a TUI approval, a turn injected
-by an MCP client (**P80.1**), an unattended cron run (**P81.23**), a mutated trace record
-(**P81.24**).
-
-**What to do.** Turn on a default audit sink writing under the data directory, created with
-`fsguard.RestrictToOwner` and rotated by size. Emit a record for every accepted state-changing HTTP
-endpoint including before/after values for config PATCHes (**P81.3**). Stamp a message origin —
-`tui`, `web`, `acp`, `mcp`, `cron` — on every persisted turn and every audit record; that stamp is
-also what **P81.9** needs to keep a TUI carve-out and what **P80.1** needs for its session-origin
-filter.
-
-**Check the premise first.** The threat model's "Needs Verification" table flags that FIND-14 assumes
-the sink is opt-in from the absence of a default construction site; trace whether `enginecfg`'s hook
-chain builds `hooks.NewAudit` when no hook config is present before treating it as unwired.
-
-Priority: Tier 3 — M, and the batch's most-referenced dependency: **P81.3**, **P81.5**, **P81.8**,
-**P81.23**, **P81.29** and **P80.1** all want the origin stamp or the sink. Build it early even though
-it is not the highest-severity item.
-
 ### P81.20 — Plan mode's guarantee rests on a 1,129-line classifier, structurally (FIND-20)
 
 **Filed 2026-08-31**, from the threat model
@@ -1732,10 +1664,14 @@ of them is not.**
 
 Priority: Tier 3 — M, `Redesign`. Sequence-dependent one way rather than both, as of 2026-08-31: the
 fuzz gate it wanted from **P81.11** is not coming, so the CI dependency is gone and the corpus work is
-unblocked today. **P81.1**'s taint rule is still bypassed by exactly this ordering if it lands at the
-policy layer alone, and that dependency stands.
-Do **P79.1**'s reachability check first — it is the cheaper question and it may change this one's
-urgency.
+unblocked today. **P81.1**'s taint rule shipped 2026-08-31 at exactly the policy layer this entry
+warned about (`permission.ContextualGate.Check` reads `tool.EffectiveCapability`, the same downgraded
+capability the base gate sees) — so it **is** bypassed by a `CapRead` downgrade, as predicted; that
+dependency stands and is now confirmed rather than hypothetical.
+**P79.1**'s reachability check ran 2026-08-31 and found the specific Windows escape not exploitable in
+production — see its record in [releases.md](releases.md#p8114-p818-p811-p791-and-p801-2026-08-31) —
+which answers this item's own "may change this one's urgency" concern in the negative: the structural
+risk this item describes stands on its own, independent of any one live escape.
 
 ### P81.22 — Command isolation degrades to unsandboxed host execution on a warning line (FIND-22)
 

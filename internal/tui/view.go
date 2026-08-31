@@ -364,6 +364,11 @@ func (m model) renderSidebar(h int) string {
 			add(m.th.sideMuted.Render(fmt.Sprintf("in  %d", promptTokens)))
 			add(m.th.sideMuted.Render(fmt.Sprintf("out %d", m.outputTokens)))
 		}
+		if m.egressBytes > 0 {
+			// P81.8: the live counterpart to the audit sink's per-fetch record —
+			// how much web_fetch has pulled in this session, at a glance.
+			add(m.th.sideMuted.Render(fmt.Sprintf("web ↓%s", fmtBytesCompact(m.egressBytes))))
+		}
 	}
 
 	return lipgloss.NewStyle().
@@ -558,7 +563,26 @@ func (m model) renderStats() string {
 	if m.costUSD > 0 {
 		s += fmt.Sprintf("  $%.4f", m.costUSD)
 	}
+	if m.egressBytes > 0 {
+		s += "  ↓" + fmtBytesCompact(m.egressBytes)
+	}
 	return s
+}
+
+// fmtBytesCompact renders a byte count in the shortest human-readable unit
+// (P81.8's egress display) — one decimal above 1000 of a unit, no decimal
+// below, so the sidebar and status line stay narrow.
+func fmtBytesCompact(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // toolMaxLines returns the effective per-result line cap based on compact mode.

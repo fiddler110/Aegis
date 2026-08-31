@@ -14,6 +14,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/fiddler110/aegis/internal/egress"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/sandbox"
 )
@@ -921,6 +922,31 @@ func WithContextWindow(ctx context.Context, n int) context.Context {
 func ContextWindowFromContext(ctx context.Context) (int, bool) {
 	n, ok := ctx.Value(contextWindowCtxKey{}).(int)
 	return n, ok
+}
+
+// egressTrackerCtxKey is the context key for the run's egress.Tracker
+// (P81.8): a live, run-scoped counter of outbound fetch volume that a tool
+// records into directly at the call site, separate from the durable audit
+// sink record hooks.Audit writes for the same call.
+type egressTrackerCtxKey struct{}
+
+// WithEgressTracker returns a context carrying t, so a tool that performs
+// outbound fetches (web_fetch) can record volume into the run's tracker
+// without importing the engine package that owns it. A nil t carries nothing,
+// matching EgressTrackerFromContext's "unset" reading.
+func WithEgressTracker(ctx context.Context, t *egress.Tracker) context.Context {
+	if t == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, egressTrackerCtxKey{}, t)
+}
+
+// EgressTrackerFromContext returns the egress.Tracker carried by ctx, if any.
+// ok is false when unset, in which case the caller should skip recording
+// rather than construct a throwaway tracker.
+func EgressTrackerFromContext(ctx context.Context) (*egress.Tracker, bool) {
+	t, ok := ctx.Value(egressTrackerCtxKey{}).(*egress.Tracker)
+	return t, ok
 }
 
 // Get returns a registered tool by name.

@@ -207,6 +207,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 		Gate:           gate,
 		Hooks:          engineHooks,
 		Cost:           tracker,
+		Approver:       approver,                 // P81.1: same approver the gate above just used
 		Purpose:        provider.PurposeSubAgent, // P67.3
 		RoundResultCap: roundCapFor(cwd),         // P67.1
 		Model:          model,

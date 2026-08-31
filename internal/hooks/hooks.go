@@ -6,13 +6,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/fsguard"
+	"github.com/fiddler110/aegis/internal/logging"
 	"github.com/fiddler110/aegis/internal/redact"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 )
 
 // Multi runs several hooks in order. PreToolUse stops at the first veto.
@@ -45,15 +48,37 @@ func (m *Multi) PostToolUse(ctx context.Context, name string, input json.RawMess
 	}
 }
 
-// Audit appends a JSONL record for each tool call to a file.
+// Default rotation bound for the audit sink (P81.14): generous headroom for
+// what an audit trail actually needs, while still bounding an unattended
+// daemon's disk use over a long uptime. Matches the order of magnitude
+// internal/logging defaults its own rotation to.
+const (
+	defaultAuditMaxBytes   = 32 << 20 // 32 MiB
+	defaultAuditMaxBackups = 5
+)
+
+// Audit appends a JSONL record for each tool call to a file, rotating it by
+// size so an unattended daemon's audit trail cannot grow without bound.
 type Audit struct {
-	mu   sync.Mutex
-	path string
-	file *os.File
+	mu         sync.Mutex
+	path       string
+	maxBytes   int64
+	maxBackups int
+	file       io.WriteCloser
 }
 
-// NewAudit creates an audit hook writing to path.
-func NewAudit(path string) *Audit { return &Audit{path: path} }
+// NewAudit creates an audit hook writing to path, rotated at the package
+// default size/backup bound. Use NewAuditWithRotation to override it.
+func NewAudit(path string) *Audit {
+	return NewAuditWithRotation(path, defaultAuditMaxBytes, defaultAuditMaxBackups)
+}
+
+// NewAuditWithRotation is NewAudit with an explicit rotation bound.
+// maxBytes <= 0 disables rotation (unbounded append), matching
+// internal/logging.Options' MaxSizeBytes convention.
+func NewAuditWithRotation(path string, maxBytes int64, maxBackups int) *Audit {
+	return &Audit{path: path, maxBytes: maxBytes, maxBackups: maxBackups}
+}
 
 // Close flushes and closes the audit file.
 func (a *Audit) Close() error {
@@ -68,11 +93,27 @@ func (a *Audit) Close() error {
 }
 
 type auditRecord struct {
-	Time    time.Time       `json:"time"`
+	Time time.Time `json:"time"`
+	// Origin names which surface drove the call — tui/web/acp/mcp/cli
+	// (internal/reqorigin), P81.14. Empty for a record with no session
+	// context to read it from (e.g. a policy decision outside a run).
+	Origin  string          `json:"origin,omitempty"`
 	Phase   string          `json:"phase"`
 	Tool    string          `json:"tool"`
 	Input   json.RawMessage `json:"input,omitempty"`
 	IsError bool            `json:"is_error,omitempty"`
+	// ResultBytes is the tool result's length (phase "post"), never the
+	// content itself — an egress ledger (P81.8's stated need for web_fetch;
+	// generically useful for every tool) needs "how much data moved", not a
+	// second copy of what the audit trail's PreToolUse input already carries.
+	ResultBytes int `json:"result_bytes,omitempty"`
+	// Config-PATCH fields (phase "config_patch"), P81.14/P81.3. Remote is the
+	// caller's r.RemoteAddr — the identifying signal available at this layer,
+	// where there is no session (and so no Origin) to read.
+	Path      string          `json:"path,omitempty"`
+	Remote    string          `json:"remote,omitempty"`
+	Requested json.RawMessage `json:"requested,omitempty"`
+	Applied   json.RawMessage `json:"applied,omitempty"`
 	// Sub-agent lifecycle fields (phase "subagent_stop").
 	AgentID string `json:"agent_id,omitempty"`
 	Status  string `json:"status,omitempty"`
@@ -106,6 +147,26 @@ func (a *Audit) PolicyDecision(toolName, cap, rule, decision, reason string) {
 		Rule:     rule,
 		Decision: decision,
 		Reason:   reason,
+	})
+}
+
+// ConfigPatch records an accepted state-changing config endpoint call
+// (P81.14/P81.3) — a privileged HTTP action with no prior audit record at
+// all, unlike a tool call, which the PreToolUse/PostToolUse pair already
+// covers. requested and applied are marshalled through auditInput's own
+// redact-then-bound-size path, since a config patch is exactly the kind of
+// call that can carry a credential (e.g. a provider base URL with embedded
+// auth) as readily as a tool argument can.
+func (a *Audit) ConfigPatch(path, remoteAddr string, requested, applied any) {
+	reqJSON, _ := json.Marshal(requested)
+	appliedJSON, _ := json.Marshal(applied)
+	a.write(auditRecord{
+		Time:      time.Now(),
+		Phase:     "config_patch",
+		Path:      path,
+		Remote:    remoteAddr,
+		Requested: auditInput(reqJSON),
+		Applied:   auditInput(appliedJSON),
 	})
 }
 
@@ -171,35 +232,23 @@ func auditInput(input json.RawMessage) json.RawMessage {
 	return json.RawMessage(b)
 }
 
-func (a *Audit) PreToolUse(_ context.Context, name string, input json.RawMessage) error {
-	a.write(auditRecord{Time: time.Now(), Phase: "pre", Tool: name, Input: auditInput(input)})
+func (a *Audit) PreToolUse(ctx context.Context, name string, input json.RawMessage) error {
+	a.write(auditRecord{Time: time.Now(), Origin: reqorigin.FromContext(ctx), Phase: "pre", Tool: name, Input: auditInput(input)})
 	return nil
 }
 
-func (a *Audit) PostToolUse(_ context.Context, name string, _ json.RawMessage, _ string, isErr bool) {
-	a.write(auditRecord{Time: time.Now(), Phase: "post", Tool: name, IsError: isErr})
+func (a *Audit) PostToolUse(ctx context.Context, name string, _ json.RawMessage, result string, isErr bool) {
+	a.write(auditRecord{Time: time.Now(), Origin: reqorigin.FromContext(ctx), Phase: "post", Tool: name, IsError: isErr, ResultBytes: len(result)})
 }
 
 func (a *Audit) write(rec auditRecord) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.file == nil {
-		f, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		f, err := a.open()
 		if err != nil {
 			slog.Error("audit: failed to open log", "path", a.path, "err", err)
 			return
-		}
-		// The audit JSONL holds redacted-but-still-revealing tool inputs —
-		// every shell command and every path the session touched. The 0o600
-		// above is sufficient on POSIX and cosmetic on Windows, where a new
-		// file inherits its parent directory's ACL and the mode argument does
-		// nothing; fsguard applies a real non-inherited ACL there and is a
-		// no-op on POSIX. Same treatment as the daemon token, the SQLite
-		// stores, the TLS key, the swarm mailbox and the trust store.
-		// Best-effort: an unhardenable audit log is still worth writing, and
-		// losing the trail entirely would be the worse failure.
-		if ferr := fsguard.RestrictToOwner(a.path); ferr != nil {
-			slog.Warn("audit: could not restrict log permissions", "path", a.path, "err", ferr)
 		}
 		a.file = f
 	}
@@ -207,4 +256,29 @@ func (a *Audit) write(rec auditRecord) {
 	if _, err := a.file.Write(append(line, '\n')); err != nil {
 		slog.Error("audit: failed to write record", "path", a.path, "err", err)
 	}
+}
+
+// open returns a fresh writer for a.path: a size-rotated one when maxBytes is
+// positive, a plain unbounded append file otherwise (maxBytes <= 0 opts out).
+//
+// The audit JSONL holds redacted-but-still-revealing tool inputs — every
+// shell command and every path the session touched. The 0o600 mode is
+// sufficient on POSIX and cosmetic on Windows, where a new file inherits its
+// parent directory's ACL and the mode argument does nothing; fsguard applies
+// a real non-inherited ACL there and is a no-op on POSIX (same treatment as
+// the daemon token, the SQLite stores, the TLS key, the swarm mailbox and the
+// trust store). Best-effort: an unhardenable audit log is still worth
+// writing, and losing the trail entirely would be the worse failure.
+func (a *Audit) open() (io.WriteCloser, error) {
+	if a.maxBytes > 0 {
+		return logging.NewRotatingWriter(a.path, a.maxBytes, a.maxBackups)
+	}
+	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if ferr := fsguard.RestrictToOwner(a.path); ferr != nil {
+		slog.Warn("audit: could not restrict log permissions", "path", a.path, "err", ferr)
+	}
+	return f, nil
 }

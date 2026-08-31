@@ -245,6 +245,106 @@ func TestConfigSandboxPatchRejectsUnknownBackend(t *testing.T) {
 	}
 }
 
+// writeGlobalConfigYAML seeds the redirected global config.yaml with raw
+// content before the daemon or a PATCH call reads it — needed for permission.*
+// settings, which have no PATCH endpoint of their own (P81.3's runtime-
+// transition check reads them from disk via config.Load(), not from any
+// request body).
+func writeGlobalConfigYAML(t *testing.T, yaml string) {
+	t.Helper()
+	path := config.GlobalConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConfigSandboxPatchRefusesUnsandboxedAutoExecTransition is P81.3/FIND-03's
+// runtime-transition half: Server.New already refuses to *start* with
+// auto_approve_exec (or mode: auto) over an unsandboxed local backend
+// (wireSecurityWarnings -> unsandboxedAutoExecError); this covers the PATCH
+// path that let an already-running daemon be moved into the exact same
+// combination — unattended RCE — through an ordinary API call with no
+// re-check at all.
+func TestConfigSandboxPatchRefusesUnsandboxedAutoExecTransition(t *testing.T) {
+	redirectConfigDir(t)
+	writeGlobalConfigYAML(t, "permission:\n  auto_approve_exec: true\n")
+	cl := newConfigTestServer(t, "")
+
+	_, err := cl.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{
+		Scope:   "global",
+		Backend: strPtr("local"),
+	})
+	if err == nil {
+		t.Fatal("expected the PATCH to be refused: auto_approve_exec is set and the target backend is unsandboxed local")
+	}
+
+	// Never persisted: a refused transition must not reach disk.
+	data, _ := os.ReadFile(config.GlobalConfigPath())
+	if strings.Contains(string(data), "backend: local") {
+		t.Errorf("refused backend transition was written to disk anyway:\n%s", data)
+	}
+}
+
+// TestConfigSandboxPatchAllowsUnsandboxedAutoExecWithOptOut: the same
+// transition succeeds once the operator has set the explicit opt-out,
+// mirroring wireSecurityWarnings' own startup behavior (warn, don't refuse).
+func TestConfigSandboxPatchAllowsUnsandboxedAutoExecWithOptOut(t *testing.T) {
+	redirectConfigDir(t)
+	writeGlobalConfigYAML(t, "permission:\n  auto_approve_exec: true\n  allow_unsandboxed_auto_exec: true\n")
+	cl := newConfigTestServer(t, "")
+
+	resp, err := cl.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{
+		Scope:   "global",
+		Backend: strPtr("local"),
+	})
+	if err != nil {
+		t.Fatalf("PatchConfigSandbox: %v", err)
+	}
+	if resp.Backend != "local" {
+		t.Errorf("Backend = %q, want local", resp.Backend)
+	}
+}
+
+// TestConfigSandboxPatchRefusesModeAutoTransition covers the
+// permission.mode: "auto" half of the same check (SEC-09) — equivalent to
+// auto_approve_exec for this purpose.
+func TestConfigSandboxPatchRefusesModeAutoTransition(t *testing.T) {
+	redirectConfigDir(t)
+	writeGlobalConfigYAML(t, "permission:\n  mode: auto\n")
+	cl := newConfigTestServer(t, "")
+
+	_, err := cl.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{
+		Scope:   "global",
+		Backend: strPtr("local"),
+	})
+	if err == nil {
+		t.Fatal("expected the PATCH to be refused: permission.mode is auto and the target backend is unsandboxed local")
+	}
+}
+
+// TestConfigSandboxPatchAllowsSandboxedBackendRegardlessOfAutoExec: the check
+// is specific to the unsandboxed local backend — container/os transitions
+// must not be blocked by auto_approve_exec at all.
+func TestConfigSandboxPatchAllowsSandboxedBackendRegardlessOfAutoExec(t *testing.T) {
+	redirectConfigDir(t)
+	writeGlobalConfigYAML(t, "permission:\n  auto_approve_exec: true\n")
+	cl := newConfigTestServer(t, "")
+
+	resp, err := cl.PatchConfigSandbox(context.Background(), api.ConfigSandboxPatchRequest{
+		Scope:   "global",
+		Backend: strPtr("os"),
+	})
+	if err != nil {
+		t.Fatalf("PatchConfigSandbox to a real sandbox backend should not be refused: %v", err)
+	}
+	if resp.Backend != "os" {
+		t.Errorf("Backend = %q, want os", resp.Backend)
+	}
+}
+
 // TestConfigSandboxPatchAliasesRuntimeName covers P25.2's PATCH-side
 // aliasing: PATCHing backend="podman" directly (the mistake the docs'
 // runtime-name phrasing invites) must be written as backend=container,

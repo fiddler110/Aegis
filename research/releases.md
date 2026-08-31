@@ -8,7 +8,43 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-30 (twenty-seventh record) — **the comprehensive architecture and security
+**Last updated:** 2026-08-31 (thirtieth record) — **P81.14, P81.8, P80.1 and P79.1 shipped; P81.1
+shipped in part.** The top four items of [Up next](roadmap.md#up-next)'s ranking plus the highest-tier
+item outside it, taken in the order the table specified: **P81.14** first, since six other items wanted
+its origin stamp or its sink — the audit sink turned out to already be default-wired for tool calls
+(the finding's core premise was wrong), so what shipped is size rotation, a message-origin stamp
+(`internal/reqorigin`) threaded onto every tool-call audit record, and a new audit event for every
+accepted config PATCH with before/after values. That origin stamp is also what let **P80.1** close in
+full rather than stay at its interim: sessions now carry a durable origin recorded at creation, and both
+the MCP and ACP surfaces refuse outright a borrowed session a different surface created, not merely
+mode-ceiling it. **P81.8** shipped the URL-secret refusal and folded its egress ledger into the same
+audit mechanism (byte counts added to `PostToolUse` records); the opt-in host allowlist it asked for
+turned out to already exist (`security.network_allowlist`, unrelated to this batch). **P81.1**, the
+report's one `Critical`, shipped the taint-after-untrusted-content rule — a
+`permission.ContextualGate` addition, on by default, gating write/execute/network for the rest of a
+turn once anything wrapped as untrusted has entered context, regardless of mode — but not the
+scan-hit-as-decision-point half, which needs the tool layer to reach the approval system and is left
+open. **P79.1** closed on a negative result: driving the exact Windows path-escape shapes through the
+real `shellTool.CapabilityFor` → `permission.Gate.Check` seam (not just the classifier the four
+regression tests exercise) found the escape is not reachable — the fix already in the tree covers the
+production path, not only the unit-level one. Full record: [P81.14, P81.8, P81.1, P79.1 and P80.1,
+2026-08-31](#p8114-p818-p811-p791-and-p801-2026-08-31).
+
+**Last updated (previous):** 2026-08-31 (twenty-ninth record) — **P76.2 and P76.3 shipped, closing the two items
+that had led [Up next](roadmap.md#up-next) since 23 August.** Both were part-built already: P76.2's
+three quit paths already cancelled the terminal run (what shipped is the test that keeps them doing
+it), and P76.3's disclosure half was already in `Report.Format` (what shipped is the trust gate on
+top). Full record: [P76.2 and P76.3 shipped, 2026-08-31](#p762-and-p763-shipped-2026-08-31).
+
+**Last updated (previous):** 2026-08-31 (twenty-eighth record) — **P82 and P83 shipped**, filed from an
+operator report rather than the threat model. P82: first-run and `/config` model selection took an
+unranked first entry from Ollama's API (ordered most-recently-modified) instead of ranking by size
+under a memory ceiling — `internal/modelpick` is now the one answer three call sites share. P83, found
+while building it: the KV-cache formula was **4x wrong** on hybrid-attention models (state-space layers
+counted as full attention), which had been silently capping every solo session's context window and
+undervaluing model weights by 27%. Full record: [P82 and P83 shipped, 2026-08-31](#p82-and-p83-shipped-2026-08-31).
+
+**Last updated (previous):** 2026-08-30 (twenty-seventh record) — **the comprehensive architecture and security
 audit is closed out in full, and `Review.md` is gone.** A five-phase principal-level pass over the whole
 tree (~109,700 non-test Go lines) had produced 28 findings across 26 rows plus two coverage-debt
 entries; 24 rows were already closed, and this sitting closed the remainder. Running the `live_workflow`
@@ -531,6 +567,248 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### P81.14, P81.8, P81.1, P79.1 and P80.1, 2026-08-31
+
+Five items taken together in one sitting: the top of [Up next](roadmap.md#up-next)'s ranking
+(**P81.14** then **P81.8** then **P81.1**), plus **P79.1** (the highest-tier item the table
+deliberately excluded) and **P80.1** (closed as a side effect of **P81.14**'s origin stamp). Every
+change is covered by a new or extended test, and the full `go build ./...`, `go vet ./...`,
+`go test ./...` and `go test -race` on every touched package are green.
+
+#### P81.14 — a default audit trail for privileged operations (FIND-14)
+
+**The finding's core premise was checked against the tree first, as its own "Needs Verification" table
+asked, and was wrong.** `internal/server/wiring.go`'s `wireHooks` already builds `hooks.NewAudit`
+unconditionally — every daemon (`aegis serve`, and the embedded in-process one every other entry point
+uses) has recorded every tool call's `PreToolUse`/`PostToolUse`, every `PolicyDecision`, and every
+`SubagentStop` since P66.11. What the finding correctly found, reading the same sink from the other
+direction, is real:
+
+- **No rotation.** `internal/logging.RotatingWriter` (renamed from the package-private
+  `rotatingWriter` it already was, so `internal/hooks` can reuse it rather than re-implement rotation a
+  second time) now backs `hooks.NewAudit` at a 32 MiB / 5-backup default; `NewAuditWithRotation` takes
+  an explicit bound, and `<=0` opts out.
+- **No message-origin stamp.** `internal/reqorigin` is a new package naming five surfaces —
+  `tui`/`web`/`acp`/`mcp`/`cli` — self-declared by the daemon's own Go integration for each one (`aegis`
+  bare/`--resume`, `aegis compare`/`parallel`, `aegis acp`, `aegis mcp-serve`, and the browser UI as the
+  default for a caller with no Go call site to stamp it itself), never taken from a remote-protocol
+  argument. `api.CreateSessionRequest.Origin` carries it to `session.Store.Create`'s new `origin` column
+  (`ALTER TABLE sessions ADD COLUMN origin`), and `messages.go`'s per-turn `runCtx` carries it onward via
+  `reqorigin.WithOrigin` so `hooks.Audit.PreToolUse`/`PostToolUse` can stamp every record with
+  `reqorigin.FromContext(ctx)` — scoped to tool-call records this pass; `PolicyDecision`/`SubagentStop`
+  don't yet reach a session context and are left for a follow-up.
+- **No record for privileged HTTP endpoints.** `patchConfigSection` — the one generic behind every
+  `PATCH /config/<section>` handler (P78.8) — now calls `hooks.Audit.ConfigPatch(path, r.RemoteAddr,
+  req, patch)` on every accepted write, recording the endpoint, the caller's remote address, the request
+  body, and the fully-resolved value that was actually applied (which reflects the real after-state even
+  for a partial-update section, since the patch already merged forward whatever the request didn't
+  touch). Both fields go through the same redact-then-bound-size path tool inputs already use, since a
+  config patch can carry a credential (e.g. a provider base URL with embedded auth) as readily as a tool
+  argument can.
+
+Tests: `internal/hooks/hooks_test.go` (origin stamping present/absent, rotation firing, `NewAudit`'s
+default bound, redaction and the origin stamp on the same record together);
+`internal/server/configaudit_test.go` (a real `PATCH /config/sandbox` over HTTP produces a
+`config_patch` record with the endpoint path, remote address and applied value);
+`internal/reqorigin/reqorigin_test.go`; `internal/session/session_test.go`'s
+`TestCreatePersistsOrigin`; `internal/server/origin_test.go`'s
+`TestCreateSessionOriginNormalizesUnknownValues` — which caught a real bug along the way:
+`handleCreateSession`'s response was hand-building a `session.Meta` literal that never carried `Origin`
+through, so every session's own creation response silently reported an empty origin regardless of what
+was stored.
+
+#### P80.1 — closed in full: session origin is now a schema, not an open decision (FIND-21)
+
+**P81.14's origin stamp is exactly the "session origin recorded at creation" fix this entry's own text
+named as the real one**, so it shipped with it rather than staying at 2026-08-31's interim (the
+mode-ceiling on a borrowed session). `mcpserver.Server.callListSessions` now filters
+`aegis_list_sessions` to `Origin == "mcp"` — an MCP client can no longer enumerate a human's TUI session
+at all — and `checkBorrowedSession` (renamed from `checkBorrowedSessionMode`) refuses outright a
+borrowed session whose `Origin` is set and is not `"mcp"`, rather than only ceiling its mode. The ACP
+half is symmetric (`checkBorrowedSession`, refusing a non-`"acp"`-origin session). A session predating
+the `origin` column (`Origin == ""`) is deliberately treated as before — mode-ceilinged, not refused —
+so an upgrade doesn't strand an editor plugin's pre-existing session. Tests added to both packages'
+`borrowed_session_test.go` cover the refusal and the empty-origin backward-compatibility case.
+
+#### P81.8 — `web_fetch` outbound inspection (FIND-08)
+
+Two of the three "what to do" bullets were real gaps; the third already existed. **Outbound secret
+refusal**: `fetchTool.Execute` now runs `redact.Classes` over the resolved URL before any network call
+and refuses with `IsError: true` naming the matched class (e.g. "GitHub token") when it matches — a
+model-chosen fetch URL is exactly how an injected instruction would try to exfiltrate a credential the
+agent has already read, and `internal/netblock` only ever validated the *destination*, never the
+payload. **Egress ledger**: folded into the audit mechanism P81.14 just built rather than a separate
+package — `hooks.Audit.PostToolUse` now records `result_bytes` (the tool result's length) alongside the
+already-redacted URL `PreToolUse` records, giving "every fetched URL and byte count" in one sink instead
+of a second one to keep consistent. **Host/suffix allowlist**: already built and wired
+(`security.network_allowlist`, enforced by `permission.ContextualGate`'s existing network-allowlist
+rule for any `CapNetwork` tool, `web_fetch` included) — checked against the tree before writing anything
+new, per the batch's own standing caution.
+
+Not done: the ledger is not yet surfaced in the TUI/UI, only in the audit sink — a real gap against the
+finding's full ask, left as a smaller follow-up now that the sink exists to read it from.
+
+Tests: `internal/tool/builtin/web_test.go`'s `TestFetchToolRefusesURLCarryingASecretPattern` (asserts
+the refusal fires *before* any request reaches the server) and `TestFetchToolAllowsOrdinaryURL`;
+`internal/hooks/hooks_test.go`'s `TestAuditRecordsResultByteCount`.
+
+#### P81.1 — taint after untrusted content, shipped in part (FIND-01, the batch's one Critical)
+
+**Shipped: the containment rule itself.** `permission.ContextualGate` gained a third rule alongside
+`egress_then_write` and the network allowlist — `taint_after_untrusted_content`
+(`security.taint_after_untrusted_content`, **on by default**): once any tool result in a turn has
+carried the untrusted-content provenance marker (`internal/trust.Wrap` — web_fetch/web_search, MCP
+results, and every other channel that calls it), every subsequent write/execute/network call that turn
+requires approval regardless of mode, including `auto`, where nothing else in the stack prompts for
+anything. Detection reads `trust.IsWrapped(result)` — a new export keyed on the fixed sentence `Wrap`
+always emits, rather than enumerating tag names — from the same `result` string `PostToolUse` already
+receives, so no tool interface change was needed. `enginecfg.BuildGate` now constructs the contextual
+gate whenever this flag is set (previously only `egress_then_write`/`network_allowlist` triggered it).
+
+**Turn-scoped by construction, which sidesteps the compaction question the entry raised as unsolved.**
+`newEngine` calls `buildGate` fresh every turn — `ContextualGate.tainted`, like the pre-existing
+`networkUsed`, is a new instance's field, not session-durable state — so the taint flag never needs to
+survive compaction; it only needs to live for the turn it was set in, which is exactly what the entry
+asked for ("tainted for the remainder of the turn"). A session-wide version that *does* survive
+compaction, if ever wanted, is a separate, larger piece of work the roadmap entry flagged and this pass
+does not attempt.
+
+**Not shipped: promoting a heuristic scan hit to a decision point.** The entry's third bullet — ask
+*before* untrusted content enters context, not after — needs the tool layer (`web.go`, `internal/mcp`)
+to reach the permission/approval system directly, which today's clean separation (tools don't know
+about permission; the gate wraps them from outside) doesn't support. Left open; the roadmap entry
+records the remaining scope.
+
+Tests: `internal/permission/contextual_test.go` — blocking write/execute/network under `auto` mode
+after a wrapped result (the strongest case, since `auto` otherwise prompts for nothing at all),
+approval-granted, read-capability calls unaffected, an ordinary (unwrapped) result never taints, a
+failed tainting call doesn't taint, the config toggle disabling the rule, and `Reset()` clearing taint.
+
+#### P79.1 — Windows read-only-shell classifier: real-path exploitability, checked and closed (regression, PR #51)
+
+**The question this item was filed with — "is the classifier-level fix reachable through the real tool
+call, not just the two test files that call it directly" — is now answered: yes, and the escape is not
+exploitable.** `TestShellToolCapabilityForRejectsWindowsAbsolutePathEscapes`
+(`internal/tool/builtin/shell_readonly_test.go`) drives the four regression tests' exact command shapes
+(`Get-Content C:\Users\x\.ssh\id_rsa`, `-Path`/`-Path:` variants, `Get-ChildItem C:\Windows\System32`)
+through `shellTool.CapabilityFor` and `tool.EffectiveCapability` — the real
+`tool.CapabilityOverrider` seam `permission.Gate.Check` consults, not `classifyShellCommand` directly —
+and then through a full `permission.Gate` in plan mode with a deny-all approver. Every escape classifies
+as `CapExecute` (never downgraded to `CapRead`) and plan mode denies every one outright. Live-verified
+on a real Windows host (this machine), not skipped or mocked. Stays Tier 2, not promoted to Tier 1.
+
+### P82 and P83 shipped, 2026-08-31
+
+**Filed from an operator report, not the threat model.** Three symptoms — `--first-init` picked the
+smallest model on the machine, `think` stayed `false` under a qwen, and `small_model` went unset —
+turned out to be one defect (**P82**) with a much larger one hiding behind it (**P83**).
+
+**P82 — model selection.** Three places answered "which model" and none of them ranked anything:
+`--first-init` and `provider.model: "auto"` took `GET /api/tags`'s first entry — Ollama orders that
+**most-recently-modified**, so pulling a 3B for one experiment re-pinned the machine to it — and the
+`/config` wizard took `discover.Discover`'s first entry, which is alphabetical. `internal/modelpick`
+is now the single answer all three use: largest by parameter count that fits a memory ceiling, the
+ceiling from `provider.vram_budget_gb` when stated else 75% of detected system RAM, never from
+GPU/VRAM introspection on any platform (P17.5 stands). Tool capability is a **tiebreak, never a
+filter** — measured on the reporting machine, `aegis-qwen35-9b` advertises
+`capabilities: ["completion","vision"]` with no `tools` (a GGUF import loses the manifest claim while
+keeping the ability), so filtering on it would have rejected the best model on the machine in favour
+of the one with the fuller manifest, which is the reported bug arrived at from the other direction.
+`think` now reads Ollama's own `thinking` capability where the manifest reports one, falling back to
+a name/family heuristic that finally covers qwen3 (the old list held neither `qwen3` nor `reasoning`),
+with non-thinking variants of those families excluded so `qwen3-coder` isn't flipped on. `aegis doctor`
+and `--first-init` now share that one list instead of keeping two that disagreed.
+
+`/config` became a raspi-config-style menu in the same pass, since the linear wizard was the other
+half of the same complaint: it walked all five questions every time, started from an empty form
+rather than the file on disk (so pressing enter through re-wrote hand-tuned settings), and had no way
+to reach `small_model` at all. Each section now shows its current value, is entered and left
+independently, and nothing is written until save. `--init`'s project template was realigned to mirror
+the global template section-for-section, with the three keys a project scope cannot set
+(`server.addr`, `log_level`, `security.dast.allowed_targets`) absent and explained rather than
+silently missing.
+
+**P83 — the KV-cache formula was 4x wrong on hybrid-attention models.** Surfaced building
+`aegis models --calibrate`, which measures `provider.vram_budget_gb` instead of asking for it: it
+loads the model at a ladder of windows and reads Ollama's own placement verdict, so the binding
+constraint is discovered rather than predicted (P17.5 untouched — no GPU introspection; the authority
+consulted is the process actually doing the placing). The first live run reported a **38 GiB capacity
+for a 16 GB card**. `KVGeometry.BytesPerToken` computed `block_count x kv_heads x (k+v) x bytes`, and
+the first factor was not the block count: Qwen3.5 uses state-space attention in three layers of four,
+which hold a fixed per-sequence state and no per-token cache. Ollama had been reporting the period the
+whole time — `qwen35.full_attention_interval = 4` — and nothing read it. `KVLayers()` now computes
+`(33 blocks - 1 MTP block) / 4 = 8`, predicting 32.00 KiB/token against 32.66 measured, in place of 132.
+
+The blast radius was every consumer of that formula, measured on the reporting machine:
+
+| | before | after |
+|---|---|---|
+| solo window at a 14.5 GiB budget | 70,656 | **262,144** (the model's entire training context) |
+| debate seat, three seats co-resident | 29,184 | **37,888** |
+| derived model weights | 4.14 GiB | **5.63 GiB** |
+
+The weights row is why this survived so long: `WeightsBytes` derives weights as `size - KV(window)`,
+so an inflated KV term deflated the weights by the same amount and the *total* stayed plausible — two
+compensating errors. The one test that would have caught them, `TestBytesPerTokenMatchesTheMeasuredQwen35`,
+built its geometry by hand without `full_attention_interval` and asserted the formula against itself,
+under a name claiming it matched a measurement; it has been rewritten against the model_info Ollama
+really returns. The corrected weights agree with `--calibrate`'s independently-fitted intercept
+(5.617 GiB) to 0.2%; the old figure was 27% low.
+
+Also settled here: the single-model default the operator asked for already existed and was inert.
+`claimResidentSet` (P69.6/P72.3) plans seat windows for a debate's duration and restores the solo
+window on release, but the whole cycle gates on `vram_budget_gb`, which was unset — so the static
+`context_window: 16000` pin was the only thing holding the debate topology together, and it was
+capping every solo session to do it. The pin's own comment was half right in an instructive way: its
+*measured* figure (11.06 GiB at 16k) was correct, while its projection ("at 64000 the 9B's KV alone is
+~8 GiB") came from the broken formula — measured, the 9B at 65536 is 7.61 GiB resident in total.
+
+### P76.2 and P76.3 shipped, 2026-08-31
+
+Both had sat at the top of [Up next](roadmap.md#up-next) since 23 August; both turned out to be
+part-built already, the same pattern the P81 first wave found the same day — *read the tree before
+estimating the work.*
+
+**P76.2 — quit doesn't cancel a running interactive-terminal command.** Filed 2026-08-23 out of the
+`internal/tui` read-only audit: `Run()`'s doc comment claimed every quit path cancelled the in-flight
+request's context, true for the model-turn context but not for `m.termRun.cancel` — the context behind
+a command running in the interactive terminal pane. All three quit paths (`update_key.go`'s ctrl+c,
+`update_overlay.go`'s quit confirmation, `update_slash.go`'s `/quit`/`/exit`) already cancelled
+`m.termRun` by the time this was picked up — the fix went in incidentally during a later `internal/tui`
+sitting and the entry was never closed. What was actually missing is the part that keeps it true:
+nothing pinned it, so a fourth quit path added later would have re-opened the leak silently against a
+doc comment still promising otherwise. `TestQuitPathsCancelTheTerminalRun`
+(`internal/tui/quit_termrun_test.go`) now drives each of the three paths with a live `termRun` and
+asserts its context is cancelled; mutation-checked by deleting the cancel from `update_slash.go` and
+confirming the `/quit` case fails. No production code changed.
+
+**P76.3 — a hostile repo can plant its own security-scan baseline to hide its own findings.** Filed
+2026-08-23 out of the `internal/security` read-only audit: `applyBaseline` reads
+`.aegis/security-baseline.yaml` straight from the scan target directory with no workspace-trust gate,
+and `Report.Format()` surfaced every suppression as a bare count, never the identity of what was
+hidden — letting a hostile or untrusted repository pre-suppress a finding for a vulnerability it
+planted itself. Independently confirmed 2026-08-31 by the STRIDE-A threat model as **FIND-21**, citing
+this entry back. Both candidate directions the entry proposed turned out not to be exclusive:
+
+- The **disclosure half** was already in the tree (`Report.Format`): every suppressed finding prints
+  its severity, tool, title, location and rule ID, not just a count. That closed the sharper problem —
+  a baseline that can hide *what* it hid — and is now documented behaviour
+  ([docs/security_scan.md](../docs/security_scan.md)) rather than an undocumented side effect.
+- The **trust-gate half** is this sitting's code. `Report.applyBaseline` now asks
+  `config.WorkspaceTrusted` (through a `baselineTrustCheck` var, so tests pin both answers without
+  touching the real trust store) before any entry may suppress anything. Untrusted, nothing is hidden:
+  every entry lands in the new `Report.BaselineUntrusted` and the report prints
+  `Baseline IGNORED (scan target is not a trusted workspace)` followed by each skipped entry and the
+  remedy (`aegis trust`). Trusted, P11.8's accepted-risk workflow is unchanged.
+
+Deliberately a **refusal to apply**, not a downgrade of the file — the baseline is read and reported
+either way, so a hostile repo shipping one is now *louder* in the report than a repo shipping none,
+inverting the incentive the finding described. Tests: `internal/security/baseline_trust_test.go`
+(both sides of the gate, plus the no-baseline-file case, which must stay silent either way);
+`TestRunWithOptionsAppliesBaselineSuppression` and `TestScanRegressionAcrossRecordedOutputs` now pin
+the gate open with a comment saying why, since their fixtures stand in for an operator-authored
+baseline.
 
 ### Comprehensive architecture and security audit, remediated in full, 2026-08-30
 

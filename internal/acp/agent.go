@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 )
 
 // Backend is the subset of the daemon client the ACP agent needs. *client.Client
@@ -179,7 +180,7 @@ func (a *Agent) handleNewSession(ctx context.Context, params json.RawMessage) (a
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, errorf(codeInvalidParams, "invalid session/new params: %v", err)
 	}
-	meta, err := a.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: a.mode, Workdir: p.Cwd})
+	meta, err := a.backend.CreateSession(ctx, api.CreateSessionRequest{Mode: a.mode, Workdir: p.Cwd, Origin: reqorigin.ACP})
 	if err != nil {
 		return nil, errorf(codeInternalError, "create session: %v", err)
 	}
@@ -189,8 +190,10 @@ func (a *Agent) handleNewSession(ctx context.Context, params json.RawMessage) (a
 	return newSessionResult{SessionID: meta.ID}, nil
 }
 
-// checkBorrowedSessionMode enforces this agent's configured mode as a ceiling
-// on a session it did not create — the ACP half of P80.1 / FIND-21.
+// checkBorrowedSession enforces this agent's configured mode as a ceiling on
+// a session it did not create, and — since P81.14 gave sessions a durable
+// origin — refuses outright a session a different surface created. The ACP
+// half of P80.1 / FIND-21.
 //
 // session/prompt takes the client's sessionId verbatim, so an authenticated
 // editor client can post a turn into any session on the daemon, including an
@@ -202,10 +205,11 @@ func (a *Agent) handleNewSession(ctx context.Context, params json.RawMessage) (a
 // finding at a lower reach, not a separate one.
 //
 // It refuses rather than downgrading: the session belongs to someone else. A
-// session at or below the ceiling is untouched, so resuming a session across
-// an agent restart keeps working, and an id the daemon does not list is
+// session at or below the ceiling, created by an ACP surface (or predating
+// the origin column — Origin == ""), is untouched, so resuming a session
+// across an agent restart keeps working; an id the daemon does not list is
 // allowed through as unverifiable (PostMessageReq rejects a nonexistent one).
-func (a *Agent) checkBorrowedSessionMode(ctx context.Context, id string) *RPCError {
+func (a *Agent) checkBorrowedSession(ctx context.Context, id string) *RPCError {
 	a.mu.Lock()
 	_, own := a.created[id]
 	a.mu.Unlock()
@@ -214,12 +218,19 @@ func (a *Agent) checkBorrowedSessionMode(ctx context.Context, id string) *RPCErr
 	}
 	metas, err := a.backend.ListSessions(ctx)
 	if err != nil {
-		a.logger.Warn("acp: could not check a borrowed session's mode against the configured mode", "session", id, "err", err)
+		a.logger.Warn("acp: could not check a borrowed session against this agent's mode/origin", "session", id, "err", err)
 		return nil
 	}
 	for _, m := range metas {
 		if m.ID != id {
 			continue
+		}
+		if m.Origin != "" && m.Origin != reqorigin.ACP {
+			a.logger.Warn("acp: refusing a prompt into a session this agent did not create, created by a different surface",
+				"session", id, "session_origin", m.Origin)
+			return errorf(codeInvalidParams,
+				"session %s was not created by an ACP client and was not created by this agent; call session/new instead",
+				id)
 		}
 		if permModeRank(m.Mode) <= permModeRank(a.mode) {
 			return nil
@@ -268,7 +279,7 @@ func (a *Agent) handlePrompt(ctx context.Context, params json.RawMessage) (any, 
 		return nil, errorf(codeInvalidParams, "prompt is empty")
 	}
 
-	if rerr := a.checkBorrowedSessionMode(ctx, p.SessionID); rerr != nil {
+	if rerr := a.checkBorrowedSession(ctx, p.SessionID); rerr != nil {
 		return nil, rerr
 	}
 

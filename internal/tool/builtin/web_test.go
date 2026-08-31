@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fiddler110/aegis/internal/egress"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -45,6 +46,107 @@ func TestFetchToolWrapsUntrustedContent(t *testing.T) {
 	}
 	if !strings.HasSuffix(res.Content, "</web_untrusted_output>") {
 		t.Errorf("marker not closed: %q", res.Content)
+	}
+}
+
+// TestFetchToolRecordsEgress is P81.8's remaining TUI/UI-surfacing half: a
+// successful fetch must record its byte count into the run's egress.Tracker
+// (carried on ctx) so a consumer can display live egress without parsing the
+// audit sink's JSONL. A tracker absent from ctx must not panic — most callers
+// (tests, non-engine tool invocations) carry none.
+func TestFetchToolRecordsEgress(t *testing.T) {
+	const body = "hello from the web"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	orig := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = orig }()
+
+	ft := &fetchTool{userAgent: "test"}
+
+	// No tracker on ctx: must not panic.
+	if _, err := ft.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`"}`)); err != nil {
+		t.Fatalf("Execute with no tracker: %v", err)
+	}
+
+	tracker := egress.NewTracker()
+	ctx := tool.WithEgressTracker(context.Background(), tracker)
+	if _, err := ft.Execute(ctx, json.RawMessage(`{"url":"`+srv.URL+`"}`)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	snap := tracker.Snapshot()
+	if snap.TotalBytes != int64(len(body)) {
+		t.Errorf("TotalBytes = %d, want %d", snap.TotalBytes, len(body))
+	}
+	if snap.Fetches != 1 {
+		t.Errorf("Fetches = %d, want 1", snap.Fetches)
+	}
+
+	// A refused fetch (URL carries a credential pattern) must record nothing.
+	if _, err := ft.Execute(ctx, json.RawMessage(`{"url":"https://example.com/?token=sk-1234567890abcdef1234567890abcdef"}`)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := tracker.Snapshot().Fetches; got != 1 {
+		t.Errorf("Fetches after refused fetch = %d, want still 1", got)
+	}
+}
+
+// TestFetchToolRefusesURLCarryingASecretPattern is P81.8/FIND-08: the model
+// chooses the fetch URL, so an injected instruction could try to exfiltrate a
+// credential the agent has read by encoding it into the path or query string
+// of a request to an otherwise-legitimate public host. internal/netblock only
+// validates the destination is not private/internal — it never inspects what
+// is actually being sent — so nothing previously stopped this. The refusal
+// must fire before any network call is made.
+func TestFetchToolRefusesURLCarryingASecretPattern(t *testing.T) {
+	var called bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Write([]byte("should never be reached"))
+	}))
+	defer srv.Close()
+	orig := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = orig }()
+
+	ft := &fetchTool{userAgent: "test"}
+	token := "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	res, err := ft.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`/exfil?data=`+token+`"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected a refusal, got a normal result: %+v", res)
+	}
+	if !strings.Contains(res.Content, "GitHub token") {
+		t.Errorf("refusal does not name the matched class: %q", res.Content)
+	}
+	if called {
+		t.Error("the request reached the server — the refusal must happen before any network call")
+	}
+}
+
+// A URL with nothing secret-shaped in it is unaffected by the P81.8 check.
+func TestFetchToolAllowsOrdinaryURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ordinary content"))
+	}))
+	defer srv.Close()
+	orig := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = orig }()
+
+	ft := &fetchTool{userAgent: "test"}
+	res, err := ft.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`/page?q=weather"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.IsError {
+		t.Errorf("an ordinary URL should not be refused: %q", res.Content)
 	}
 }
 

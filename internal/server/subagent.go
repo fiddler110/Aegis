@@ -131,6 +131,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 			Adapter:   s.modelAdapter(spawnWin),
 			Tools:     s.subAgentToolRegistry(cfg.ParentSessionID),
 			Gate:      gate,
+			Approver:  s.approver(),             // P81.1: same approver buildGate above just used
 			Purpose:   provider.PurposeSubAgent, // P67.3
 			Compactor: s.compactor,
 			// A spawn had a Compactor but no window to measure against

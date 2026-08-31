@@ -100,6 +100,7 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.thinkEntries = nil
 	m.tools = m.tools[:0]
 	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
+	m.egressBytes = 0
 	m.displayedInputTokens, m.displayedOutputTokens = 0, 0
 	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
 	m.tokensEstimated = false

@@ -11,6 +11,7 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/spf13/cobra"
 )
 
@@ -112,7 +113,7 @@ type parallelResult struct {
 // stream, answering approval prompts and reporting progress.
 func runOneParallel(ctx context.Context, cl *client.Client, idx int, prompt, mode string, autoApprove bool, logf func(string, ...any)) (res parallelResult) {
 	res.idx = idx
-	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: mode})
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: mode, Origin: reqorigin.CLI})
 	if err != nil {
 		res.err = err
 		return

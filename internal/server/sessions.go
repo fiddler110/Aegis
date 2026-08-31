@@ -20,6 +20,7 @@ import (
 	"github.com/fiddler110/aegis/internal/memory"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
 )
@@ -109,7 +110,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if system == "" {
 		system = p.System
 	}
-	sess, err := s.store.Create(r.Context(), req.Title, system, mode, req.Persona, workdir)
+	origin := reqorigin.Normalize(req.Origin)
+	sess, err := s.store.Create(r.Context(), req.Title, system, mode, req.Persona, workdir, origin)
 	if err != nil {
 		s.logger.Error("create session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -127,7 +129,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("failed to materialize built-in skills into project", "workdir", effWorkdir, "err", err)
 		}
 	}
-	writeJSON(w, http.StatusCreated, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, Workdir: sess.Workdir, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
+	writeJSON(w, http.StatusCreated, toMeta(session.Meta{ID: sess.ID, Title: sess.Title, Mode: sess.Mode, Workdir: sess.Workdir, Origin: sess.Origin, CreatedAt: sess.CreatedAt, UpdatedAt: sess.UpdatedAt}))
 }
 
 // workdirError pairs an HTTP status with a message for a rejected session
@@ -728,7 +730,7 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	title := forkTitle(sess.Title)
-	forked, err := s.store.Create(r.Context(), title, sess.System, sess.Mode, sess.Persona, sess.Workdir)
+	forked, err := s.store.Create(r.Context(), title, sess.System, sess.Mode, sess.Persona, sess.Workdir, sess.Origin)
 	if err != nil {
 		s.logger.Error("fork: create session", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -933,6 +935,7 @@ func toMeta(m session.Meta) api.SessionMeta {
 		Model:        m.Model,
 		Background:   m.Background,
 		Archived:     m.Archived,
+		Origin:       m.Origin,
 		ArchivedAt:   m.ArchivedAt,
 		InputTokens:  m.InputTokens,
 		OutputTokens: m.OutputTokens,
