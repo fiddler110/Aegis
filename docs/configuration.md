@@ -756,9 +756,11 @@ server:
   addr: "127.0.0.1:4127"
 
   # Must be set to bind `addr` to a non-loopback address (e.g. "0.0.0.0:4127"
-  # to reach the daemon from another machine). The API is protected only by a
-  # bearer token with no rate limiting, so the daemon refuses to start on a
-  # non-loopback address until this is explicitly acknowledged (FIND-08).
+  # to reach the daemon from another machine). The API is protected only by
+  # daemon.token (or, for a browser, the revocable session credential
+  # POST /auth/exchange trades it for — P81.4/FIND-04) with no rate limiting,
+  # so the daemon refuses to start on a non-loopback address until this is
+  # explicitly acknowledged (FIND-08).
   allow_remote: false
 
   # PATCH /config/sandbox, /config/security, /config/skills and /config/cost
@@ -770,9 +772,11 @@ server:
   # and requires it (via the X-Aegis-Admin-Token header) on those endpoints
   # only — every other route is unaffected. `aegis`'s CLI commands read it
   # the same way they read daemon.token, from disk, so an operator using the
-  # CLI notices nothing; a caller that holds only daemon.token (a browser
-  # session via the web UI's page-token exchange, an MCP client, a script
-  # that copied just the one file) gets a 403 naming the missing header.
+  # CLI notices nothing; a caller that lacks it (an MCP client, a script that
+  # copied just daemon.token, or a web UI browser session — which since
+  # P81.4/FIND-04 never holds daemon.token at all, only its own revocable
+  # session credential from POST /auth/exchange) gets a 403 naming the
+  # missing header.
 
   # Bounds which directories a client may request as a session's working
   # directory (P25.1) once allow_remote is set: the resolved path must be
@@ -785,7 +789,8 @@ server:
 
   # Transport encryption for client<->daemon traffic (FIND-32/P24.18). On by
   # default since P27.5/FIND-13: without it, client<->daemon HTTP is
-  # plaintext, including the bearer token and full conversation content —
+  # plaintext, including daemon.token (or a browser's session cookie/CSRF
+  # nonce, P81.4/FIND-04) and full conversation content —
   # fine against off-host attackers given the loopback-only default above,
   # but observable by another local account on a shared host with
   # packet-capture privilege. Set enabled: false (or AEGIS_SERVER_TLS_ENABLED

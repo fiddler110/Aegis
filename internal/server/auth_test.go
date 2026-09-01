@@ -505,3 +505,238 @@ func TestPageTokenCapEngagementIsLogged(t *testing.T) {
 		t.Errorf("cap warn does not name the remote address, got: %s", logged)
 	}
 }
+
+// TestBrowserSessionNeverCarriesTheRealToken is the core P81.4/FIND-04
+// regression: the browser must never receive s.authToken. It gets a
+// revocable, expiring session credential instead.
+func TestBrowserSessionNeverCarriesTheRealToken(t *testing.T) {
+	srv, _, _ := newLoggingAuthTestServer(t)
+
+	id, csrf, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == srv.authToken || csrf == srv.authToken {
+		t.Fatal("minted browser session equals the real daemon token")
+	}
+	if !srv.validateAndTouchBrowserSession(id, csrf) {
+		t.Fatal("a freshly minted session must validate")
+	}
+}
+
+// TestBrowserSessionRejectsWrongCSRFOrUnknownID covers the two ways a
+// browser-session credential can fail to authenticate: a session id that was
+// never minted, and a known id presented with the wrong CSRF nonce (the
+// value that never leaves the HttpOnly cookie, so a page that can only guess
+// it must be rejected).
+func TestBrowserSessionRejectsWrongCSRFOrUnknownID(t *testing.T) {
+	srv, _, _ := newLoggingAuthTestServer(t)
+
+	if srv.validateAndTouchBrowserSession("never-minted", "whatever") {
+		t.Error("an unknown session id validated")
+	}
+
+	id, csrf, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.validateAndTouchBrowserSession(id, "wrong-nonce") {
+		t.Error("a session validated with the wrong CSRF nonce")
+	}
+	// The correct pair still works afterward — a failed guess must not have
+	// consumed or corrupted the entry.
+	if !srv.validateAndTouchBrowserSession(id, csrf) {
+		t.Error("the correct CSRF pair failed to validate after a wrong guess")
+	}
+}
+
+// TestBrowserSessionExpires covers both the idle sliding window and the
+// absolute cap: an entry past its expiry is rejected and removed, and the
+// sliding window can never be pushed past mintedAt+browserSessionMaxTTL.
+func TestBrowserSessionExpires(t *testing.T) {
+	srv, _, _ := newLoggingAuthTestServer(t)
+
+	id, csrf, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.browserSessionMu.Lock()
+	entry := srv.browserSessions[id]
+	entry.expiry = time.Now().Add(-time.Second)
+	srv.browserSessions[id] = entry
+	srv.browserSessionMu.Unlock()
+
+	if srv.validateAndTouchBrowserSession(id, csrf) {
+		t.Fatal("an expired session validated")
+	}
+	srv.browserSessionMu.Lock()
+	_, stillThere := srv.browserSessions[id]
+	srv.browserSessionMu.Unlock()
+	if stillThere {
+		t.Error("an expired session survived a failed validation attempt")
+	}
+
+	// The absolute cap: even continuous use cannot slide expiry past
+	// mintedAt+browserSessionMaxTTL.
+	id2, csrf2, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.browserSessionMu.Lock()
+	entry2 := srv.browserSessions[id2]
+	entry2.mintedAt = time.Now().Add(-browserSessionMaxTTL + time.Minute)
+	entry2.expiry = time.Now().Add(time.Hour)
+	srv.browserSessions[id2] = entry2
+	srv.browserSessionMu.Unlock()
+
+	if !srv.validateAndTouchBrowserSession(id2, csrf2) {
+		t.Fatal("a session inside its max TTL failed to validate")
+	}
+	srv.browserSessionMu.Lock()
+	gotExpiry := srv.browserSessions[id2].expiry
+	wantCeiling := entry2.mintedAt.Add(browserSessionMaxTTL)
+	srv.browserSessionMu.Unlock()
+	if gotExpiry.After(wantCeiling.Add(time.Second)) {
+		t.Errorf("expiry slid past the absolute cap: got %v, cap %v", gotExpiry, wantCeiling)
+	}
+}
+
+// TestBrowserSessionRevoke covers the "revocable" half of P81.4: a session
+// deleted via revokeBrowserSession must stop validating, and
+// revokeAllBrowserSessions must clear every outstanding one (the hook a
+// future daemon.token rotation, P81.25, is expected to call).
+func TestBrowserSessionRevoke(t *testing.T) {
+	srv, _, _ := newLoggingAuthTestServer(t)
+
+	id, csrf, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.revokeBrowserSession(id)
+	if srv.validateAndTouchBrowserSession(id, csrf) {
+		t.Fatal("a revoked session still validated")
+	}
+
+	id2, csrf2, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id3, csrf3, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.revokeAllBrowserSessions()
+	if srv.validateAndTouchBrowserSession(id2, csrf2) || srv.validateAndTouchBrowserSession(id3, csrf3) {
+		t.Fatal("a session survived revokeAllBrowserSessions")
+	}
+}
+
+// TestBrowserSessionCapEngages mirrors TestPageTokenCapEngagementIsLogged for
+// the browser-session store: a flood of outstanding sessions is refused, not
+// silently evicted, so a flood cannot invalidate another tab's live session.
+func TestBrowserSessionCapEngages(t *testing.T) {
+	srv, _, logBuf := newLoggingAuthTestServer(t)
+
+	srv.browserSessionMu.Lock()
+	srv.browserSessions = make(map[string]browserSessionEntry, maxBrowserSessions)
+	for i := range maxBrowserSessions {
+		srv.browserSessions[strconv.Itoa(i)] = browserSessionEntry{
+			csrf: "x", mintedAt: time.Now(), expiry: time.Now().Add(browserSessionIdleTTL),
+		}
+	}
+	srv.browserSessionMu.Unlock()
+
+	if _, _, err := srv.mintBrowserSession("192.168.9.9:1"); !errors.Is(err, errTooManyBrowserSessions) {
+		t.Fatalf("mint past the cap returned %v, want errTooManyBrowserSessions", err)
+	}
+	if !strings.Contains(logBuf.String(), "browser-session cap reached") {
+		t.Errorf("no warn line when the browser-session cap engaged, got: %s", logBuf.String())
+	}
+}
+
+// TestAuthMiddlewareAcceptsBrowserSession is the end-to-end regression for
+// P81.4: a request with no Authorization header at all, only the session
+// cookie and its CSRF header, must reach a protected endpoint — and the
+// CSRF header alone (session id withheld, as a hostile page unable to read
+// the HttpOnly cookie would be limited to) must not.
+func TestAuthMiddlewareAcceptsBrowserSession(t *testing.T) {
+	srv, ts := newAuthTestServer(t)
+
+	id, csrf, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/sessions", nil)
+	req.AddCookie(&http.Cookie{Name: browserSessionCookieName, Value: id})
+	req.Header.Set(browserSessionCSRFHeaderName, csrf)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("session cookie + matching CSRF header = %d, want 200", resp.StatusCode)
+	}
+
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/sessions", nil)
+	req2.Header.Set(browserSessionCSRFHeaderName, csrf)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("CSRF header without the session cookie = %d, want 401", resp2.StatusCode)
+	}
+}
+
+// TestAuthLogoutRevokesSessionAndClearsCookie covers POST /auth/logout: it
+// must require a valid credential to reach at all (it is not exempted from
+// authMiddleware), and once reached must both invalidate the session server-
+// side and clear the cookie in the response.
+func TestAuthLogoutRevokesSessionAndClearsCookie(t *testing.T) {
+	srv, ts := newAuthTestServer(t)
+
+	// Unauthenticated: no credential at all.
+	resp, err := http.Post(ts.URL+"/auth/logout", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated logout = %d, want 401", resp.StatusCode)
+	}
+
+	id, csrf, err := srv.mintBrowserSession("127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: browserSessionCookieName, Value: id})
+	req.Header.Set(browserSessionCSRFHeaderName, csrf)
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusNoContent {
+		t.Fatalf("authenticated logout status = %d, want 204", r.StatusCode)
+	}
+	cleared := false
+	for _, c := range r.Cookies() {
+		if c.Name == browserSessionCookieName {
+			cleared = true
+			if c.MaxAge >= 0 {
+				t.Errorf("logout cookie MaxAge = %d, want negative (delete)", c.MaxAge)
+			}
+		}
+	}
+	if !cleared {
+		t.Error("logout response did not clear the aegis_session cookie")
+	}
+
+	if srv.validateAndTouchBrowserSession(id, csrf) {
+		t.Error("session still validates after logout")
+	}
+}

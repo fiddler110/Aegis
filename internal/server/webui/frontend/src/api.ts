@@ -1,11 +1,17 @@
 import type { Event } from "./types";
 
-// authToken holds the real daemon auth token, set once by exchangeToken().
-// It never comes from the page itself: the HTML shell only carries a
-// short-lived, single-use page token (data-page-token), traded in for this
-// one via POST /auth/exchange so a leaked page source can't be replayed as
-// a standing credential (P15.12).
-let authToken = "";
+// sessionCSRF is the nonce POST /auth/exchange returns for the browser
+// session it establishes (P81.4). The session id itself never reaches this
+// script: it lives only in the HttpOnly aegis_session cookie the browser
+// attaches automatically, so a script-execution bug here can drive API calls
+// but can't exfiltrate a replayable credential. This value must accompany
+// every call as X-Aegis-Session-CSRF, proving the request came from this
+// same-origin page (see browserSessionCSRFHeaderName's doc comment in
+// internal/server/auth.go). The page itself only ever carries the short-lived,
+// single-use page token (data-page-token) traded in for this via
+// POST /auth/exchange, so a leaked page source can't be replayed as a
+// standing credential (P15.12).
+let sessionCSRF = "";
 
 function pageToken(): string {
   return document.getElementById("root")?.dataset.pageToken ?? "";
@@ -33,15 +39,18 @@ export async function exchangeToken(): Promise<void> {
     },
   });
   if (!r.ok) throw new Error((await r.text()) || String(r.status));
-  const body = (await r.json()) as { token: string };
-  authToken = body.token;
+  const body = (await r.json()) as { csrf: string };
+  sessionCSRF = body.csrf;
 }
 
 export async function api(path: string, opts: RequestInit = {}): Promise<Response> {
   const r = await fetch(path, {
     ...opts,
+    // credentials default to "same-origin" for a same-origin URL like these,
+    // which is what carries the HttpOnly aegis_session cookie automatically;
+    // no explicit `credentials` option is needed.
     headers: {
-      Authorization: "Bearer " + authToken,
+      "X-Aegis-Session-CSRF": sessionCSRF,
       ...(opts.headers as Record<string, string> | undefined),
     },
   });

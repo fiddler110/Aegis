@@ -210,6 +210,18 @@ type Server struct {
 	mintLimitMu  sync.Mutex
 	mintLimiters map[string]*mintLimiter
 
+	// browserSessions holds the P81.4/FIND-04 credential minted by
+	// POST /auth/exchange in place of the real daemon token: a random id
+	// (set as the HttpOnly aegis_session cookie) mapped to a CSRF nonce and
+	// expiry (see browserSessionEntry, mintBrowserSession/
+	// validateAndTouchBrowserSession/revokeBrowserSession in auth.go). Server-
+	// side state — rather than a self-contained signed cookie — is the point:
+	// it is what makes the credential revocable at all, individually via
+	// POST /auth/logout and wholesale via revokeAllBrowserSessions (for a
+	// future token-rotation hook, P81.25).
+	browserSessionMu sync.Mutex
+	browserSessions  map[string]browserSessionEntry
+
 	// sandboxFallback and sandboxFallbackReason record whether the configured
 	// sandbox backend failed to initialize and the daemon fell back to
 	// unsandboxed local execution (P7.4). Surfaced via the authenticated

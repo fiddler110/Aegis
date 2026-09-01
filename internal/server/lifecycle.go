@@ -82,6 +82,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /ui/", s.handleWebUI)
 	mux.HandleFunc("GET /ui/assets/", s.handleWebUIAssets)
 	mux.HandleFunc("POST /auth/exchange", s.handleAuthExchange)
+	// Not exempted from authMiddleware: a caller must already present a valid
+	// credential (bearer token or browser session) to log out of it, so
+	// nothing here is reachable without first being authenticated (P81.4).
+	mux.HandleFunc("POST /auth/logout", s.handleAuthLogout)
 	return s.authMiddleware(s.originMiddleware(mux))
 }
 

@@ -41,10 +41,11 @@ func generateAndWriteToken(path string) (string, error) {
 	return token, nil
 }
 
-// authMiddleware checks for a valid Bearer token on all requests except
-// /healthz. Requests without a valid token receive 401, or 429 while a
+// authMiddleware checks for a valid Bearer token, or (P81.4/FIND-04) a valid
+// browser session cookie plus its matching CSRF header, on all requests
+// except /healthz. Requests without either receive 401, or 429 while a
 // P27.12/FIND-14 lockout window is active (see registerAuthFailure). A
-// request carrying the correct token is served throughout the window.
+// request carrying a correct credential is served throughout the window.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /healthz is public; the web UI page itself is served without a token
@@ -87,6 +88,23 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		valid := hasPrefix && subtle.ConstantTimeCompare([]byte(provided), []byte(s.authToken)) == 1
 
+		// P81.4/FIND-04: a browser holds no bearer token at all after this
+		// change — it authenticates with the HttpOnly aegis_session cookie
+		// POST /auth/exchange set, plus the CSRF nonce it returned in the
+		// response body (see browserSessionCSRFHeaderName's doc comment for
+		// why a cross-origin caller can't reconstruct this pair). Tried only
+		// when the bearer check already failed, so a valid daemon token (the
+		// CLI, a script, any non-browser caller) is unaffected.
+		hasSessionCookie := false
+		if !valid {
+			if cookie, err := r.Cookie(browserSessionCookieName); err == nil && cookie.Value != "" {
+				hasSessionCookie = true
+				if s.validateAndTouchBrowserSession(cookie.Value, r.Header.Get(browserSessionCSRFHeaderName)) {
+					valid = true
+				}
+			}
+		}
+
 		if !valid {
 			if remaining, locked := s.authLockoutRemaining(); locked {
 				writeError(w, http.StatusTooManyRequests, fmt.Sprintf(
@@ -94,7 +112,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			s.recordInvalidAuthAttempt(r)
-			if !hasPrefix {
+			if !hasPrefix && !hasSessionCookie {
 				writeError(w, http.StatusUnauthorized, "missing authorization")
 				return
 			}
@@ -549,15 +567,208 @@ func (s *Server) exchangePageToken(token, csrf string) bool {
 	return csrf != "" && subtle.ConstantTimeCompare([]byte(csrf), []byte(entry.csrf)) == 1
 }
 
+// browserSessionCookieName carries the P81.4/FIND-04 browser session id: a
+// random value naming an entry in Server.browserSessions, set HttpOnly so no
+// page script can ever read it. browserSessionCSRFHeaderName is the nonce
+// bound to that entry at mint time — returned once in the /auth/exchange
+// JSON body (never as a cookie, since the frontend must hold it in memory to
+// send back) and required on every subsequent authenticated request. Two
+// browsers requesting cross-origin cannot forge this pair: SameSite=Strict
+// keeps the cookie from riding along on a cross-site request in the first
+// place, and even if it somehow did, a custom header on a cross-origin fetch
+// forces a CORS preflight this server never approves (see
+// uiCSRFCookieName's doc comment for the fuller version of this reasoning,
+// which applies here identically).
+const (
+	browserSessionCookieName     = "aegis_session"
+	browserSessionCSRFHeaderName = "X-Aegis-Session-CSRF"
+)
+
+// browserSessionIdleTTL/browserSessionMaxTTL bound a browser session's
+// lifetime: each successful use slides the expiry forward by
+// browserSessionIdleTTL (so an active browser tab is never logged out mid-
+// use), but never past mintedAt+browserSessionMaxTTL — an absolute cap so a
+// session left continuously in use still eventually forces a fresh /ui load
+// (and therefore a fresh page-token exchange) rather than living forever,
+// which is the FIND-04 property the real daemon token lacked. A session past
+// either bound requires reloading the page to mint a new one.
+const (
+	browserSessionIdleTTL = 24 * time.Hour
+	browserSessionMaxTTL  = 7 * 24 * time.Hour
+	maxBrowserSessions    = 256
+)
+
+// browserSessionEntry records one minted browser session: the CSRF nonce
+// bound to it at mint time, when it was minted (the anchor for
+// browserSessionMaxTTL), and its current sliding expiry.
+type browserSessionEntry struct {
+	csrf     string
+	mintedAt time.Time
+	expiry   time.Time
+}
+
+// errTooManyBrowserSessions is returned by mintBrowserSession when
+// maxBrowserSessions unexpired sessions are already outstanding. Mirrors
+// errTooManyPageTokens: refusing rather than evicting means a flood cannot
+// invalidate another tab's still-active session.
+var errTooManyBrowserSessions = errors.New("too many outstanding browser sessions; retry shortly")
+
+// mintBrowserSession creates a new browser session entry and returns its id
+// (for the HttpOnly cookie) and CSRF nonce (for the JSON response body the
+// frontend holds in memory). Called by handleAuthExchange once the page-
+// token/CSRF checks it guards have already passed.
+func (s *Server) mintBrowserSession(remoteAddr string) (id, csrf string, err error) {
+	var idBuf [32]byte
+	if _, err := rand.Read(idBuf[:]); err != nil {
+		return "", "", err
+	}
+	id = hex.EncodeToString(idBuf[:])
+	var csrfBuf [32]byte
+	if _, err := rand.Read(csrfBuf[:]); err != nil {
+		return "", "", err
+	}
+	csrf = hex.EncodeToString(csrfBuf[:])
+
+	s.browserSessionMu.Lock()
+	defer s.browserSessionMu.Unlock()
+	if s.browserSessions == nil {
+		s.browserSessions = make(map[string]browserSessionEntry)
+	}
+	now := time.Now()
+	for k, e := range s.browserSessions {
+		if now.After(e.expiry) {
+			delete(s.browserSessions, k)
+		}
+	}
+	if len(s.browserSessions) >= maxBrowserSessions {
+		s.logger.Warn("browser-session cap reached; /auth/exchange is being refused",
+			"remote_addr", remoteAddr,
+			"outstanding", len(s.browserSessions),
+			"cap", maxBrowserSessions,
+		)
+		return "", "", errTooManyBrowserSessions
+	}
+	s.browserSessions[id] = browserSessionEntry{csrf: csrf, mintedAt: now, expiry: now.Add(browserSessionIdleTTL)}
+	// Operator-visible notice (P81.4's "track the residual mint path"
+	// concern): a real browser mints one of these per /ui page load, so this
+	// line is the one place an operator watching the log sees exactly when
+	// and from where a new standing browser credential came into existence.
+	s.logger.Info("browser session minted", "remote_addr", remoteAddr)
+	return id, csrf, nil
+}
+
+// validateAndTouchBrowserSession reports whether id names a live,
+// unexpired browser session whose stored CSRF nonce matches csrf, and — if
+// so — slides its expiry forward (capped at mintedAt+browserSessionMaxTTL).
+// An expired entry is deleted opportunistically rather than left for a sweep
+// elsewhere, since a validation attempt is the only place besides mint that
+// ever reads this map.
+func (s *Server) validateAndTouchBrowserSession(id, csrf string) bool {
+	if id == "" || csrf == "" {
+		return false
+	}
+	s.browserSessionMu.Lock()
+	defer s.browserSessionMu.Unlock()
+	entry, ok := s.browserSessions[id]
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	if now.After(entry.expiry) {
+		delete(s.browserSessions, id)
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(csrf), []byte(entry.csrf)) != 1 {
+		return false
+	}
+	next := now.Add(browserSessionIdleTTL)
+	if hardCap := entry.mintedAt.Add(browserSessionMaxTTL); next.After(hardCap) {
+		next = hardCap
+	}
+	entry.expiry = next
+	s.browserSessions[id] = entry
+	return true
+}
+
+// revokeBrowserSession deletes one browser session, e.g. on explicit logout.
+// A caller who no longer holds the id (it never leaves the HttpOnly cookie)
+// cannot revoke a session by guessing; handleAuthLogout only ever revokes the
+// id the request's own cookie carries.
+func (s *Server) revokeBrowserSession(id string) {
+	if id == "" {
+		return
+	}
+	s.browserSessionMu.Lock()
+	delete(s.browserSessions, id)
+	s.browserSessionMu.Unlock()
+}
+
+// revokeAllBrowserSessions clears every outstanding browser session. Not
+// wired to anything yet — daemon.token has no rotation path today (P81.25 is
+// open) — but exists so that whenever one lands, invalidating every
+// browser's standing credential is a one-line call rather than new plumbing.
+func (s *Server) revokeAllBrowserSessions() {
+	s.browserSessionMu.Lock()
+	s.browserSessions = make(map[string]browserSessionEntry)
+	s.browserSessionMu.Unlock()
+}
+
+// browserSessionCookieSecure mirrors the Secure-flag logic webui.go uses for
+// the CSRF cookie: Secure only when the request arrived over TLS, or —
+// deliberately only when the operator opted into TrustProxyHeaders — via a
+// reverse proxy's X-Forwarded-Proto. Kept as its own function so both cookie
+// sites (handleAuthExchange here, and the CSRF cookie in webui.go) can't
+// silently drift apart.
+func (s *Server) browserSessionCookieSecure(r *http.Request) bool {
+	return r.TLS != nil || (s.cfg.Server.TrustProxyHeaders && r.Header.Get("X-Forwarded-Proto") == "https")
+}
+
+// handleAuthLogout revokes the caller's own browser session (identified by
+// the aegis_session cookie the request already carries — authMiddleware has
+// validated it before this handler ever runs) and clears the cookie. It is a
+// deliberately small piece of the P81.4/FIND-04 "revocable" requirement: an
+// operator (or a compromised-tab's own cleanup) can end one browser session
+// without waiting on daemon.token rotation (P81.25). A non-browser caller
+// authenticating with the real bearer token instead has no session cookie to
+// revoke, so this is a no-op for it beyond clearing an absent cookie.
+func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(browserSessionCookieName); err == nil {
+		s.revokeBrowserSession(cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     browserSessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   s.browserSessionCookieSecure(r),
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleAuthExchange trades a single-use page token (minted by GET /ui, sent
 // here as a Bearer token since the frontend has no other credential yet) for
-// the real daemon auth token used on every subsequent request. The page
-// token is invalidated whether or not the exchange succeeds, so it can be
-// redeemed at most once. The request must also present the double-submit
+// a browser session credential (P81.4/FIND-04) — never the real, long-lived
+// daemon token. It mints a browser session (mintBrowserSession) and returns
+// it as an HttpOnly aegis_session cookie plus a CSRF nonce in the JSON body,
+// which the frontend then attaches as X-Aegis-Session-CSRF on every
+// subsequent call; see authMiddleware for how that pair authenticates. The
+// page token is invalidated whether or not the exchange succeeds, so it can
+// be redeemed at most once. The request must also present the double-submit
 // CSRF nonce minted alongside the page token — both via the HttpOnly cookie
 // GET /ui set and via an explicit header only same-origin JS could have
 // constructed — see uiCSRFCookieName's doc comment for why this binds the
 // exchange to the browser that actually loaded the page.
+//
+// Before this, the response body carried s.authToken itself: the real
+// bearer credential, good for the daemon's entire process lifetime, held
+// thereafter in SPA memory where any script-execution defect in the SPA, any
+// compromised dependency in its bundle (P81.17), or any browser extension
+// with host permissions on 127.0.0.1 could read and replay it indefinitely.
+// A browser session is scoped, expires (browserSessionIdleTTL/
+// browserSessionMaxTTL), and is individually revocable (handleAuthLogout)
+// without touching daemon.token at all.
 //
 // Every rejection here is logged through logInvalidAuthAttempt (P63.5).
 // authMiddleware exempts this path — it has to, since the frontend holds only
@@ -593,7 +804,26 @@ func (s *Server) handleAuthExchange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid or expired page token")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": s.authToken})
+	sessionID, sessionCSRF, err := s.mintBrowserSession(r.RemoteAddr)
+	if err != nil {
+		if errors.Is(err, errTooManyBrowserSessions) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "too many browser sessions outstanding; retry shortly")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to establish a browser session")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     browserSessionCookieName,
+		Value:    sessionID,
+		Path:     "/",
+		MaxAge:   int(browserSessionIdleTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   s.browserSessionCookieSecure(r),
+		SameSite: http.SameSiteStrictMode,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"csrf": sessionCSRF})
 }
 
 func isLoopbackOrigin(origin string) bool {

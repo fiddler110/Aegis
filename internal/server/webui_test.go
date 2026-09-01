@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -102,9 +103,12 @@ func TestWebUIServedAndTokenInjected(t *testing.T) {
 		t.Errorf("GET /sessions without token = %d, want 401", r2.StatusCode)
 	}
 
-	// The page token exchanges for the real token exactly once. The jar
-	// attaches the aegis_ui_csrf cookie GET /ui set automatically; the
-	// explicit header simulates what the frontend's JS reads out of the DOM.
+	// The page token exchanges for a browser session exactly once (P81.4):
+	// the response no longer carries the real daemon token, only a CSRF
+	// nonce, while the session id itself arrives as an HttpOnly cookie the
+	// jar captures automatically. The jar attaches the aegis_ui_csrf cookie
+	// GET /ui set automatically; the explicit header simulates what the
+	// frontend's JS reads out of the DOM.
 	exchange := func() (int, string) {
 		req, err := http.NewRequest(http.MethodPost, ts.URL+"/auth/exchange", nil)
 		if err != nil {
@@ -118,18 +122,31 @@ func TestWebUIServedAndTokenInjected(t *testing.T) {
 		}
 		defer r.Body.Close()
 		var out struct {
+			CSRF  string `json:"csrf"`
 			Token string `json:"token"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&out)
-		return r.StatusCode, out.Token
+		if out.Token != "" {
+			t.Error("exchange response carried the real daemon token; it must only ever carry a session CSRF nonce (P81.4)")
+		}
+		return r.StatusCode, out.CSRF
 	}
 
-	status, token := exchange()
+	status, sessionCSRF := exchange()
 	if status != http.StatusOK {
 		t.Fatalf("first exchange status = %d, want 200", status)
 	}
-	if token != "secret-token" {
-		t.Errorf("exchange returned token %q, want the real auth token", token)
+	if sessionCSRF == "" {
+		t.Fatal("exchange returned no session CSRF nonce")
+	}
+	foundSessionCookie := false
+	for _, c := range jar.Cookies(mustParseURL(t, ts.URL)) {
+		if c.Name == browserSessionCookieName {
+			foundSessionCookie = true
+		}
+	}
+	if !foundSessionCookie {
+		t.Fatal("exchange did not set the aegis_session cookie")
 	}
 
 	status, _ = exchange()
@@ -137,17 +154,42 @@ func TestWebUIServedAndTokenInjected(t *testing.T) {
 		t.Errorf("replayed exchange status = %d, want 401 (single-use)", status)
 	}
 
-	// The real token from the exchange now works on a protected endpoint.
+	// The browser session from the exchange now works on a protected
+	// endpoint via the jar's cookie plus the session CSRF header — no bearer
+	// token involved.
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/sessions", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	r3, err := http.DefaultClient.Do(req)
+	req.Header.Set(browserSessionCSRFHeaderName, sessionCSRF)
+	r3, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r3.Body.Close()
 	if r3.StatusCode != http.StatusOK {
-		t.Errorf("GET /sessions with exchanged token = %d, want 200", r3.StatusCode)
+		t.Errorf("GET /sessions with exchanged session = %d, want 200", r3.StatusCode)
 	}
+
+	// The session id never left the HttpOnly cookie for this script to
+	// replay elsewhere, so a bare client with the CSRF nonce alone (no
+	// cookie jar carrying the session id) must still be rejected.
+	req4, _ := http.NewRequest(http.MethodGet, ts.URL+"/sessions", nil)
+	req4.Header.Set(browserSessionCSRFHeaderName, sessionCSRF)
+	r4, err := http.DefaultClient.Do(req4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r4.Body.Close()
+	if r4.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /sessions with CSRF nonce but no session cookie = %d, want 401", r4.StatusCode)
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }
 
 func TestAuthExchangeRejectsMismatchedCSRF(t *testing.T) {

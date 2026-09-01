@@ -459,6 +459,17 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
+**Updated 2026-08-31 (tenth entry the same day)**: **P81.4 — the web UI's own token-exposure problem —
+shipped.** `POST /auth/exchange` no longer returns `s.authToken` to the browser at all; it mints a
+revocable, expiring `browserSessionEntry` instead (HttpOnly `aegis_session` cookie for the id, a CSRF
+nonce in the JSON body for the frontend to echo as `X-Aegis-Session-CSRF`), which `authMiddleware`
+accepts as an alternative to the bearer token without touching the non-browser path at all. A session
+slides its expiry on use but cannot exceed a 7-day absolute cap, and a new `POST /auth/logout` plus an
+unwired `revokeAllBrowserSessions` (left for **P81.25**, still open, to call once `daemon.token`
+rotation exists) cover the "revocable" half of the finding. See **P81.4**'s own entry for the full
+design and the one thing left deliberately undone — a real non-browser-mint liveness signal, which has
+no home in the codebase yet.
+
 **Updated 2026-08-31 (ninth entry the same day)**: **P81.3's credential split — the one piece this
 table's ranking named as needing an operator decision before code — is decided and shipped.** The
 operator chose a second, separately-stored token (`admin.token`) over an interactive TUI/UI
@@ -567,8 +578,7 @@ See [releases.md](releases.md) for every record.
 
 | #   | Item                                                                                              | Tier / size          | Why now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | --- | ------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **P81.4** — the web UI hands the real daemon token to browser JavaScript                          | Tier 3 — High         | Next fresh item in the Tier 3 take order (P81.1/P81.8/P81.5/P81.2/P81.3 all worked 2026-08-31). `High` effort, `Redesign` mitigation — larger than it looks because the SPA's whole call path changes, and it wants **P81.25**'s revocation story to be useful.                                                                                                                                                                                                                                                                                              |
-| 2   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2, P80.4) — _parked by choice, 2026-08-16_ | Verification         | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** now have what they needed — a surviving data dir and `aegis sessions trace <id>`, shipped as **P68.1** (2026-08-22) — so whenever this row is next picked up, the next sitting can actually judge them instead of reproducing the same unreadable evidence. |
+| 1   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2, P80.4) — _parked by choice, 2026-08-16_ | Verification         | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** now have what they needed — a surviving data dir and `aegis sessions trace <id>`, shipped as **P68.1** (2026-08-22) — so whenever this row is next picked up, the next sitting can actually judge them instead of reproducing the same unreadable evidence. |
 
 **One item is deliberately off this list, Tier 4 with no fired trigger.** **P74.21** (filed
 2026-08-21) is the half of P74.17's own roadmap entry that did not ship with it — see
@@ -1612,6 +1622,54 @@ UI window is known to be open.
 
 Priority: Tier 3 — `High` effort, `Redesign` mitigation. Larger than it looks because the SPA's whole
 call path changes with it, and it wants **P81.25**'s revocation story to be useful.
+
+**SHIPPED 2026-08-31.** `handleAuthExchange` (`internal/server/auth.go`) no longer returns
+`s.authToken` at all. It mints a `browserSessionEntry` (random 32-byte id + a separate 32-byte CSRF
+nonce, `mintBrowserSession`) and returns the id only as an `HttpOnly`/`SameSite=Strict` cookie
+(`aegis_session`; `Secure` follows the same TLS/`TrustProxyHeaders`-gated logic the existing
+`aegis_ui_csrf` cookie already used, factored into `browserSessionCookieSecure` so the two sites can't
+drift), while the CSRF nonce goes only in the JSON body for the frontend to hold in memory and echo
+back as `X-Aegis-Session-CSRF`. `authMiddleware` accepts this pair as an alternative to the bearer
+token — tried only after the bearer check fails, so a non-browser caller holding `daemon.token` is
+untouched — via `validateAndTouchBrowserSession`, which also slides the session's expiry
+(`browserSessionIdleTTL`, 24h) forward on every successful use, capped at `mintedAt +
+browserSessionMaxTTL` (7 days) so a continuously-open tab still eventually forces a fresh `/ui` load.
+The store is capped (`maxBrowserSessions`, refuse-not-evict, same posture as `maxPageTokens`) and
+swept on mint, mirroring the existing page-token bookkeeping.
+
+The "revocable" half of the finding's own ask: `revokeBrowserSession` backs a new
+`POST /auth/logout` (through `authMiddleware`, not exempted — a caller needs a valid credential to log
+out of it) that deletes one session and clears its cookie; `revokeAllBrowserSessions` clears every
+outstanding session and is wired to nothing yet, existing so a future `daemon.token` rotation
+(**P81.25**, still open) has a one-line hook rather than new plumbing to write. The "track the residual
+non-browser mint path" ask got the narrow version: `mintBrowserSession` logs an Info line naming the
+remote address on every mint, which is the same signal `/ui`'s own page-token mint already didn't have
+before P81.16 — a full "no UI window is known to be open" liveness check was judged out of scope for
+what the codebase tracks today (there is no window-liveness concept anywhere else in the server) and
+was not attempted.
+
+The frontend (`internal/server/webui/frontend/src/api.ts`) dropped `authToken`/`Authorization: Bearer`
+entirely for API calls in favor of `sessionCSRF` + the automatically-attached cookie (same-origin
+`fetch` sends cookies by default; no explicit `credentials` option was needed). `dist/` was rebuilt and
+committed per this file's own build instructions.
+
+Tests: `TestBrowserSessionNeverCarriesTheRealToken`, `TestBrowserSessionRejectsWrongCSRFOrUnknownID`,
+`TestBrowserSessionExpires` (both the sliding window and the absolute cap), `TestBrowserSessionRevoke`
+(both the single-session and clear-all paths), `TestBrowserSessionCapEngages`,
+`TestAuthMiddlewareAcceptsBrowserSession` (and that the CSRF header alone, without the HttpOnly cookie,
+is rejected), `TestAuthLogoutRevokesSessionAndClearsCookie` — plus `TestWebUIServedAndTokenInjected` in
+`webui_test.go` was rewritten for the new exchange contract (asserts the response never carries a
+`token` field, that the session cookie is set, and that the CSRF nonce alone without the cookie is
+rejected).
+
+**Known consequence, unchanged from P81.3's note.** `admin.token` gating is untouched by this — a
+browser session substitutes only for `daemon.token`, never for `admin.token` — so `/config/skills`
+still answers 403 for every browser session exactly as P81.3 already documented; this item did not
+change that story.
+
+Priority: Tier 3 — closed for the core redesign. The one thing explicitly deferred is a real
+non-browser-mint liveness signal, which has no home in the codebase yet and would need one built rather
+than reused.
 
 ### P81.10 — The container workspace mount is broader than any single command needs (FIND-10)
 
