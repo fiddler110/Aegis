@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/fiddler110/aegis/internal/api"
@@ -39,6 +40,7 @@ func (s *Server) handleStatusInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	ctxWin, ctxWinSrc := s.effectiveContextWindow()
 	reachable, latencyMS := s.probeProviderReachability(ctx)
+	cronTotal, cronAutoApprove, cronUnconfirmed := s.cronStatusCounts(ctx)
 	resp := api.StatusInfo{
 		Provider:              s.cfg.Provider.Default,
 		Model:                 s.cfg.Provider.Model,
@@ -57,6 +59,34 @@ func (s *Server) handleStatusInfo(w http.ResponseWriter, r *http.Request) {
 		WorkdirAllowlist:      s.cfg.Server.SessionWorkdirAllowlist,
 		ProviderReachable:     reachable,
 		ProviderLatencyMS:     latencyMS,
+		CronJobCount:          cronTotal,
+		CronAutoApproveCount:  cronAutoApprove,
+		CronUnconfirmedCount:  cronUnconfirmed,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// cronStatusCounts summarizes the registered cron job set for /status
+// (P81.23/FIND-23): total, how many opt into unattended auto_approve, and how
+// many are still unconfirmed (created from a non-interactive surface and
+// waiting on cron_confirm). Returns zeros when cron isn't wired or listing
+// fails — this is a status surface, not a gate.
+func (s *Server) cronStatusCounts(ctx context.Context) (total, autoApprove, unconfirmed int) {
+	if s.cronSched == nil {
+		return 0, 0, 0
+	}
+	jobs, err := s.cronSched.List(ctx)
+	if err != nil {
+		return 0, 0, 0
+	}
+	for _, j := range jobs {
+		total++
+		if j.AutoApprove {
+			autoApprove++
+		}
+		if !j.Confirmed {
+			unconfirmed++
+		}
+	}
+	return total, autoApprove, unconfirmed
 }

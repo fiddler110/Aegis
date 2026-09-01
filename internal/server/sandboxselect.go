@@ -65,14 +65,15 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 	switch cfg.Backend {
 	case "container", "auto":
 		opts := sandbox.ContainerOpts{
-			Image:      cfg.Image,
-			Network:    cfg.Network,
-			Priority:   sandbox.ParseRuntimes(cfg.Priority),
-			Limits:     cfg.Limits.Sandbox(),
-			Persistent: cfg.Persistent,
-			SessionTTL: cfg.SandboxSessionTTL(),
-			EnvAllow:   cfg.EnvAllow,
-			Logger:     logger,
+			Image:          cfg.Image,
+			Network:        cfg.Network,
+			Priority:       sandbox.ParseRuntimes(cfg.Priority),
+			Limits:         cfg.Limits.Sandbox(),
+			Persistent:     cfg.Persistent,
+			SessionTTL:     cfg.SandboxSessionTTL(),
+			EnvAllow:       cfg.EnvAllow,
+			Logger:         logger,
+			SecretExcludes: cfg.SecretExcludePaths,
 		}
 		// Only "container" honors an explicit forced runtime; "auto" always detects.
 		if cfg.Backend == "container" {
@@ -244,5 +245,32 @@ func unsandboxedAutoExecError(perm config.PermissionConfig, configuredBackend st
 		"refusing to start: %s but the effective sandbox backend is unsandboxed local execution (%s) — every model-issued shell command would run on the host with no approval and no isolation. "+
 			"Configure a real sandbox (sandbox.backend: container or os), or set permission.allow_unsandboxed_auto_exec: true if this is intentional",
 		setting, why,
+	)
+}
+
+// cronAutoApproveGuard refuses cron_create's auto_approve on an unsandboxed
+// local backend (P81.23/FIND-23), mirroring unsandboxedAutoExecError's own
+// startup refusal and its allow_unsandboxed_auto_exec escape hatch — a cron
+// job fires with nobody present to approve anything, exactly like
+// auto_approve_exec/mode:auto, so it is refused the same way rather than
+// getting its own weaker rule. A plain method value (wired via
+// cron.Scheduler.SetAutoApproveGuard), so it reads s.cfg/s.sandbox fresh on
+// every Create call rather than whatever they were when the daemon started.
+func (s *Server) cronAutoApproveGuard() error {
+	if _, isLocal := s.sandbox.(*sandbox.LocalBackend); !isLocal {
+		return nil
+	}
+	if s.cfg.Permission.AllowUnsandboxedAutoExec {
+		return nil
+	}
+	why := fmt.Sprintf("sandbox.backend is %q", s.cfg.Sandbox.Backend)
+	if s.sandboxFallback {
+		why = s.sandboxFallbackReason
+	}
+	return fmt.Errorf(
+		"cron: refusing to create an auto_approve job — the effective sandbox backend is unsandboxed local execution (%s). "+
+			"This job would fire unattended, with no approval and no isolation. Configure a real sandbox "+
+			"(sandbox.backend: container or os), or set permission.allow_unsandboxed_auto_exec: true if this is intentional",
+		why,
 	)
 }

@@ -3,12 +3,14 @@ package cron
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	_ "modernc.org/sqlite"
 )
 
@@ -140,7 +142,7 @@ func TestSchedulerCreateAndToggle(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) {}, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "@hourly", "echo hello", "hourly echo", false, "", false)
+	j, err := sched.Create(ctx, "@hourly", "echo hello", "hourly echo", false, "", false, reqorigin.CLI)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,11 +180,11 @@ func TestSchedulerCreateNotifyRoundTrips(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) {}, nil)
 	ctx := context.Background()
 
-	quiet, err := sched.Create(ctx, "@daily", "echo quiet", "quiet", false, "", false)
+	quiet, err := sched.Create(ctx, "@daily", "echo quiet", "quiet", false, "", false, reqorigin.CLI)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loud, err := sched.Create(ctx, "@daily", "echo loud", "loud", false, "", true)
+	loud, err := sched.Create(ctx, "@daily", "echo loud", "loud", false, "", true, reqorigin.CLI)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +223,7 @@ func TestSchedulerCreateBadSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	sched := NewScheduler(store, func(j Job) {}, nil)
-	if _, err := sched.Create(context.Background(), "not a cron", "echo", "", false, "", false); err == nil {
+	if _, err := sched.Create(context.Background(), "not a cron", "echo", "", false, "", false, reqorigin.CLI); err == nil {
 		t.Error("expected error for bad schedule")
 	}
 }
@@ -244,7 +246,7 @@ func TestTickFiresAndIdempotent(t *testing.T) {
 	sched := NewScheduler(store, run, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "* * * * *", "echo tick", "all-minutes", false, "", false)
+	j, err := sched.Create(ctx, "* * * * *", "echo tick", "all-minutes", false, "", false, reqorigin.CLI)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +410,7 @@ func TestTickSkipsDisabled(t *testing.T) {
 	sched := NewScheduler(store, func(j Job) { fired = true }, nil)
 	ctx := context.Background()
 
-	j, err := sched.Create(ctx, "* * * * *", "echo", "", false, "", false)
+	j, err := sched.Create(ctx, "* * * * *", "echo", "", false, "", false, reqorigin.CLI)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,5 +419,108 @@ func TestTickSkipsDisabled(t *testing.T) {
 	sched.tick(time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC))
 	if fired {
 		t.Error("expected disabled job not to fire")
+	}
+}
+
+// TestCreateInteractiveOriginIsConfirmed pins the P81.23/FIND-23 rule: a job
+// created from the TUI or a scripted CLI invocation is confirmed immediately,
+// since an operator was already present to type cron_create.
+func TestCreateInteractiveOriginIsConfirmed(t *testing.T) {
+	db := testDB(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := NewScheduler(store, func(j Job) {}, nil)
+	ctx := context.Background()
+
+	for _, origin := range []string{reqorigin.TUI, reqorigin.CLI} {
+		j, err := sched.Create(ctx, "@daily", "echo hi", "t", false, "", false, origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !j.Confirmed {
+			t.Errorf("origin %q: expected Confirmed=true, got false", origin)
+		}
+	}
+}
+
+// TestCreateNonInteractiveOriginStartsUnconfirmed pins the other half: a job
+// created from ACP, MCP, or the web UI starts unconfirmed and tick skips it
+// until Confirm is called.
+func TestCreateNonInteractiveOriginStartsUnconfirmed(t *testing.T) {
+	db := testDB(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var fired []string
+	sched := NewScheduler(store, func(j Job) {
+		mu.Lock()
+		fired = append(fired, j.ID)
+		mu.Unlock()
+	}, nil)
+	ctx := context.Background()
+
+	for _, origin := range []string{reqorigin.ACP, reqorigin.MCP, reqorigin.Web, ""} {
+		j, err := sched.Create(ctx, "@daily", "echo hi", "t", false, "", false, origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if j.Confirmed {
+			t.Errorf("origin %q: expected Confirmed=false, got true", origin)
+		}
+	}
+
+	j, err := sched.Create(ctx, "* * * * *", "echo hi", "unconfirmed", false, "", false, reqorigin.MCP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	sched.tick(now)
+	mu.Lock()
+	n := len(fired)
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("expected an unconfirmed job not to fire, got %d firings", n)
+	}
+
+	if err := sched.Confirm(ctx, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	sched.tick(now)
+	mu.Lock()
+	n = len(fired)
+	mu.Unlock()
+	if n != 1 {
+		t.Errorf("expected the confirmed job to fire once, got %d firings", n)
+	}
+}
+
+// TestCreateRefusesAutoApproveWhenGuardRejects is the P81.23/FIND-23
+// regression for the auto_approve posture gate: a non-nil AutoApproveGuard
+// error refuses job creation outright when autoApprove is requested, and has
+// no effect on a job that doesn't ask for it.
+func TestCreateRefusesAutoApproveWhenGuardRejects(t *testing.T) {
+	db := testDB(t)
+	store, err := NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := NewScheduler(store, func(j Job) {}, nil)
+	sched.SetAutoApproveGuard(func() error {
+		return errors.New("sandbox backend is unsandboxed local execution")
+	})
+	ctx := context.Background()
+
+	if _, err := sched.Create(ctx, "@daily", "echo hi", "t", true, "", false, reqorigin.CLI); err == nil {
+		t.Fatal("expected Create to refuse auto_approve when the guard rejects")
+	}
+
+	// A job that doesn't ask for auto_approve is unaffected by the guard.
+	if _, err := sched.Create(ctx, "@daily", "echo hi", "t", false, "", false, reqorigin.CLI); err != nil {
+		t.Errorf("expected a non-auto_approve job to succeed despite the guard, got %v", err)
 	}
 }

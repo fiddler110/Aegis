@@ -282,6 +282,16 @@ func (m model) renderSidebar(h int) string {
 		add("")
 	}
 
+	// P81.23/FIND-23: cron is a persistence mechanism — present the registered
+	// job set as a standing sidebar fact, the same reasoning as SANDBOX above,
+	// so an operator sees an unrecognised or auto_approve job without running
+	// cron_list themselves.
+	if m.cronJobCount > 0 {
+		section("CRON")
+		add(m.renderCronBadge(w))
+		add("")
+	}
+
 	if m.streaming && !m.phase.streamStart.IsZero() {
 		if m.phase.firstTokenAt.IsZero() {
 			section("WAITING")
@@ -564,6 +574,28 @@ func (m model) renderSandboxBadge(w int) string {
 		return lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠ unconfined (local)")
 	}
 	return m.th.sideValue.Render(truncate(m.sandboxBackend, w))
+}
+
+// renderCronBadge renders the sidebar's CRON line (P81.23/FIND-23): total
+// registered jobs, and — in warning color, since these are exactly the
+// postures that fire unattended — how many opt into auto_approve and how
+// many are still unconfirmed.
+func (m model) renderCronBadge(w int) string {
+	line := fmt.Sprintf("%d job", m.cronJobCount)
+	if m.cronJobCount != 1 {
+		line += "s"
+	}
+	if m.cronAutoApproveCount == 0 && m.cronUnconfirmedCount == 0 {
+		return m.th.sideValue.Render(truncate(line, w))
+	}
+	warn := lipgloss.NewStyle().Foreground(colWarning).Bold(true)
+	if m.cronAutoApproveCount > 0 {
+		line += fmt.Sprintf(", %d auto_approve", m.cronAutoApproveCount)
+	}
+	if m.cronUnconfirmedCount > 0 {
+		line += fmt.Sprintf(", %d unconfirmed", m.cronUnconfirmedCount)
+	}
+	return warn.Render(truncate(line, w))
 }
 
 func (m model) renderModeBadge() string {

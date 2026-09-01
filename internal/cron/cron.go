@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/google/uuid"
 )
 
@@ -41,6 +42,22 @@ type Job struct {
 	// Delivery still requires a channel to be configured (notify.desktop or
 	// notify.webhook); with neither, this flag is inert.
 	Notify bool `json:"notify"`
+	// Origin records which surface created this job (reqorigin), stamped at
+	// Create time from the calling turn's context (P81.23/FIND-23) — never
+	// taken from a field a caller sets on the job itself. "" for a job
+	// created before this column existed.
+	Origin string `json:"origin,omitempty"`
+	// Confirmed gates a job's very first fire (P81.23/FIND-23): a job created
+	// from an interactive surface (reqorigin.Interactive — the TUI or a
+	// scripted CLI invocation) is confirmed at creation, since an operator
+	// was already present to type cron_create. A job created from any other
+	// surface (an editor plugin over ACP, an MCP client, the web UI) starts
+	// unconfirmed and the scheduler skips it at every tick until an operator
+	// confirms it — the same "no one was present when this was scheduled"
+	// gap the rest of this finding addresses for auto_approve, applied to
+	// registration itself. A job predating this column defaults to true (see
+	// the migration below) so an upgrade doesn't strand existing jobs.
+	Confirmed bool `json:"confirmed"`
 }
 
 // ErrNotFound is returned for an unknown job id.
@@ -88,6 +105,11 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN workdir TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN notify INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN origin TEXT NOT NULL DEFAULT ''`)
+	// Default 1: a job predating this column was already reviewed by whatever
+	// process created it under the pre-P81.23 rules — grandfathering it in
+	// keeps an upgrade from silently stranding every existing job unconfirmed.
+	_, _ = db.Exec(`ALTER TABLE cron_jobs ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 1`)
 	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS cron_runs (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,8 +133,8 @@ func (s *Store) Save(ctx context.Context, j *Job) error {
 		last = j.LastRun.UnixMilli()
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO cron_jobs (id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO cron_jobs (id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify, origin, confirmed)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     schedule     = excluded.schedule,
     command      = excluded.command,
@@ -121,15 +143,17 @@ ON CONFLICT(id) DO UPDATE SET
     last_run     = excluded.last_run,
     auto_approve = excluded.auto_approve,
     workdir      = excluded.workdir,
-    notify       = excluded.notify`,
-		j.ID, j.Schedule, j.Command, j.Title, boolToInt(j.Enabled), last, j.Created.UnixMilli(), boolToInt(j.AutoApprove), j.Workdir, boolToInt(j.Notify))
+    notify       = excluded.notify,
+    origin       = excluded.origin,
+    confirmed    = excluded.confirmed`,
+		j.ID, j.Schedule, j.Command, j.Title, boolToInt(j.Enabled), last, j.Created.UnixMilli(), boolToInt(j.AutoApprove), j.Workdir, boolToInt(j.Notify), j.Origin, boolToInt(j.Confirmed))
 	return err
 }
 
 // Get loads a job by id.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify FROM cron_jobs WHERE id = ?`, id)
+		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify, origin, confirmed FROM cron_jobs WHERE id = ?`, id)
 	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -140,7 +164,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 // List returns all jobs, newest first.
 func (s *Store) List(ctx context.Context) ([]*Job, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify FROM cron_jobs ORDER BY created DESC`)
+		`SELECT id, schedule, command, title, enabled, last_run, created, auto_approve, workdir, notify, origin, confirmed FROM cron_jobs ORDER BY created DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -217,16 +241,17 @@ type scanner interface{ Scan(...any) error }
 
 func scanJob(sc scanner) (*Job, error) {
 	var (
-		j                            Job
-		enabled, autoApprove, notify int
-		last, created                int64
+		j                                       Job
+		enabled, autoApprove, notify, confirmed int
+		last, created                           int64
 	)
-	if err := sc.Scan(&j.ID, &j.Schedule, &j.Command, &j.Title, &enabled, &last, &created, &autoApprove, &j.Workdir, &notify); err != nil {
+	if err := sc.Scan(&j.ID, &j.Schedule, &j.Command, &j.Title, &enabled, &last, &created, &autoApprove, &j.Workdir, &notify, &j.Origin, &confirmed); err != nil {
 		return nil, err
 	}
 	j.Enabled = enabled != 0
 	j.AutoApprove = autoApprove != 0
 	j.Notify = notify != 0
+	j.Confirmed = confirmed != 0
 	if last != 0 {
 		j.LastRun = time.UnixMilli(last)
 	}
@@ -252,6 +277,14 @@ type Scheduler struct {
 	logger      *slog.Logger
 	now         func() time.Time // injectable clock for tests
 	parsedSched sync.Map         // map[string]*Schedule — avoids re-parsing on every tick
+
+	// autoApproveGuard, when non-nil, is consulted by Create whenever a
+	// caller sets autoApprove — a non-nil error refuses job creation
+	// (P81.23/FIND-23), mirroring the allow_unsandboxed_auto_exec gate the
+	// daemon already applies to auto_approve_exec at startup. nil means no
+	// gate is wired (e.g. in tests that don't care about sandbox posture),
+	// not "always allowed".
+	autoApproveGuard func() error
 }
 
 // NewScheduler builds a scheduler over store; run fires a due job.
@@ -262,21 +295,35 @@ func NewScheduler(store *Store, run RunFunc, logger *slog.Logger) *Scheduler {
 	return &Scheduler{store: store, run: run, logger: logger, now: time.Now}
 }
 
+// SetAutoApproveGuard installs the fire-time posture gate Create consults
+// whenever autoApprove is requested (P81.23/FIND-23). Call once, before the
+// scheduler starts accepting Create calls.
+func (s *Scheduler) SetAutoApproveGuard(guard func() error) { s.autoApproveGuard = guard }
+
 // Create validates the schedule, persists a new enabled job, and returns it.
 // autoApprove opts the job into firing unattended even when the daemon's
 // current permission mode would otherwise require approval for shell
-// execution (see Job.AutoApprove). workdir is the directory the job's
-// command runs in (P25.8); "" falls back to the daemon's own working
-// directory at fire time. notify opts the job into out-of-band delivery of
-// its fire outcome (P58.1; see Job.Notify) — kept at the end of the signature
-// rather than beside autoApprove so the two independent booleans are not
-// adjacent and cannot be silently swapped at a call site.
-func (s *Scheduler) Create(ctx context.Context, schedule, command, title string, autoApprove bool, workdir string, notify bool) (*Job, error) {
+// execution (see Job.AutoApprove) — refused outright when autoApproveGuard is
+// set and rejects the current sandbox posture (P81.23/FIND-23). workdir is
+// the directory the job's command runs in (P25.8); "" falls back to the
+// daemon's own working directory at fire time. notify opts the job into
+// out-of-band delivery of its fire outcome (P58.1; see Job.Notify). origin is
+// the reqorigin value of the surface that called this (P81.23/FIND-23) — a
+// job created from a non-interactive surface starts unconfirmed and the
+// scheduler skips it until an operator confirms it via Confirm. Kept at the
+// end of the signature, after the pre-existing booleans, so none of them
+// become adjacent and silently swappable at a call site.
+func (s *Scheduler) Create(ctx context.Context, schedule, command, title string, autoApprove bool, workdir string, notify bool, origin string) (*Job, error) {
 	if _, err := Parse(schedule); err != nil {
 		return nil, err
 	}
 	if command == "" {
 		return nil, fmt.Errorf("cron: command is required")
+	}
+	if autoApprove && s.autoApproveGuard != nil {
+		if err := s.autoApproveGuard(); err != nil {
+			return nil, err
+		}
 	}
 	j := &Job{
 		ID:          uuid.NewString(),
@@ -288,11 +335,27 @@ func (s *Scheduler) Create(ctx context.Context, schedule, command, title string,
 		Created:     s.now(),
 		Workdir:     workdir,
 		Notify:      notify,
+		Origin:      origin,
+		Confirmed:   reqorigin.Interactive(origin),
 	}
 	if err := s.store.Save(ctx, j); err != nil {
 		return nil, err
 	}
 	return j, nil
+}
+
+// Confirm marks a job confirmed (P81.23/FIND-23), clearing it to fire for the
+// first time. A no-op (returns nil) if the job is already confirmed.
+func (s *Scheduler) Confirm(ctx context.Context, id string) error {
+	j, err := s.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if j.Confirmed {
+		return nil
+	}
+	j.Confirmed = true
+	return s.store.Save(ctx, j)
 }
 
 // List returns all jobs.
@@ -343,6 +406,13 @@ func (s *Scheduler) tick(now time.Time) {
 		}
 		if !j.LastRun.IsZero() && !j.LastRun.Truncate(time.Minute).Before(now) {
 			continue // already fired this minute
+		}
+		if !j.Confirmed {
+			// P81.23/FIND-23: a job created from a non-interactive surface
+			// (ACP, MCP, the web UI) does not get to fire unattended until an
+			// operator confirms it — no run record either, since nothing ran.
+			s.logger.Warn("cron: skipping unconfirmed job", "job", j.ID, "title", j.Title, "origin", j.Origin)
+			continue
 		}
 		j.LastRun = now
 		if err := s.store.Save(context.Background(), j); err != nil {

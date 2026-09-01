@@ -1351,6 +1351,19 @@ sandbox:
   # don't exist on the host are silently skipped. Only applies to backend: os.
   os_extra_read_paths: []
 
+  # Additional workspace-relative paths to shadow out of every container
+  # mount, on top of the built-in ".aegis/.env" (P81.10/FIND-10). A path that
+  # exists under the mounted workspace is replaced inside the container with
+  # an empty read-only file or directory, instead of being reachable through
+  # the bind mount. Only applies to backend: container/auto. A command the
+  # shell tool's read-only classifier recognizes (ls, cat, git status, ...)
+  # also gets the whole workspace mounted read-only for that one call — see
+  # CLAUDE.md's plan-mode invariant for what that classifier does and does
+  # not cover; a persistent container's mount (sandbox.persistent: true) is
+  # fixed at container start and always stays read-write, since it is reused
+  # across every future command regardless of that command's own verdict.
+  secret_exclude_paths: []
+
 
 # ── Contextual security policies ──────────────────────────────────────────────
 # Note: these are tool-layer controls, not system-wide egress firewalls.

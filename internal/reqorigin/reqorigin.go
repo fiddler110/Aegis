@@ -35,16 +35,31 @@ const (
 	// interactive local shell), tagged separately for legibility in the audit
 	// trail.
 	CLI = "cli"
+	// Cron is the background job scheduler firing a job unattended, with no
+	// human present to resolve an approval prompt (P81.23/FIND-23) — stamped
+	// by internal/server's cron fire path itself, never taken from the job
+	// definition a caller supplied at creation time.
+	Cron = "cron"
 )
 
 // Valid reports whether s is one of the known origin values.
 func Valid(s string) bool {
 	switch s {
-	case TUI, Web, ACP, MCP, CLI:
+	case TUI, Web, ACP, MCP, CLI, Cron:
 		return true
 	default:
 		return false
 	}
+}
+
+// Interactive reports whether origin is a surface with an operator physically
+// present to type the command that created it — the TUI or a scripted CLI
+// invocation — as opposed to a surface driven by an editor plugin, an MCP
+// client, the browser UI, or nothing at all (P81.23/FIND-23's re-confirmation
+// gate uses this to tell "an operator just typed cron_create" apart from
+// "a client speaking a protocol asked for an unattended job").
+func Interactive(origin string) bool {
+	return origin == TUI || origin == CLI
 }
 
 // Normalize returns s when it's a known origin, else Web — the safe default

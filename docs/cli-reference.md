@@ -712,7 +712,7 @@ Inspect persisted cron jobs (background scheduled tasks) — the operator-facing
 aegis cron list [--auto-approve-only]
 ```
 
-Lists every cron job: ID, enabled/disabled state, schedule, command, title, and an `[AUTO_APPROVE — fires unattended, bypassing interactive approval]` marker where applicable.
+Lists every cron job: ID, enabled/disabled state, schedule, command, title, and markers where applicable — `[AUTO_APPROVE — fires unattended, bypassing interactive approval]`, `[NOTIFY — delivers its output over the configured notify channels]`, and `[UNCONFIRMED — created from a non-interactive surface; will not fire until cron_confirm]` (P81.23/FIND-23).
 
 | Flag | Description |
 |------|-------------|

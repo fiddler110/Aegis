@@ -107,7 +107,14 @@ func (c *ContainerBackend) startPersistentArgs(dir string) []string {
 		"--label", persistentOwnerLabel+"="+ownerTag(),
 	)
 	if dir != "" {
-		args = append(args, "-v", HostMountPath(c.runtime, dir)+":/workspace", "-w", "/workspace")
+		// Always read-write: the mount is fixed for the container's life and
+		// reused across every future `exec` regardless of that command's own
+		// capability verdict (P81.10/FIND-10) — see ExecOpts.ReadOnly's doc
+		// comment. The secret-exclusion shadow mounts apply here too, since
+		// those don't depend on ExecOpts at all.
+		args = append(args, "-v", HostMountPath(c.runtime, dir)+":/workspace")
+		args = append(args, c.secretShadowArgs(dir, func(p string) string { return HostMountPath(c.runtime, p) })...)
+		args = append(args, "-w", "/workspace")
 	}
 	ttl := c.sessionTTL
 	if ttl <= 0 {

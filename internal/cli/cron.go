@@ -54,6 +54,9 @@ func newCronListCmd() *cobra.Command {
 				if j.Notify {
 					approve += "  [NOTIFY — delivers its output over the configured notify channels]"
 				}
+				if !j.Confirmed {
+					approve += "  [UNCONFIRMED — created from a non-interactive surface; will not fire until cron_confirm]"
+				}
 				title := j.Title
 				if title == "" {
 					title = "(untitled)"

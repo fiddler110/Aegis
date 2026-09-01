@@ -33,6 +33,13 @@ func (m model) updateStatusInfo(msg statusInfoMsg) (tea.Model, tea.Cmd) {
 	if msg.err == nil && msg.info.SandboxBackend != "" {
 		m.sandboxBackend = msg.info.SandboxBackend
 	}
+	// P81.23/FIND-23: same "keep the last known value on a transient error"
+	// posture as SandboxBackend above.
+	if msg.err == nil {
+		m.cronJobCount = msg.info.CronJobCount
+		m.cronAutoApproveCount = msg.info.CronAutoApproveCount
+		m.cronUnconfirmedCount = msg.info.CronUnconfirmedCount
+	}
 	// P28.7 connection/model-health indicator: a request error means the
 	// daemon itself is unreachable, distinct from the daemon being up but
 	// reporting its configured provider as unreachable.

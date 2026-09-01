@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fiddler110/aegis/internal/cron"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -20,6 +21,7 @@ func CronTools(sched *cron.Scheduler) []tool.Tool {
 		&cronDeleteTool{sched: sched},
 		&cronToggleTool{sched: sched},
 		&cronHistoryTool{sched: sched},
+		&cronConfirmTool{sched: sched},
 	}
 }
 
@@ -65,11 +67,15 @@ func (t *cronCreateTool) Execute(ctx context.Context, input json.RawMessage) (to
 	// instead of always running in the daemon's cwd regardless of which
 	// session scheduled it.
 	workdir, _ := tool.WorkdirFromContext(ctx)
-	j, err := t.sched.Create(ctx, args.Schedule, args.Command, args.Title, args.AutoApprove, workdir, args.Notify)
+	j, err := t.sched.Create(ctx, args.Schedule, args.Command, args.Title, args.AutoApprove, workdir, args.Notify, reqorigin.FromContext(ctx))
 	if err != nil {
 		return tool.Result{Content: "cron_create: " + err.Error(), IsError: true}, nil
 	}
-	return tool.Result{Content: fmt.Sprintf("Created cron job %s (id %s), schedule %q. Manage with cron_list, cron_toggle, cron_delete.", j.Title, j.ID, j.Schedule)}, nil
+	msg := fmt.Sprintf("Created cron job %s (id %s), schedule %q. Manage with cron_list, cron_toggle, cron_delete.", j.Title, j.ID, j.Schedule)
+	if !j.Confirmed {
+		msg += " This job was created from a non-interactive surface and will not fire until an operator confirms it with cron_confirm."
+	}
+	return tool.Result{Content: msg}, nil
 }
 
 // --- cron_list ---
@@ -104,6 +110,9 @@ func (t *cronListTool) Execute(ctx context.Context, _ json.RawMessage) (tool.Res
 		}
 		if j.Notify {
 			approve += " [notify]"
+		}
+		if !j.Confirmed {
+			approve += " [unconfirmed — will not fire until cron_confirm]"
 		}
 		fmt.Fprintf(&sb, "%s  %-10s  %-14s  %s  %s%s\n", j.ID, enabled, j.Schedule, j.Command, j.Title, approve)
 	}
@@ -235,4 +244,40 @@ func (t *cronHistoryTool) Execute(ctx context.Context, input json.RawMessage) (t
 		fmt.Fprintf(&sb, "%s  %-7s  job=%s  %s\n", r.FiredAt.Format(time.RFC3339), r.Status, r.JobID, snippet)
 	}
 	return tool.Result{Content: strings.TrimRight(sb.String(), "\n")}, nil
+}
+
+// --- cron_confirm ---
+
+type cronConfirmTool struct{ sched *cron.Scheduler }
+
+func (t *cronConfirmTool) Name() string { return "cron_confirm" }
+
+// Capability is CapExecute for cron_delete's reason (DR-3): clearing a job to
+// fire unattended for the first time is exactly the authorization decision
+// cron_create's own confirmation gate exists to require a human review for
+// (P81.23/FIND-23) — a prompt-injected model confirming its own job would
+// defeat the point.
+func (t *cronConfirmTool) Capability() tool.Capability { return tool.CapExecute }
+func (t *cronConfirmTool) Description() string {
+	return "Confirm a cron job created from a non-interactive surface (an editor plugin over ACP, " +
+		"an MCP client, the web UI) so it is cleared to fire for the first time. A job created from " +
+		"the interactive TUI or CLI is already confirmed and never needs this."
+}
+func (t *cronConfirmTool) InputSchema() json.RawMessage {
+	return schema(`{"type":"object","properties":{"id":{"type":"string","description":"the cron job id"}},"required":["id"]}`)
+}
+func (t *cronConfirmTool) Execute(ctx context.Context, input json.RawMessage) (tool.Result, error) {
+	var args struct {
+		ID string `json:"id"`
+	}
+	if err := parseArgs(input, &args); err != nil {
+		return tool.Result{}, err
+	}
+	if args.ID == "" {
+		return tool.Result{Content: "id is required", IsError: true}, nil
+	}
+	if err := t.sched.Confirm(ctx, args.ID); err != nil {
+		return tool.Result{Content: "cron_confirm: " + err.Error(), IsError: true}, nil
+	}
+	return tool.Result{Content: "confirmed " + args.ID + " — it will fire on its next scheduled tick"}, nil
 }

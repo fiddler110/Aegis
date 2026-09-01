@@ -46,6 +46,15 @@ type ContainerBackend struct {
 	mu         sync.Mutex
 	persistent bool
 	containers map[string]string // working directory -> container id
+
+	// secretExcludes lists workspace-relative paths shadowed out of every
+	// mounted container regardless of ExecOpts (P81.10/FIND-10) — see
+	// secretmount.go. shadowMu guards the lazily-created empty file/dir used
+	// as the shadow mount source.
+	secretExcludes []string
+	shadowMu       sync.Mutex
+	shadowFilePath string
+	shadowDirPath  string
 }
 
 // ContainerOpts configures the container sandbox.
@@ -76,6 +85,13 @@ type ContainerOpts struct {
 	// Logger receives the lifecycle lines persistent mode produces (started,
 	// reaped, degraded to one-shot). nil discards them.
 	Logger *slog.Logger
+	// SecretExcludes names additional workspace-relative paths to shadow out
+	// of every mounted container, on top of the built-in ".aegis/.env"
+	// (sandbox.secret_exclude_paths, P81.10/FIND-10). A path that exists
+	// under the mounted directory is replaced inside the container with an
+	// empty read-only file or directory instead of being visible via the
+	// bind mount.
+	SecretExcludes []string
 }
 
 // ResourceLimits caps a sandboxed container's resource consumption (P60.1).
@@ -135,10 +151,11 @@ func NewContainerBackend(opts ContainerOpts) (*ContainerBackend, error) {
 		// P60.2: honored only where the detach/exec CLI surface is verified;
 		// elsewhere the backend keeps its per-command behavior rather than
 		// failing on a subcommand the runtime does not have.
-		persistent: opts.Persistent && SupportsPersistentContainer(rt),
-		sessionTTL: opts.SessionTTL,
-		containers: map[string]string{},
-		cli:        &execCLI{runtime: rt},
+		persistent:     opts.Persistent && SupportsPersistentContainer(rt),
+		sessionTTL:     opts.SessionTTL,
+		containers:     map[string]string{},
+		cli:            &execCLI{runtime: rt},
+		secretExcludes: mergeNames(defaultSecretExcludes, opts.SecretExcludes),
 	}, nil
 }
 
@@ -222,6 +239,7 @@ func (c *ContainerBackend) ExecStreaming(ctx context.Context, command string, op
 // anything to close.
 func (c *ContainerBackend) Close() error {
 	c.closePersistent()
+	c.closeShadowMounts()
 	return nil
 }
 
@@ -285,7 +303,9 @@ func (c *ContainerBackend) wslRunArgs(command string, opts ExecOpts) []string {
 		args = append(args, "--network", "none")
 	}
 	if opts.Dir != "" {
-		args = append(args, "-v", wslHostPath(opts.Dir)+":/workspace", "-w", "/workspace")
+		args = append(args, "-v", wslHostPath(opts.Dir)+":/workspace"+mountModeSuffix(opts))
+		args = append(args, c.secretShadowArgs(opts.Dir, wslHostPath)...)
+		args = append(args, "-w", "/workspace")
 	}
 	args = append(args, c.image, "/bin/sh", "-c", command)
 	return args
@@ -407,7 +427,9 @@ func (c *ContainerBackend) ociRunArgs(command string, opts ExecOpts) []string {
 		args = append(args, "--network", "none")
 	}
 	if opts.Dir != "" {
-		args = append(args, "-v", hostPathForMount(opts.Dir)+":/workspace", "-w", "/workspace")
+		args = append(args, "-v", hostPathForMount(opts.Dir)+":/workspace"+mountModeSuffix(opts))
+		args = append(args, c.secretShadowArgs(opts.Dir, hostPathForMount)...)
+		args = append(args, "-w", "/workspace")
 	}
 	args = append(args, c.image, "/bin/sh", "-c", command)
 	return args
@@ -477,7 +499,9 @@ func (c *ContainerBackend) appleContainerArgs(command string, opts ExecOpts) []s
 		args = append(args, "--network", "none")
 	}
 	if opts.Dir != "" {
-		args = append(args, "-v", opts.Dir+":/workspace", "-w", "/workspace")
+		args = append(args, "-v", opts.Dir+":/workspace"+mountModeSuffix(opts))
+		args = append(args, c.secretShadowArgs(opts.Dir, func(p string) string { return p })...)
+		args = append(args, "-w", "/workspace")
 	}
 	args = append(args, c.image, "/bin/sh", "-c", command)
 	return args

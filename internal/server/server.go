@@ -462,6 +462,19 @@ func New(cfg *config.Config, logger *slog.Logger) (_ *Server, err error) {
 	// container by this point, which outlives the process that started it.
 	onFailure(func() { s.sandbox.Close() })
 
+	// wireHooks must run before wireCron: the cron RunFunc captures s.hooks by
+	// value at construction time (P81.23/FIND-23's origin stamp on cron's
+	// audit trail), unlike cronPermCheck/cronNotify's own late-binding method
+	// values, since engine.Hooks is an interface field rather than something
+	// s can be assumed to have set by the time a job actually fires.
+	s.wireHooks(cfg, logger)
+	// The audit sink is an open file the daemon appends policy decisions to.
+	onFailure(func() {
+		if s.audit != nil {
+			_ = s.audit.Close()
+		}
+	})
+
 	if err = s.wireCron(cwd, sb, logger); err != nil {
 		return nil, err
 	}
@@ -518,14 +531,6 @@ func New(cfg *config.Config, logger *slog.Logger) (_ *Server, err error) {
 	if err = s.wireAuthAndTLS(cfg); err != nil {
 		return nil, err
 	}
-
-	s.wireHooks(cfg, logger)
-	// The audit sink is an open file the daemon appends policy decisions to.
-	onFailure(func() {
-		if s.audit != nil {
-			_ = s.audit.Close()
-		}
-	})
 
 	if s.adapter != nil {
 		s.wireCompaction(cfg)

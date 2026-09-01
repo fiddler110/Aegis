@@ -436,9 +436,38 @@ egress-then-write if enabled) resolves from the job's `auto_approve` flag, since
 an interactive prompt here — set it to allow the job to fire even when the daemon's mode would
 otherwise require approval.
 
+`auto_approve` is refused outright at creation time when the effective sandbox backend is
+unsandboxed local execution (P81.23/FIND-23), mirroring the same startup refusal
+`permission.auto_approve_exec`/`mode: auto` get against a local backend — a job that fires
+unattended with no isolation and no approval is exactly the combination that refusal exists to
+catch. Configure a real sandbox (`sandbox.backend: container` or `os`), or set
+`permission.allow_unsandboxed_auto_exec: true` if this is intentional.
+
+A job created from a non-interactive surface (an editor plugin over ACP, an MCP client, the web
+UI) starts **unconfirmed** and will not fire on its schedule until an operator confirms it with
+`cron_confirm` — a job created from the interactive TUI or a scripted CLI invocation is confirmed
+immediately, since an operator was already present to type `cron_create`.
+
 Run `aegis cron list` from the CLI (not a model-facing tool call) to review persisted jobs as an
-operator, including which ones carry `auto_approve` and which carry `notify`; add
-`--auto-approve-only` to see just those that fire unattended.
+operator, including which ones carry `auto_approve`, `notify`, or are still unconfirmed; add
+`--auto-approve-only` to see just those that fire unattended. The full registered job set is also
+logged at daemon startup and summarized in `/status` and the TUI sidebar's CRON section, since a
+cron job is a persistence mechanism an operator should be able to recognize or disown.
+
+---
+
+### `cron_confirm`
+
+**Capability:** execute
+
+Confirm a cron job created from a non-interactive surface so it is cleared to fire for the first
+time.
+
+```json
+{
+  "id": "cron-abc123"
+}
+```
 
 ---
 

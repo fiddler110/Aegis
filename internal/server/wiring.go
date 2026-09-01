@@ -103,9 +103,37 @@ func (s *Server) wireCron(cwd string, sb sandbox.Backend, logger *slog.Logger) e
 		return err
 	}
 	runCronCmd := cronShellRunner(sb, cwd)
-	cronRun := newCronRunFunc(cronStore, s.tasks, runCronCmd, s.cronPermCheck, s.cronNotify, logger)
+	cronRun := newCronRunFunc(cronStore, s.tasks, runCronCmd, s.cronPermCheck, s.cronNotify, s.hooks, logger)
 	s.cronSched = cron.NewScheduler(cronStore, cronRun, logger)
+	// P81.23/FIND-23: refuse auto_approve at creation time unless the
+	// effective sandbox backend is a real isolation backend — a plain method
+	// value like cronPermCheck/cronNotify above, reading s.cfg/s.sandbox at
+	// call time rather than capturing them now.
+	s.cronSched.SetAutoApproveGuard(s.cronAutoApproveGuard)
+	logRegisteredCronJobs(context.Background(), s.cronSched, logger)
 	return nil
+}
+
+// logRegisteredCronJobs presents the full registered job set at daemon start
+// (P81.23/FIND-23) — cron is a persistence mechanism (an attacker who obtains
+// the bearer token once can register a recurring job that outlives a later
+// token rotation), and nothing previously surfaced that set for an operator
+// to recognise or disown. A failure to list is logged and otherwise ignored:
+// this is a visibility aid, not a startup gate.
+func logRegisteredCronJobs(ctx context.Context, sched *cron.Scheduler, logger *slog.Logger) {
+	jobs, err := sched.List(ctx)
+	if err != nil {
+		logger.Warn("cron: could not list registered jobs at startup", "err", err)
+		return
+	}
+	if len(jobs) == 0 {
+		return
+	}
+	logger.Info("cron: registered jobs at startup", "count", len(jobs))
+	for _, j := range jobs {
+		logger.Info("cron: registered job", "id", j.ID, "title", j.Title, "schedule", j.Schedule,
+			"enabled", j.Enabled, "auto_approve", j.AutoApprove, "confirmed", j.Confirmed, "origin", j.Origin)
+	}
 }
 
 // wireLSP starts every configured language server. No-op when none are

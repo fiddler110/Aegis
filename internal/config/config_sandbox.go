@@ -45,6 +45,13 @@ type SandboxConfig struct {
 	// toolchain installed somewhere non-standard. Each entry that doesn't
 	// exist on the host is silently skipped.
 	OSExtraReadPaths []string `koanf:"os_extra_read_paths"`
+	// SecretExcludePaths names additional workspace-relative paths to shadow
+	// out of every container mount, on top of the built-in ".aegis/.env"
+	// (P81.10/FIND-10). A path that exists under the mounted workspace is
+	// replaced inside the container with an empty read-only file or
+	// directory instead of being reachable via the bind mount. Applies to
+	// the "container"/"auto" backends only.
+	SecretExcludePaths []string `koanf:"secret_exclude_paths"`
 	// Limits caps what a single sandboxed container run may consume (P60.1).
 	// Applies to the "container"/"auto" backends only — the local and os
 	// backends run on the host, where there is no per-command resource knob to

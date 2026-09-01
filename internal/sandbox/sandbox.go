@@ -40,6 +40,17 @@ type ExecOpts struct {
 	// The persistent container itself is untouched: later commands in the
 	// same session still reuse it as before.
 	FreshContainer bool
+
+	// ReadOnly mounts the workspace read-only inside a container backend for
+	// this one command (P81.10/FIND-10), when the caller has already
+	// classified the command as non-mutating (CapRead/CapNetwork) via the
+	// same per-call capability verdict the permission gate used
+	// (tool.EffectiveCapability). Only the one-shot container path honors
+	// this: a persistent container's mount is fixed at container start and
+	// reused across `docker exec` calls with different verdicts, so it
+	// always stays read-write — see ContainerBackend.startPersistentArgs.
+	// Ignored by the local/os backends, which run directly on the host.
+	ReadOnly bool
 }
 
 // ShellCommand returns the platform shell binary and argument list for

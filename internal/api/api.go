@@ -144,6 +144,16 @@ type StatusInfo struct {
 	// Server.probeProviderReachability for the exact rule.
 	ProviderReachable bool  `json:"provider_reachable"`
 	ProviderLatencyMS int64 `json:"provider_latency_ms,omitempty"`
+
+	// CronJobCount/CronAutoApproveCount/CronUnconfirmedCount present the
+	// registered cron job set at a glance (P81.23/FIND-23) — cron is a
+	// persistence mechanism, so an operator checking /status should see how
+	// many jobs are registered, how many fire unattended (auto_approve), and
+	// how many are still waiting on a first-run confirmation, without a
+	// separate cron_list call. 0/0/0 when no cron jobs are registered.
+	CronJobCount         int `json:"cron_job_count,omitempty"`
+	CronAutoApproveCount int `json:"cron_auto_approve_count,omitempty"`
+	CronUnconfirmedCount int `json:"cron_unconfirmed_count,omitempty"`
 }
 
 // PruneResponse reports how many sessions were deleted by a prune operation.
@@ -481,6 +491,13 @@ type CronJobInfo struct {
 	// fires unattended *and* notifies is the one an operator most wants to be
 	// able to identify.
 	Notify bool `json:"notify"`
+	// Origin/Confirmed are the P81.23/FIND-23 registration gate: Origin names
+	// the surface that created this job (internal/reqorigin); Confirmed is
+	// false for a job created from a non-interactive surface (ACP, MCP, the
+	// web UI) until an operator confirms it — the scheduler skips an
+	// unconfirmed job at every tick.
+	Origin    string `json:"origin,omitempty"`
+	Confirmed bool   `json:"confirmed"`
 }
 
 // SteerRequest injects a mid-run instruction into an active session run.

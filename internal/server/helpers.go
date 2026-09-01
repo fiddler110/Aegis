@@ -16,12 +16,14 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cron"
+	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/mcp"
 	"github.com/fiddler110/aegis/internal/notify"
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/repomap"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
@@ -352,6 +354,7 @@ func newCronRunFunc(
 	runCronCmd func(ctx context.Context, command, dir string, emit func(string)) error,
 	permCheck func(ctx context.Context, j cron.Job) (bool, string),
 	notifyRun func(j cron.Job, status, output string),
+	hk engine.Hooks,
 	logger *slog.Logger,
 ) cron.RunFunc {
 	return func(j cron.Job) {
@@ -365,6 +368,16 @@ func newCronRunFunc(
 			title = "cron: " + j.Command
 		}
 		_, _ = taskMgr.Start(task.Spec{Kind: "cron", Title: title}, func(ctx context.Context, emit func(string)) (string, error) {
+			// P81.23/FIND-23: a cron job's shell execution runs the sandbox
+			// backend directly (runCronCmd below), bypassing the tool
+			// registry's own Pre/PostToolUse dispatch that stamps every
+			// interactive tool call's audit record with its origin — so
+			// without this, a scheduled run left no origin-stamped record in
+			// hooks.Audit at all. Stamping it here and routing through the
+			// same hk.PreToolUse/PostToolUse pair an interactive shell call
+			// gets closes that gap using the existing sink rather than a
+			// second one.
+			ctx = reqorigin.WithOrigin(ctx, reqorigin.Cron)
 			// Mirror everything sent to the task-manager's live emit into a
 			// local buffer too, so a durable, truncated copy of the run's
 			// combined stdout/stderr can be persisted to the cron_runs audit
@@ -407,10 +420,25 @@ func newCronRunFunc(
 				finishRun("blocked")
 				return "", errors.New(blocked)
 			}
+			cmdInput, _ := json.Marshal(struct {
+				Command string `json:"command"`
+			}{Command: j.Command})
+			if hk != nil {
+				if err := hk.PreToolUse(ctx, "shell", cmdInput); err != nil {
+					blocked := fmt.Sprintf("cron job %q blocked by hook: %v", j.Title, err)
+					logger.Warn("cron: job blocked by hook", "job", j.ID, "err", err)
+					capture(blocked)
+					finishRun("blocked")
+					return "", errors.New(blocked)
+				}
+			}
 			runErr := runCronCmd(ctx, j.Command, j.Workdir, capture)
 			status := "ok"
 			if runErr != nil {
 				status = "error"
+			}
+			if hk != nil {
+				hk.PostToolUse(ctx, "shell", cmdInput, outBuf.String(), runErr != nil)
 			}
 			finishRun(status)
 			return "", runErr

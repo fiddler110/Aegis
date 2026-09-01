@@ -186,11 +186,12 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if tool.EffectiveCapability(ctx, t, input) != tool.CapExecute {
 		// Any classified command is non-mutating (CapRead or, for gh,
 		// CapNetwork), so there is nothing for the checkpoint snapshot to
-		// capture.
-		text, err = t.exec(ctx, root, args.Command, timeout, args.ResetSandbox)
+		// capture — and, for the same reason, the container backend can
+		// mount the workspace read-only for this one call (P81.10/FIND-10).
+		text, err = t.exec(ctx, root, args.Command, timeout, args.ResetSandbox, true)
 	} else {
 		text, err = captureShellWrites(ctx, checkpoint.SnapshotterFrom(ctx), root, func() (string, error) {
-			return t.exec(ctx, root, args.Command, timeout, args.ResetSandbox)
+			return t.exec(ctx, root, args.Command, timeout, args.ResetSandbox, false)
 		})
 	}
 	// P64.3: was 200 << 10 (200 KiB), which tokenest prices at 51,200 tokens —
@@ -253,10 +254,13 @@ func interpreterHint(command string) string {
 // exec runs a command synchronously, delegating to the sandbox backend if set.
 // resetSandbox threads reset_sandbox through to the backend as
 // ExecOpts.FreshContainer (P81.22/FIND-22); it has no effect on backends that
-// don't reuse a persistent container in the first place.
-func (t *shellTool) exec(ctx context.Context, root, command string, timeout time.Duration, resetSandbox bool) (string, error) {
+// don't reuse a persistent container in the first place. readOnly threads the
+// same per-call capability verdict the permission gate already used through
+// as ExecOpts.ReadOnly (P81.10/FIND-10) — only meaningful for a one-shot
+// container run; see that field's doc comment.
+func (t *shellTool) exec(ctx context.Context, root, command string, timeout time.Duration, resetSandbox, readOnly bool) (string, error) {
 	if t.sb != nil {
-		return t.sb.Exec(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout, FreshContainer: resetSandbox})
+		return t.sb.Exec(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout, FreshContainer: resetSandbox, ReadOnly: readOnly})
 	}
 	return sandbox.NewLocalBackend().Exec(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout})
 }

