@@ -141,12 +141,23 @@ func execShellTool(t *testing.T, reg *tool.Registry, command string) string {
 // config.Load()/provider setup, which needs a real environment) by comparing
 // the pre-fix registration (no Sandbox) against the post-fix one (Sandbox
 // from SelectSandbox) for the same configured extra strip-env name.
+//
+// The env var under test is one of sandbox.DefaultEnvAllow's names (GOPROXY),
+// not an arbitrary one: since P81.26/FIND-26 inverted the default from a
+// denylist to an allowlist, an arbitrary secret name never survives either
+// registration's default filtering regardless of this wiring — which would
+// make the "leaks without a wired sandbox" setup assertion below false and
+// the test moot. GOPROXY is a name real operators put a credential-bearing
+// module-proxy URL in and one this project's own toolchain needs by default
+// (see CLAUDE.md's go build/test commands), so it stays allowlisted through
+// on both paths — exactly the case sandbox.strip_env exists to let an
+// operator override, and exactly the case this wiring gap silently ignored.
 func TestExecuteWorkerSandboxHonorsConfiguredStripEnv(t *testing.T) {
-	t.Setenv("MY_MCP_TOKEN", "sk-mcp-secret-value")
+	t.Setenv("GOPROXY", "https://user:sk-mcp-secret-value@proxy.internal/mod")
 
 	cwd := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := config.SandboxConfig{StripEnv: []string{"MY_MCP_TOKEN"}}
+	cfg := config.SandboxConfig{StripEnv: []string{"GOPROXY"}}
 
 	// Pre-fix behavior: no Sandbox wired into the registry at all.
 	regNoSandbox := tool.NewRegistry()

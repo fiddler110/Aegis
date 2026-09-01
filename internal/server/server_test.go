@@ -28,6 +28,7 @@ import (
 	"github.com/fiddler110/aegis/internal/memory"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/swarm"
@@ -125,7 +126,7 @@ func TestServerDeleteSessionClearsWorkdirAndSkillMaps(t *testing.T) {
 	cl := client.New(ts.URL).WithToken("test-token")
 	ctx := context.Background()
 
-	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: t.TempDir()})
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: t.TempDir(), Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

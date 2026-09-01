@@ -76,6 +76,30 @@ func (t *shellTool) CapabilityFor(ctx context.Context, input json.RawMessage) to
 	return tool.CapExecute
 }
 
+// TouchedPaths implements tool.PathToucher (P81.30 / FIND-30). The engine's
+// parallel-round dependency graph orders same-path calls using a "path"/
+// "file_path" input field, which shell's schema doesn't have — its target
+// lives inside a command string instead. This reuses shellCommandPaths, the
+// same argv splitting and path-candidate extraction classifyShellCommand
+// trusts for its own read-only downgrade, so `shell cat somefile` is ordered
+// against a concurrent write_file on the same path exactly as a read_file
+// call would be.
+//
+// It does not consult ctx for a workdir the way CapabilityFor does: unlike
+// confinement, path *identification* doesn't depend on which root a relative
+// name resolves under — the engine's own dependency graph compares the same
+// cleaned, workspace-relative strings toolTargetPath extracts from every
+// other tool's "path" field, none of which are root-joined either.
+func (t *shellTool) TouchedPaths(_ context.Context, input json.RawMessage) ([]string, bool) {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(input, &args) != nil {
+		return nil, false
+	}
+	return shellCommandPaths(args.Command, t.usesPowerShell())
+}
+
 // usesPowerShell reports whether this tool's commands actually reach
 // PowerShell. A Windows host normally means they do — but a container backend
 // runs them inside a Linux container, where /bin/sh and the Unix commands are
@@ -96,9 +120,9 @@ func (t *shellTool) Description() string {
 }
 func (t *shellTool) InputSchema() json.RawMessage {
 	if t.usesPowerShell() {
-		return schema(`{"type":"object","properties":{"command":{"type":"string","description":"PowerShell command to run. Use PowerShell syntax (Get-ChildItem, Get-Content, Select-String, Remove-Item, etc.) — Unix commands do not work in PowerShell."},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"}},"required":["command"]}`)
+		return schema(`{"type":"object","properties":{"command":{"type":"string","description":"PowerShell command to run. Use PowerShell syntax (Get-ChildItem, Get-Content, Select-String, Remove-Item, etc.) — Unix commands do not work in PowerShell."},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"},"reset_sandbox":{"type":"boolean","description":"run this one command in a fresh, disposable sandbox instead of reusing the session's persistent container (only has an effect with sandbox.persistent: true and a container backend); use this after a command that may have left broken state (a poisoned PATH, a corrupted install) that should not affect later commands"}},"required":["command"]}`)
 	}
-	return schema(`{"type":"object","properties":{"command":{"type":"string","description":"the shell command to run via /bin/sh -c"},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"}},"required":["command"]}`)
+	return schema(`{"type":"object","properties":{"command":{"type":"string","description":"the shell command to run via /bin/sh -c"},"timeout_sec":{"type":"integer","description":"optional per-call timeout override in seconds"},"background":{"type":"boolean","description":"run as a detached background job and return a task id immediately instead of blocking"},"reset_sandbox":{"type":"boolean","description":"run this one command in a fresh, disposable sandbox instead of reusing the session's persistent container (only has an effect with sandbox.persistent: true and a container backend); use this after a command that may have left broken state (a poisoned PATH, a corrupted install) that should not affect later commands"}},"required":["command"]}`)
 }
 
 func (t *shellTool) OutputSchema() json.RawMessage {
@@ -110,6 +134,11 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		Command    string `json:"command"`
 		TimeoutSec int    `json:"timeout_sec"`
 		Background bool   `json:"background"`
+		// ResetSandbox forces this one command into a fresh, disposable
+		// sandbox instead of reusing the session's persistent container
+		// (P81.22/FIND-22 — see sandbox.ExecOpts.FreshContainer). No effect
+		// on backends that aren't a persistent container in the first place.
+		ResetSandbox bool `json:"reset_sandbox"`
 	}
 	if err := parseArgs(input, &args); err != nil {
 		return tool.Result{}, err
@@ -158,10 +187,10 @@ func (t *shellTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		// Any classified command is non-mutating (CapRead or, for gh,
 		// CapNetwork), so there is nothing for the checkpoint snapshot to
 		// capture.
-		text, err = t.exec(ctx, root, args.Command, timeout)
+		text, err = t.exec(ctx, root, args.Command, timeout, args.ResetSandbox)
 	} else {
 		text, err = captureShellWrites(ctx, checkpoint.SnapshotterFrom(ctx), root, func() (string, error) {
-			return t.exec(ctx, root, args.Command, timeout)
+			return t.exec(ctx, root, args.Command, timeout, args.ResetSandbox)
 		})
 	}
 	// P64.3: was 200 << 10 (200 KiB), which tokenest prices at 51,200 tokens —
@@ -222,9 +251,12 @@ func interpreterHint(command string) string {
 }
 
 // exec runs a command synchronously, delegating to the sandbox backend if set.
-func (t *shellTool) exec(ctx context.Context, root, command string, timeout time.Duration) (string, error) {
+// resetSandbox threads reset_sandbox through to the backend as
+// ExecOpts.FreshContainer (P81.22/FIND-22); it has no effect on backends that
+// don't reuse a persistent container in the first place.
+func (t *shellTool) exec(ctx context.Context, root, command string, timeout time.Duration, resetSandbox bool) (string, error) {
 	if t.sb != nil {
-		return t.sb.Exec(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout})
+		return t.sb.Exec(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout, FreshContainer: resetSandbox})
 	}
 	return sandbox.NewLocalBackend().Exec(ctx, command, sandbox.ExecOpts{Dir: root, Timeout: timeout})
 }

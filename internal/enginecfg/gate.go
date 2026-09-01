@@ -69,6 +69,14 @@ type GateOptions struct {
 	OnDecision func(permission.ContextualDecision)
 	// Logger receives the warnings about ignored persona rules. Nil is fine.
 	Logger *slog.Logger
+	// SandboxBackendLabel names the effective command-execution sandbox
+	// backend (e.g. "container:docker", "os:bwrap", "local (unsandboxed)")
+	// for this run (P81.22/FIND-22). Passed straight to the base mode gate so
+	// an execute-capability approval prompt says what will actually contain
+	// the command, not only a startup log line. Empty (the sub-agent/debate/
+	// worker default, where the caller has no sandbox of its own to name)
+	// skips the annotation.
+	SandboxBackendLabel string
 }
 
 // BuildGate assembles the shared permission gate stack, used by every engine run
@@ -100,6 +108,7 @@ type GateOptions struct {
 func BuildGate(o GateOptions) (engine.Gate, engine.Hooks) {
 	baseGate := permission.New(permission.ParseMode(o.Mode), o.Approver)
 	baseGate.Policy.StrictPlanMode = o.StrictPlanMode
+	baseGate.SandboxBackendLabel = o.SandboxBackendLabel
 	// M7: every layer above reports its decisions to o.OnDecision; the mode
 	// gate reported nothing, so the one decision no layer explained was the
 	// silent capability downgrade — the thing that lets an execute-capable tool
@@ -147,11 +156,14 @@ func BuildGate(o GateOptions) (engine.Gate, engine.Hooks) {
 		gate = permission.NewRuleGate(gate, rules, permission.WithRuleObserver(o.OnDecision))
 	}
 
-	// A persona's declared Tools list is advisory only (P7.5: never a security
-	// boundary) — it warns or prompts, and the real allow/deny rules it wraps
-	// still decide.
+	// A persona's declared Tools list is advisory by default (P7.5: never a
+	// security boundary on its own) — it warns or prompts, and the real
+	// allow/deny rules it wraps still decide. Persona.ToolsEnforced
+	// (P81.20/FIND-20 item 4) opts a persona into treating the list as a hard
+	// boundary instead, for an operator who wants a persona to double as
+	// containment; advisory remains the default either way.
 	if len(o.Persona.Tools) > 0 {
-		gate = permission.NewPersonaToolGate(gate, o.Persona.Name, o.Persona.Tools, o.Approver, o.Logger, o.OnDecision)
+		gate = permission.NewPersonaToolGate(gate, o.Persona.Name, o.Persona.Tools, o.Persona.ToolsEnforced, o.Approver, o.Logger, o.OnDecision)
 	}
 
 	// Per-task file-write scope (P46.1). It binds hardest: an out-of-scope

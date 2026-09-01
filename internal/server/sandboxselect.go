@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	goruntime "runtime"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
@@ -24,9 +25,23 @@ import (
 // the "os" backend (seatbelt/bwrap) before giving up to unsandboxed local,
 // so a host without Docker/Podman running still gets OS-level isolation
 // where available, rather than silently losing it just because container is
-// now the default. cfg.Strict opts out of the whole cascade, not just the
-// last step — it means "I asked for container, tell me if it isn't there"
-// rather than "quietly substitute something else".
+// now the default.
+//
+// cfg.Strict (P81.22/FIND-22: on by default) guards only the *last* step of
+// that cascade — landing on unsandboxed local — not the cascade itself: it
+// means "give me real isolation or tell me you can't", not "refuse anything
+// but the exact runtime I named". A container→os cascade under strict still
+// succeeds, because OS-level isolation is a real (if different) containment
+// mechanism, not a downgrade to none; only a cascade that bottoms out at
+// local — no container runtime and no OS sandbox mechanism, which is every
+// current Windows box (P77.6) plus a macOS/Linux box missing both Docker and
+// seatbelt/bwrap — is refused under strict. Earlier versions of this
+// function had strict opt out of the whole cascade; that was fine when
+// strict was an opt-in for someone who specifically wanted zero
+// substitution, but flipping it to the default with that semantics intact
+// would hard-fail the daemon on every macOS/Linux box that merely doesn't
+// have Docker *running* right now — a far larger population than the one
+// this posture exists to protect.
 //
 // A fallback to the unsandboxed local backend is a silent security downgrade
 // for an operator who believes sandboxing is active (P7.4): it is always
@@ -56,6 +71,7 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 			Limits:     cfg.Limits.Sandbox(),
 			Persistent: cfg.Persistent,
 			SessionTTL: cfg.SandboxSessionTTL(),
+			EnvAllow:   cfg.EnvAllow,
 			Logger:     logger,
 		}
 		// Only "container" honors an explicit forced runtime; "auto" always detects.
@@ -64,25 +80,26 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 		}
 		csb, cerr := sandbox.NewContainerBackend(opts)
 		if cerr != nil {
-			if cfg.Strict {
-				return nil, false, "", fmt.Errorf("sandbox: no container runtime available for backend %q and sandbox.strict is set: %w", cfg.Backend, cerr)
-			}
-			// Cascade to OS-level isolation before giving up to unsandboxed
-			// local: container is the default, but most hosts don't have
-			// Docker/Podman running, and falling straight to local would be a
-			// silent security downgrade for every macOS/Linux box that has
-			// seatbelt/bwrap available. Mirrors the "os" case below.
+			// Cascade to OS-level isolation regardless of cfg.Strict: strict
+			// guards against landing on *no* isolation, not against landing on
+			// a different (but still real) isolation mechanism than the one
+			// named. See the doc comment above for why this changed.
 			osb, oerr := sandbox.NewOSBackend(cwd, cfg.Network, cfg.StripEnv, cfg.OSExtraReadPaths)
 			if oerr == nil {
+				osb.WithEnvAllow(cfg.EnvAllow)
 				logger.Warn("sandbox: no container runtime available, falling back to OS-level sandboxing",
 					"backend", cfg.Backend, "mechanism", osb.Name(), "err", cerr)
 				reason = fmt.Sprintf("configured sandbox backend %q unavailable (%v) — falling back to OS-level sandboxing (%s)", cfg.Backend, cerr, osb.Name())
 				return osb, true, reason, nil
 			}
+			if cfg.Strict {
+				return nil, false, "", strictUnavailableErr(cfg.Backend, cerr, oerr)
+			}
 			logger.Warn("sandbox: no container runtime available and OS sandbox unavailable, falling back to local",
 				"backend", cfg.Backend, "container_err", cerr, "os_err", oerr)
 			reason = fmt.Sprintf("configured sandbox backend %q unavailable (%v); OS sandbox also unavailable (%v) — running unsandboxed on the host", cfg.Backend, cerr, oerr)
-			return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), true, reason, nil
+			lb := sandbox.NewLocalBackendWithEnv(cfg.StripEnv).WithEnvAllow(cfg.EnvAllow).WithLimits(cfg.Limits.Sandbox())
+			return lb, true, reason, nil
 		}
 		logger.Info("sandbox backend", "runtime", csb.DetectedRuntime(), "image", cfg.Image)
 		// FIND-06 / P24.10: Docker/Podman socket access is privilege-equivalent
@@ -130,20 +147,28 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 		return csb, false, "", nil
 	case "os":
 		// OS-level isolation without a container runtime (P4.7): seatbelt on
-		// macOS, bwrap on Linux. Falls back to local when unavailable.
+		// macOS, bwrap on Linux. Falls back to local when unavailable — a hard
+		// failure under strict, since local is the "no isolation at all" case
+		// strict exists to catch (there is nothing left to cascade to here).
 		osb, oerr := sandbox.NewOSBackend(cwd, cfg.Network, cfg.StripEnv, cfg.OSExtraReadPaths)
 		if oerr != nil {
 			if cfg.Strict {
-				return nil, false, "", fmt.Errorf("sandbox: OS sandbox unavailable and sandbox.strict is set: %w", oerr)
+				return nil, false, "", strictUnavailableErr(cfg.Backend, oerr, nil)
 			}
 			logger.Warn("sandbox: OS sandbox unavailable, falling back to local", "err", oerr)
 			reason = fmt.Sprintf("configured sandbox backend \"os\" unavailable (%v) — running unsandboxed on the host", oerr)
-			return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), true, reason, nil
+			lb := sandbox.NewLocalBackendWithEnv(cfg.StripEnv).WithEnvAllow(cfg.EnvAllow).WithLimits(cfg.Limits.Sandbox())
+			return lb, true, reason, nil
 		}
+		osb.WithEnvAllow(cfg.EnvAllow)
 		logger.Info("sandbox backend", "mechanism", osb.Name(), "network", cfg.Network)
 		return osb, false, "", nil
 	case "", "local":
-		return sandbox.NewLocalBackendWithEnv(cfg.StripEnv), false, "", nil
+		lb := sandbox.NewLocalBackendWithEnv(cfg.StripEnv).WithEnvAllow(cfg.EnvAllow).WithLimits(cfg.Limits.Sandbox())
+		if !cfg.Limits.Sandbox().Empty() && !sandbox.ResourceLimiterSupported() {
+			logger.Warn("sandbox: configured sandbox.limits are NOT enforced on the local backend on this platform — resource caps are currently implemented via Windows job objects only; a runaway command can still consume the host (POSIX rlimit/cgroup support is a follow-up, see P81.22)")
+		}
+		return lb, false, "", nil
 	default:
 		return nil, false, "", fmt.Errorf(
 			"sandbox: unknown sandbox.backend %q (want \"local\", \"container\", \"auto\", or \"os\"); "+
@@ -152,6 +177,36 @@ func SelectSandbox(cfg config.SandboxConfig, cwd string, logger *slog.Logger) (s
 			cfg.Backend, cfg.Backend,
 		)
 	}
+}
+
+// strictUnavailableErr builds the sandbox.strict startup-refusal error for
+// the case neither a container runtime nor OS-level isolation is available
+// (P81.22/FIND-22) — the "unavailable isolation" case strict exists to catch,
+// now hit by default on every host that used to silently land on unsandboxed
+// local behind a startup WARN. osErr is nil when backend "os" was the one
+// that failed directly (no separate container attempt to report).
+//
+// The message is actionable rather than a bare wrapped error because this is
+// the exact failure the maintainer's own Windows dev box hits with the new
+// default (P77.6: no OS-level sandbox backend on Windows yet) — a strict
+// mode that fails closed with no next step would just be a worse warning.
+func strictUnavailableErr(configuredBackend string, containerOrOSErr, osErr error) error {
+	var detail string
+	if osErr != nil {
+		detail = fmt.Sprintf("container runtime unavailable (%v); OS-level sandbox also unavailable (%v)", containerOrOSErr, osErr)
+	} else {
+		detail = fmt.Sprintf("OS-level sandbox unavailable (%v)", containerOrOSErr)
+	}
+	hint := "install Docker or Podman (sandbox.backend: container), or bubblewrap/seatbelt for OS-level isolation (sandbox.backend: os)"
+	if goruntime.GOOS == "windows" {
+		hint = "install Docker Desktop or Podman for sandbox.backend: container — Windows has no OS-level sandbox backend yet (P77.6)"
+	}
+	return fmt.Errorf(
+		"refusing to start: sandbox.strict is set (the default as of P81.22) and no real command-execution isolation is available for sandbox.backend %q — %s. "+
+			"%s. If you understand the risk and want the old behavior (every model-issued shell command runs directly on the host, unconfined), "+
+			"set sandbox.strict: false, or sandbox.backend: local to choose that outright without the warning",
+		configuredBackend, detail, hint,
+	)
 }
 
 // unsandboxedAutoExecError returns a startup-refusal error when

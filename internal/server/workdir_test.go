@@ -13,11 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
@@ -114,14 +116,18 @@ func TestSessionWorkdirConfinement(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	metaA, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: dirA})
+	// P81.9: the allowlist now applies unconditionally, so a session outside
+	// the daemon's own workspace needs the TUI/CLI origin carve-out to be
+	// created at all — this test is about workdir confinement, not the
+	// allowlist gate itself, so declare the origin that exercises it.
+	metaA, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: dirA, Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession A: %v", err)
 	}
 	if metaA.Workdir != dirA {
 		t.Errorf("session A Workdir = %q, want %q", metaA.Workdir, dirA)
 	}
-	metaB, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: dirB})
+	metaB, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: dirB, Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession B: %v", err)
 	}
@@ -165,7 +171,7 @@ func TestSessionWorkdirEscapeErrorNamesSessionRoot(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: dirA})
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: dirA, Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -213,11 +219,13 @@ func TestCreateSessionRejectsMissingWorkdir(t *testing.T) {
 	}
 }
 
-// TestCreateSessionWorkdirTrustBoundary covers P25.1's remote-daemon
-// safeguard: once server.allow_remote is set, a session Workdir outside the
-// daemon's own workspace is rejected (403) unless it falls under
-// server.session_workdir_allowlist — a remote-accessible daemon must not
-// become an arbitrary-filesystem oracle, one session at a time.
+// TestCreateSessionWorkdirTrustBoundary covers P25.1/P81.9's daemon
+// safeguard: a session Workdir outside the daemon's own workspace is
+// rejected (403) unless it falls under server.session_workdir_allowlist —
+// enforced unconditionally now, not only once server.allow_remote is set,
+// since a token holder that isn't the operator's own shell (an MCP client,
+// an ACP editor plugin, a scheduled job) is exactly as able to reach a
+// loopback-only daemon as a remote one.
 func TestCreateSessionWorkdirTrustBoundary(t *testing.T) {
 	defaultRoot := t.TempDir()
 	outsideDir := t.TempDir()
@@ -235,7 +243,7 @@ func TestCreateSessionWorkdirTrustBoundary(t *testing.T) {
 	cfg := &config.Config{
 		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
 		Permission: config.PermissionConfig{Mode: "build"},
-		Server:     config.ServerConfig{AllowRemote: true, SessionWorkdirAllowlist: []string{allowedParent}},
+		Server:     config.ServerConfig{SessionWorkdirAllowlist: []string{allowedParent}},
 	}
 	reg := tool.NewRegistry()
 	if err := builtin.Register(reg, builtin.Options{Root: defaultRoot}); err != nil {
@@ -280,5 +288,208 @@ func TestCreateSessionWorkdirTrustBoundary(t *testing.T) {
 	nonexistentOutside := filepath.Join(outsideDir, "does-not-exist")
 	if got := post(nonexistentOutside); got != http.StatusForbidden {
 		t.Errorf("nonexistent workdir outside workspace/allowlist: status = %d, want 403 (not 400 — must not leak existence before the allowlist gate)", got)
+	}
+}
+
+// TestSessionWorkdirOriginCarveOut is the P81.9 regression: the allowlist
+// exemption that used to key off server.allow_remote (never set on a
+// loopback-only daemon, so effectively always exempt) now keys off request
+// origin. TUI and CLI — interactive, operator-driven local-shell surfaces —
+// keep the exemption; Web, ACP and MCP, none of which represent the operator
+// choosing a directory, do not.
+func TestSessionWorkdirOriginCarveOut(t *testing.T) {
+	defaultRoot := t.TempDir()
+	outsideDir := t.TempDir()
+
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "build"},
+	}
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: defaultRoot}); err != nil {
+		t.Fatal(err)
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, &readFileAdapter{}, reg)
+	srv.workspace = defaultRoot
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	cl := client.New(ts.URL).WithToken("test-token")
+
+	for _, origin := range []string{reqorigin.Web, reqorigin.ACP, reqorigin.MCP} {
+		_, err := cl.CreateSession(context.Background(), api.CreateSessionRequest{Mode: "build", Workdir: outsideDir, Origin: origin})
+		if err == nil {
+			t.Errorf("origin %q: expected the allowlist to reject a session outside the daemon's workspace, got no error", origin)
+		}
+	}
+	for _, origin := range []string{reqorigin.TUI, reqorigin.CLI} {
+		if _, err := cl.CreateSession(context.Background(), api.CreateSessionRequest{Mode: "build", Workdir: outsideDir, Origin: origin}); err != nil {
+			t.Errorf("origin %q: expected the interactive-local carve-out to allow it, got: %v", origin, err)
+		}
+	}
+}
+
+// TestSessionWorkdirTrustGrantSatisfiesAllowlist covers the other legitimate
+// path P81.9 asks for: a directory the operator has already vetted via
+// `aegis trust --dir` (config.TrustWorkspace) satisfies the allowlist gate
+// for any origin, the same way workspace.additional_roots already reuses
+// that trust store rather than a second consent mechanism.
+func TestSessionWorkdirTrustGrantSatisfiesAllowlist(t *testing.T) {
+	defaultRoot := t.TempDir()
+	trustedDir := t.TempDir()
+
+	// Redirect the workspace-trust store (config.WorkspaceTrustStorePath ->
+	// defaultDataDir) into a scratch location so this test never touches the
+	// real developer machine's grant file. Mirrors config package's own
+	// redirectConfigDir test helper: HOME for Unix's os.UserHomeDir, APPDATA
+	// for Windows' os.UserConfigDir, XDG_CONFIG_HOME so Linux doesn't fall
+	// back to a real ~/.config.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("APPDATA", filepath.Join(fakeHome, "AppData", "Roaming"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(fakeHome, ".config"))
+
+	if err := config.TrustWorkspace(trustedDir); err != nil {
+		t.Fatalf("TrustWorkspace: %v", err)
+	}
+
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "build"},
+	}
+	reg := tool.NewRegistry()
+	if err := builtin.Register(reg, builtin.Options{Root: defaultRoot}); err != nil {
+		t.Fatal(err)
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, &readFileAdapter{}, reg)
+	srv.workspace = defaultRoot
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	cl := client.New(ts.URL).WithToken("test-token")
+
+	if _, err := cl.CreateSession(context.Background(), api.CreateSessionRequest{Mode: "build", Workdir: trustedDir, Origin: reqorigin.MCP}); err != nil {
+		t.Errorf("expected a trusted workdir to satisfy the allowlist for an MCP-origin session, got: %v", err)
+	}
+}
+
+// TestDeleteSessionReapsUnsharedSpillDir is the P81.24 regression: deleting
+// the last session rooted at a workdir must reap that workdir's
+// .aegis/spill/ directory, closing the gap where a spill file (a verbatim
+// copy of truncated tool output) outlived the session that produced it by up
+// to spillTTL (24h).
+func TestDeleteSessionReapsUnsharedSpillDir(t *testing.T) {
+	defaultRoot := t.TempDir()
+	sessionRoot := t.TempDir()
+	spillDir := filepath.Join(sessionRoot, ".aegis", "spill")
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spillDir, "leftover.txt"), []byte("stale spill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, cl, cleanup := newWorkdirTestServer(t, defaultRoot, &readFileAdapter{path: "target.txt"})
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: sessionRoot, Origin: reqorigin.TUI})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := cl.DeleteSession(ctx, meta.ID); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	if _, err := os.Stat(spillDir); !os.IsNotExist(err) {
+		t.Errorf("expected the spill directory to be reaped after the last session on its workdir was deleted, stat err = %v", err)
+	}
+}
+
+// TestDeleteSessionKeepsSpillDirWhileSharedWorkdirSessionLives is the other
+// half: builtin.ReapSpillDir's own doc comment requires a caller to prove no
+// other live session shares the workdir first, since spillText scopes files
+// by workspace rather than by session.
+func TestDeleteSessionKeepsSpillDirWhileSharedWorkdirSessionLives(t *testing.T) {
+	defaultRoot := t.TempDir()
+	sessionRoot := t.TempDir()
+	spillDir := filepath.Join(sessionRoot, ".aegis", "spill")
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spillDir, "leftover.txt"), []byte("stale spill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, cl, cleanup := newWorkdirTestServer(t, defaultRoot, &readFileAdapter{path: "target.txt"})
+	defer cleanup()
+	ctx := context.Background()
+
+	metaA, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: sessionRoot, Origin: reqorigin.TUI})
+	if err != nil {
+		t.Fatalf("CreateSession A: %v", err)
+	}
+	metaB, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build", Workdir: sessionRoot, Origin: reqorigin.TUI})
+	if err != nil {
+		t.Fatalf("CreateSession B: %v", err)
+	}
+
+	if err := cl.DeleteSession(ctx, metaA.ID); err != nil {
+		t.Fatalf("DeleteSession A: %v", err)
+	}
+	if _, err := os.Stat(spillDir); err != nil {
+		t.Fatalf("expected the spill directory to survive while session B still shares its workdir, stat err = %v", err)
+	}
+
+	if err := cl.DeleteSession(ctx, metaB.ID); err != nil {
+		t.Fatalf("DeleteSession B: %v", err)
+	}
+	if _, err := os.Stat(spillDir); !os.IsNotExist(err) {
+		t.Errorf("expected the spill directory to be reaped once the last sharing session was deleted, stat err = %v", err)
+	}
+}
+
+// TestRunRetentionPruneDeletesOldArchivedSessions is the P81.24 wiring
+// regression: config.CleanupConfig.ArchivedSessionTTLDays previously had no
+// caller at all, so an archived session's conversation, traces and
+// checkpoint file copies were immortal regardless of this setting.
+// session.Store.PruneArchived itself is covered at the store level; this
+// proves the daemon's own pruner actually calls it.
+func TestRunRetentionPruneDeletesOldArchivedSessions(t *testing.T) {
+	defaultRoot := t.TempDir()
+	srv, cl, cleanup := newWorkdirTestServer(t, defaultRoot, &readFileAdapter{})
+	defer cleanup()
+	srv.cfg.Cleanup.ArchivedSessionTTLDays = 1
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := srv.store.Archive(ctx, meta.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	// Backdate archived_at past the 1-day TTL — PruneArchived's own store-level
+	// tests already cover the predicate; this only needs a row old enough to
+	// trip it.
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	if _, err := srv.store.DB().ExecContext(ctx, `UPDATE sessions SET archived_at = ? WHERE id = ?`, old, meta.ID); err != nil {
+		t.Fatalf("backdate archived_at: %v", err)
+	}
+
+	srv.runRetentionPrune()
+
+	if _, err := cl.GetSession(ctx, meta.ID); err == nil {
+		t.Error("expected the archived session to be pruned once past its ArchivedSessionTTLDays")
 	}
 }

@@ -34,7 +34,7 @@ func TestChatGateHonorsConfigDenyRules(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	gate, _ := buildChatGate(cfg, persona.Persona{}, reg, "build", true /* --yes */, chatTestLogger())
+	gate, _ := buildChatGate(cfg, persona.Persona{}, reg, "build", true /* --yes */, t.TempDir(), chatTestLogger())
 
 	sh, ok := reg.Get("shell")
 	if !ok {
@@ -51,7 +51,7 @@ func TestChatGateHonorsConfigDenyRules(t *testing.T) {
 	// The control: with no rules configured, --yes still approves, so the test
 	// above is measuring the rule and not the approver.
 	cfg.Permission.Rules = nil
-	gate, _ = buildChatGate(cfg, persona.Persona{}, reg, "build", true, chatTestLogger())
+	gate, _ = buildChatGate(cfg, persona.Persona{}, reg, "build", true, t.TempDir(), chatTestLogger())
 	if allowed, _ := gate.Check(context.Background(), sh, json.RawMessage(`{"command":"echo hi"}`)); !allowed {
 		t.Error("shell was refused with no deny rule configured; the control arm does not isolate the rule layer")
 	}
@@ -74,7 +74,7 @@ func TestChatGateAppliesPersonaDenyRules(t *testing.T) {
 	}
 
 	p := persona.Persona{Name: "locked-down", Rules: []string{"deny shell(*)"}}
-	gate, _ := buildChatGate(cfg, p, reg, "build", true, chatTestLogger())
+	gate, _ := buildChatGate(cfg, p, reg, "build", true, t.TempDir(), chatTestLogger())
 	if allowed, _ := gate.Check(context.Background(), sh, json.RawMessage(`{"command":"echo hi"}`)); allowed {
 		t.Error("a persona's deny rule did not reach the CLI permission gate")
 	}

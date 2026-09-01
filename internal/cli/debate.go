@@ -111,7 +111,7 @@ func newDebateCmd() *cobra.Command {
 				// inert by definition — passed anyway so a future mode change
 				// here does not silently drop the operator's posture.
 				Mode:           string(permission.ModeBuild),
-				StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(),
+				StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(config.WorkspaceTrusted(cwd)),
 				Approver:       permission.AutoDeny{},
 				Security:       cfg.Security,
 				Registry:       reg,

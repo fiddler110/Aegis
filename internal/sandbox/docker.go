@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -31,6 +32,10 @@ type ContainerBackend struct {
 	image   string
 	network bool
 	limits  ResourceLimits
+	// envAllow lists the env var names forwarded from the host into the
+	// container via -e (P81.26/FIND-26). Defaults to
+	// DefaultContainerEnvAllow, extended by sandbox.env_allow.
+	envAllow []string
 
 	// Persistent-container state (P60.2). persistent is mutable: a failed
 	// start turns it off for the rest of this backend's life so the fallback
@@ -61,6 +66,13 @@ type ContainerOpts struct {
 	// called (a killed daemon). 0 uses DefaultSessionTTL. No effect unless
 	// Persistent is set.
 	SessionTTL time.Duration
+	// EnvAllow names additional host env var names to forward into the
+	// container on top of DefaultContainerEnvAllow (sandbox.env_allow,
+	// P81.26/FIND-26). Unlike the local/os backends, this does not include
+	// PATH/HOME-shaped defaults — see DefaultContainerEnvAllow's doc comment
+	// for why forwarding host paths into a container's own filesystem would
+	// be wrong rather than merely unnecessary.
+	EnvAllow []string
 	// Logger receives the lifecycle lines persistent mode produces (started,
 	// reaped, degraded to one-shot). nil discards them.
 	Logger *slog.Logger
@@ -106,12 +118,20 @@ func NewContainerBackend(opts ContainerOpts) (*ContainerBackend, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	// P81.13: sandbox.image is a mutable tag with no build-time record to pin
+	// against (unlike the security package's locally-built scanner images) —
+	// pin its real image ID at first use and refuse a later mismatch rather
+	// than silently running whatever now answers to the same tag.
+	if err := pinAndVerifySandboxImage(context.Background(), rt, opts.Image); err != nil {
+		return nil, err
+	}
 	return &ContainerBackend{
-		runtime: rt,
-		image:   opts.Image,
-		network: opts.Network,
-		limits:  opts.Limits,
-		logger:  logger,
+		runtime:  rt,
+		image:    opts.Image,
+		network:  opts.Network,
+		limits:   opts.Limits,
+		envAllow: mergeEnvAllow(DefaultContainerEnvAllow, opts.EnvAllow),
+		logger:   logger,
 		// P60.2: honored only where the detach/exec CLI surface is verified;
 		// elsewhere the backend keeps its per-command behavior rather than
 		// failing on a subcommand the runtime does not have.
@@ -210,10 +230,34 @@ func (c *ContainerBackend) Close() error {
 // diverge: everything above it — timeouts, output handling, error wrapping — is
 // shared, so a persistent command is not quietly a different kind of command.
 func (c *ContainerBackend) commandArgs(ctx context.Context, command string, opts ExecOpts) ([]string, bool) {
+	// P81.22/FIND-22: opts.FreshContainer is the per-command escape hatch from
+	// the persistent-container state model — run this one command one-shot,
+	// in a disposable container, instead of the session's persistent one.
+	// Deliberately not "kill the persistent container too": later commands in
+	// this session still find and reuse it exactly as before, since the whole
+	// point is isolating one command's view, not resetting the session.
+	if opts.FreshContainer {
+		return c.runArgs(command, opts), false
+	}
 	if id, ok := c.container(ctx, opts.Dir); ok {
 		return execPersistentArgs(id, command, opts), true
 	}
 	return c.runArgs(command, opts), false
+}
+
+// containerEnvArgs returns the -e NAME=value arguments that forward the
+// backend's allowlisted host env vars into a container (P81.26/FIND-26),
+// applying DefaultStripEnv as the same defensive second layer the local/os
+// backends apply. Unlike those backends this never includes PATH/HOME/GOPATH
+// — see DefaultContainerEnvAllow's doc comment — so in the common case this
+// returns nothing at all: a container simply uses its own image environment.
+func (c *ContainerBackend) containerEnvArgs() []string {
+	kvs := allowlistedEnv(os.Environ(), c.envAllow, DefaultStripEnv)
+	args := make([]string, 0, len(kvs)*2)
+	for _, kv := range kvs {
+		args = append(args, "-e", kv)
+	}
+	return args
 }
 
 // runArgs builds the CLI arguments for a container run command.
@@ -236,6 +280,7 @@ func (c *ContainerBackend) runArgs(command string, opts ExecOpts) []string {
 func (c *ContainerBackend) wslRunArgs(command string, opts ExecOpts) []string {
 	args := []string{"run", "--rm"}
 	args = append(args, ResourceFlags(c.runtime, c.limits)...)
+	args = append(args, c.containerEnvArgs()...)
 	if !c.network {
 		args = append(args, "--network", "none")
 	}
@@ -357,6 +402,7 @@ func SupportsCapAdd(rt ContainerRuntime) bool {
 func (c *ContainerBackend) ociRunArgs(command string, opts ExecOpts) []string {
 	args := append([]string{"run", "--rm"}, OCIHardeningFlags(c.runtime)...)
 	args = append(args, ResourceFlags(c.runtime, c.limits)...)
+	args = append(args, c.containerEnvArgs()...)
 	if !c.network {
 		args = append(args, "--network", "none")
 	}
@@ -426,6 +472,7 @@ func SocketPrivilegeNotice(rt ContainerRuntime) string {
 func (c *ContainerBackend) appleContainerArgs(command string, opts ExecOpts) []string {
 	args := []string{"run", "--rm"}
 	args = append(args, ResourceFlags(c.runtime, c.limits)...)
+	args = append(args, c.containerEnvArgs()...)
 	if !c.network {
 		args = append(args, "--network", "none")
 	}

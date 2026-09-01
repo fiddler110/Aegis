@@ -13,6 +13,7 @@ import (
 	"github.com/fiddler110/aegis/internal/enginecfg"
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 )
 
 // handleDebate runs a multi-agent debate (P12) directly against the daemon's
@@ -39,9 +40,11 @@ func (s *Server) handleDebate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Debate is session-less, so it needs the same Workdir validation
-	// handleCreateSession applies (P25.1/P25.8): must exist and, on a
-	// remote-accessible daemon, fall within the configured trust boundary.
-	workdir, werr := s.resolveSessionWorkdir(req.Workdir)
+	// handleCreateSession applies (P25.1/P25.8/P81.9): must exist and fall
+	// within the configured trust boundary. DebateRequest carries no origin
+	// field, so this always resolves as an unprivileged (Web) origin — no
+	// TUI/CLI carve-out for a raw HTTP caller here.
+	workdir, werr := s.resolveSessionWorkdir(req.Workdir, reqorigin.Web)
 	if werr != nil {
 		writeError(w, werr.status, werr.msg)
 		return
@@ -149,7 +152,7 @@ func (s *Server) debateRoleRunner(tracker *cost.Tracker, workdir string) debate.
 		// Letting a persona file widen a debate role's permissions is a
 		// separate decision with a security review attached, and folding it in
 		// here would make it by accident.
-		gate, engineHooks := s.buildGate("build", s.approver(), persona.Persona{})
+		gate, engineHooks := s.buildGate("build", s.approver(), persona.Persona{}, workdir)
 		// P65.4: no InitialStartedTools/OnToolStarted/OnToolFinished here — a
 		// debate role is a bounded sub-run of an already-durable parent turn,
 		// not itself a resumable session with a session ID to key a register on.

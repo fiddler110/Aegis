@@ -148,7 +148,7 @@ func VerifyNetscanner(ctx context.Context, p NetscannerPolicy, only []string, pr
 		}
 		return nil, fmt.Errorf("no container runtime available (docker/podman)")
 	}
-	if reason := verifyNetscannerImage(ctx, rt, p); reason != "" {
+	if reason := verifyNetscannerImageID(ctx, rt, p); reason != "" {
 		return nil, fmt.Errorf("%s", reason)
 	}
 

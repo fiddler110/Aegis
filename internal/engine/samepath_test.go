@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -214,6 +215,254 @@ func (b blockingTool) Execute(_ context.Context, _ json.RawMessage) (tool.Result
 		<-b.block
 	}
 	return tool.Result{Content: "done"}, nil
+}
+
+// shellLikeTool is a minimal stand-in for the real shell tool's two relevant
+// interfaces — tool.CapabilityOverrider and tool.PathToucher — without any of
+// the real argv classification (internal/tool/builtin has its own dedicated
+// tests for that). It exists to exercise the *engine's* dependency-graph
+// wiring in toolround.go against those two interfaces directly (P81.30 /
+// FIND-30): whatever classifyShellCommand and shellCommandPaths decide for a
+// real command, the engine must schedule the same way for any tool that
+// answers the same two questions.
+//
+// Input is {"command": "<verb> <path>"}: "read" is classified CapRead and
+// reports a resolved single-element path; "wild" is classified CapRead but
+// reports its target unresolved, standing in for a shell command whose argv
+// can't be attributed to a literal path (the case the roadmap requires be
+// ordered conservatively rather than left unordered).
+type shellLikeTool struct {
+	store   *fileStore
+	onStart func()
+}
+
+func (shellLikeTool) Name() string                 { return "shell" }
+func (shellLikeTool) Description() string          { return "test shell stand-in" }
+func (shellLikeTool) Capability() tool.Capability  { return tool.CapExecute }
+func (shellLikeTool) InputSchema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (shellLikeTool) parse(input json.RawMessage) (verb, path string) {
+	var args struct{ Command string }
+	_ = json.Unmarshal(input, &args)
+	parts := strings.SplitN(args.Command, " ", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return parts[0], ""
+}
+
+func (t shellLikeTool) CapabilityFor(_ context.Context, input json.RawMessage) tool.Capability {
+	verb, _ := t.parse(input)
+	if verb == "read" || verb == "wild" {
+		return tool.CapRead
+	}
+	return tool.CapExecute
+}
+
+func (t shellLikeTool) TouchedPaths(_ context.Context, input json.RawMessage) ([]string, bool) {
+	verb, path := t.parse(input)
+	switch verb {
+	case "read":
+		return []string{path}, true
+	case "wild":
+		return nil, false
+	default:
+		return nil, true
+	}
+}
+
+func (t shellLikeTool) Execute(_ context.Context, input json.RawMessage) (tool.Result, error) {
+	if t.onStart != nil {
+		t.onStart()
+	}
+	_, path := t.parse(input)
+	if v, ok := t.store.get(path); ok {
+		return tool.Result{Content: v}, nil
+	}
+	return tool.Result{Content: "not found: " + path, IsError: true}, nil
+}
+
+// TestShellReadWaitsForSamePathWrite is the FIND-30 regression: a shell-shaped
+// call (no "path" input field, classified CapRead so it isn't held behind
+// execLock) that names the same path a concurrent write_file targets must
+// still observe the write, not race it. Before P81.30 the dependency graph in
+// toolround.go keyed same-path ordering only on the literal "path" JSON
+// field, which shell's schema never carries, so this pair was never ordered
+// and the read could return "not found" or stale content.
+func TestShellReadWaitsForSamePathWrite(t *testing.T) {
+	store := newFileStore()
+
+	turn1 := []provider.Event{
+		{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_0", Name: "write_file", Input: json.RawMessage(`{"path":"shared.txt","content":"hello"}`)}},
+		{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_1", Name: "shell", Input: json.RawMessage(`{"command":"read shared.txt"}`)}},
+		{Type: provider.EventDone, Stop: provider.StopToolUse},
+	}
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		turn1,
+		{{Type: provider.EventTextDelta, Text: "ok"}, {Type: provider.EventDone, Stop: provider.StopEndTurn}},
+	}}
+
+	reg := tool.NewRegistry()
+	if err := reg.Register(storeWriteTool{store: store, delay: 50 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(shellLikeTool{store: store}); err != nil {
+		t.Fatal(err)
+	}
+	eng, _ := New(Options{Adapter: adapter, Tools: reg, Model: "test"})
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+
+	if err := eng.Run(context.Background(), conv, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	results := conv.Messages[2].Content
+	if len(results) != 2 {
+		t.Fatalf("got %d result blocks, want 2", len(results))
+	}
+	read, ok := results[1].(provider.ToolResultBlock)
+	if !ok {
+		t.Fatalf("result 1 is %T, want ToolResultBlock", results[1])
+	}
+	if read.IsError {
+		t.Fatalf("shell read raced ahead of the write: %q", read.Content)
+	}
+	if read.Content != "hello" {
+		t.Errorf("shell read content = %q, want %q", read.Content, "hello")
+	}
+}
+
+// TestShellReadOnDistinctPathDoesNotWaitForWrite is the latency-preserving
+// half of the FIND-30 fix: a shell-shaped read whose resolved target differs
+// from a concurrently-blocked write's path must still start immediately, so
+// the new ordering doesn't degrade into a de facto global lock the way a
+// naive fix (holding every read behind every write) would.
+func TestShellReadOnDistinctPathDoesNotWaitForWrite(t *testing.T) {
+	store := newFileStore()
+	store.set("b.txt", "b-content")
+
+	writeStarted := make(chan struct{})
+	release := make(chan struct{})
+	shellStarted := make(chan struct{})
+
+	writeBlocker := blockingTool{
+		name: "write_file", cap: tool.CapWrite,
+		onStart: func() { close(writeStarted) }, block: release,
+	}
+	shell := shellLikeTool{store: store, onStart: func() { close(shellStarted) }}
+
+	turn1 := []provider.Event{
+		{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_0", Name: "write_file", Input: json.RawMessage(`{"path":"a.txt"}`)}},
+		{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_1", Name: "shell", Input: json.RawMessage(`{"command":"read b.txt"}`)}},
+		{Type: provider.EventDone, Stop: provider.StopToolUse},
+	}
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		turn1,
+		{{Type: provider.EventTextDelta, Text: "ok"}, {Type: provider.EventDone, Stop: provider.StopEndTurn}},
+	}}
+
+	reg := tool.NewRegistry()
+	if err := reg.Register(writeBlocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(shell); err != nil {
+		t.Fatal(err)
+	}
+	eng, _ := New(Options{Adapter: adapter, Tools: reg, Model: "test"})
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- eng.Run(context.Background(), conv, nil) }()
+
+	select {
+	case <-writeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("write never started")
+	}
+	select {
+	case <-shellStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shell read on a distinct, resolved path was blocked behind the write — over-serialized")
+	}
+	close(release)
+
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// TestWildcardShellWaitsForAnyConcurrentWrite is the conservative-ordering
+// half the roadmap calls for explicitly: a shell command whose target can't
+// be statically resolved must be ordered behind *every* concurrent write in
+// the round, not just ones sharing a path it happens to know — because it
+// might touch any of them.
+func TestWildcardShellWaitsForAnyConcurrentWrite(t *testing.T) {
+	writeStarted := make(chan struct{})
+	release := make(chan struct{})
+	shellStarted := make(chan struct{})
+
+	writeBlocker := blockingTool{
+		name: "write_file", cap: tool.CapWrite,
+		onStart: func() { close(writeStarted) }, block: release,
+	}
+	// "wild" is not the "read" verb this stand-in resolves — it reports
+	// TouchedPaths(nil, false), the unresolved case. store is unused by that
+	// path but set anyway so a test bug can't turn into a nil-pointer panic.
+	shell := shellLikeTool{store: newFileStore(), onStart: func() { close(shellStarted) }}
+
+	turn1 := []provider.Event{
+		{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_0", Name: "write_file", Input: json.RawMessage(`{"path":"a.txt"}`)}},
+		{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "tu_1", Name: "shell", Input: json.RawMessage(`{"command":"wild something-unresolvable"}`)}},
+		{Type: provider.EventDone, Stop: provider.StopToolUse},
+	}
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		turn1,
+		{{Type: provider.EventTextDelta, Text: "ok"}, {Type: provider.EventDone, Stop: provider.StopEndTurn}},
+	}}
+
+	reg := tool.NewRegistry()
+	if err := reg.Register(writeBlocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(shell); err != nil {
+		t.Fatal(err)
+	}
+	eng, _ := New(Options{Adapter: adapter, Tools: reg, Model: "test"})
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "go"}}})
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- eng.Run(context.Background(), conv, nil) }()
+
+	select {
+	case <-writeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("write never started")
+	}
+	select {
+	case <-shellStarted:
+		close(release)
+		<-runDone
+		t.Fatal("wildcard shell call started while an unrelated write held the round — should have waited")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: still parked behind the write.
+	}
+	close(release)
+
+	select {
+	case <-shellStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wildcard shell call never started after the write released")
+	}
+
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 }
 
 func TestToolTargetPath(t *testing.T) {

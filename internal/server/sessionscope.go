@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/knowledge"
 	"github.com/fiddler110/aegis/internal/permission"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -161,15 +163,21 @@ func (s *Server) repoMapFor(root string) string {
 }
 
 // workdirAllowed reports whether workdir (already resolved to an absolute
-// path) is permitted for a session on this daemon, given how AllowRemote and
-// SessionWorkdirAllowlist are configured (P25.1). A remote-accessible daemon
-// must not become an arbitrary-filesystem oracle: once AllowRemote is set,
-// only the daemon's own default workspace (or a directory nested under it)
-// or a directory nested under an allowlisted root is accepted. The default
-// loopback-only bind trusts any existing directory, matching today's model
-// where a local client is already as trusted as a local shell user.
-func (s *Server) workdirAllowed(workdir string) bool {
-	if !s.cfg.Server.AllowRemote {
+// path) is permitted for a session on this daemon (P25.1, P81.9).
+//
+// The allowlist used to be skipped entirely on the default loopback-only
+// bind, on the reasoning that a local token holder is already as trusted as
+// a local shell user. That reasoning holds for the operator's own shell and
+// for nothing else reachable on a loopback daemon: an MCP client, an editor
+// plugin over ACP, and a scheduled job all authenticate with the same
+// bearer token without the operator having chosen a directory. The
+// allowlist is now applied unconditionally, with the exemption re-targeted
+// at what actually deserves it — origin, not bind address. TUI and CLI are
+// interactive, operator-driven local-shell surfaces (see reqorigin's doc
+// comment); Web, ACP and MCP are not, and get no free pass regardless of how
+// the daemon is bound.
+func (s *Server) workdirAllowed(workdir, origin string) bool {
+	if origin == reqorigin.TUI || origin == reqorigin.CLI {
 		return true
 	}
 	if withinRoot(s.workspace, workdir) {
@@ -184,7 +192,12 @@ func (s *Server) workdirAllowed(workdir string) bool {
 			return true
 		}
 	}
-	return false
+	// Reuse the same trust grant workspace.additional_roots already asks
+	// for (config.WorkspaceTrusted/TrustWorkspace) rather than inventing a
+	// second consent mechanism: an operator who has already run
+	// `aegis trust --dir <path>` for a directory has made exactly the
+	// judgment call this gate exists to require.
+	return config.WorkspaceTrusted(workdir)
 }
 
 // withinRoot reports whether target equals root or is nested under it. Both

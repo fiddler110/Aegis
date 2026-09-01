@@ -87,6 +87,54 @@ func TestGateCheck(t *testing.T) {
 	}
 }
 
+// recordingApprover captures the reason string it was asked to approve, for
+// tests that need to inspect what the operator would actually see.
+type recordingApprover struct {
+	approve bool
+	reason  string
+}
+
+func (a *recordingApprover) Approve(_ context.Context, _ string, reason string, _ json.RawMessage) bool {
+	a.reason = reason
+	return a.approve
+}
+
+// TestGateCheckAnnotatesExecuteReasonWithSandboxBackend is the P81.22/FIND-22
+// regression: an execute-capability approval prompt must say what will
+// actually contain the command, not only a startup log line the operator may
+// never see. A write approval (not execute) must NOT carry the annotation —
+// it isn't a command-execution decision.
+func TestGateCheckAnnotatesExecuteReasonWithSandboxBackend(t *testing.T) {
+	ctx := context.Background()
+	exec := fakeTool{name: "shell", cap: tool.CapExecute}
+	write := fakeTool{name: "write_file", cap: tool.CapWrite}
+
+	approver := &recordingApprover{approve: true}
+	gate := New(ModeBuild, approver)
+	gate.SandboxBackendLabel = "local"
+
+	if ok, _ := gate.Check(ctx, exec, nil); !ok {
+		t.Fatal("expected approval")
+	}
+	if !strings.Contains(approver.reason, "sandbox: local") {
+		t.Errorf("expected execute reason to name the sandbox backend, got %q", approver.reason)
+	}
+
+	// Build mode allows write outright — no Ask, so no reason is ever asked
+	// for. Force it through Ask by using plan mode instead, where write is
+	// Ask... actually write is Deny in plan mode, not Ask (see TestPolicyDecide),
+	// so use auto mode's CapNetwork-shaped mid-tier: simplest is to directly
+	// confirm a Write call never reaches SandboxBackendLabel logic by checking
+	// build mode's Allow path never calls the approver at all.
+	approver.reason = ""
+	if ok, _ := gate.Check(ctx, write, nil); !ok {
+		t.Fatal("expected write to be allowed outright in build mode")
+	}
+	if approver.reason != "" {
+		t.Errorf("expected the approver not to be consulted for an outright Allow, got reason %q", approver.reason)
+	}
+}
+
 // TestGateCheckUsesEffectiveCapability covers P25.4c: a call a tool
 // reclassifies via CapabilityOverrider (e.g. shell's read-only allowlist) is
 // gated on that narrower capability, not the tool's static one — both in

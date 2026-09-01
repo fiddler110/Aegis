@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -13,6 +15,42 @@ import (
 const maxTranscriptBytes = 1 << 20
 
 const trimmedMarker = "[earlier output trimmed]\n\n"
+
+// maxLineRunes bounds a single transcript line's length (P81.33/FIND-33).
+// maxTranscriptBytes bounds the whole pane, and truncate.go's per-call caps
+// bound what a *tool* returns, but neither stops a single pathological
+// line — one multi-megabyte line with no newlines, e.g. dense JSON or a
+// wide-glyph flood in the model's own prose — from making wrap()'s
+// lipgloss word-wrap pass, and the terminal rendering it, do unbounded work
+// on one render. Generous enough that no real transcript content ever hits
+// it.
+const maxLineRunes = 20000
+
+// capLineLengths truncates any line in raw longer than maxLineRunes,
+// appending an SGR reset before the marker so a cut mid-escape-sequence
+// can't leak an open color/bold state into the rest of the transcript.
+// Returns raw unchanged (no allocation) when nothing needed truncating.
+func capLineLengths(raw string) string {
+	if utf8.RuneCountInString(raw) <= maxLineRunes {
+		// Every individual line is at most this long too, so no line can
+		// exceed maxLineRunes — skip the split/scan entirely.
+		return raw
+	}
+	lines := strings.Split(raw, "\n")
+	changed := false
+	for i, line := range lines {
+		if utf8.RuneCountInString(line) <= maxLineRunes {
+			continue
+		}
+		r := []rune(line)
+		lines[i] = string(r[:maxLineRunes]) + "\x1b[0m […truncated, line exceeded " + strconv.Itoa(maxLineRunes) + " chars]"
+		changed = true
+	}
+	if !changed {
+		return raw
+	}
+	return strings.Join(lines, "\n")
+}
 
 // transcriptItem is one independently-cached, independently-addressable unit
 // of the conversation: a user turn, an assistant reply, a tool call, a tool
@@ -181,6 +219,7 @@ func (p *transcriptPane) Append(raw string) {
 	if raw == "" {
 		return
 	}
+	raw = capLineLengths(raw)
 	p.items = append(p.items, newItem(raw))
 	p.rawBytes += len(raw)
 	p.invalidateItemsHeight()
@@ -207,6 +246,7 @@ func (p *transcriptPane) AppendBlock(raw string) *transcriptItem {
 	if raw == "" {
 		return nil
 	}
+	raw = capLineLengths(raw)
 	it := newItem(raw)
 	p.items = append(p.items, it)
 	p.rawBytes += len(raw)
@@ -224,6 +264,7 @@ func (p *transcriptPane) AppendBlock(raw string) *transcriptItem {
 // exact and invalidating its render cache. The caller must ensure it is
 // still part of this pane.
 func (p *transcriptPane) SetItemRaw(it *transcriptItem, raw string) {
+	raw = capLineLengths(raw)
 	p.rawBytes += len(raw) - len(it.raw)
 	it.raw = raw
 	it.invalidate()

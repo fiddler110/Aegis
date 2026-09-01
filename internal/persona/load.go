@@ -204,12 +204,13 @@ func register(p Persona) {
 }
 
 type frontmatter struct {
-	Description string    `yaml:"description"`
-	Model       string    `yaml:"model"`
-	Mode        string    `yaml:"mode"`
-	Tools       []string  `yaml:"tools"`
-	Rules       []string  `yaml:"rules"`
-	OutputGuard yaml.Node `yaml:"output_guard"`
+	Description   string    `yaml:"description"`
+	Model         string    `yaml:"model"`
+	Mode          string    `yaml:"mode"`
+	Tools         []string  `yaml:"tools"`
+	ToolsEnforced bool      `yaml:"tools_enforced"`
+	Rules         []string  `yaml:"rules"`
+	OutputGuard   yaml.Node `yaml:"output_guard"`
 }
 
 func parsePersonaFile(path string, honorControlFields bool) (Persona, error) {
@@ -266,18 +267,20 @@ func parsePersonaBytes(name string, data []byte, honorControlFields bool) (Perso
 		}
 	}
 	p := Persona{
-		Name:        name,
-		Description: fm.Description,
-		System:      strings.TrimSpace(body),
-		Model:       fm.Model,
-		Mode:        fm.Mode,
-		Tools:       fm.Tools,
-		Rules:       fm.Rules,
-		Guard:       parseGuard(fm.OutputGuard),
+		Name:          name,
+		Description:   fm.Description,
+		System:        strings.TrimSpace(body),
+		Model:         fm.Model,
+		Mode:          fm.Mode,
+		Tools:         fm.Tools,
+		ToolsEnforced: fm.ToolsEnforced,
+		Rules:         fm.Rules,
+		Guard:         parseGuard(fm.OutputGuard),
 	}
 	if !honorControlFields {
 		p.Mode = ""
 		p.Tools = nil
+		p.ToolsEnforced = false
 		p.Rules = nil
 		p.Guard = nil
 	}

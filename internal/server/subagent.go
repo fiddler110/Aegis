@@ -109,7 +109,7 @@ func (s *Server) subAgentRunner() swarm.RunFunc {
 		// that above the swarm layer. A bare mode gate here let a spawned
 		// teammate route straight around an operator's egress-then-write or
 		// deny rule (P10.1).
-		gate, engineHooks := s.buildGate(cfg.Mode, s.approver(), persona.Persona{})
+		gate, engineHooks := s.buildGate(cfg.Mode, s.approver(), persona.Persona{}, cfg.Workdir)
 		// A spawn can name its own model (swarm.SpawnConfig.Model), which hits
 		// the same shared-adapter mismatch a routed turn does — serve it with
 		// *its* window, not the primary model's num_ctx (P52.4). Identical to

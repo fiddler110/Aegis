@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 
 	yamlv3 "go.yaml.in/yaml/v3"
+
+	"github.com/fiddler110/aegis/internal/reqorigin"
 )
 
 // AppendProjectPermissionRule appends a text permission rule (e.g.
@@ -23,7 +25,19 @@ import (
 // itself is an explicit, interactive, local operator decision — not
 // inherited from a cloned repository's pre-existing config — the exact
 // distinction the trust gate exists to make.
+//
+// This origin-less form defaults to reqorigin.CLI;
+// AppendProjectPermissionRuleWithOrigin lets a caller that knows which
+// session/interface triggered the approval say so (FIND-27) — server code
+// approving a running session's "allow always" should prefer it, passing the
+// session's own recorded origin.
 func AppendProjectPermissionRule(root, rule string) error {
+	return AppendProjectPermissionRuleWithOrigin(root, rule, reqorigin.CLI)
+}
+
+// AppendProjectPermissionRuleWithOrigin is AppendProjectPermissionRule plus
+// FIND-27's origin stamp on the trust grant the append records.
+func AppendProjectPermissionRuleWithOrigin(root, rule, origin string) error {
 	path := filepath.Join(root, ".aegis", "config.yaml")
 
 	doc := map[string]any{}
@@ -69,7 +83,7 @@ func AppendProjectPermissionRule(root, rule string) error {
 	// covers the file as it now stands — including the rule just appended.
 	// Re-trusting before the write would record the pre-write content and go
 	// stale the instant this function returns.
-	if err := TrustWorkspace(root); err != nil {
+	if err := TrustWorkspaceWithOrigin(root, origin); err != nil {
 		return fmt.Errorf("trust %s: %w", root, err)
 	}
 	return nil

@@ -39,6 +39,21 @@ type OSBackend struct {
 	// confine the filesystem and network but do not touch the process
 	// environment, so this still runs on the host's inherited env otherwise.
 	stripEnv []string
+
+	// envAllow lists the only env var names a spawned command's environment
+	// may carry (P81.26/FIND-26) — start from nothing, not the daemon's own
+	// environment. Always includes DefaultEnvAllow; extended via WithEnvAllow
+	// (sandbox.env_allow).
+	envAllow []string
+}
+
+// WithEnvAllow adds operator-configured additional allowlisted env var names
+// (sandbox.env_allow) on top of DefaultEnvAllow. Returns the receiver so it
+// chains onto NewOSBackend; mutates in place, meant to be called once, right
+// after construction, before the backend is shared.
+func (o *OSBackend) WithEnvAllow(extra []string) *OSBackend {
+	o.envAllow = mergeEnvAllow(DefaultEnvAllow, extra)
+	return o
 }
 
 // NewOSBackend builds an OS sandbox for the workspace. Network is denied unless
@@ -61,6 +76,7 @@ func NewOSBackend(workspace string, allowNetwork bool, strip []string, extraRead
 		mechanism:  mech,
 		wrapperBin: bin,
 		stripEnv:   mergeStripEnv(strip),
+		envAllow:   DefaultEnvAllow,
 	}, nil
 }
 
@@ -73,7 +89,7 @@ func (o *OSBackend) Exec(ctx context.Context, command string, opts ExecOpts) (st
 	name, args := o.wrap(command, opts)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = o.dir(opts)
-	cmd.Env = filteredEnv(os.Environ(), o.stripEnv)
+	cmd.Env = allowlistedEnv(os.Environ(), o.envAllow, o.stripEnv)
 	cmd.WaitDelay = ioCloseGrace
 
 	out, err := cmd.CombinedOutput()
@@ -97,7 +113,7 @@ func (o *OSBackend) ExecStreaming(ctx context.Context, command string, opts Exec
 	name, args := o.wrap(command, opts)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = o.dir(opts)
-	cmd.Env = filteredEnv(os.Environ(), o.stripEnv)
+	cmd.Env = allowlistedEnv(os.Environ(), o.envAllow, o.stripEnv)
 	cmd.WaitDelay = ioCloseGrace
 	w := emitWriter{emit: emit}
 	cmd.Stdout = w

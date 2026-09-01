@@ -499,7 +499,7 @@ func (s *Server) cronPermCheck(ctx context.Context, j cron.Job) (bool, string) {
 	if j.AutoApprove {
 		approver = permission.AutoApprove{}
 	}
-	gate, _ := s.buildGate(s.cfg.Permission.Mode, approver, persona.Persona{})
+	gate, _ := s.buildGate(s.cfg.Permission.Mode, approver, persona.Persona{}, j.Workdir)
 	shellTool, ok := s.tools.Get("shell")
 	if !ok {
 		return false, "shell tool is not registered"

@@ -8,7 +8,36 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-08-31 (thirtieth record) — **P81.14, P81.8, P80.1 and P79.1 shipped; P81.1
+**Last updated:** 2026-09-01 (thirty-second record) — **P81.20, P81.22, P81.26, P81.27 and P81.30
+shipped: five Tier 3 items from the P81 batch, built by four parallel agents in one sitting** (the
+sandbox pair — P81.22 and P81.26 — went to one agent since both touch `internal/sandbox`). Plan mode's
+read-only guarantee (**P81.20**) is now trust-conditioned rather than resting only on classifier
+correctness: `permission.plan_mode_shell_reads` defaults to `false` for a workspace without a trust
+grant and `true` for a trusted one (operator-overridable either way), `classifyShellCommand` gained an
+explicit character-allowlist ahead of its existing per-command tables so an unrecognized raw command
+string fails closed, the fuzz corpus now names every previously-fixed escape (CRIT-1, CRIT-2, P79.1) by
+seed, and personas gained an opt-in `tools_enforced` mode that refuses an out-of-list call outright
+instead of only warning. Sandbox isolation (**P81.22**) stopped failing open silently: `sandbox.strict`
+now defaults to `true` but guards only the final cascade step onto unsandboxed `local` (a
+container→OS-level fallback still succeeds), the effective backend is now visible in the approval
+reason and a new TUI sidebar section, Windows got real job-object memory/process-count limits, and a
+`reset_sandbox` shell input forces a fresh persistent container without evicting the session's; POSIX
+rlimits and Windows CPU-rate limiting are explicitly deferred. Sandboxed commands (**P81.26**) now get
+an allowlisted environment (`PATH`/`HOME`/locale/Go-toolchain/proxy vars, extensible via
+`sandbox.env_allow`) instead of the daemon's full environment minus a denylist, applied identically to
+the container backend. The workspace trust store (**P81.27**) gained a locally-derived HMAC-SHA256 MAC
+per entry (no OS-credential-store dependency exists anywhere in this codebase, so none was added
+speculatively — the docstring is explicit this detects a corrupted/hand-edited store, not a
+fully-privileged same-user attacker) plus a `GrantedVia`/`GrantedByProcess` stamp reusing P81.14's
+`reqorigin`; the ACL half was already shipped. Parallel tool rounds (**P81.30**) now order a `shell`
+call against a concurrent write on an overlapping or unresolvable path, via a new `tool.PathToucher`
+interface reusing the classifier's existing argv resolution — closing the batch's one pure-correctness
+finding. `go build ./...`, `go vet ./...` and `go test ./...` are green across the whole tree after
+integrating all four agents' concurrent edits, including files more than one touched
+(`internal/enginecfg/gate.go`, several `internal/server/*.go`). Full record:
+[P81.20, P81.22, P81.26, P81.27 and P81.30, 2026-09-01](#p8120-p8122-p8126-p8127-and-p8130-2026-09-01).
+
+**Last updated (previous):** 2026-08-31 (thirtieth record) — **P81.14, P81.8, P80.1 and P79.1 shipped; P81.1
 shipped in part.** The top four items of [Up next](roadmap.md#up-next)'s ranking plus the highest-tier
 item outside it, taken in the order the table specified: **P81.14** first, since six other items wanted
 its origin stamp or its sink — the audit sink turned out to already be default-wired for tool calls
@@ -567,6 +596,199 @@ reading:
 | 3 | **P67.1** — per-round tool-result cap | **SHIPPED.** A round budget above the per-call caps. The finding was understated: `maxParallelTools` is **8**, so the worst case was 256 KiB (~65k estimated tokens) in one message. |
 | 4 | **P66.21** — doc corrections the review disproved | **SHIPPED.** One of the three was already gone: ARCH-13's wrong sentence had been *deleted* by the CLAUDE.md cut, leaving the guarantee undocumented rather than wrong. |
 | 5 | **P66.12** — staticcheck cleanup | **SHIPPED.** Clean tree, `continue-on-error` deleted. One thing worth knowing came out of it: a symbol used only by a build-tagged test reads as U1000 dead to the untagged run, and must be annotated rather than deleted. |
+
+### P81.20, P81.22, P81.26, P81.27 and P81.30, 2026-09-01
+
+Five Tier 3 items from the P81 threat-model batch, rows 6-8 of [Up next](roadmap.md#up-next)'s ranking
+minus P81.23 and P81.10 (deliberately deferred — see below). Built by four parallel agents in one
+sitting, each briefed with the item's full roadmap context and scoped to disjoint files where possible
+(the sandbox pair shared a package and went to one agent). Every change carries a new or extended test;
+the full `go build ./...`, `go vet ./...` and `go test ./...` are green after integrating all four
+agents' work into one working tree, including packages more than one agent touched
+(`internal/enginecfg/gate.go`, several `internal/server/*.go` files) — no merge conflicts, one clean
+build.
+
+#### P81.20 — plan mode's guarantee, made trust-conditioned (FIND-20)
+
+`permission.plan_mode_shell_reads` — the flag that lets a classifier-downgraded `CapRead` shell call
+through in plan mode — now defaults to `false` for a workspace without a trust grant and `true` for a
+trusted one (`config.WorkspaceTrusted`), rather than unconditionally `true`. An operator's explicit
+setting still wins either way. This is a posture change, not a parser change: the point is that the
+guarantee an operator picks when reviewing an untrusted repository no longer depends on the classifier
+being defect-free, which it has not been three times running (CRIT-1, CRIT-2, P79.1).
+
+`classifyShellCommand` (`internal/tool/builtin/shell_readonly.go`) gained a character-allowlist check
+ahead of its existing per-command/per-flag tables — any byte outside letters/digits/whitespace/path-and-
+flag punctuation, or invalid UTF-8, is rejected before word-splitting even starts, converting the
+"known-bad-metachar" denylist reasoning that guarded the raw command string into an allowlist. Verified
+against the full existing test corpus: no legitimate command in the suite uses the now-excluded
+characters (`! # ^ { }`, raw control bytes).
+
+`FuzzClassifyShellCommand`'s seed corpus now names every previously-fixed escape by its origin: CRIT-1
+(`cat ~root/.bashrc`, `ls ~`, `grep --file=~/.ssh/id_rsa foo`), CRIT-2 (`../ls`, `~/x/ls`,
+`./scripts/cat notes.txt`), and all four P79.1 Windows absolute-path escape forms. CI wiring was
+explicitly not attempted — `ci.yml` stays disabled by the P81.11 decision and `codeql.yml` doesn't run
+Go tests — so this only pays off on a manual fuzz run, which is what the roadmap entry asked for.
+
+Personas gained an opt-in enforcing mode: `Persona.ToolsEnforced` (`tools_enforced` frontmatter key,
+gated by the existing `honorControlFields` trust check so an untrusted persona file can't self-escalate
+into enforcement) makes `permission.NewPersonaToolGate` refuse an out-of-list tool call outright
+(`Rule: "persona_tools_enforced"`) instead of only warning/prompting. Advisory stays the documented
+default.
+
+Tests: `internal/config/planmodeshellreads_test.go`, `internal/server/plan_mode_trust_test.go`
+(end-to-end through `cronPermCheck` and a real `config.TrustWorkspace` grant),
+`internal/tool/builtin/shell_readonly_fuzz_test.go`'s new named seeds,
+`internal/permission/persona_tools_test.go`, `internal/persona/load_test.go`. One existing test
+(`internal/server/cron_test.go`'s `TestCronPermCheckClassifiesAgainstTheJobWorkdir`) needed updating —
+it implicitly relied on the old always-`true` default, which isn't what it's about (P79.1's workdir
+scoping), so it now pins `PlanModeShellReads: &true` explicitly.
+
+**Deferred nothing from the roadmap's four asks**, though item 4 (enforcing persona mode) is the
+newest and least battle-tested of the four.
+
+#### P81.22 — sandbox isolation stops failing open silently (FIND-22)
+
+`sandbox.strict` now defaults to `true`, but the semantics changed to make that safe: strict now guards
+only the *last* cascade step — landing on unsandboxed `local` — not the whole cascade, so a
+container→OS-level fallback still succeeds under strict. Flipping strict to guard the whole cascade
+would have hard-failed every host that merely lacks a running Docker daemon, which is not the finding's
+target. `strictUnavailableErr()` gives OS-specific actionable guidance, naming P77.6 on Windows
+specifically since that's the machine this project develops on and the config comment's own "every
+current Windows box" population.
+
+The effective backend is now visible at the decision, not only in a startup log: `permission.Gate`
+carries a `SandboxBackendLabel`, threaded through `enginecfg.GateOptions` into the `Ask` reason for
+execute-capability calls (`"shell requires execute access (sandbox: local)"`), and `api.StatusInfo`
+gained `SandboxBackend`, surfaced in a new TUI sidebar "SANDBOX" section with a warning-colored
+"unconfined" badge and consumed by `/status`.
+
+Windows gained real job-object resource limits (`internal/sandbox/joblimits_windows.go`: memory and
+process-count via `CreateJobObject`/`SetInformationJobObject`/`AssignProcessToJobObject`,
+`KILL_ON_JOB_CLOSE`), live-verified on this Windows machine. `SelectSandbox` wires `sandbox.limits` into
+the local backend and warns when the platform can't enforce them (`joblimits_other.go`'s POSIX stub).
+**CPU-rate limiting on Windows is deferred** — `golang.org/x/sys/windows` doesn't expose
+`JOBOBJECT_CPU_RATE_CONTROL_INFORMATION`, and hand-rolling that struct wasn't worth shipping untested
+this pass. **POSIX rlimits/cgroups are deferred** entirely, per instruction to prioritize this
+Windows-first pass.
+
+Persistent-container state is now documented (`docs/configuration.md`) and a per-command reset exists:
+`ExecOpts.FreshContainer` / the `shell` tool's `reset_sandbox` input bypasses the persistent-container
+lookup for one call without evicting the session's persistent container.
+
+Tests: `internal/sandbox/joblimits_windows_test.go` (real job-object creation/assign, `parseMemoryLimit`,
+integration exec under limits — live, not mocked), `internal/server/sandbox_test.go` (strict semantics,
+`strictUnavailableErr` message, local-backend wiring), `internal/permission/permission_test.go` (reason
+annotation), `internal/tui/status_health_test.go` (sidebar state), `internal/tool/builtin/shell_reset_sandbox_test.go`.
+
+#### P81.26 — sandboxed commands get an allowlisted environment (FIND-26)
+
+Both sandbox backends inverted from denylist to allowlist. `internal/sandbox/env.go` gained
+`DefaultEnvAllow` (`PATH`/`HOME`/locale/Go-toolchain vars/proxy vars — sized against this project's own
+`go build`/`go test`/npm/corporate-proxy needs) and `DefaultContainerEnvAllow` (locale+proxy only, no
+host paths, since a container has its own filesystem). `allowlistedEnv()` applies the allowlist first,
+then the old `DefaultStripEnv` denylist as a second defensive layer — an allowlisted name that somehow
+still carries a secret (e.g. a proxy URL with embedded credentials) is still caught.
+`internal/sandbox/local.go` and `os_sandbox.go` switched `cmd.Env` construction to `allowlistedEnv`;
+`docker.go` gained `ContainerOpts.EnvAllow`/`containerEnvArgs()` so the container backend (which
+previously passed no host env at all, and so silently broke corporate-proxy builds) now agrees with the
+local backend. `internal/config/config_sandbox.go` added `sandbox.env_allow` for operator extension.
+
+One existing test's premise stopped being true under the new default (`internal/cli/worker_test.go`
+asserted an arbitrary secret leaks without a wired sandbox) and was rewritten to use `GOPROXY` — a real
+allowlisted-by-default name that can carry a credential-bearing proxy URL — so it still exercises the
+P10.2 wiring gap it exists for.
+
+**The risk named in the roadmap entry (breakage, not design) was addressed by allowlisting the Go
+toolchain's own environment needs** (`GOPATH`/`GOCACHE`/`GOMODCACHE`/`GOROOT`/`GOTOOLCHAIN`/`GOFLAGS`
+where set) rather than only the generic PATH/HOME/locale set the roadmap named as a starting point.
+
+Tests: `internal/sandbox/sandbox_test.go` (allowlist inversion, `WithEnvAllow`), `docker_test.go`
+(`containerEnvArgs`), full-suite `go test -race -count=1 ./internal/sandbox/...`.
+
+#### P81.27 — trust-store integrity and origin stamping (FIND-27)
+
+The ACL half (`fsguard.RestrictToOwner` on the store file) was already shipped — confirmed against
+`internal/workspacetrust/workspacetrust.go`'s `save()` and the existing `TestSaveRestrictsACL`, no work
+needed.
+
+What shipped: a locally-derived HMAC-SHA256 MAC per entry. A 32-byte key is generated on first use and
+stored in a sibling file (`<store path>.key`), created with `O_EXCL` (race-safe against concurrent
+first-use) and hardened with the same `fsguard.RestrictToOwner` posture as the store. `Entry` gained
+`GrantedVia`, `GrantedByProcess` and `MAC`; `Store.TrustWithOrigin` computes the MAC over `(dir,
+TrustedAt, Fingerprint, GrantedVia, GrantedByProcess)`, and `Check` treats a missing/invalid MAC exactly
+like a moved fingerprint — safe-default **Stale**, never a crash and never silent trust.
+
+**No OS-credential-store dependency exists anywhere in this codebase** (confirmed via a `go.mod`
+search), so none was added speculatively for the MAC key. The threat model this covers is documented in
+the package doc comment and is narrower than a real OS-keychain-backed MAC: it detects a process that
+can write the store but lacks read access to the sibling key file (corruption, a hand-edited or
+dropped-in grant, a grant copied from another machine) — it does **not** detect a fully-privileged
+same-user attacker, since the key sits under the identical owner-only ACL as the store itself. That gap
+is named, not hidden.
+
+Origin/process stamping reuses P81.14's `reqorigin` rather than inventing a new type:
+`config.TrustWorkspaceWithOrigin(dir, origin)` (origin-less `TrustWorkspace` now defaults to
+`reqorigin.CLI`, kept as a wrapper so no existing call site needed touching) is threaded to every writer
+that can trigger an auto-trust — `internal/tui/securityconfig.go` → `reqorigin.TUI`,
+`internal/server/config.go`'s PATCH/harden handlers → `reqorigin.Web`, and the interactive "allow
+always" approval path in `internal/server/messages.go` → the owning session's own `sess.Origin`.
+`GrantedByProcess` comes from `os.Executable()`, never caller-supplied, matching `reqorigin`'s
+self-declared-never-attacker-controlled convention.
+
+**The `.aegis/.env`-in-the-fingerprint gap (the roadmap's fourth ask) is deferred with a concrete
+design**, not built: at `SecurityFingerprint(dir)` time, `os.Stat`+`os.ReadFile` `.aegis/.env` purely to
+compute `sha256(content)`, then fold `"env_present=true"` plus that digest into the hashed key set —
+never the plaintext, never parsed into `AEGIS_*` values, so the ordering constraint ("trust resolves
+before `.env`'s contents are read into the environment") survives; hashing raw bytes isn't "reading" it
+in the sense that ordering protects against. `TestDotEnvIsNotFingerprinted` currently pins the opposite
+behavior and `fingerprint.go`'s own comment states the exclusion "in as many words" — both need a
+deliberate, documented reversal (plus a `docs/configuration.md` update), not a silent behavior change,
+which is why this was left for a follow-up rather than done unilaterally mid-batch.
+
+Tests: `internal/workspacetrust/workspacetrust_test.go`'s new `TestTrustWithOriginRecordsOriginAndProcess`,
+`TestTamperedEntryIsStale` (direct JSON-file edit → Stale), `TestMissingKeyFileMakesEveryEntryStale`,
+`TestTrustWithoutOriginLeavesGrantedViaEmpty`, `TestKeyFileRestrictsACL` (Windows ACL, mirroring the
+store-file one).
+
+#### P81.30 — ordering `shell` against concurrent writes (FIND-30)
+
+The batch's one pure-correctness finding (not containment): a parallel round's write/execute calls
+share one exclusive lock, reads take none (deliberate, P8.6), and the only read-vs-write ordering was a
+same-`path` dependency graph keyed on the literal `"path"` input field — which `shell`'s schema doesn't
+have, so a `shell cat somefile` and a concurrent `write_file somefile` were never ordered.
+
+`internal/tool/tool.go` gained a `PathToucher` interface (mirrors the existing `CapabilityOverrider`)
+and `EffectiveTouchedPaths(ctx, t, input)`. `internal/tool/builtin/shell_readonly.go` gained
+`shellCommandPaths(command, powershell)`, resolving a shell command's argv into path candidates by
+reusing the exact primitives `classifyShellCommand` already trusts (`splitShellWords`,
+`baseBinaryName`/`pathQualifiedBinary`, the git-subcommand split, `confinementArgs`/
+`argvPathCandidates`) rather than re-parsing independently — the reuse the roadmap explicitly asked for.
+It returns "unresolved" (wildcard/conservative) for chaining, redirection, an unparseable command, a
+path-qualified argv0, or anything the shell would expand (tilde, glob) before a literal parse could see
+it. `shellTool.TouchedPaths` implements the interface. `internal/engine/toolexec.go`'s new
+`callPaths()` falls back to the existing `"path"`-field lookup for tools that have one, otherwise
+consults `PathToucher`. `internal/engine/toolround.go`'s scheduling now orders a wildcard call behind
+*every* prior write in the round, and a resolved call behind writes sharing a literal path only —
+unrelated calls stay fully concurrent, preserving P8.6's no-broad-lock decision.
+
+`CLAUDE.md`'s "Parallel tool rounds" invariant, which stated outright "a `shell` call and a `read_file`
+are never ordered," is updated to describe the new mechanism.
+
+Tests: `internal/tool/builtin/shellpaths_test.go` (`TestShellCommandPaths`, 13 cases; the classifier
+integration test), `internal/engine/samepath_test.go`'s three new tests —
+`TestShellReadWaitsForSamePathWrite` (the FIND-30 regression itself, asserting no torn read),
+`TestShellReadOnDistinctPathDoesNotWaitForWrite` (latency check: an unrelated shell read starts
+immediately while a write on a different path is still blocked — no global lock introduced),
+`TestWildcardShellWaitsForAnyConcurrentWrite` (the conservative-ordering case). `go test -race
+./internal/engine/...` on the new tests: no races.
+
+**Deliberately scoped down**: a shell command with a recognized binary but no path-shaped operands
+(bare `ls`, `pwd`) resolves to an empty path list — no dependency edge, matching how any other
+path-less tool already behaves; ordering against an implicit directory-wide read was judged out of
+scope. An unrecognized binary can over-include an option's numeric argument as a path candidate (e.g.
+`head -n 5`'s `5`) — the same conservative direction `argv_confine.go` already documents: false
+positives cost extra serialization, never a missed dependency.
 
 ### P81.14, P81.8, P81.1, P79.1 and P80.1, 2026-08-31
 

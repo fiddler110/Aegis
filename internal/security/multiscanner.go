@@ -253,7 +253,12 @@ type MultiscannerPolicy struct {
 	// Empty means the config predates the field — unknown, not drift. See
 	// MultiscannerSourceDrift.
 	SourceFingerprint string
-	Concurrency       int
+	// Verified and AllowUnverified mirror config.MultiscannerConfig's fields
+	// of the same name (P81.13): verifyMultiscannerImage fails closed on a
+	// pinned-but-unverified image unless AllowUnverified opts out.
+	Verified        bool
+	AllowUnverified bool
+	Concurrency     int
 	// Runtime is the container runtime that built the image. See
 	// RuntimePriority for why resolution can't just auto-detect.
 	Runtime sandbox.ContainerRuntime
@@ -320,6 +325,8 @@ func MultiscannerPolicyFromConfig(cfg config.MultiscannerConfig) MultiscannerPol
 		Image:             strings.TrimSpace(cfg.Image),
 		ImageID:           strings.TrimSpace(cfg.ImageID),
 		SourceFingerprint: strings.TrimSpace(cfg.SourceFingerprint),
+		Verified:          cfg.Verified,
+		AllowUnverified:   cfg.AllowUnverified,
 		Runtime:           sandbox.ContainerRuntime(strings.TrimSpace(cfg.Runtime)),
 		Concurrency:       cfg.Concurrency,
 		Tools:             map[string]bool{},
@@ -392,7 +399,28 @@ func normalizeImageID(id string) string {
 	return strings.TrimPrefix(id, "sha256:")
 }
 
-// verifyMultiscannerImage confirms the image currently answering to
+// verifyMultiscannerImage is verifyMultiscannerImageID plus the P81.13
+// verified-before-scan gate: it fails closed on an image whose ID matches
+// its pin but has never passed `aegis security verify-image`. Used only at
+// the two scan-resolution call sites in method.go — everywhere else
+// (verify-image's own preflight, update-db, the status DB-age report) needs
+// the ID-integrity check alone, or verifying an image would require it to
+// already be verified.
+func verifyMultiscannerImage(ctx context.Context, rt sandbox.ContainerRuntime, p MultiscannerPolicy) string {
+	if fail := verifyMultiscannerImageID(ctx, rt, p); fail != "" {
+		return fail
+	}
+	if !p.Verified && !p.AllowUnverified {
+		// A matching ID proves the image hasn't changed since it was pinned,
+		// not that any scanner inside it can actually detect anything
+		// (--skip-verify, or a config written before this field existed, both
+		// leave Verified false).
+		return fmt.Sprintf("multiscanner image %s is pinned but has not passed `aegis security verify-image` — run it before scanning, or set security.multiscanner.allow_unverified: true to override for local development", p.Image)
+	}
+	return ""
+}
+
+// verifyMultiscannerImageID confirms the image currently answering to
 // policy.Image is byte-for-byte the one build-image recorded, returning a
 // MethodNone reason if not.
 //
@@ -403,7 +431,7 @@ func normalizeImageID(id string) string {
 // ever be satisfied by a fiction. Asking the runtime for the image's real ID
 // and comparing it verifies the actual content, which is what the digest rule
 // was reaching for in the first place.
-func verifyMultiscannerImage(ctx context.Context, rt sandbox.ContainerRuntime, p MultiscannerPolicy) string {
+func verifyMultiscannerImageID(ctx context.Context, rt sandbox.ContainerRuntime, p MultiscannerPolicy) string {
 	if p.ImageID == "" {
 		return "security.multiscanner.enabled is true but no image has been built yet (security.multiscanner.image_id is empty) — run `aegis security build-image`"
 	}

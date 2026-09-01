@@ -1,10 +1,12 @@
 package builtin
 
 import (
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/sandbox"
@@ -723,6 +725,20 @@ func classifyShellCommand(root, command string, powershell bool) (tool.Capabilit
 	if command == "" || strings.ContainsAny(command, permission.ShellChainMetaChars) {
 		return tool.CapExecute, false
 	}
+	// P81.20/FIND-20: reject any byte the allowlist below does not name, before
+	// doing anything else with the string. ShellChainMetaChars above is a
+	// denylist — CRIT-1, CRIT-2 and P79.1 were each one more spelling that
+	// denylist had not been told about yet (a bare "~", an unconfined argv0, a
+	// Windows drive-letter path), found only once each was exploited or fuzzed
+	// into existence. commandCharsetAllowed inverts that: every character
+	// permitted here is one a real read-only invocation in the table below
+	// needs — checked against the whole existing test corpus — so a construct
+	// built from anything else (a control byte, a shell operator nobody has
+	// named yet, an encoding trick) fails closed on being unrecognized rather
+	// than on being recognized as bad.
+	if !commandCharsetAllowed(command) {
+		return tool.CapExecute, false
+	}
 	// Split the way the shell will, not the way strings.Fields does. Quoting is
 	// not decoration here: it changes what a token *is*, and the confinement
 	// check below can only judge a path it can recognize as one. See
@@ -772,6 +788,121 @@ func classifyShellCommand(root, command string, powershell bool) (tool.Capabilit
 		return tool.CapExecute, false
 	}
 	return cap, true
+}
+
+// shellCommandPaths resolves the filesystem paths a shell command's argv
+// names, for the engine's parallel-round dependency graph (P81.30 / FIND-30).
+// It walks the argv the same way classifyShellCommand does — splitShellWords,
+// baseBinaryName/pathQualifiedBinary, the git-subcommand split, and
+// confinementArgs/argvPathCandidates — rather than re-parsing the command a
+// second way. Unlike classifyShellCommand it does not call
+// sandbox.ValidatePath: this function answers "what does this command's argv
+// name", not "is that name confined to root", and the engine only needs the
+// former to order same-path calls against each other. It also does not
+// require the binary to be one of the read-only commands — a write/execute
+// command's paths matter to the graph exactly as much as a read's, since a
+// later call on the same path must still wait for it.
+//
+// resolved is false whenever the argv cannot be attributed to path-bearing
+// operands with confidence: a command carrying a shell chaining/redirection/
+// substitution metacharacter (which can name a target this parse never sees,
+// e.g. "> /tmp/x"), one splitShellWords cannot tokenize, a path-qualified
+// argv0 (CRIT-2's concern — a workspace-resident script, not a fixed
+// operator-installed binary), or one naming a candidate the shell would
+// expand before this parse ever sees the literal target (a tilde or a glob).
+// The caller treats an unresolved command as touching anything a concurrent
+// write in the round might, the same fail-closed direction
+// classifyShellCommand already takes for capability.
+//
+// A command that parses cleanly but names no path-shaped operand at all (a
+// bare `pwd`, `git status`) is resolved=true with an empty path list, which
+// participates in no ordering — the same as a tool call with no "path" field.
+func shellCommandPaths(command string, powershell bool) (paths []string, resolved bool) {
+	command = strings.TrimSpace(command)
+	if command == "" || strings.ContainsAny(command, permission.ShellChainMetaChars) {
+		return nil, false
+	}
+	fields, ok := splitShellWords(command, !powershell)
+	if !ok || len(fields) == 0 || pathQualifiedBinary(fields[0]) {
+		return nil, false
+	}
+	bin := strings.ToLower(baseBinaryName(fields[0]))
+	args := fields[1:]
+	switch {
+	case bin == "git":
+		if len(fields) < 2 {
+			return nil, true // "git" alone names nothing
+		}
+		args = fields[2:] // skip the subcommand, as validateReadOnlyGitArgv does
+	case readOnlyShellCommands[bin] != nil:
+		// PowerShell's colon-attached value ("-Path:C:\Windows") — the same
+		// adaptation confinementArgs performs before argvPathCandidates sees
+		// the token, so a target spelled that way isn't missed here either.
+		args = readOnlyShellCommands[bin].confinementArgs(args)
+	}
+	for _, a := range args {
+		for _, c := range argvPathCandidates(a) {
+			if c == "" {
+				continue
+			}
+			if expandsToHome(c) || strings.ContainsAny(c, "*?[") {
+				// The shell resolves this to a literal target this parse never
+				// sees; matching it against another call's literal path would
+				// silently miss the dependency, so the whole command is
+				// unresolved instead.
+				return nil, false
+			}
+			paths = append(paths, filepath.Clean(c))
+		}
+	}
+	return paths, true
+}
+
+// commandCharsetAllowlist is every byte a bare word in the read-only command
+// table can legitimately need: letters, digits, whitespace that
+// splitShellWords already treats as a separator, and the punctuation the
+// table's own flags/paths/patterns use — path separators, flag dashes,
+// attached-value separators ("=", ":"), size/date-format punctuation ("+",
+// "%", "."), glob metacharacters rg/fd/grep's own --glob/--include flags take
+// as an ordinary string value ("*", "?", "[", "]"), and quote characters
+// splitShellWords already parses structurally. Bytes >= 0x80 (UTF-8
+// continuation/lead bytes) are allowed separately, not through this table —
+// see commandCharsetAllowed — because a legitimate filename may be non-ASCII
+// and this classifier does not want to be the reason it cannot be read.
+//
+// Deliberately absent: "!", "#", "^", "{", "}", and every ASCII control byte
+// other than space/tab. None of them appears in any read-only command's flag
+// or pattern spelling (checked against the whole test corpus when this table
+// was written), and each has a history of being a shell metacharacter in some
+// dialect this classifier does not want to have to keep discovering one
+// exploit at a time. "(" and ")" are not repeated here — they are already
+// refused by ShellChainMetaChars above, checked first — but excluding them
+// from this list too costs nothing and keeps this table readable as "yes"
+// rather than "not one of the other list's noes".
+const commandCharsetAllowlist = "" +
+	"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
+	" \t" +
+	`-_./\~:=+,*?%'"@[]`
+
+// commandCharsetAllowed reports whether every byte of command is either in
+// commandCharsetAllowlist or is part of a valid non-ASCII UTF-8 sequence (a
+// legitimate filename in a language other than English). Invalid UTF-8 fails
+// closed rather than being let through byte-by-byte — a malformed sequence is
+// exactly the kind of "construct nobody described" this check exists to
+// refuse.
+func commandCharsetAllowed(command string) bool {
+	if !utf8.ValidString(command) {
+		return false
+	}
+	for _, r := range command {
+		if r >= utf8.RuneSelf {
+			continue // non-ASCII: valid UTF-8 already confirmed above
+		}
+		if !strings.ContainsRune(commandCharsetAllowlist, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // splitShellWords splits a command into the argument vector the shell will

@@ -1194,9 +1194,9 @@ sandbox:
   # macOS/Linux host without a container runtime running still gets OS-level
   # isolation instead of silently losing it. Only a host with neither (every
   # current Windows box, or a macOS/Linux box missing both Docker and
-  # seatbelt/bwrap) lands on unsandboxed "local", with a startup WARN either
-  # way. sandbox.strict below turns any step of that cascade into a hard
-  # startup error instead of a silent fallback.
+  # seatbelt/bwrap) lands on unsandboxed "local" — and since sandbox.strict
+  # below now defaults to true (P81.22/FIND-22), that is a hard startup error
+  # by default, not a silent WARN. See sandbox.strict.
   #
   # A container runtime name (docker, podman, wsl/wslc, apple) is also
   # accepted here directly and is rewritten to backend: container + the
@@ -1280,6 +1280,16 @@ sandbox:
   # supported (verified `run -d`/`exec`/`rm -f` surface); on wslc and Apple
   # Containers this key has no effect and the daemon says so at startup.
   # Set false for the strictly leak-free per-command posture.
+  #
+  # Per-command reset (P81.22/FIND-22): a persistent container is shared
+  # session state, so a command that plants a shim, edits PATH, or otherwise
+  # leaves broken state behind affects every later command in that session —
+  # there is no automatic recovery from that short of restarting the daemon.
+  # The `shell` tool's `reset_sandbox: true` input runs that one command in a
+  # fresh, disposable container instead of the session's persistent one,
+  # without touching the persistent container itself: later commands still
+  # find and reuse it exactly as before. Use it when a command is suspect
+  # rather than reaching for a daemon restart.
   persistent: true
 
   # How long a persistent container lives when the daemon never gets to tear
@@ -1290,22 +1300,50 @@ sandbox:
   # container belonging to a live Aegis process). 0 = 4 hours.
   session_ttl_sec: 14400
 
-  # If backend=container/os and the runtime can't be initialized (e.g. Docker
-  # daemon down), the default is to log a warning and fall back to running
-  # unsandboxed on the host — a silent security downgrade an operator might
-  # not notice (P7.4). Set strict=true to make that a hard startup failure
-  # instead. The daemon also reports an active fallback via the authenticated /status, and the
-  # TUI/CLI print a warning before entering a session when it's set.
-  strict: false
+  # If the configured backend cannot be initialized (e.g. Docker daemon down,
+  # and no OS-level sandbox available either — see the cascade note above),
+  # the default (as of P81.22/FIND-22) is to refuse to start rather than
+  # silently run unsandboxed: a downgrade to no isolation at all is exactly
+  # the kind of thing an operator who believes sandboxing is active would not
+  # notice from a startup WARN alone (P7.4). Set strict=false to restore the
+  # old behavior — log a warning and fall back to running unsandboxed on the
+  # host — for a host that genuinely has neither a container runtime nor
+  # OS-level isolation and accepts that risk knowingly (every current Windows
+  # box, until P77.6). Note that strict guards only the *last* step of the
+  # cascade: a container→os fallback still succeeds under strict, since
+  # OS-level isolation is real (if different) containment, not a downgrade to
+  # none — only bottoming out at unsandboxed "local" is refused. The daemon
+  # also reports the active backend and any fallback via the authenticated
+  # /status (surfaced continuously in the TUI sidebar, not just at the moment
+  # a fallback happens), and an execute-capability approval prompt names the
+  # effective backend too.
+  strict: true
 
-  # Commands run by the local/os backends never see ANTHROPIC_API_KEY or
-  # OPENAI_API_KEY (P7.2) — a prompt-injected `shell` call can't read the
-  # daemon's own provider credentials back out and exfiltrate them via
-  # web_fetch. List additional env var names here to also exclude them, e.g.
-  # secrets loaded from .aegis/.env for MCP server auth that the shell tool
-  # has no legitimate reason to see. Container backend tools never inherit
-  # host env at all, so this only applies to backend: local/os/auto(fallback).
+  # Commands run by the local/os backends start from an *empty* environment
+  # and only see the names in sandbox.DefaultEnvAllow (PATH, HOME, locale, the
+  # Go toolchain's own vars, a couple of proxy settings — see env_allow just
+  # below for how to extend it) plus whatever survives the strip_env denylist
+  # applied on top (P81.26/FIND-26). This used to be inverted — the daemon's
+  # full environment minus strip_env — which fails open for any secret the
+  # operator's shell happens to export that nobody thought to strip; CLAUDE.md
+  # is explicit that provider API keys live in that environment by design, so
+  # inheriting it was exactly the wrong starting point for a sandboxed
+  # command. List additional env var names here to exclude them from the
+  # allowlisted set, e.g. secrets loaded from .aegis/.env for MCP server auth
+  # that the shell tool has no legitimate reason to see. The container backend
+  # forwards a much narrower default set (locale + proxy only, since PATH/HOME
+  # name host filesystem paths that don't exist inside a container) — see
+  # env_allow below for widening that set; strip_env still applies to it too.
   strip_env: []
+
+  # Additional environment variable names to pass through to sandboxed
+  # commands, on top of the built-in allowlist defaults (P81.26/FIND-26). Use
+  # this for a project- or environment-specific variable a build genuinely
+  # needs that the built-in list doesn't anticipate — e.g. a custom module
+  # proxy token, or a locale/library path a particular toolchain reads.
+  # strip_env above is still applied on top of the combined allowlist, so
+  # naming something here does not exempt it from being stripped elsewhere.
+  env_allow: []
 
   # Additional host paths the "os" backend may read from, on top of the
   # workspace and the built-in toolchain allowlist (P27.18/FIND-19). Use this

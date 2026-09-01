@@ -37,14 +37,14 @@ import (
 // everyone else. A rule added by an unsaved "allow always" in a running daemon
 // is the one thing a separate process cannot see; that is a property of the
 // process boundary, not of this stack.
-func buildChatGate(cfg *config.Config, p persona.Persona, reg *tool.Registry, mode string, autoApprove bool, logger *slog.Logger) (engine.Gate, engine.Hooks) {
+func buildChatGate(cfg *config.Config, p persona.Persona, reg *tool.Registry, mode string, autoApprove bool, workdir string, logger *slog.Logger) (engine.Gate, engine.Hooks) {
 	approver := enginecfg.Approver(cfg)
 	if autoApprove {
 		approver = permission.AutoApprove{}
 	}
 	return enginecfg.BuildGate(enginecfg.GateOptions{
 		Mode:           mode,
-		StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(),
+		StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(config.WorkspaceTrusted(workdir)),
 		Approver:       approver,
 		Persona:        p,
 		Security:       cfg.Security,

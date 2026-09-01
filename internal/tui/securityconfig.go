@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/security"
 )
 
@@ -537,7 +538,9 @@ func (m *securityConfigModel) saveCmd() tea.Cmd {
 		Multiscanner:     m.multiscanner,
 		Netscanner:       m.netscanner,
 	}
-	write := config.PatchProjectSecurity
+	write := func(p config.SecurityPatch) error {
+		return config.PatchProjectSecurityWithOrigin(p, reqorigin.TUI)
+	}
 	if m.global {
 		write = config.PatchGlobalSecurity
 	}

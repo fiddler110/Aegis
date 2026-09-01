@@ -273,6 +273,15 @@ func (m model) renderSidebar(h int) string {
 	add(m.renderConnDetail()) // P28.7: reachable/unreachable + latency at a glance
 	add("")
 
+	// P81.22/FIND-22: the effective sandbox backend, so "this session runs
+	// commands unconfined" is a standing sidebar fact rather than something an
+	// operator has to remember from a startup log line or run /status to see.
+	if m.sandboxBackend != "" {
+		section("SANDBOX")
+		add(m.renderSandboxBadge(w))
+		add("")
+	}
+
 	if m.streaming && !m.phase.streamStart.IsZero() {
 		if m.phase.firstTokenAt.IsZero() {
 			section("WAITING")
@@ -538,6 +547,23 @@ func (m model) renderConnDetail() string {
 	default:
 		return style.Render("● unreachable")
 	}
+}
+
+// isUnsandboxedBackend reports whether a sandbox.Backend.Name() value names
+// the unsandboxed local backend — "local" exactly, never a prefix match,
+// since "local" is also a legitimate substring nowhere else this value
+// appears ("container:docker", "os:bwrap").
+func isUnsandboxedBackend(name string) bool { return name == "local" }
+
+// renderSandboxBadge renders the sidebar's SANDBOX line (P81.22/FIND-22):
+// the effective backend, in warning color and spelled out as unconfined when
+// it's the unsandboxed local backend, muted/plain otherwise. w bounds the
+// backend name so a long custom label can't blow out the sidebar width.
+func (m model) renderSandboxBadge(w int) string {
+	if isUnsandboxedBackend(m.sandboxBackend) {
+		return lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠ unconfined (local)")
+	}
+	return m.th.sideValue.Render(truncate(m.sandboxBackend, w))
 }
 
 func (m model) renderModeBadge() string {

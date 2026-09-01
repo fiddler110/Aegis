@@ -25,6 +25,19 @@ type SandboxConfig struct {
 	// .aegis/.env for MCP server auth or gateway headers that the shell tool
 	// has no legitimate reason to read.
 	StripEnv []string `koanf:"strip_env"`
+	// EnvAllow names additional environment variable names to pass through to
+	// commands run by the local/os/container backends, on top of the built-in
+	// defaults (sandbox.DefaultEnvAllow / sandbox.DefaultContainerEnvAllow)
+	// (P81.26/FIND-26). Sandboxed command execution starts from an empty
+	// environment and allowlists only what a command needs — PATH, HOME,
+	// locale, the Go toolchain's own env vars, and a couple of proxy
+	// settings — rather than the daemon's full environment minus a denylist,
+	// which fails open for any secret-bearing variable nobody thought to
+	// strip. Use this for a project- or environment-specific variable a build
+	// genuinely needs that the built-in list doesn't anticipate.
+	// StripEnv/DefaultStripEnv is still applied on top of the allowlisted
+	// set, as a second layer.
+	EnvAllow []string `koanf:"env_allow"`
 	// OSExtraReadPaths names additional host paths the "os" backend
 	// (seatbelt/bwrap) may read from, on top of the workspace and the
 	// built-in toolchain defaults (FIND-19/P27.18) — see

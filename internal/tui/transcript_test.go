@@ -530,3 +530,45 @@ func TestLiveBlockRendersThroughMarkdownRenderer(t *testing.T) {
 		t.Fatalf("expected cached prefix to skip re-render, got %d calls", calls)
 	}
 }
+
+// TestCapLineLengthsTruncatesOnlyOverlongLines is the P81.33 regression: a
+// single pathological line (one multi-megabyte line with no newlines) must
+// be bounded, while normal multi-line content — including lines individually
+// under the cap — passes through unchanged.
+func TestCapLineLengthsTruncatesOnlyOverlongLines(t *testing.T) {
+	short := "line one\nline two\nline three"
+	if got := capLineLengths(short); got != short {
+		t.Errorf("short content should pass through unchanged, got %q", got)
+	}
+
+	huge := strings.Repeat("x", maxLineRunes+5000)
+	got := capLineLengths("before\n" + huge + "\nafter")
+	if strings.Contains(got, huge) {
+		t.Fatal("expected the overlong line to be truncated, found it verbatim")
+	}
+	if !strings.Contains(got, "before\n") || !strings.Contains(got, "\nafter") {
+		t.Errorf("expected the surrounding short lines to survive untouched, got a %d-byte result", len(got))
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("expected an explicit truncation marker, got %q", got[:200])
+	}
+	// The reset sequence must precede the marker so a cut mid-ANSI-run can't
+	// leak an open style into the rest of the transcript.
+	if !strings.Contains(got, "\x1b[0m […truncated") {
+		t.Errorf("expected an SGR reset immediately before the truncation marker")
+	}
+}
+
+// TestAppendEnforcesLineLengthCap proves the cap is actually applied at the
+// transcript's write path, not just by the helper in isolation.
+func TestAppendEnforcesLineLengthCap(t *testing.T) {
+	p := newTranscriptPane(80, 24)
+	huge := strings.Repeat("y", maxLineRunes*2)
+	p.Append(huge + "\n")
+	if len(p.items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(p.items))
+	}
+	if utf8RuneCount := len([]rune(p.items[0].raw)); utf8RuneCount > maxLineRunes*2 {
+		t.Errorf("expected Append to cap the line length, stored item has %d runes", utf8RuneCount)
+	}
+}

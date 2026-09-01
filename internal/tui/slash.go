@@ -753,18 +753,30 @@ func (d *SlashDispatcher) cmdStatus(_ []string) SlashResult {
 		}
 	}
 
-	backend := "local"
-	if cfgErr == nil {
-		if cfg.Sandbox.Backend != "" {
-			backend = cfg.Sandbox.Backend
-		}
-		if cfg.Sandbox.Runtime != "" {
-			backend = fmt.Sprintf("%s (runtime: %s)", backend, cfg.Sandbox.Runtime)
+	// P81.22/FIND-22: info.SandboxBackend is the daemon-authoritative
+	// *effective* backend (sandbox.Backend.Name()) — what will actually
+	// contain the next command — not the configured value, which can differ
+	// silently (an unavailable runtime, a fallback). Prefer it; fall back to
+	// the local config's configured value only when talking to an older
+	// daemon that predates this field.
+	backend := info.SandboxBackend
+	if backend == "" {
+		backend = "local"
+		if cfgErr == nil {
+			if cfg.Sandbox.Backend != "" {
+				backend = cfg.Sandbox.Backend
+			}
+			if cfg.Sandbox.Runtime != "" {
+				backend = fmt.Sprintf("%s (runtime: %s)", backend, cfg.Sandbox.Runtime)
+			}
 		}
 	}
 	fmt.Fprintf(&b, "Sandbox: %s\n", backend)
+	if backend == "local" {
+		b.WriteString("  ⚠ commands run unconfined on the host (no container or OS-level isolation active)\n")
+	}
 	if info.SandboxFallback {
-		fmt.Fprintf(&b, "  ⚠ fell back to unsandboxed local execution: %s\n", info.SandboxFallbackReason)
+		fmt.Fprintf(&b, "  ⚠ fell back from the configured backend: %s\n", info.SandboxFallbackReason)
 	}
 
 	if sess, err := d.client.GetSession(ctx, d.sessionID); err == nil {

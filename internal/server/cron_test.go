@@ -560,9 +560,19 @@ func TestCronPermCheckClassifiesAgainstTheJobWorkdir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	// PlanModeShellReads is pinned true explicitly: this test is CRIT-3's
+	// workdir-scoping question (does the check classify against the job's
+	// workdir or the daemon's?), which needs plan mode's CapRead downgrade to
+	// be observable in the first place. Since P81.20/FIND-20 the untrusted-
+	// workspace default for an operator who hasn't set the knob is false
+	// (config.WorkspaceTrusted(job.Workdir) is false for every t.TempDir()
+	// here), which would make every case in this table deny outright on the
+	// posture default alone and never reach the workdir-scoping logic this
+	// test exists to pin.
+	planModeShellReads := true
 	cfg := &config.Config{
 		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
-		Permission: config.PermissionConfig{Mode: "plan"},
+		Permission: config.PermissionConfig{Mode: "plan", PlanModeShellReads: &planModeShellReads},
 	}
 	reg := tool.NewRegistry()
 	if err := builtin.Register(reg, builtin.Options{Root: daemonRoot}); err != nil {

@@ -58,3 +58,40 @@ func TestSaveRestrictsACL(t *testing.T) {
 		t.Errorf("sole ACE grants access to %s, want the owner-rights SID", sid.String())
 	}
 }
+
+// TestKeyFileRestrictsACL is TestSaveRestrictsACL's sibling for the MAC
+// secret introduced by FIND-27/P81.27: the key is exactly as sensitive as the
+// store it authenticates (anything that can read it can forge a valid grant),
+// so it needs the identical owner-only ACL, not just the store file.
+func TestKeyFileRestrictsACL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trust", "workspace_trust.json")
+	s := Open(path)
+	if err := s.TrustWithOrigin(t.TempDir(), "sha256:aaaa", "cli"); err != nil {
+		t.Fatalf("TrustWithOrigin: %v", err)
+	}
+	kp := keyPath(path)
+	if _, err := os.Stat(kp); err != nil {
+		t.Fatalf("key file was not written: %v", err)
+	}
+
+	sd, err := windows.GetNamedSecurityInfo(kp, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo: %v", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("sd.DACL: %v", err)
+	}
+	if dacl.AceCount != 1 {
+		t.Fatalf("key file has %d ACEs, want exactly 1 (more than one means the parent directory's ACL was inherited)", dacl.AceCount)
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		t.Fatalf("GetAce: %v", err)
+	}
+	sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if !sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) {
+		t.Errorf("sole ACE grants access to %s, want the owner-rights SID", sid.String())
+	}
+}

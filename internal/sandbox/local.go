@@ -16,6 +16,18 @@ type LocalBackend struct {
 	// environment (P7.2). Always includes DefaultStripEnv.
 	stripEnv []string
 
+	// envAllow lists the only env var names a spawned command's environment
+	// may carry (P81.26/FIND-26) — start from nothing, not the daemon's own
+	// environment. Always includes DefaultEnvAllow; extended via WithEnvAllow
+	// (sandbox.env_allow).
+	envAllow []string
+
+	// limits caps the resources (currently memory + process count; see
+	// joblimits_windows.go) a spawned command may consume on platforms that
+	// support it (P81.22/FIND-22) — set via WithLimits (sandbox.limits),
+	// mirroring the container backend's per-runtime enforcement.
+	limits ResourceLimits
+
 	// maxOutput bounds the bytes Exec buffers from a command (VULN-05). Zero
 	// means maxCapturedOutput; it is a field only so a test can bind the cap
 	// with a command that finishes in milliseconds instead of one that has to
@@ -24,15 +36,36 @@ type LocalBackend struct {
 }
 
 // NewLocalBackend returns a local backend that strips DefaultStripEnv (the
-// provider API keys) from commands it runs.
-func NewLocalBackend() *LocalBackend { return &LocalBackend{stripEnv: DefaultStripEnv} }
+// provider API keys) from commands it runs, and otherwise only forwards
+// DefaultEnvAllow.
+func NewLocalBackend() *LocalBackend {
+	return &LocalBackend{stripEnv: DefaultStripEnv, envAllow: DefaultEnvAllow}
+}
 
 // NewLocalBackendWithEnv returns a local backend that also strips the given
 // env var names in addition to DefaultStripEnv (P7.2) — e.g. secrets loaded
 // from .aegis/.env for MCP server authentication that the shell tool has no
 // business reading.
 func NewLocalBackendWithEnv(strip []string) *LocalBackend {
-	return &LocalBackend{stripEnv: mergeStripEnv(strip)}
+	return &LocalBackend{stripEnv: mergeStripEnv(strip), envAllow: DefaultEnvAllow}
+}
+
+// WithEnvAllow adds operator-configured additional allowlisted env var names
+// (sandbox.env_allow) on top of DefaultEnvAllow. Returns the receiver so it
+// chains onto a constructor call; mutates in place, so it is meant to be
+// called once, right after construction, before the backend is shared.
+func (l *LocalBackend) WithEnvAllow(extra []string) *LocalBackend {
+	l.envAllow = mergeEnvAllow(DefaultEnvAllow, extra)
+	return l
+}
+
+// WithLimits sets the resource caps (P81.22/FIND-22) applied to every command
+// this backend runs, on platforms that support enforcing them (currently
+// Windows job objects; see joblimits_windows.go/joblimits_other.go). Returns
+// the receiver so it chains onto a constructor call.
+func (l *LocalBackend) WithLimits(lim ResourceLimits) *LocalBackend {
+	l.limits = lim
+	return l
 }
 
 func (l *LocalBackend) Name() string { return "local" }
@@ -50,7 +83,7 @@ func (l *LocalBackend) Exec(ctx context.Context, command string, opts ExecOpts) 
 	name, args := ShellCommand(command)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = opts.Dir
-	cmd.Env = filteredEnv(os.Environ(), l.stripEnv)
+	cmd.Env = allowlistedEnv(os.Environ(), l.envAllow, l.stripEnv)
 	cmd.WaitDelay = ioCloseGrace
 
 	// Bound the capture at the pipe rather than after it (VULN-05). The result
@@ -66,7 +99,7 @@ func (l *LocalBackend) Exec(ctx context.Context, command string, opts ExecOpts) 
 	cmd.Stdout = w
 	cmd.Stderr = w
 
-	err := cmd.Run()
+	err := l.run(cmd)
 	text := w.text()
 	if runCtx.Err() == context.DeadlineExceeded {
 		return text, fmt.Errorf("command timed out after %s", opts.Timeout)
@@ -87,13 +120,13 @@ func (l *LocalBackend) ExecStreaming(ctx context.Context, command string, opts E
 	name, args := ShellCommand(command)
 	cmd := exec.CommandContext(runCtx, name, args...)
 	cmd.Dir = opts.Dir
-	cmd.Env = filteredEnv(os.Environ(), l.stripEnv)
+	cmd.Env = allowlistedEnv(os.Environ(), l.envAllow, l.stripEnv)
 	cmd.WaitDelay = ioCloseGrace
 	w := emitWriter{emit: emit}
 	cmd.Stdout = w
 	cmd.Stderr = w
 
-	err := cmd.Run()
+	err := l.run(cmd)
 	if runCtx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("command timed out after %s", opts.Timeout)
 	}
@@ -104,6 +137,32 @@ func (l *LocalBackend) ExecStreaming(ctx context.Context, command string, opts E
 		return fmt.Errorf("exit error: %w", err)
 	}
 	return nil
+}
+
+// run starts cmd and, when l.limits names a real cap, assigns the spawned
+// process to a resource-limited job object before waiting on it (P81.22/
+// FIND-22 — see joblimits_windows.go). Split from a bare cmd.Run() because
+// job-object assignment has to happen between Start and Wait: the process
+// needs a handle before it can be placed under the job, and placing it after
+// Wait would be placing it after the fact.
+//
+// A limiter that fails to construct or assign is logged nowhere here (this
+// type carries no logger) and simply runs the command unlimited — the
+// warning that a configured cap is not in force on this platform/runtime
+// belongs at sandbox selection time (see internal/server.SelectSandbox),
+// once per daemon start, not once per command.
+func (l *LocalBackend) run(cmd *exec.Cmd) error {
+	limiter, _ := newResourceLimiter(l.limits)
+	if limiter != nil {
+		defer limiter.Close()
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if limiter != nil {
+		_ = limiter.assign(cmd.Process)
+	}
+	return cmd.Wait()
 }
 
 func (l *LocalBackend) Close() error { return nil }

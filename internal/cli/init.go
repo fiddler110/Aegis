@@ -612,11 +612,12 @@ swarm:
 # ─────────────────────────────────────────────────────────────────────────────
 # Defaults to "container": isolate each command in Docker/Podman. If no
 # container runtime is available, falls back to "os" (macOS seatbelt / Linux
-# bubblewrap, no container runtime needed); if that's unavailable too (every
-# current Windows host, or a macOS/Linux box missing both), falls back further
-# to unsandboxed "local" with a startup warning — set backend: local below to
-# silence that warning once you've made the unsandboxed choice intentionally
-# (P27.14/FIND-04).
+# bubblewrap, no container runtime needed). If OS-level isolation is
+# unavailable too (every current Windows host, or a macOS/Linux box missing
+# both), the daemon now refuses to start by default (sandbox.strict; see
+# below) rather than silently falling back to unsandboxed "local" —
+# P81.22/FIND-22. Set backend: local explicitly (and strict: false) once
+# you've made the unsandboxed choice intentionally (P27.14/FIND-04).
 
 sandbox:
   backend: container          # "container" = isolate each command in a chosen runtime
@@ -640,6 +641,13 @@ sandbox:
                              #   the scanner images.
   # image: ubuntu:22.04      # Container image when backend=container/auto.
   # network: false           # Allow outbound network inside containers?
+  # strict: true             # Default. Refuse to start rather than silently fall back to
+                             #   unsandboxed "local" when no real isolation is available
+                             #   (P81.22/FIND-22). Set false only on a host that genuinely
+                             #   has neither Docker/Podman nor seatbelt/bwrap and accepts
+                             #   running every command unconfined.
+  # env_allow: []            # Extra env var names to pass through to sandboxed commands,
+                             #   on top of the built-in allowlist (P81.26/FIND-26).
 
 
 # ─────────────────────────────────────────────────────────────────────────────

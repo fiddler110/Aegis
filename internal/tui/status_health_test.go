@@ -48,6 +48,52 @@ func TestStatusInfoMsgUpdatesConnectionState(t *testing.T) {
 	}
 }
 
+// TestStatusInfoMsgUpdatesSandboxBackend covers the P81.22/FIND-22 sidebar
+// signal: a /status response's SandboxBackend populates m.sandboxBackend, and
+// a later transient error (SandboxBackend empty, err set) must NOT blank it
+// out — the whole point is a signal that doesn't flicker on a daemon hiccup.
+func TestStatusInfoMsgUpdatesSandboxBackend(t *testing.T) {
+	var m model
+	if m.sandboxBackend != "" {
+		t.Fatal("sandboxBackend should start empty")
+	}
+
+	next, _ := m.Update(statusInfoMsg{info: api.StatusInfo{SandboxBackend: "local"}})
+	m = next.(model)
+	if m.sandboxBackend != "local" {
+		t.Errorf("sandboxBackend = %q, want %q", m.sandboxBackend, "local")
+	}
+
+	next, _ = m.Update(statusInfoMsg{err: errTestDaemonDown})
+	m = next.(model)
+	if m.sandboxBackend != "local" {
+		t.Errorf("sandboxBackend should survive a transient /status error, got %q", m.sandboxBackend)
+	}
+}
+
+// TestRenderSandboxBadge covers the P81.22/FIND-22 sidebar indicator: the
+// unsandboxed local backend renders a distinguishable warning, any other
+// backend renders its plain name.
+func TestRenderSandboxBadge(t *testing.T) {
+	cases := []struct {
+		backend string
+		wantSub string
+	}{
+		{"local", "unconfined"},
+		{"container:docker", "container:docker"},
+		{"os:bwrap", "os:bwrap"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.backend, func(t *testing.T) {
+			m := model{sandboxBackend: tc.backend}
+			got := m.renderSandboxBadge(40)
+			if !strings.Contains(got, tc.wantSub) {
+				t.Errorf("renderSandboxBadge() = %q, want substring %q", got, tc.wantSub)
+			}
+		})
+	}
+}
+
 // TestStatusTickMsgReschedules covers the P28.7 periodic refresh: handling
 // statusTickMsg must return a non-nil Cmd (it batches a re-fetch plus the
 // next tick) so the indicator keeps updating without user action.

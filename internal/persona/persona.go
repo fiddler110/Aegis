@@ -17,9 +17,23 @@ type Persona struct {
 	System      string
 	Model       string       // model id override (same provider); "" = global
 	Mode        string       // permission mode; "" = session/config default
-	Tools       []string     // advisory tool list; see PersonaToolGate (never a hard restriction)
+	Tools       []string     // advisory tool list; see PersonaToolGate (never a hard restriction unless ToolsEnforced)
 	Rules       []string     // permission rules merged into the session gate
 	Guard       *GuardConfig // nil = global default; Disabled = no guard
+	// ToolsEnforced opts a persona into treating its Tools list as a hard
+	// containment boundary (P81.20/FIND-20 item 4) instead of the P7.5
+	// advisory default: a call to a tool outside the list is refused outright
+	// by PersonaToolGate rather than routed through the approver's warn/prompt
+	// path. Honoring this for a *loaded* (untrusted) persona file does not
+	// violate P7.5's "content never gains enforcement teeth" rule the way an
+	// honored Mode or an honored allow-Rule would — enforcing mode can only
+	// narrow what a session may call, never widen it, so it is gated the same
+	// way filterPersonaRules keeps a loaded persona's deny rules: restricting
+	// is safe to honor from untrusted content, granting is not. Still gated by
+	// honorControlFields like every other frontmatter control field, so
+	// P27.7/FIND-09's "advisory-only injected persona" posture is unaffected.
+	ToolsEnforced bool
+
 	// Loaded is true for a persona parsed from a *.md file (user/project
 	// personas dir, including ones installed by a bundle) rather than one of
 	// the built-ins compiled into this package. The permission gate uses this

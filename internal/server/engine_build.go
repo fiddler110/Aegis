@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cost"
 	"github.com/fiddler110/aegis/internal/engine"
 	"github.com/fiddler110/aegis/internal/enginecfg"
@@ -92,22 +93,31 @@ func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
 // constructor: the permission rules are read under permMu because an "allow
 // always" approval adds one at runtime, the audit sink is a daemon-owned file,
 // and s.hooks already carries the user's configured exec hooks.
-func (s *Server) buildGate(mode string, approver permission.Approver, p persona.Persona) (engine.Gate, engine.Hooks) {
+//
+// workdir decides the default StrictPlanMode posture when the operator has
+// not set `permission.plan_mode_shell_reads` explicitly (P81.20/FIND-20): an
+// untrusted workdir (config.WorkspaceTrusted) now defaults to the strict
+// posture, so a classifier defect in an unreviewed workspace is not a silent
+// plan-mode bypass by default. Pass the root the run's tools will actually
+// execute against — the same root callers already thread through for
+// RoundResultCap/ExtraRoots.
+func (s *Server) buildGate(mode string, approver permission.Approver, p persona.Persona, workdir string) (engine.Gate, engine.Hooks) {
 	s.permMu.Lock()
 	rules := append([]permission.Rule{}, s.permRules...)
 	s.permMu.Unlock()
 
 	return enginecfg.BuildGate(enginecfg.GateOptions{
-		Mode:           mode,
-		StrictPlanMode: !s.cfg.Permission.PlanModeShellReadsEnabled(),
-		Approver:       approver,
-		Persona:        p,
-		Security:       s.cfg.Security,
-		Registry:       s.tools,
-		Rules:          rules,
-		Hooks:          s.hooks,
-		OnDecision:     s.recordPolicyDecision,
-		Logger:         s.logger,
+		Mode:                mode,
+		StrictPlanMode:      !s.cfg.Permission.PlanModeShellReadsEnabled(config.WorkspaceTrusted(workdir)),
+		Approver:            approver,
+		Persona:             p,
+		Security:            s.cfg.Security,
+		Registry:            s.tools,
+		Rules:               rules,
+		Hooks:               s.hooks,
+		OnDecision:          s.recordPolicyDecision,
+		Logger:              s.logger,
+		SandboxBackendLabel: s.sandboxBackendLabel(),
 	})
 }
 
@@ -241,7 +251,7 @@ func (s *Server) newEngine(sessionID, mode string, approver permission.Approver,
 	if approver == nil {
 		approver = s.approver()
 	}
-	gate, engineHooks := s.buildGate(mode, approver, p)
+	gate, engineHooks := s.buildGate(mode, approver, p, workdir)
 
 	model, routingReason, routedToSmall := s.turnModel(p, modelOverride, userText, priorMessages)
 	if routingReason != "" {

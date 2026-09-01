@@ -129,6 +129,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err := s.validateListenAddr(); err != nil {
 		return err
 	}
+	// P81.17: the committed dist/ has no PR-time drift check that runs
+	// (P81.11 confirmed that disablement is deliberate and permanent), so
+	// this is the only thing left that verifies the embedded web UI bundle
+	// against the digest of the bundle that was actually reviewed.
+	if drift, digest, err := checkDistDrift(); err != nil {
+		s.logger.Warn("web UI bundle drift check failed", "err", err)
+	} else if drift {
+		s.logger.Warn("web UI bundle does not match its pinned manifest — dist/ may have been modified since the last reviewed build", "digest", digest)
+	} else {
+		s.logger.Info("web UI bundle matches its pinned manifest", "digest", digest)
+	}
 	// Start the cron scheduler in the background.
 	if s.cronSched != nil {
 		cronCtx, cronCancel := context.WithCancel(context.Background())
@@ -136,13 +147,16 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		go s.cronSched.Run(cronCtx)
 	}
 
-	// Start the session auto-pruner when a TTL is configured.
-	if s.cfg.Cleanup.SessionTTLDays > 0 {
+	// Start the auto-pruner ticker when any of the three retention horizons
+	// is configured (P81.24 added ArchivedSessionTTLDays and
+	// CheckpointTTLDays alongside the original SessionTTLDays) — one ticker,
+	// each horizon gated independently so leaving one at its 0/disabled
+	// default never blocks the others.
+	if s.cfg.Cleanup.SessionTTLDays > 0 || s.cfg.Cleanup.ArchivedSessionTTLDays > 0 || s.cfg.Cleanup.CheckpointTTLDays > 0 {
 		interval := 24 * time.Hour
 		if h := s.cfg.Cleanup.IntervalHours; h > 0 {
 			interval = time.Duration(h) * time.Hour
 		}
-		ttl := time.Duration(s.cfg.Cleanup.SessionTTLDays) * 24 * time.Hour
 		go func() {
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
@@ -151,12 +165,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					n, err := s.store.Prune(context.Background(), ttl)
-					if err != nil {
-						s.logger.Error("auto-prune sessions", "err", err)
-					} else if n > 0 {
-						s.logger.Info("auto-pruned old sessions", "deleted", n, "ttl_days", s.cfg.Cleanup.SessionTTLDays)
-					}
+					s.runRetentionPrune()
 				}
 			}
 		}()
@@ -191,6 +200,39 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			return nil
 		}
 		return err
+	}
+}
+
+// runRetentionPrune runs one pass of every configured retention horizon
+// (P81.24): idle non-archived sessions, archived sessions past their own
+// clock, and checkpoints past theirs — independent of whether their owning
+// session still exists. Each is gated on its own TTL being non-zero, so
+// leaving one at the disabled default never blocks the others sharing this
+// ticker.
+func (s *Server) runRetentionPrune() {
+	if s.cfg.Cleanup.SessionTTLDays > 0 {
+		ttl := time.Duration(s.cfg.Cleanup.SessionTTLDays) * 24 * time.Hour
+		if n, err := s.store.Prune(context.Background(), ttl); err != nil {
+			s.logger.Error("auto-prune sessions", "err", err)
+		} else if n > 0 {
+			s.logger.Info("auto-pruned old sessions", "deleted", n, "ttl_days", s.cfg.Cleanup.SessionTTLDays)
+		}
+	}
+	if s.cfg.Cleanup.ArchivedSessionTTLDays > 0 {
+		ttl := time.Duration(s.cfg.Cleanup.ArchivedSessionTTLDays) * 24 * time.Hour
+		if n, err := s.store.PruneArchived(context.Background(), ttl); err != nil {
+			s.logger.Error("auto-prune archived sessions", "err", err)
+		} else if n > 0 {
+			s.logger.Info("auto-pruned archived sessions", "deleted", n, "ttl_days", s.cfg.Cleanup.ArchivedSessionTTLDays)
+		}
+	}
+	if s.cfg.Cleanup.CheckpointTTLDays > 0 && s.checkpoints != nil {
+		cutoff := time.Now().Add(-time.Duration(s.cfg.Cleanup.CheckpointTTLDays) * 24 * time.Hour)
+		if n, err := s.checkpoints.PruneOlderThan(context.Background(), cutoff); err != nil {
+			s.logger.Error("auto-prune checkpoints", "err", err)
+		} else if n > 0 {
+			s.logger.Info("auto-pruned old checkpoints", "deleted", n, "ttl_days", s.cfg.Cleanup.CheckpointTTLDays)
+		}
 	}
 }
 

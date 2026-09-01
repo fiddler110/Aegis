@@ -23,6 +23,7 @@ import (
 	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
+	"github.com/fiddler110/aegis/internal/tool/builtin"
 )
 
 func permModeRank(mode string) int {
@@ -91,7 +92,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	workdir, werr := s.resolveSessionWorkdir(req.Workdir)
+	origin := reqorigin.Normalize(req.Origin)
+	workdir, werr := s.resolveSessionWorkdir(req.Workdir, origin)
 	if werr != nil {
 		writeError(w, werr.status, werr.msg)
 		return
@@ -110,7 +112,6 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if system == "" {
 		system = p.System
 	}
-	origin := reqorigin.Normalize(req.Origin)
 	sess, err := s.store.Create(r.Context(), req.Title, system, mode, req.Persona, workdir, origin)
 	if err != nil {
 		s.logger.Error("create session", "err", err)
@@ -142,12 +143,13 @@ type workdirError struct {
 
 func (e *workdirError) Error() string { return e.msg }
 
-// resolveSessionWorkdir validates a client-supplied session Workdir (P25.1):
-// empty keeps today's behavior (the daemon's default workspace, via
+// resolveSessionWorkdir validates a client-supplied session Workdir (P25.1,
+// P81.9): empty keeps today's behavior (the daemon's default workspace, via
 // workdirFor's fallback); otherwise it must resolve to an existing
-// directory and, on a remote-accessible daemon, fall within the trust
-// boundary workdirAllowed enforces.
-func (s *Server) resolveSessionWorkdir(raw string) (string, *workdirError) {
+// directory and fall within the trust boundary workdirAllowed enforces,
+// regardless of bind address — origin (already normalized by the caller) is
+// what the TUI/CLI carve-out is keyed on now, not AllowRemote.
+func (s *Server) resolveSessionWorkdir(raw, origin string) (string, *workdirError) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", nil
@@ -161,8 +163,8 @@ func (s *Server) resolveSessionWorkdir(raw string) (string, *workdirError) {
 	// as a filesystem-existence oracle for paths outside the trust
 	// boundary (P31.2), since a 400 "does not exist" vs. 403 "not
 	// permitted" response reveals existence before the gate ever runs.
-	if !s.workdirAllowed(abs) {
-		return "", &workdirError{http.StatusForbidden, "workdir is not permitted for a remote-accessible daemon; add it to server.session_workdir_allowlist"}
+	if !s.workdirAllowed(abs, origin) {
+		return "", &workdirError{http.StatusForbidden, "workdir is not permitted for this session origin; add it to server.session_workdir_allowlist or grant it with `aegis trust --dir`"}
 	}
 	info, err := os.Stat(abs)
 	if err != nil || !info.IsDir() {
@@ -257,6 +259,10 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Read before deleting the map entry: reapSessionSpillIfUnshared (P81.24)
+	// needs this session's own workdir, and needs to check every *other*
+	// session's before it's gone from the map too.
+	workdir, hadWorkdir := s.sessionWorkdirs.Load(id)
 	// Store.Delete also cleans up checkpoint snapshots (P32.3) via the
 	// SetCheckpointCleaner wiring done in New — no separate call needed here.
 	if err := s.store.Delete(r.Context(), id); err != nil {
@@ -270,7 +276,44 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	s.taskScopes.Delete(id)
 	s.promptSectionCache.Delete(id)
 	s.forgetSessionRunState(id)
+	if hadWorkdir {
+		if root, ok := workdir.(string); ok {
+			s.reapSessionSpillIfUnshared(id, root)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// reapSessionSpillIfUnshared is the session-end half of P81.24's spill
+// cleanup: builtin.ReapSpillDir's own doc comment requires a caller to prove
+// no other live session shares root's workspace before deleting its spill
+// directory (spillText scopes files by workspace, not by session — the tool
+// layer has no session id). Excluded is the session that just ended, no
+// longer present in sessionWorkdirs by the time this runs.
+//
+// A session created with an empty Workdir (the daemon's own default
+// workspace) is never tracked in sessionWorkdirs at all (see
+// handleCreateSession), so this is only ever reached for an explicit,
+// non-default session root — never the workspace every default-workdir
+// session implicitly shares.
+func (s *Server) reapSessionSpillIfUnshared(excluded, root string) {
+	if root == "" {
+		return
+	}
+	shared := false
+	s.sessionWorkdirs.Range(func(_, v any) bool {
+		if other, ok := v.(string); ok && other == root {
+			shared = true
+			return false
+		}
+		return true
+	})
+	if shared {
+		return
+	}
+	if err := builtin.ReapSpillDir(root); err != nil {
+		s.logger.Warn("reap session spill directory", "workdir", root, "err", err)
+	}
 }
 
 // forgetSessionRunState drops the per-session run bookkeeping that lives in

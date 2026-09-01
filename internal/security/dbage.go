@@ -254,7 +254,7 @@ func DatabaseAges(ctx context.Context, opts Options) DatabaseAgeReport {
 	// almost always free here): reading a timestamp out of an image whose ID
 	// no longer matches the pin would be reporting on something other than
 	// what scans actually run.
-	if reason := verifyMultiscannerImage(ctx, rt, p); reason != "" {
+	if reason := verifyMultiscannerImageID(ctx, rt, p); reason != "" {
 		return DatabaseAgeReport{Unavailable: reason}
 	}
 	out, err := readCacheMetadata(ctx, rt, p.Image, cacheProbeScript())

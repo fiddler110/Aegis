@@ -20,12 +20,13 @@ func withLookPath(t *testing.T, fn func(string) bool) {
 
 func netPolicy(id string, tools ...string) NetscannerPolicy {
 	p := NetscannerPolicy{
-		Enabled: true,
-		Image:   NetscannerDefaultImage,
-		ImageID: id,
-		Runtime: sandbox.RuntimePodman,
-		Tools:   map[string]bool{},
-		check:   &multiscannerCheck{},
+		Enabled:  true,
+		Image:    NetscannerDefaultImage,
+		ImageID:  id,
+		Runtime:  sandbox.RuntimePodman,
+		Tools:    map[string]bool{},
+		Verified: true, // P81.13: tests using this factory exercise resolution, not the verify gate itself
+		check:    &multiscannerCheck{},
 	}
 	if len(tools) == 0 {
 		tools = NetscannerTools()
@@ -294,6 +295,31 @@ func TestNetscannerToolsAllHaveVerification(t *testing.T) {
 // TestNetworkFacingToolsAreAllKnown: the status table iterates this list, and a
 // name with no descriptor would render a row saying "no scanner descriptor
 // registered" to an operator who did nothing wrong.
+// TestVerifyNetscannerImageRequiresVerified mirrors
+// TestVerifyMultiscannerImageRequiresVerified for the netscanner path
+// (P81.13).
+func TestVerifyNetscannerImageRequiresVerified(t *testing.T) {
+	withInspectImageID(t, func(context.Context, sandbox.ContainerRuntime, string) (string, error) {
+		return testImageID, nil
+	})
+
+	unverified := netPolicy(testImageID, "nmap")
+	unverified.Verified = false
+	if reason := verifyNetscannerImage(context.Background(), sandbox.RuntimePodman, unverified); reason == "" {
+		t.Fatal("expected a pinned-but-unverified netscanner image to fail verifyNetscannerImage")
+	}
+	if reason := verifyNetscannerImageID(context.Background(), sandbox.RuntimePodman, unverified); reason != "" {
+		t.Errorf("verifyNetscannerImageID (verify-image's own preflight) = %q, want \"\"", reason)
+	}
+
+	allowed := unverified
+	allowed.AllowUnverified = true
+	allowed.check = &multiscannerCheck{}
+	if reason := verifyNetscannerImage(context.Background(), sandbox.RuntimePodman, allowed); reason != "" {
+		t.Errorf("AllowUnverified = true: verifyNetscannerImage = %q, want \"\"", reason)
+	}
+}
+
 func TestNetworkFacingToolsAreAllKnown(t *testing.T) {
 	for _, name := range NetworkFacingTools() {
 		if _, ok := DescriptorFor(name); !ok {

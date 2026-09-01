@@ -49,18 +49,26 @@ func TestReadToolUsesContextWorkdirOverride(t *testing.T) {
 	}
 }
 
-// recordingBackend is a sandbox.Backend that only records the Dir it was
-// asked to execute in, so shellTool tests can assert on ExecOpts.Dir without
-// depending on platform-specific shell syntax.
-type recordingBackend struct{ lastDir string }
+// recordingBackend is a sandbox.Backend that records the full ExecOpts it was
+// last called with, so shellTool tests can assert on ExecOpts.Dir (P25.1) or
+// any other field (e.g. FreshContainer, P81.22/FIND-22) without depending on
+// platform-specific shell syntax. lastDir is kept as a direct field, not just
+// derived from lastOpts, purely so existing assertions reading b.lastDir
+// don't need to change.
+type recordingBackend struct {
+	lastDir  string
+	lastOpts sandbox.ExecOpts
+}
 
 func (b *recordingBackend) Name() string { return "recording" }
 func (b *recordingBackend) Exec(_ context.Context, _ string, opts sandbox.ExecOpts) (string, error) {
 	b.lastDir = opts.Dir
-	return "", nil
+	b.lastOpts = opts
+	return "(no output)", nil
 }
 func (b *recordingBackend) ExecStreaming(_ context.Context, _ string, opts sandbox.ExecOpts, _ func(string)) error {
 	b.lastDir = opts.Dir
+	b.lastOpts = opts
 	return nil
 }
 func (b *recordingBackend) Close() error { return nil }

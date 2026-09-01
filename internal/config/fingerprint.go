@@ -13,6 +13,7 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/workspacetrust"
 )
 
@@ -145,6 +146,20 @@ func WorkspaceTrusted(dir string) bool {
 // currently on disk. Every write path goes through here so no call site has to
 // remember to compute the fingerprint — a Trust call that forgot would write a
 // grant Check reads as permanently stale.
+//
+// This is the origin-less form: it exists for callers (mostly tests, and
+// `aegis trust`, whose default already matches) that don't have a more
+// specific interface to report. See TrustWorkspaceWithOrigin.
 func TrustWorkspace(dir string) error {
-	return workspacetrust.Open(WorkspaceTrustStorePath()).Trust(dir, SecurityFingerprint(dir))
+	return TrustWorkspaceWithOrigin(dir, reqorigin.CLI)
+}
+
+// TrustWorkspaceWithOrigin is TrustWorkspace plus FIND-27's origin stamp:
+// origin should be one of reqorigin's constants, naming the interface that
+// made this trust decision (`aegis trust` on the CLI, the TUI's security
+// config screen, an HTTP PATCH from the web UI, ...) so an inserted or
+// hand-edited grant is at least visibly missing (or wrong) origin/MAC data
+// rather than indistinguishable from a real one.
+func TrustWorkspaceWithOrigin(dir, origin string) error {
+	return workspacetrust.Open(WorkspaceTrustStorePath()).TrustWithOrigin(dir, SecurityFingerprint(dir), origin)
 }

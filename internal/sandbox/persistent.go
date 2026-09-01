@@ -98,6 +98,7 @@ func SupportsPersistentContainer(rt ContainerRuntime) bool {
 func (c *ContainerBackend) startPersistentArgs(dir string) []string {
 	args := append([]string{"run", "-d", "--rm"}, OCIHardeningFlags(c.runtime)...)
 	args = append(args, ResourceFlags(c.runtime, c.limits)...)
+	args = append(args, c.containerEnvArgs()...)
 	if !c.network {
 		args = append(args, "--network", "none")
 	}

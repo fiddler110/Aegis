@@ -193,17 +193,26 @@ func defaults() map[string]any {
 		// path, ahead of even --first-init's template writing this same value
 		// explicitly — isn't silently unconfined. SelectSandbox cascades on
 		// failure: no container runtime falls back to "os" (P4.7 OS-level
-		// isolation via seatbelt/bwrap, no container runtime needed) before
-		// giving up to unsandboxed "local" with a startup WARN (never a hard
-		// failure, sandbox.strict aside). A host with Docker/Podman running
-		// gets the container backend; a macOS/Linux host without one still
-		// gets OS-level isolation exactly as it did when "os" was the bare
-		// default; only a host with neither (every current Windows box, or a
-		// macOS/Linux box missing both Docker and seatbelt/bwrap) lands on
-		// local, same as before.
+		// isolation via seatbelt/bwrap, no container runtime needed). A host
+		// with Docker/Podman running gets the container backend; a macOS/Linux
+		// host without one still gets OS-level isolation exactly as it did
+		// when "os" was the bare default. Only a host with neither (every
+		// current Windows box, or a macOS/Linux box missing both Docker and
+		// seatbelt/bwrap) has nowhere left to cascade to — and since
+		// sandbox.strict now defaults to true (P81.22/FIND-22), that host
+		// fails the daemon at startup with an actionable error rather than
+		// quietly falling back to unsandboxed "local" behind nothing louder
+		// than a startup WARN, which used to be the default outcome. Set
+		// sandbox.strict: false explicitly to opt back into that fallback (or
+		// sandbox.backend: local to choose it outright).
 		"sandbox.backend": "container",
 		"sandbox.image":   "ubuntu:22.04",
 		"sandbox.network": false,
+		// P81.22/FIND-22: an unavailable isolation backend is now a startup
+		// failure by default rather than a silent downgrade — see the
+		// sandbox.backend comment above, and SelectSandbox's doc comment for
+		// exactly what "strict" refuses.
+		"sandbox.strict": true,
 		// P60.1: conservative per-container caps. Sized to let ordinary
 		// build/test work through (a `go build`, an `npm ci`) while making a
 		// runaway inside the sandbox a failed command rather than a host-wide

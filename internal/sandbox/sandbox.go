@@ -29,6 +29,17 @@ type Backend interface {
 type ExecOpts struct {
 	Dir     string        // working directory
 	Timeout time.Duration // per-command timeout (0 = no timeout beyond ctx)
+
+	// FreshContainer forces this one command to run in a new, disposable
+	// container instead of reusing a persistent session container
+	// (sandbox.persistent: true) (P81.22/FIND-22). It has no effect on the
+	// local/os backends, and no effect at all unless a persistent container
+	// is already in play for this working directory — the escape hatch for a
+	// command known to have planted a shim, poisoned PATH, or otherwise left
+	// state in the session container that the caller wants isolated from.
+	// The persistent container itself is untouched: later commands in the
+	// same session still reuse it as before.
+	FreshContainer bool
 }
 
 // ShellCommand returns the platform shell binary and argument list for

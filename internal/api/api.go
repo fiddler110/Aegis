@@ -76,12 +76,19 @@ type HealthStatus struct {
 // totals the P9.5/P10.5 daily caps already track in the session store; the
 // Cap fields are 0 when the corresponding cap is unconfigured (unlimited).
 type StatusInfo struct {
-	Provider              string  `json:"provider"`
-	Model                 string  `json:"model"`
-	SandboxFallback       bool    `json:"sandbox_fallback,omitempty"`
-	SandboxFallbackReason string  `json:"sandbox_fallback_reason,omitempty"`
-	DailyCostUSD          float64 `json:"daily_cost_usd"`
-	DailyCapUSD           float64 `json:"daily_cap_usd,omitempty"`
+	Provider              string `json:"provider"`
+	Model                 string `json:"model"`
+	SandboxFallback       bool   `json:"sandbox_fallback,omitempty"`
+	SandboxFallbackReason string `json:"sandbox_fallback_reason,omitempty"`
+	// SandboxBackend is the effective command-execution sandbox backend
+	// (sandbox.Backend.Name(): "container:docker", "os:bwrap", "local", …)
+	// (P81.22/FIND-22) — surfaced continuously in the TUI status/sidebar, not
+	// only via the fallback warning above, so "this session runs commands
+	// unconfined" is visible whether or not that state came from a fallback
+	// (an operator can also configure sandbox.backend: local outright).
+	SandboxBackend string  `json:"sandbox_backend,omitempty"`
+	DailyCostUSD   float64 `json:"daily_cost_usd"`
+	DailyCapUSD    float64 `json:"daily_cap_usd,omitempty"`
 	// DailyTokens is the cross-session sum of per-turn total token counts
 	// (input+output+cache) — tokens *processed*, the always-enforceable budget
 	// primitive (see cost.Tracker.TotalTokens). The input component sums each

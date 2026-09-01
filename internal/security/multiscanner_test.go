@@ -34,11 +34,12 @@ func msPolicy(wantID string, tools ...string) MultiscannerPolicy {
 		set[tool] = true
 	}
 	return MultiscannerPolicy{
-		Enabled: true,
-		Image:   MultiscannerDefaultImage,
-		ImageID: wantID,
-		Tools:   set,
-		check:   &multiscannerCheck{},
+		Enabled:  true,
+		Image:    MultiscannerDefaultImage,
+		ImageID:  wantID,
+		Verified: true, // P81.13: tests using this factory exercise resolution, not the verify gate itself
+		Tools:    set,
+		check:    &multiscannerCheck{},
 	}
 }
 
@@ -851,6 +852,40 @@ func TestVerifyMultiscannerImageCaches(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("inspect called %d times across 5 verifies, want 1 (TTL cache)", calls)
+	}
+}
+
+// TestVerifyMultiscannerImageRequiresVerified is the P81.13 regression: an
+// image whose ID matches its pin must still fail closed at scan-resolution
+// time until it has actually passed `aegis security verify-image` — unless
+// AllowUnverified opts out, or the caller is verify-image's own preflight
+// (verifyMultiscannerImageID), which must never gate on itself.
+func TestVerifyMultiscannerImageRequiresVerified(t *testing.T) {
+	withInspectImageID(t, func(context.Context, sandbox.ContainerRuntime, string) (string, error) {
+		return testImageID, nil
+	})
+
+	unverified := msPolicy(testImageID, "trivy")
+	unverified.Verified = false
+	if reason := verifyMultiscannerImage(context.Background(), sandbox.RuntimePodman, unverified); reason == "" {
+		t.Fatal("expected a pinned-but-unverified image to fail verifyMultiscannerImage")
+	}
+	if reason := verifyMultiscannerImageID(context.Background(), sandbox.RuntimePodman, unverified); reason != "" {
+		t.Errorf("verifyMultiscannerImageID (verify-image's own preflight) = %q, want \"\" — it must not gate on Verified or verify-image could never pass for the first time", reason)
+	}
+
+	allowed := unverified
+	allowed.AllowUnverified = true
+	allowed.check = &multiscannerCheck{}
+	if reason := verifyMultiscannerImage(context.Background(), sandbox.RuntimePodman, allowed); reason != "" {
+		t.Errorf("AllowUnverified = true: verifyMultiscannerImage = %q, want \"\"", reason)
+	}
+
+	verified := unverified
+	verified.Verified = true
+	verified.check = &multiscannerCheck{}
+	if reason := verifyMultiscannerImage(context.Background(), sandbox.RuntimePodman, verified); reason != "" {
+		t.Errorf("Verified = true: verifyMultiscannerImage = %q, want \"\"", reason)
 	}
 }
 

@@ -31,12 +31,7 @@
     - [P81.4 — The web UI hands the real daemon token to browser JavaScript (FIND-04)](#p814--the-web-ui-hands-the-real-daemon-token-to-browser-javascript-find-04)
     - [P81.10 — The container workspace mount is broader than any single command needs (FIND-10)](#p8110--the-container-workspace-mount-is-broader-than-any-single-command-needs-find-10)
     - [P81.12 — Release artifacts ship without checksums, signatures or provenance (FIND-12)](#p8112--release-artifacts-ship-without-checksums-signatures-or-provenance-find-12)
-    - [P81.20 — Plan mode's guarantee rests on a 1,129-line classifier, structurally (FIND-20)](#p8120--plan-modes-guarantee-rests-on-a-1129-line-classifier-structurally-find-20)
-    - [P81.22 — Command isolation degrades to unsandboxed host execution on a warning line (FIND-22)](#p8122--command-isolation-degrades-to-unsandboxed-host-execution-on-a-warning-line-find-22)
     - [P81.23 — Scheduled jobs run unattended in whatever mode they were created with (FIND-23)](#p8123--scheduled-jobs-run-unattended-in-whatever-mode-they-were-created-with-find-23)
-    - [P81.26 — Sandboxed commands inherit the daemon environment minus a denylist (FIND-26)](#p8126--sandboxed-commands-inherit-the-daemon-environment-minus-a-denylist-find-26)
-    - [P81.27 — Trust grants are unauthenticated local state, and `.aegis/.env` is outside the fingerprint (FIND-27)](#p8127--trust-grants-are-unauthenticated-local-state-and-aegisenv-is-outside-the-fingerprint-find-27)
-    - [P81.30 — Parallel rounds do not order shell commands against concurrent writes (FIND-30)](#p8130--parallel-rounds-do-not-order-shell-commands-against-concurrent-writes-find-30)
   - [Open Work — Tier 4](#open-work--tier-4)
     - [P80.2 — Three packages the security audit never read](#p802--three-packages-the-security-audit-never-read)
     - [P80.3 — `Server`'s 60-field struct, after the file split](#p803--servers-60-field-struct-after-the-file-split)
@@ -209,6 +204,13 @@ adding items.
 ---
 
 ## Status
+
+**Updated 2026-09-01: nine more P81 Tier 2/3 items closed the same day** (**P81.17**, **P81.9**,
+**P81.13**, **P81.24**, **P81.25**, **P81.33**'s render-bound half, then **P81.20**, **P81.22**,
+**P81.26**, **P81.27**, **P81.30**) — see [Up next](#up-next)'s two 2026-09-01 entries for the full
+record of each. The counts below predate that work and are known-stale in places already (see the
+"0 open" vs "7 open" note left in [Tier 2](#open-work--tier-2)); trust each tier's own open-item count
+in its section header over the paragraph below, which is kept for the 2026-08-31 history it narrates.
 
 **57 open items: 48 build + 9 verification-only.** Eight P81 items closed on 2026-08-31 (five
 shipped, two closed without code, one — **P81.19** — shipped and superseded by the larger gap it
@@ -458,6 +460,112 @@ instead, regardless of how large or urgent the underlying question is.
 ---
 
 ## Up next
+
+**Updated 2026-09-01 (third entry the same day)**: **rows 6-8 of the "Next batch" list below shipped
+(minus P81.23 and P81.10, deliberately left for later — see below)**: **P81.20** (plan mode's default
+now depends on workspace trust — `permission.plan_mode_shell_reads` defaults to `false` for an
+untrusted workspace and `true` for a trusted one, both still operator-overridable either way;
+`classifyShellCommand` gained an explicit character-allowlist gate ahead of its existing per-command
+tables, so an unrecognised raw command string fails closed instead of only known-bad metacharacters
+being denied; `FuzzClassifyShellCommand`'s seed corpus now carries every fixed CRIT-1/CRIT-2/P79.1
+escape by name; and persona `tools:` lists gained an opt-in `tools_enforced` frontmatter key that
+refuses an out-of-list call outright instead of only warning — advisory stays the default); **P81.22**
+(`sandbox.strict` now defaults to `true`, but only guards the final cascade step onto unsandboxed
+`local` — a container→OS-level fallback still succeeds under strict, so this doesn't hard-fail every
+host merely missing a Docker daemon; the effective backend is now surfaced in the `Ask` approval
+reason and a new TUi sidebar "SANDBOX" section with an "unconfined" warning badge; Windows gained real
+job-object memory/process-count limits on the local backend, `reset_sandbox` lets one shell call force
+a fresh persistent container without evicting the session's; POSIX rlimits/cgroups and Windows CPU-rate
+limiting are explicitly deferred, noted in code); **P81.26** (sandboxed commands now get an allowlisted
+environment — `PATH`/`HOME`/locale/Go-toolchain/proxy vars by default, operator-extensible via a new
+`sandbox.env_allow` config key — with the old `DefaultStripEnv` denylist kept as a second defensive
+layer rather than the only one, applied identically to the container backend's `--env` construction);
+and **P81.30** (parallel tool rounds now resolve a `shell` call's touched paths the same way the
+capability classifier already does, via a new `tool.PathToucher` interface, and order it against a
+concurrent write on an overlapping or unresolvable — wildcard — path, closing the one correctness
+finding in the batch: "a `shell` call and a `read_file` are never ordered" is no longer true for a
+literal same-path case). **P81.27** shipped too, out of ranking order, alongside the others (all four
+were built by parallel agents in one sitting): `workspacetrust`'s ACL fix was already shipped (an
+earlier sitting's note was accurate), so what landed is a locally-derived HMAC-SHA256 MAC over each
+entry (keyed from a sibling `0o600` key file, not an OS credential store — none exists anywhere in this
+codebase's dependencies, and none was added speculatively; the docstring is explicit that this detects
+a corrupted or hand-edited store, not a fully-privileged same-user attacker who can read the key file
+exactly as easily as the store), a `GrantedVia`/`GrantedByProcess` stamp on every entry reusing
+P81.14's `reqorigin` origins, and a concrete deferred design for folding `.aegis/.env`'s presence-and-
+digest (never its contents) into the fingerprint without breaking the load-order it protects.
+**P81.23 and P81.10 were deliberately left out of this sitting**: P81.23 (cron jobs unattended in
+`auto` mode) explicitly wants P81.22 finished first per its own entry, and while P81.22 is now done the
+job-set-presentation and re-confirmation halves are genuinely separate work, not a trivial follow-on;
+P81.10 (the container mount is broader than any one command needs) wants to consume the same
+per-call capability verdict this batch didn't touch, and is `M`-sized on its own. Both stay open, ranked
+below. `go build ./...`, `go vet ./...` and `go test ./...` are green across the whole tree after
+integrating all four agents' work into one working tree, including packages more than one agent
+touched (`internal/enginecfg/gate.go`, several `internal/server/*.go` files).
+
+**Updated 2026-09-01 (second entry the same day)**: **the first five rows of the "Next batch" list
+below shipped**: **P81.17** (dist/ drift is now a runtime digest check logged at daemon start,
+`internal/server/webui_manifest.go` + `cmd/webuimanifest`) together with **P81.12**'s `codeql.yml`
+pinning half (every `uses:` in that workflow now pins a commit SHA, `govulncheck` pinned to v1.7.0);
+**P81.9** (the session-workdir allowlist now applies unconditionally, keyed on `reqorigin.TUI`/`CLI`
+instead of `server.allow_remote`, with a `config.WorkspaceTrusted` fallback reusing the
+`additional_roots` trust grant); **P81.13** (found mostly already shipped on inspection — the
+multiscanner/netscanner images were already ID-pinned and re-verified before every run, and
+`security.tools.*.image` already requires a digest — what was missing was `sandbox.image`, now pinned
+at first use via `internal/sandbox/imagepin.go`, and a `Verified`/`AllowUnverified` gate that makes
+`verify-image` an actual precondition of a scan run rather than a command nobody is forced to run);
+**P81.24 + P81.25's remainders** (found the ACL half, the cert regeneration warning and the fingerprint
+log already shipped in an earlier sitting — `checkpoint.Store.PruneOlderThan` and
+`session.Store.PruneArchived` existed but had no caller, so archived sessions and checkpoints were
+still effectively immortal; both are now wired into one daemon retention ticker behind two new
+`cleanup.*` config keys, and `handleDeleteSession` now reaps a workdir's spill directory once no other
+live session shares it); and the render-bound half of **P81.33** (`capLineLengths` bounds any single
+transcript line to 20,000 runes with an SGR-safe truncation marker, closing the "one multi-megabyte
+line stalls the render loop" half of the finding). **P81.33's batched-approval half is deliberately
+not done**: the daemon's approval protocol correlates one pending approval per *run*, not per call
+(`sseApprover.ch`/`ApprovalID`), so presenting a parallel round's approvals as one reviewable summary
+needs a real protocol change, not a TUI-only fix — filed as the reason the item stays open rather than
+attempted piecemeal. P81.25's client-side TLS fingerprint acknowledgment is likewise left for the
+rotation decision that already covers it. Every change here was run against its package's test suite
+(`go test ./internal/server/...`, `./internal/security/...`, `./internal/sandbox/...`,
+`./internal/tui/...`, `./internal/config/...`, `./internal/cli/...`) plus a full `go build ./...`; new
+regression tests were added at each layer rather than only exercising the happy path.
+
+**Updated 2026-09-01**: **the P81 batch's Tier 3 wave (P81.1, P81.2, P81.3, P81.4, P81.5, P81.8) is
+now fully closed, P80.1 and P79.1 are closed, and the table's top clears for the first time since the
+threat model was filed.** Nothing shipped this sitting — this is a re-ranking of what's left, done
+because the previous "next row" entries (P81.5, then P81.1) are both gone and the table hadn't named a
+successor. What remains is 7 real Tier 2 items (the section header nearby claiming "0 open" is stale —
+verified against each entry's own body text) and 8 Tier 3 P81 items plus P80.1, all confirmed still
+open by reading their bodies rather than trusting the header counts.
+
+**Next batch, cheapest and most independent first:**
+
+1. **P81.17 + P81.12's `codeql.yml` pinning half** — same kind of fix (drift/supply-chain detection
+   in CI config), no design decision, and **P81.12**'s entry already says to take them together: pin
+   every `uses:` reference in `codeql.yml` to a commit SHA (the one workflow with live triggers) while
+   adding the `dist/` drift check. Both Tier 2 — XS/S.
+2. **P81.9** — apply the session-workdir allowlist unconditionally instead of exempting the default
+   bind. Unblocked now that `internal/reqorigin` (shipped for P81.14) gives a one-field origin check
+   for the TUI carve-out this entry wanted. Tier 2 — S.
+3. **P81.13** — pin `sandbox.image` and the scanner images to a digest at first use; make
+   `verify-image` a precondition of a scan run. Self-contained. Tier 2 — S.
+4. **P81.24 + P81.25 remainders** — both are the same `fsguard.RestrictToOwner` mechanism applied to
+   different targets (session DB/checkpoints/spill; the daemon certificate), so take them as one
+   sitting as the entries themselves suggest. Tier 2 — S each.
+5. **P81.33** — bound the TUI render path and break the serial-approval click-through pattern. Worth
+   pairing with **P80.2** (Tier 4, also `internal/tui`) since both need that file open. Tier 2 — M.
+6. **P81.23** — now unblocked: refuse `auto` mode for scheduled jobs unless the effective sandbox
+   backend is a real isolation backend (answerable now that **P81.22** shipped), present the
+   registered job set at daemon start/TUI, require re-confirmation for a job created outside an
+   interactive session, and give ACP's `session/new` the same mode ceiling as **P80.1**. Tier 3 — M.
+7. **P81.10** — narrow the container workspace mount to what the resolved call actually needs
+   (`.aegis/.env` exclusion first, it's separable and small; read-only vs read-write and subtree
+   mounting off the same per-call capability verdict `tool.WithCapabilityMemo` already holds is the
+   larger remaining piece). Tier 3 — M.
+8. **P81.12**'s release-artifact half stays parked behind the dormant-releases product decision, not a
+   trigger — do not build it speculatively. Its `codeql.yml`-pinning half already shipped with P81.17.
+9. **P80.1** — the session-origin schema decision P80.1's interim fix deferred is still open and still
+   wants a product decision before code, same as when it was last ranked here.
 
 **Updated 2026-08-31 (tenth entry the same day)**: **P81.4 — the web UI's own token-exposure problem —
 shipped.** `POST /auth/exchange` no longer returns `s.authToken` to the browser at all; it mints a
@@ -789,7 +897,10 @@ small and has no dependency.
 
 ## Open Work — Tier 2
 
-**Status: 0 open.** **P68.1** (the live tier can now run a measurement it can read back) shipped
+**Status: 7 open** (P81.9, P81.13, P81.17, P81.33, plus the remainders of P81.24 and P81.25, plus the
+`codeql.yml`-pinning half of P81.12 — see [Up next](#up-next), updated 2026-09-01, for the current
+take order). This header undercounted for a stretch after 2026-08-22 when the tier last fully cleared;
+kept below for that history. **P68.1** (the live tier can now run a measurement it can read back) shipped
 2026-08-22 — record in [releases.md](releases.md). Before it, this tier's most recent shipment was
 **P74.15** (HTML
 comments stripped from injected memory files) on 2026-08-21, right after **P74.14** (a malformed
@@ -1106,15 +1217,14 @@ the reason this is not XS. Take it while `internal/tui` is open for **P80.2**.
 
 ## Open Work — Tier 3
 
-**Status: 17 open.** Two pre-existing — **P76.1** (both sessions done, entry kept as a pointer; its
+**Status: 3 open**, updated 2026-09-01. **P81.1**, **P81.8**, **P81.5**, **P81.2**, **P81.3**, **P81.4**,
+**P81.14**, **P81.20**, **P81.22**, **P81.26**, **P81.27** and **P81.30** are all shipped — see
+[Up next](#up-next) for each closure's record. What's left from the P81 batch: **P81.10** (container
+mount scoping) and **P81.23** (scheduled-job posture, now unblocked by **P81.22**). Also open:
+**P76.1** (both sessions done, entry kept as a pointer; its
 Session A survivor, **P76.3**, shipped 2026-08-31 — see [its record](releases.md#p762-and-p763-shipped-2026-08-31))
 and **P80.1** (filed 2026-08-30, the one `internal/mcpserver`
-audit finding whose fix is a product decision rather than a defect repair). Fifteen arrived 2026-08-31
-with the P81 threat-model batch: **P81.1**, **P81.8**, **P81.5**, **P81.2**, **P81.3**, **P81.4**,
-**P81.10**, **P81.12**, **P81.14**, **P81.20**, **P81.22**, **P81.23**, **P81.26**, **P81.27** and
-**P81.30**. They are listed in that order below, which is the order to take them in: **P81.14** first
-because six of the others want its origin stamp, then **P81.8** before **P81.1** because the ledger is
-the instrument the containment work is judged with. **P75.1** (per-block tool-result expand/collapse, filed 2026-08-21 the same day
+audit finding whose fix is a product decision rather than a defect repair). **P75.1** (per-block tool-result expand/collapse, filed 2026-08-21 the same day
 the styling follow-up below shipped) shipped in full the same day, both slices — record in
 [releases.md](releases.md#p751-shipped-in-full-2026-08-21). **P74.17** (per-model harness profiles)
 shipped 2026-08-21 too, closing the tier out before this —
@@ -1724,89 +1834,6 @@ behind a trigger. The `codeql.yml` action-pinning half is **Tier 2 — XS** and 
 taken with **P81.17**; it is the only supply-chain work in this batch that touches a workflow that
 actually runs.
 
-### P81.20 — Plan mode's guarantee rests on a 1,129-line classifier, structurally (FIND-20)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-20**](../threat-model-20260831-002123/3-findings.md#find-20-plan-modes-read-only-guarantee-rests-on-a-1129-line-shell-classifier),
-CVSS 7.3, `Important`, CWE-863). This is the structural half of what **P79.1** filed as a specific
-regression, and the two should not be confused. P79.1 is _did this Windows path escape reproduce, and
-is it reachable through `shellTool.CapabilityFor` end to end_. This item is _the arrangement that
-makes every parser defect a plan-mode defect, of which P79.1 is the third instance._
-
-`Gate.Check` consults `tool.EffectiveCapability` **before** `Policy.Decide`, so any call
-`classifyShellCommand` downgrades to `CapRead` is allowed silently in every mode — including plan
-mode, where an execute call would have been denied. The design is deliberate, documented, and has a
-real benefit (before it, `git status` in plan mode was silently denied, which was worse). It is also
-why CRIT-1 (an unexpanded `~`), CRIT-2 (an unconfined `argv[0]`) and P79.1 (Windows absolute-path
-escapes through the attached-flag and PowerShell operand paths) were each a plan-mode bypass rather
-than a parsing bug. The threat model verified on 2026-08-31 that the four P79.1 tests pass in the
-current working tree — **the specific regression appears addressed; the structure that produced three
-of them is not.**
-
-**What to do**, and note that the first item is a posture change rather than a parser change:
-
-1. Default `permission.plan_mode_shell_reads` to `false` for workspaces that have **not** been granted
-   trust, keeping today's default for trusted ones — so the posture an operator picks for reviewing an
-   untrusted repository does not depend on parser correctness. The flag and both postures already
-   exist and are already required to keep working.
-2. Narrow the classifier's `CapRead` surface to an explicit allowlist of command forms rather than a
-   denylist of escapes, so an unrecognised construct fails closed.
-3. Grow `FuzzClassifyShellCommand`'s seed corpus with every fixed case including the P79.1 Windows
-   forms. **The "run it in CI" half has no home as of 2026-08-31** — `ci.yml` stays disabled by
-   decision (**P81.11**) and `codeql.yml`, the only workflow that runs, does not execute Go tests.
-   Either give the fuzz target a scheduled workflow of its own (the pattern `codeql.yml` already uses
-   for its weekly cron), or accept that it runs only when someone runs it and say so. Seed-corpus
-   growth is worth doing either way: it is what makes a manual run find the next case.
-4. Offer an _enforcing_ mode for persona `tools:` lists, for operators using a persona as a
-   containment boundary. Advisory is the documented default and should stay the default.
-
-Priority: Tier 3 — M, `Redesign`. Sequence-dependent one way rather than both, as of 2026-08-31: the
-fuzz gate it wanted from **P81.11** is not coming, so the CI dependency is gone and the corpus work is
-unblocked today. **P81.1**'s taint rule shipped 2026-08-31 at exactly the policy layer this entry
-warned about (`permission.ContextualGate.Check` reads `tool.EffectiveCapability`, the same downgraded
-capability the base gate sees) — so it **is** bypassed by a `CapRead` downgrade, as predicted; that
-dependency stands and is now confirmed rather than hypothetical.
-**P79.1**'s reachability check ran 2026-08-31 and found the specific Windows escape not exploitable in
-production — see its record in [releases.md](releases.md#p8114-p818-p811-p791-and-p801-2026-08-31) —
-which answers this item's own "may change this one's urgency" concern in the negative: the structural
-risk this item describes stands on its own, independent of any one live escape.
-
-### P81.22 — Command isolation degrades to unsandboxed host execution on a warning line (FIND-22)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-22**](../threat-model-20260831-002123/3-findings.md#find-22-command-isolation-silently-degrades-to-unsandboxed-host-execution),
-CVSS 6.9, `Important`, CWE-693). `sandbox.backend` defaults to `container` and `SelectSandbox`
-cascades: no container runtime falls back to OS-level isolation (seatbelt/bwrap), and a host with
-neither falls back to the unsandboxed `local` backend with a startup `WARN` — "never a hard failure,
-`sandbox.strict` aside."
-
-**The population this lands on is not marginal, and the config comment names it: "every current
-Windows box."** That is the machine this project is developed on. On those hosts every model-requested
-shell command runs directly on the host with the operator's full privileges, with no filesystem
-confinement beyond the tool-level path checks and none of the memory, CPU or PID limits the container
-path applies (`internal/sandbox/local.go:26-53,83-90` versus `docker.go:320-334`). One startup line is
-thin signal for a change of that size, and it is emitted at start rather than at the moment a command
-runs unconfined. The daemon does refuse `auto_approve_exec` on the local backend without
-`allow_unsandboxed_auto_exec`, which bounds the worst combination — that check is the reason this is
-Tier 3 and not higher.
-
-**What to do.** Make `sandbox.strict` the default so unavailable isolation is a visible failure rather
-than a silent downgrade, with an explicit opt-out for hosts that genuinely have neither option.
-Surface the effective backend in the approval prompt and the TUI status line (shared with
-**P81.33**), so "this command will run unconfined" is stated at the decision, not only in the startup
-log. Apply OS-level resource limits — job objects on Windows, rlimits or cgroups on POSIX — so
-`sandbox.limits` means something on every backend. Document the persistent-container state model
-(`sandbox.persistent: true`) and offer a per-command reset: state carries across commands for the
-session TTL, so a command that plants a shim or edits `PATH` inside the container affects every later
-command in that session.
-
-**Note the overlap with P77.6** (no OS-level process sandbox on Windows, Tier 4, GAP-05). P77.6 is the
-missing capability; this is the missing _signal_ that the capability is absent. The signal half is
-worth taking even if the capability half stays parked.
-
-Priority: Tier 3 — M. Changing a default that will fail closed on the maintainer's own machine is the
-part that needs care, which is why the prompt-surfacing half should ship first.
-
 ### P81.23 — Scheduled jobs run unattended in whatever mode they were created with (FIND-23)
 
 **Filed 2026-08-31**, from the threat model
@@ -1836,93 +1863,6 @@ alongside **P80.1**'s clamp rather than separately.
 
 Priority: Tier 3 — M, sequence-dependent on **P81.22** and **P81.14**.
 
-### P81.26 — Sandboxed commands inherit the daemon environment minus a denylist (FIND-26)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-26**](../threat-model-20260831-002123/3-findings.md#find-26-sandboxed-commands-inherit-the-daemon-environment-minus-a-denylist),
-CVSS 5.7, `Moderate`, CWE-526). Commands are spawned with
-`cmd.Env = filteredEnv(os.Environ(), l.stripEnv)` on both the `Exec` and `ExecStreaming` paths
-(`internal/sandbox/local.go:53,90`) — the daemon's own environment with a denylist removed.
-`DefaultStripEnv` covers the known-sensitive names and `NewLocalBackendWithEnv` extends it with names
-loaded from `.aegis/.env`, which is the right instinct. But **a denylist over an inherited environment
-fails open**: any secret-bearing variable the operator's shell happens to export, that nobody thought
-to add to the list, is visible to every command the model runs.
-
-And the daemon's environment is where API keys live _by design_ — `CLAUDE.md` states secrets come only
-from the environment or `.aegis/.env`. That makes the inherited environment exactly the wrong starting
-point for a sandboxed command.
-
-**What to do.** Invert to an allowlist: start empty and pass only what a command needs — `PATH`,
-`HOME`, `TMPDIR`, locale, plus an operator-configurable list. Keep `DefaultStripEnv` as a second layer
-over the allowlisted names that can still carry secrets. Apply the same construction to the container
-backend's `--env` handling so both paths agree.
-
-**The risk in this one is breakage, not design.** A `go build`, an `npm ci`, a `git` invocation behind
-a corporate proxy and anything reading `GOPATH`/`GOCACHE`/`GOMODCACHE` all need environment this
-inversion removes by default. Build the allowlist against a real run of the project's own toolchain
-before shipping it.
-
-Priority: Tier 3 — M, `Redesign`. The change is small; getting the allowlist right without breaking
-every build command is the work.
-
-### P81.27 — Trust grants are unauthenticated local state, and `.aegis/.env` is outside the fingerprint (FIND-27)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-27**](../threat-model-20260831-002123/3-findings.md#find-27-workspace-trust-grants-are-unauthenticated-local-state-and-exclude-aegisenv),
-CVSS 5.5, `Moderate`, CWE-345). The trust store is what stops a cloned repository's
-`.aegis/config.yaml` from silently widening the agent's posture, and the fingerprint pinning is a
-genuinely good design: a grant is bound to the security-relevant subset of that directory's config, so
-changing a frozen key re-prompts. Two gaps sit around it.
-
-First, the store is unauthenticated local state. `workspacetrust.save()` writes `0o600` inside a
-`0o700` directory with no integrity protection and no `fsguard.RestrictToOwner`, so a same-user
-process can insert a grant for any directory and suppress the prompt entirely. Entries record
-`TrustedAt` and the fingerprint but **not who granted them or through which interface**, so an
-inserted grant is indistinguishable from an operator decision.
-
-Second, the fingerprint deliberately excludes `.aegis/.env`, and the code says so in as many words:
-"The honest fingerprint would include .aegis/.env, and this one does not." The reasoning is real — the
-trust decision resolves before any project-controlled file is read — but the consequence is that a
-project can change the secrets loaded into the daemon's environment without invalidating an existing
-grant.
-
-**What to do.** Apply `fsguard.RestrictToOwner` to the trust store file (the same one-line class of
-fix as **P81.24** and **P81.25**; take all three together). Authenticate the entry set with a MAC
-keyed from the OS credential store so an inserted grant is detectable. Record the granting interface
-and requesting process alongside each entry (**P81.14**'s origin stamp again). And revisit the
-load-order constraint — hashing `.aegis/.env`'s presence and digest _without_ reading its contents
-into the environment first is the shape that would close the documented hole without breaking the
-ordering it exists for.
-
-Priority: Tier 3 — M. The ACL is trivial and should ride with the other two; the MAC and the
-fingerprint-ordering question are the real content and need a decision about where the key lives.
-
-### P81.30 — Parallel rounds do not order shell commands against concurrent writes (FIND-30)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-30**](../threat-model-20260831-002123/3-findings.md#find-30-parallel-tool-rounds-do-not-order-shell-commands-against-concurrent-writes),
-CVSS 4.8, `Moderate`, CWE-362) — and the only item in the batch that is a **correctness** finding
-rather than a containment one. In a parallel round, write and execute calls share one exclusive
-`execLock`; reads and network calls take no lock and are deliberately not held off by a concurrent
-write (P8.6). The only read-versus-write ordering is a same-`path` dependency graph keyed on the
-literal `"path"` input field — and `shell`'s schema carries a _command_, not a `path`, so as
-`CLAUDE.md` states outright, "a `shell` call and a `read_file` are never ordered."
-
-The consequence is a torn read: a `shell cat` or a `read_file` can observe a file mid-write and feed
-partially-written state back into the model's reasoning. Documented rather than accidental, but it
-means the file state the model believes it is acting on can differ from what is on disk.
-
-**What to do.** Extend the dependency graph to cover shell commands using the classifier's
-already-resolved argv — the same resolution `argv_confine.go` performs, and the same verdict
-`tool.WithCapabilityMemo` already holds, so this should consume an existing result rather than
-re-parse. Where a path cannot be resolved from a command, order that command conservatively against
-any concurrent write in the round. Add a regression test issuing a `write_file` and a `shell cat` of
-the same path in one round, asserting deterministic ordering and unchanged round latency for unrelated
-calls.
-
-Priority: Tier 3 — M, sequence-dependent on the argv resolution being reusable from `toolround.go`.
-Note the tension with P8.6's deliberate no-lock-on-reads decision: this narrows it by dependency, not
-by lock, and any fix that reintroduces a broad read lock is the wrong one.
 
 ---
 

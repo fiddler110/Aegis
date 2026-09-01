@@ -292,11 +292,14 @@ Run a shell command in the workspace directory.
 {
   "command": "go test ./internal/engine/...",
   "timeout_ms": 30000,        // optional: override default timeout
-  "background": false         // optional: run async, return task ID immediately
+  "background": false,        // optional: run async, return task ID immediately
+  "reset_sandbox": false      // optional: run this one command in a fresh container (P81.22/FIND-22)
 }
 ```
 
 When `background: true`, the tool returns a task ID immediately. Use the task tools to monitor and retrieve output.
+
+`reset_sandbox: true` only has an effect with `sandbox.backend: container` and `sandbox.persistent: true`: instead of reusing the session's persistent container, this one command runs in a fresh, disposable one. Use it after a command that may have left broken state (a poisoned `PATH`, a corrupted install) that should not affect later commands in the session — the persistent container itself is untouched, so later commands still find and reuse it.
 
 Every invocation is gated by the permission mode. In `build` mode, a prompt appears unless `auto_approve_exec: true` or a matching `allow` rule exists.
 

@@ -49,6 +49,30 @@ func FuzzClassifyShellCommand(f *testing.F) {
 		"   ",
 		"--",
 		"~",
+		// P81.20/FIND-20: every previously-fixed escape gets a named seed
+		// here, not just a representative one, so a future regression in any
+		// of them is one fuzz corpus entry away from being caught again
+		// rather than needing to be refuzzed into existence.
+		//
+		// CRIT-1 (a tilde the classifier never expanded, so it read as an
+		// ordinary relative name and confined "happily" inside root).
+		"cat ~root/.bashrc",
+		"ls ~",
+		"grep --file=~/.ssh/id_rsa foo",
+		// CRIT-2 (an unconfined argv0: baseBinaryName reduced a
+		// path-qualified binary to a bare name that matched the table, while
+		// confinement was only ever checked against fields[1:]).
+		"../ls",
+		"~/x/ls",
+		"./scripts/cat notes.txt",
+		// P79.1 (Windows absolute-path escapes through the attached-flag and
+		// PowerShell operand-path spellings — reachable through
+		// shellTool.CapabilityFor end to end, see
+		// TestShellToolCapabilityForRejectsWindowsAbsolutePathEscapes).
+		`Get-Content C:\Users\x\.ssh\id_rsa`,
+		`Get-Content -Path C:\Users\x\.ssh\id_rsa`,
+		`Get-Content -Path:C:\Windows\System32\drivers\etc\hosts`,
+		`Get-ChildItem C:\Windows\System32`,
 	} {
 		for _, ps := range []bool{false, true} {
 			f.Add(seed, ps)

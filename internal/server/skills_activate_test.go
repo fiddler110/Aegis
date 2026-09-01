@@ -14,6 +14,7 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -134,7 +135,7 @@ func TestActivateSkill_ReturnsSkillBody(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: t.TempDir()})
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: t.TempDir(), Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestActivateSkill_MaterializesIntoProjectWorkdir(t *testing.T) {
 	ctx := context.Background()
 	workdir := t.TempDir()
 
-	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir})
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir, Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestActivateSkill_RepeatedActivationDoesNotRewriteUnchangedFiles(t *testing
 	ctx := context.Background()
 	workdir := t.TempDir()
 
-	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir})
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir, Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestCreateSession_MaterializesConfigEnabledBuiltins(t *testing.T) {
 	ctx := context.Background()
 	workdir := t.TempDir()
 
-	if _, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir}); err != nil {
+	if _, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "plan", Workdir: workdir, Origin: reqorigin.TUI}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 

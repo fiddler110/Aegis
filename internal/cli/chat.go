@@ -210,7 +210,7 @@ func runChat(cmd *cobra.Command, args []string, o *chatOptions) error {
 	if o.mode != "" {
 		resolvedMode = o.mode
 	}
-	gate, engineHooks := buildChatGate(cfg, p, reg, resolvedMode, o.autoApprove, logger)
+	gate, engineHooks := buildChatGate(cfg, p, reg, resolvedMode, o.autoApprove, cwd, logger)
 	// P81.1: the same approver logic buildChatGate applied internally,
 	// recomputed here rather than changing buildChatGate's signature (its
 	// tests call it directly and only look at the gate).

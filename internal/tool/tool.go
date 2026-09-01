@@ -192,6 +192,47 @@ func EffectiveReplay(t Tool, input json.RawMessage) ReplayClass {
 	return ReplayNever
 }
 
+// PathToucher is an optional Tool extension for a tool whose call can name a
+// filesystem target the engine's parallel-round dependency graph cannot see
+// from a "path"/"file_path" input field alone (P81.30 / FIND-30). The shell
+// tool is the motivating (and, today, only) implementer: its schema carries a
+// command string rather than a path, so — before this existed — a
+// `shell cat somefile` and a concurrent `write_file` on "somefile" were never
+// ordered relative to each other and the read could observe the file
+// mid-write, exactly as CLAUDE.md's "Parallel tool rounds" section used to
+// document as a known gap.
+//
+// TouchedPaths reports every path this call's input names and whether that
+// list is a complete answer. resolved=false means the call's targets could
+// not be determined with confidence — a chained/redirected shell command, an
+// argv this tool's parser doesn't recognize, or one naming a target the
+// parser can't reduce to a literal path (a glob, a tilde-expansion) — and the
+// caller must then treat the call as potentially touching anything a
+// concurrent write in the same round touches, rather than leaving it
+// unordered for lack of a known target. That is the same fail-closed
+// direction CapabilityOverrider already takes: a false positive here costs a
+// call some unnecessary serialization, a false negative costs a torn read.
+//
+// The context is the one the call will actually execute under, mirroring
+// CapabilityOverrider — a tool whose answer genuinely does not depend on it is
+// free to ignore it.
+type PathToucher interface {
+	TouchedPaths(ctx context.Context, input json.RawMessage) (paths []string, resolved bool)
+}
+
+// EffectiveTouchedPaths returns the paths a call names and whether that is a
+// complete answer: nil, true (no known target, not a wildcard) unless t
+// implements PathToucher. Mirrors EffectiveCapability/EffectiveReplay's
+// per-call question with a safe default for the overwhelming majority of
+// tools that don't need to answer it because their input already carries a
+// plain "path" field.
+func EffectiveTouchedPaths(ctx context.Context, t Tool, input json.RawMessage) (paths []string, resolved bool) {
+	if p, ok := t.(PathToucher); ok {
+		return p.TouchedPaths(ctx, input)
+	}
+	return nil, true
+}
+
 // PollExempter is an optional Tool extension for a tool whose repeated calls
 // are legitimately expected while waiting on external state (P53.2). The
 // engine's loop detector flags a model that issues the same tool calls turn

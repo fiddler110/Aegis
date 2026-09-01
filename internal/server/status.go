@@ -44,6 +44,7 @@ func (s *Server) handleStatusInfo(w http.ResponseWriter, r *http.Request) {
 		Model:                 s.cfg.Provider.Model,
 		SandboxFallback:       s.sandboxFallback,
 		SandboxFallbackReason: s.sandboxFallbackReason,
+		SandboxBackend:        s.sandboxBackendLabel(),
 		DailyCostUSD:          dailyCost,
 		DailyCapUSD:           s.cfg.Cost.DailyCapUSD,
 		DailyTokens:           dailyTokens,

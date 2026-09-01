@@ -174,6 +174,21 @@ type MultiscannerConfig struct {
 	// existed have a perfectly good image, and flagging every one of them on
 	// upgrade would be noise, not a finding.
 	SourceFingerprint string `koanf:"source_fingerprint"`
+	// Verified records that `aegis security verify-image` (or build-image's
+	// implicit run of it) passed against the exact ImageID pinned above
+	// (P81.13). A pin proves the image hasn't changed since it was built; it
+	// says nothing about whether the scanners inside it actually load their
+	// rules or databases, which is what verify-image's canary scan checks.
+	// --skip-verify and a config written before this field existed both leave
+	// this false. False is the safe default: an operator has to have actually
+	// run verification, not merely built an image, before a scan trusts it.
+	Verified bool `koanf:"verified"`
+	// VerifiedAt is when Verified was last set, RFC3339, purely informational.
+	VerifiedAt string `koanf:"verified_at"`
+	// AllowUnverified opts out of the Verified gate above, for local
+	// development where re-verifying after every rebuild is friction rather
+	// than signal. Off by default.
+	AllowUnverified bool `koanf:"allow_unverified"`
 	// Concurrency bounds how many scanners run at once during a scan. Each
 	// container-method scanner is one container, so this is how many run in
 	// parallel. 0 means the built-in default (multiscannerDefaultConcurrency);
@@ -218,6 +233,12 @@ type NetscannerConfig struct {
 	// Both images are built from one context, so this is the same hash the
 	// multiscanner records. Empty means "unknown", not "drift".
 	SourceFingerprint string `koanf:"source_fingerprint"`
+	// Verified, VerifiedAt and AllowUnverified mirror MultiscannerConfig's
+	// fields of the same name (P81.13): a pin alone does not prove
+	// `aegis security verify-image --netscanner` was ever run against it.
+	Verified        bool   `koanf:"verified"`
+	VerifiedAt      string `koanf:"verified_at"`
+	AllowUnverified bool   `koanf:"allow_unverified"`
 	// Tools optionally restricts which scanners resolve to this image. Empty
 	// (the default) means every scanner the image is known to carry.
 	Tools []string `koanf:"tools"`

@@ -61,7 +61,28 @@ type CleanupConfig struct {
 	// SessionTTLDays is how many days since last update before a non-archived
 	// session is automatically deleted. 0 disables auto-cleanup.
 	SessionTTLDays int `koanf:"session_ttl_days"`
-	// IntervalHours is how often the pruner runs. Defaults to 24.
+	// ArchivedSessionTTLDays is how many days since a session was archived
+	// before it is automatically deleted, using session.Store.PruneArchived
+	// (P81.24). Archiving is how an operator says "keep this, out of the
+	// way" — SessionTTLDays deliberately never touches an archived session —
+	// but that made archiving the one gesture that opted a conversation, its
+	// traces and its checkpoint file copies out of retention *permanently*.
+	// 0 disables auto-cleanup of archived sessions, matching SessionTTLDays'
+	// own default-off convention; an operator who wants "keep forever" gets
+	// exactly that by leaving this unset.
+	ArchivedSessionTTLDays int `koanf:"archived_session_ttl_days"`
+	// CheckpointTTLDays is how many days a checkpoint (and the whole-file
+	// snapshots it holds) is kept, independent of whether its owning session
+	// still exists (P81.24) — checkpoint.Store.PruneOlderThan. A checkpoint's
+	// value decays with wall-clock time, not with session lifetime: rewind
+	// only ever reaches a session's recent turns, so a checkpoint made a
+	// month ago is dead weight in the database whether or not its session
+	// was ever deleted or archived. 0 disables auto-cleanup.
+	CheckpointTTLDays int `koanf:"checkpoint_ttl_days"`
+	// IntervalHours is how often the pruner runs. Defaults to 24. Shared by
+	// SessionTTLDays, ArchivedSessionTTLDays and CheckpointTTLDays — they are
+	// three retention horizons over the same one daemon-lifetime ticker, not
+	// three separate schedules to configure.
 	IntervalHours int `koanf:"interval_hours"`
 }
 

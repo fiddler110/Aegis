@@ -262,6 +262,14 @@ type model struct {
 	connReachable bool  // provider reachable per Server.probeProviderReachability
 	connLatencyMS int64 // last measured latency in ms; 0 when unmeasured (cloud provider)
 
+	// sandboxBackend is the effective command-execution sandbox backend from
+	// the daemon's /status (P81.22/FIND-22): "container:docker", "os:bwrap",
+	// "local", … — empty until the first /status round trip completes, same
+	// as connKnown above. Surfaced continuously in the sidebar (not only as a
+	// one-off fallback warning) so "commands run unconfined" stays visible
+	// for the life of the session, not just at the moment it happened.
+	sandboxBackend string
+
 	thinkStart time.Time // when extended thinking began this turn; zero when idle
 	turnCount  int       // conversation turns sent; guards turn separator logic
 	animStep   int       // frame counter for the streaming "working" shimmer

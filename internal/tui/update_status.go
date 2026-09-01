@@ -27,6 +27,12 @@ func (m model) updateStatusInfo(msg statusInfoMsg) (tea.Model, tea.Cmd) {
 		m.srvCtxWin = msg.info.ContextWindow
 		m.srvCtxWinSrc = msg.info.ContextWindowSource
 	}
+	// P81.22/FIND-22: keep the last known backend on a transient /status
+	// error rather than blanking it — a daemon hiccup shouldn't make the
+	// "commands run unconfined" signal flicker off.
+	if msg.err == nil && msg.info.SandboxBackend != "" {
+		m.sandboxBackend = msg.info.SandboxBackend
+	}
 	// P28.7 connection/model-health indicator: a request error means the
 	// daemon itself is unreachable, distinct from the daemon being up but
 	// reporting its configured provider as unreachable.

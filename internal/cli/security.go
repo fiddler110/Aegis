@@ -349,6 +349,63 @@ func recordMultiscannerPin(res security.MultiscannerBuildResult, project bool) (
 	return ms, target, nil
 }
 
+// recordVerified marks an already-pinned image as having passed
+// verification (P81.13), writing to whichever config file's pin the merged
+// config actually resolved from — project if it pins a matching image ID,
+// else the global (machine-wide) config, the same file
+// recordMultiscannerPin/recordNetscannerPin default to.
+//
+// kind is "multiscanner" or "netscanner".
+func recordVerified(kind string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	target := config.GlobalConfigPath()
+	write := config.PatchGlobalSecurity
+	projectSec, err := config.FileSecurity(config.ProjectConfigPath())
+	if err == nil {
+		matches := false
+		switch kind {
+		case "multiscanner":
+			matches = strings.TrimSpace(projectSec.Multiscanner.ImageID) != "" &&
+				strings.EqualFold(projectSec.Multiscanner.ImageID, cfg.Security.Multiscanner.ImageID)
+		case "netscanner":
+			matches = strings.TrimSpace(projectSec.Netscanner.ImageID) != "" &&
+				strings.EqualFold(projectSec.Netscanner.ImageID, cfg.Security.Netscanner.ImageID)
+		}
+		if matches {
+			target, write = config.ProjectConfigPath(), config.PatchProjectSecurity
+		}
+	}
+
+	existing, err := config.FileSecurity(target)
+	if err != nil {
+		return fmt.Errorf("read %s to record verification: %w", target, err)
+	}
+	patch := config.SecurityPatch{
+		EgressThenWrite:  existing.EgressThenWrite,
+		NetworkAllowList: existing.NetworkAllowList,
+		DefaultMethod:    existing.DefaultMethod,
+		Tools:            existing.Tools,
+		DAST:             existing.DAST,
+		WSLDistro:        existing.WSLDistro,
+		Debate:           existing.Debate,
+		Multiscanner:     existing.Multiscanner,
+		Netscanner:       existing.Netscanner,
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	switch kind {
+	case "multiscanner":
+		patch.Multiscanner.Verified = true
+		patch.Multiscanner.VerifiedAt = now
+	case "netscanner":
+		patch.Netscanner.Verified = true
+		patch.Netscanner.VerifiedAt = now
+	}
+	return write(patch)
+}
+
 // stickyBuildRuntime returns the container runtime a rebuild should reuse: the
 // one already recorded in config, or "" to let BuildMultiscanner auto-detect.
 //
@@ -536,6 +593,9 @@ func runVerifyNetscanner(cmd *cobra.Command, nc config.NetscannerConfig, tools [
 	if failed > 0 {
 		return fmt.Errorf("%d scanner(s) in %s could not be verified — see the rows above", failed, policy.Image)
 	}
+	if err := recordVerified("netscanner"); err != nil {
+		fmt.Fprintf(out, "\nwarning: verification passed but could not be recorded in config: %v\n", err)
+	}
 	return nil
 }
 
@@ -589,6 +649,11 @@ func runVerifyImage(cmd *cobra.Command, mc config.MultiscannerConfig, tools []st
 		// Non-zero exit, deliberately: this is meant to gate provisioning, and
 		// a gate that reports a problem and exits 0 is not a gate.
 		return fmt.Errorf("%d scanner(s) in %s could not be verified — see the rows above", failed, policy.Image)
+	}
+	// P81.13: record the pass so verifyMultiscannerImage's scan-time gate
+	// trusts this image without an operator having to remember a config edit.
+	if err := recordVerified("multiscanner"); err != nil {
+		fmt.Fprintf(out, "\nwarning: verification passed but could not be recorded in config: %v\n", err)
 	}
 	return nil
 }

@@ -191,7 +191,7 @@ func executeWorker(ctx context.Context, spec swarm.WorkerSpec) (string, cost.Sna
 	// now inert by the stack's own rule rather than by absence.
 	gate, engineHooks := enginecfg.BuildGate(enginecfg.GateOptions{
 		Mode:           spec.Config.Mode,
-		StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(),
+		StrictPlanMode: !cfg.Permission.PlanModeShellReadsEnabled(config.WorkspaceTrusted(cwd)),
 		Approver:       approver,
 		Security:       cfg.Security,
 		Registry:       reg,

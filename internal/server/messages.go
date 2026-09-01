@@ -199,12 +199,14 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 		runApprover = permission.AutoApprove{}
 	} else {
 		runApprover = &sseApprover{
-			send:        send,
-			ch:          approvalCh,
-			runID:       runID,
-			sessionID:   id,
-			permCache:   &s.sessionPermCache,
-			persistRule: s.addPermissionRule,
+			send:      send,
+			ch:        approvalCh,
+			runID:     runID,
+			sessionID: id,
+			permCache: &s.sessionPermCache,
+			persistRule: func(toolName, pattern string) {
+				s.addPermissionRuleWithOrigin(toolName, pattern, reqorigin.Normalize(sess.Origin))
+			},
 		}
 	}
 
@@ -769,7 +771,18 @@ func displayTitle(title, id string) string {
 // (.aegis/config.yaml → permission.rules) so it survives restarts. A rule
 // that fails to parse or persist is logged, never fatal — the approval that
 // produced it has already been granted.
+//
+// The trust grant this append can trigger (FIND-27) is stamped with origin
+// rather than a fixed default, since an approval can come from any surface
+// that runs an interactive session; see addPermissionRuleWithOrigin's callers
+// for how origin is threaded from the session that owns the approval.
 func (s *Server) addPermissionRule(toolName, pattern string) {
+	s.addPermissionRuleWithOrigin(toolName, pattern, reqorigin.CLI)
+}
+
+// addPermissionRuleWithOrigin is addPermissionRule plus FIND-27's origin
+// stamp on the trust grant the persisted rule can trigger.
+func (s *Server) addPermissionRuleWithOrigin(toolName, pattern, origin string) {
 	line := fmt.Sprintf("allow %s(%s)", toolName, pattern)
 	rule, err := permission.ParseRule(line)
 	if err != nil {
@@ -779,7 +792,7 @@ func (s *Server) addPermissionRule(toolName, pattern string) {
 	s.permMu.Lock()
 	s.permRules = append(s.permRules, rule)
 	s.permMu.Unlock()
-	if err := config.AppendProjectPermissionRule(s.workspace, line); err != nil {
+	if err := config.AppendProjectPermissionRuleWithOrigin(s.workspace, line, origin); err != nil {
 		s.logger.Warn("permission rule active for this daemon but not persisted", "rule", line, "err", err)
 		return
 	}

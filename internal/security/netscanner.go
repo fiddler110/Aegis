@@ -148,6 +148,10 @@ type NetscannerPolicy struct {
 	// image lives only in that engine's storage. See RuntimePriority.
 	Runtime sandbox.ContainerRuntime
 	Tools   map[string]bool
+	// Verified and AllowUnverified mirror MultiscannerPolicy's fields of the
+	// same name (P81.13).
+	Verified        bool
+	AllowUnverified bool
 
 	// check memoizes the image-ID verification for multiscannerVerifyTTL, the
 	// same way MultiscannerPolicy.check does. Nil is valid and means "verify on
@@ -179,6 +183,8 @@ func NetscannerPolicyFromConfig(cfg config.NetscannerConfig) NetscannerPolicy {
 		SourceFingerprint: strings.TrimSpace(cfg.SourceFingerprint),
 		Runtime:           sandbox.ContainerRuntime(strings.TrimSpace(cfg.Runtime)),
 		Tools:             map[string]bool{},
+		Verified:          cfg.Verified,
+		AllowUnverified:   cfg.AllowUnverified,
 		check:             &multiscannerCheck{},
 	}
 	names := cfg.Tools
@@ -197,11 +203,25 @@ func NetscannerPolicyFromConfig(cfg config.NetscannerConfig) NetscannerPolicy {
 	return p
 }
 
-// verifyNetscannerImage confirms the image answering to policy.Image is the one
-// build-image recorded. Same check, and the same reasoning, as
-// verifyMultiscannerImage: a locally-built image has no registry digest to pin,
-// so its real ID is compared instead of a regex on a reference string.
+// verifyNetscannerImage is verifyNetscannerImageID plus the P81.13
+// verified-before-scan gate, mirroring verifyMultiscannerImage: used only at
+// the scan-resolution call sites below, never in verify-image's own
+// preflight (netscanner_verify.go), which needs the ID check alone.
 func verifyNetscannerImage(ctx context.Context, rt sandbox.ContainerRuntime, p NetscannerPolicy) string {
+	if fail := verifyNetscannerImageID(ctx, rt, p); fail != "" {
+		return fail
+	}
+	if !p.Verified && !p.AllowUnverified {
+		return fmt.Sprintf("netscanner image %s is pinned but has not passed `aegis security verify-image --netscanner` — run it before scanning, or set security.netscanner.allow_unverified: true to override for local development", p.Image)
+	}
+	return ""
+}
+
+// verifyNetscannerImageID confirms the image answering to policy.Image is the
+// one build-image recorded. Same check, and the same reasoning, as
+// verifyMultiscannerImageID: a locally-built image has no registry digest to
+// pin, so its real ID is compared instead of a regex on a reference string.
+func verifyNetscannerImageID(ctx context.Context, rt sandbox.ContainerRuntime, p NetscannerPolicy) string {
 	if p.ImageID == "" {
 		return "security.netscanner.enabled is true but no image has been built yet (security.netscanner.image_id is empty) — run `aegis security build-image --netscanner`"
 	}

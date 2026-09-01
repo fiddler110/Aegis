@@ -25,6 +25,22 @@ func boundToolError(s string) string {
 	return s[:maxTraceToolError] + "…"
 }
 
+// pathsOverlap reports whether a and b share any cleaned path, for the
+// dependency graph's multi-path case (P81.30/FIND-30) — a shell command's
+// argv can name more than one target where a single-"path"-field tool never
+// could. Both slices are typically length 0 or 1, so the naive double loop
+// costs nothing a round of at most maxParallelTools calls would notice.
+func pathsOverlap(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // P67.7. This file is `runTools` restructured so the scheduler can be fed one
 // call at a time, as that call's block completes in the stream, instead of being
 // handed a finished slice after the whole model turn has drained.
@@ -66,9 +82,10 @@ func boundToolError(s string) string {
 type toolSlot struct {
 	tu        provider.ToolUseBlock
 	serialize bool          // write/execute: takes execLock, and its failure cancels the round
-	path      string        // filesystem target, for same-path ordering; "" if none
+	paths     []string      // filesystem targets, for same-path ordering; empty if none known
+	wildcard  bool          // targets could not be resolved (P81.30/FIND-30): treat as touching anything a concurrent write touches
 	done      chan struct{} // closed when this call is finished, however it finished
-	waitFor   []*toolSlot   // earlier same-path writes this call must follow
+	waitFor   []*toolSlot   // earlier same-path (or wildcard) writes this call must follow
 
 	result provider.Block
 	trace  trace.ToolCall
@@ -132,22 +149,28 @@ func (r *toolRound) add(tu provider.ToolUseBlock) {
 	s := &toolSlot{
 		tu:        tu,
 		serialize: r.e.serializeTool(r.ctx, tu.Name, tu.Input),
-		path:      toolTargetPath(tu.Input),
 		done:      make(chan struct{}),
 	}
+	s.paths, s.wildcard = r.e.callPaths(r.ctx, tu.Name, tu.Input)
 	// waitFor lists earlier calls whose completion this one must await: any
-	// prior write/execute call targeting the same non-empty path. It applies
-	// whether this call reads or writes that path, so both write→read and
-	// write→write pairs preserve the model-emitted order for a shared path;
-	// calls on distinct paths (or with no path) never gate one another and stay
-	// fully concurrent.
+	// prior write/execute call targeting the same path, or one that is a
+	// wildcard in either direction (P81.30/FIND-30) — a call whose targets
+	// could not be resolved statically (a shell command with no "path" field
+	// classifyShellCommand's argv resolution can attribute to a literal name)
+	// is ordered against every write, and a wildcard write is itself ordered
+	// against every later path-bearing call, since neither side can rule out
+	// touching the other's target. It applies whether this call reads or
+	// writes the shared path, so both write→read and write→write pairs
+	// preserve the model-emitted order; calls on disjoint, non-wildcard paths
+	// (or with no path at all on this call's side) never gate one another and
+	// stay fully concurrent.
 	//
 	// Only earlier calls are consulted, which is exactly why the graph survives
 	// incremental arrival: a dependency can only point backwards, and everything
 	// it could point at has already been added.
-	if s.path != "" {
+	if s.wildcard || len(s.paths) > 0 {
 		for _, prev := range r.slots {
-			if prev.serialize && prev.path == s.path {
+			if prev.serialize && (s.wildcard || prev.wildcard || pathsOverlap(s.paths, prev.paths)) {
 				s.waitFor = append(s.waitFor, prev)
 			}
 		}

@@ -163,6 +163,13 @@ type Gate struct {
 	// identically and reports nothing, which is what a bare permission.New
 	// gets.
 	OnDecision func(ContextualDecision)
+	// SandboxBackendLabel, when set, is appended to the Ask reason for an
+	// execute-capability call (P81.22/FIND-22): "this command will run
+	// unconfined" needs to be visible at the point of the approval decision,
+	// not only in a startup log line the operator may never see. Empty skips
+	// the annotation, which is what every Gate built before this field
+	// existed still gets.
+	SandboxBackendLabel string
 }
 
 // CapabilityDowngradeRule is the Rule name on the record Gate.Check emits when
@@ -213,6 +220,12 @@ func (g Gate) Check(ctx context.Context, t tool.Tool, input json.RawMessage) (bo
 		return true, ""
 	case Ask:
 		reason := fmt.Sprintf("%s requires %s access", t.Name(), cap)
+		// P81.22/FIND-22: an execute-capability approval is the moment an
+		// unconfined command is about to run — say so here, not only in a
+		// startup log the operator has likely scrolled past.
+		if cap == tool.CapExecute && g.SandboxBackendLabel != "" {
+			reason = fmt.Sprintf("%s (sandbox: %s)", reason, g.SandboxBackendLabel)
+		}
 		if g.Approver.Approve(ctx, t.Name(), reason, input) {
 			return true, ""
 		}

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/fiddler110/aegis/internal/reqorigin"
 )
 
 // ProviderPatch holds the provider fields to write into the global config file.
@@ -212,7 +214,17 @@ func PatchGlobalSandbox(p SandboxPatch) error {
 // since this write is an explicit, local operator action (e.g. `aegis
 // sandbox use --project`), not a setting silently inherited from a cloned
 // repository's pre-existing config.
+//
+// This origin-less form defaults to reqorigin.CLI, which is where most
+// callers live; PatchProjectSandboxWithOrigin lets a caller in a different
+// interface (the TUI, an HTTP handler) say so (FIND-27).
 func PatchProjectSandbox(p SandboxPatch) error {
+	return PatchProjectSandboxWithOrigin(p, reqorigin.CLI)
+}
+
+// PatchProjectSandboxWithOrigin is PatchProjectSandbox plus FIND-27's origin
+// stamp on the trust grant the patch records.
+func PatchProjectSandboxWithOrigin(p SandboxPatch, origin string) error {
 	if err := patchSandbox(ProjectConfigPath(), p); err != nil {
 		return err
 	}
@@ -222,7 +234,7 @@ func PatchProjectSandbox(p SandboxPatch) error {
 	}
 	// P66.25/SEC-07: after the write, so the grant's fingerprint covers the
 	// block this call just wrote rather than the content it replaced.
-	return TrustWorkspace(dir)
+	return TrustWorkspaceWithOrigin(dir, origin)
 }
 
 func patchSandbox(path string, p SandboxPatch) error {
@@ -378,7 +390,16 @@ type SecurityPatch struct {
 // not a setting inherited from a cloned repository's pre-existing config, and
 // without this the operator's own write would be frozen back out on the next
 // load.
+//
+// This origin-less form defaults to reqorigin.CLI; PatchProjectSecurityWithOrigin
+// lets a different interface say so (FIND-27).
 func PatchProjectSecurity(p SecurityPatch) error {
+	return PatchProjectSecurityWithOrigin(p, reqorigin.CLI)
+}
+
+// PatchProjectSecurityWithOrigin is PatchProjectSecurity plus FIND-27's
+// origin stamp on the trust grant the patch records.
+func PatchProjectSecurityWithOrigin(p SecurityPatch, origin string) error {
 	if err := patchSecurity(ProjectConfigPath(), p); err != nil {
 		return err
 	}
@@ -389,7 +410,7 @@ func PatchProjectSecurity(p SecurityPatch) error {
 	// P66.25/SEC-07: after the write, for the same reason as
 	// PatchProjectSandbox — the operator's own edit is what the renewed
 	// fingerprint has to describe.
-	return TrustWorkspace(dir)
+	return TrustWorkspaceWithOrigin(dir, origin)
 }
 
 // PatchGlobalSecurity replaces the security: block in the global config file.

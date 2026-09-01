@@ -11,6 +11,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/skills"
 )
 
@@ -171,11 +172,15 @@ func patchConfigSection[Req any, T any](
 // all silently degrade to the unsandboxed local backend, and s.sandbox /
 // s.sandboxFallback(Reason) — set once at daemon startup by SelectSandbox —
 // are the only source of truth for what's actually live.
-func (s *Server) sandboxConfigResponse(scope, backend, runtime string, priority []string, image string, network bool) api.ConfigSandboxResponse {
-	active := ""
-	if s.sandbox != nil {
-		active = s.sandbox.Name()
+func (s *Server) sandboxBackendLabel() string {
+	if s.sandbox == nil {
+		return ""
 	}
+	return s.sandbox.Name()
+}
+
+func (s *Server) sandboxConfigResponse(scope, backend, runtime string, priority []string, image string, network bool) api.ConfigSandboxResponse {
+	active := s.sandboxBackendLabel()
 	return api.ConfigSandboxResponse{
 		Scope:          scope,
 		Backend:        backend,
@@ -256,7 +261,9 @@ func (s *Server) handlePatchConfigSandbox(w http.ResponseWriter, r *http.Request
 		},
 		func(scope string) func(config.SandboxPatch) error {
 			if scope == "project" {
-				return config.PatchProjectSandbox
+				return func(p config.SandboxPatch) error {
+					return config.PatchProjectSandboxWithOrigin(p, reqorigin.Web)
+				}
 			}
 			return config.PatchGlobalSandbox
 		},
@@ -374,7 +381,9 @@ func (s *Server) handlePatchConfigSecurity(w http.ResponseWriter, r *http.Reques
 		},
 		func(scope string) func(config.SecurityPatch) error {
 			if scope == "project" {
-				return config.PatchProjectSecurity
+				return func(p config.SecurityPatch) error {
+					return config.PatchProjectSecurityWithOrigin(p, reqorigin.Web)
+				}
 			}
 			return config.PatchGlobalSecurity
 		},
@@ -580,8 +589,12 @@ func (s *Server) handleConfigHarden(w http.ResponseWriter, r *http.Request) {
 	writeSecurity := config.PatchGlobalSecurity
 	writeCost := config.PatchGlobalCost
 	if scope == "project" {
-		writeSandbox = config.PatchProjectSandbox
-		writeSecurity = config.PatchProjectSecurity
+		writeSandbox = func(p config.SandboxPatch) error {
+			return config.PatchProjectSandboxWithOrigin(p, reqorigin.Web)
+		}
+		writeSecurity = func(p config.SecurityPatch) error {
+			return config.PatchProjectSecurityWithOrigin(p, reqorigin.Web)
+		}
 		writeCost = config.PatchProjectCost
 	}
 	if err := writeSandbox(plan.Sandbox); err != nil {

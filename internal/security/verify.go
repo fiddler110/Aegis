@@ -349,7 +349,7 @@ func VerifyMultiscanner(ctx context.Context, p MultiscannerPolicy, only []string
 		}
 		return nil, fmt.Errorf("no container runtime available (docker/podman)")
 	}
-	if reason := verifyMultiscannerImage(ctx, rt, p); reason != "" {
+	if reason := verifyMultiscannerImageID(ctx, rt, p); reason != "" {
 		return nil, fmt.Errorf("%s", reason)
 	}
 

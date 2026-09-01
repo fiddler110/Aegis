@@ -14,6 +14,7 @@ import (
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/fiddler110/aegis/internal/session"
 	"github.com/fiddler110/aegis/internal/tool"
@@ -130,7 +131,7 @@ func TestRepoMapForDiffersPerRoot(t *testing.T) {
 	buildRepoMapCache(t, sessionRoot)
 
 	ctx := context.Background()
-	sess, err := cl.CreateSession(ctx, api.CreateSessionRequest{Workdir: sessionRoot})
+	sess, err := cl.CreateSession(ctx, api.CreateSessionRequest{Workdir: sessionRoot, Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -178,7 +179,7 @@ func TestPersonaForSeesSessionsOwnProjectPersona(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sess, err := cl.CreateSession(ctx, api.CreateSessionRequest{Workdir: sessionRoot, Persona: "session-reviewer"})
+	sess, err := cl.CreateSession(ctx, api.CreateSessionRequest{Workdir: sessionRoot, Persona: "session-reviewer", Origin: reqorigin.TUI})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}

@@ -173,9 +173,16 @@ is a deliberate, documented hole. See [docs/configuration.md](docs/configuration
 - **Parallel tool rounds.** In `engine.runTools`, write/execute calls take one
   plain exclusive `sync.Mutex` (`execLock`) so they never run concurrently with
   each other. Reads/network calls take no lock — they are *not* held off by a
-  concurrent write (P8.6). The only read-vs-write ordering is the same-`path`
-  dependency graph, keyed on the literal `"path"` input field, so a `shell` call
-  and a `read_file` are never ordered. A round runs under its own context derived
+  concurrent write (P8.6). The only read-vs-write ordering is a dependency graph
+  keyed on filesystem target: the literal `"path"` input field for most tools,
+  or `tool.PathToucher` for one whose schema carries no path field at all — the
+  shell tool's `TouchedPaths` resolves a command's argv the same way
+  `classifyShellCommand` does, so a `shell cat somefile` is ordered against a
+  concurrent `write_file` on `somefile` exactly as a `read_file` call would be
+  (P81.30/FIND-30). A command whose targets can't be resolved statically
+  (chained/redirected, or an argv the parser doesn't recognize) is treated as
+  touching anything a concurrent write in the round touches, rather than left
+  unordered. A round runs under its own context derived
   from the turn's (P67.4): a failing **write/execute** call cancels its siblings,
   a failing read never does, and cancelling the round must never cancel the turn.
   Every result slot is still filled — an unanswered `tool_use` is a protocol

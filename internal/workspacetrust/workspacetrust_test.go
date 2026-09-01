@@ -188,3 +188,132 @@ func TestNormalizeRelativeVsAbsolute(t *testing.T) {
 		}
 	}
 }
+
+// TestTrustWithOriginRecordsOriginAndProcess pins FIND-27's origin stamp: a
+// grant records which interface made it and a best-effort process
+// identification, and both survive a reopen.
+func TestTrustWithOriginRecordsOriginAndProcess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace_trust.json")
+	dir := t.TempDir()
+
+	s := Open(path)
+	if err := s.TrustWithOrigin(dir, fp, "cli"); err != nil {
+		t.Fatalf("TrustWithOrigin: %v", err)
+	}
+	if got := s.Check(dir, fp); got != Trusted {
+		t.Fatalf("Check = %v, want Trusted", got)
+	}
+
+	reopened := Open(path)
+	reopened.mu.Lock()
+	e, ok := reopened.entries[normalize(dir)]
+	reopened.mu.Unlock()
+	if !ok {
+		t.Fatal("grant did not survive reopen")
+	}
+	if e.GrantedVia != "cli" {
+		t.Errorf("GrantedVia = %q, want %q", e.GrantedVia, "cli")
+	}
+	if e.GrantedByProcess == "" {
+		t.Error("GrantedByProcess should be populated (os.Executable() should succeed in a go test binary)")
+	}
+	if e.MAC == "" {
+		t.Error("entry should carry a MAC")
+	}
+	if got := reopened.Check(dir, fp); got != Trusted {
+		t.Fatalf("reopened Check = %v, want Trusted", got)
+	}
+}
+
+// TestTamperedEntryIsStale is FIND-27's core new assertion: a grant edited
+// directly in the store file — the exact same-user-process attack the
+// finding describes — fails MAC verification and is treated as Stale
+// (re-prompt), not silently trusted.
+func TestTamperedEntryIsStale(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace_trust.json")
+	dir := t.TempDir()
+
+	s := Open(path)
+	if err := s.TrustWithOrigin(dir, fp, "cli"); err != nil {
+		t.Fatalf("TrustWithOrigin: %v", err)
+	}
+
+	// Simulate a same-user process inserting/editing a grant directly,
+	// without going through Trust/TrustWithOrigin (so it never learns a
+	// valid MAC for the tampered content).
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries map[string]Entry
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatal(err)
+	}
+	norm := normalize(dir)
+	e := entries[norm]
+	e.GrantedVia = "tui" // an attacker relabeling how the grant was made, without knowing the key
+	entries[norm] = e
+	tampered, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := Open(path)
+	if got := reopened.Check(dir, fp); got != Stale {
+		t.Fatalf("Check on a tampered entry = %v, want Stale", got)
+	}
+	if reopened.IsTrusted(dir, fp) {
+		t.Error("a tampered entry must never report as Trusted")
+	}
+}
+
+// TestMissingKeyFileMakesEveryEntryStale confirms an entry with a MAC but no
+// readable key (the key file lost, deleted, or belonging to a different
+// install) fails closed rather than being trusted on the strength of an
+// unverifiable claim.
+func TestMissingKeyFileMakesEveryEntryStale(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace_trust.json")
+	dir := t.TempDir()
+
+	s := Open(path)
+	if err := s.TrustWithOrigin(dir, fp, "cli"); err != nil {
+		t.Fatalf("TrustWithOrigin: %v", err)
+	}
+	if err := os.Remove(keyPath(path)); err != nil {
+		t.Fatalf("remove key file: %v", err)
+	}
+
+	reopened := Open(path)
+	if got := reopened.Check(dir, fp); got != Stale {
+		t.Fatalf("Check with the key file missing = %v, want Stale", got)
+	}
+}
+
+// TestTrustWithoutOriginLeavesGrantedViaEmpty confirms the plain Trust
+// wrapper (used by the rest of this package's tests, and any caller that
+// doesn't have an origin to report) still authenticates its entry with a
+// MAC — it just records no interface.
+func TestTrustWithoutOriginLeavesGrantedViaEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace_trust.json")
+	dir := t.TempDir()
+
+	s := Open(path)
+	if err := s.Trust(dir, fp); err != nil {
+		t.Fatalf("Trust: %v", err)
+	}
+	s.mu.Lock()
+	e := s.entries[normalize(dir)]
+	s.mu.Unlock()
+	if e.GrantedVia != "" {
+		t.Errorf("GrantedVia = %q, want empty for the origin-less Trust wrapper", e.GrantedVia)
+	}
+	if e.MAC == "" {
+		t.Error("Trust should still compute a MAC even with no origin")
+	}
+	if got := s.Check(dir, fp); got != Trusted {
+		t.Fatalf("Check = %v, want Trusted", got)
+	}
+}

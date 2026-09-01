@@ -144,7 +144,7 @@ func UpdateMultiscannerDB(ctx context.Context, p MultiscannerPolicy, skipJavaDB 
 		}
 		return fmt.Errorf("no container runtime available (docker/podman)")
 	}
-	if reason := verifyMultiscannerImage(ctx, rt, p); reason != "" {
+	if reason := verifyMultiscannerImageID(ctx, rt, p); reason != "" {
 		return fmt.Errorf("%s", reason)
 	}
 

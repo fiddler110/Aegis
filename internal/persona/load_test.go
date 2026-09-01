@@ -78,6 +78,62 @@ You are a strict secure code reviewer.`)
 	}
 }
 
+// TestLoadFromDirsToolsEnforced is P81.20/FIND-20 item 4: a persona file can
+// opt its Tools list into enforcing mode via tools_enforced, and — like
+// mode/tools/rules/output_guard — the field is a frontmatter control field
+// gated by honorControlFields (P27.7/FIND-09), so an untrusted project dir's
+// persona cannot silently turn on a hard containment boundary any more than
+// it can silently change Mode.
+func TestLoadFromDirsToolsEnforced(t *testing.T) {
+	dir := t.TempDir()
+	writePersona(t, dir, "locked-down.md", `---
+description: A persona that treats its tool list as a hard boundary
+tools: [read_file, grep]
+tools_enforced: true
+---
+Body.`)
+
+	// Trusted load (honorControlFields=true): the field takes effect.
+	n := LoadFromDirs("", true, dir)
+	if n != 1 {
+		t.Fatalf("expected 1 persona loaded, got %d", n)
+	}
+	p, ok := Get("locked-down")
+	if !ok {
+		t.Fatal("persona not registered")
+	}
+	if !p.ToolsEnforced {
+		t.Error("expected ToolsEnforced=true for a trusted load of tools_enforced: true")
+	}
+
+	// Untrusted load (honorControlFields=false): every control field,
+	// ToolsEnforced included, is dropped — the same rule Mode/Tools/Rules
+	// already follow.
+	t.Cleanup(func() {
+		mu.Lock()
+		delete(loaded, "locked-down")
+		for i, name := range loadedOrder {
+			if name == "locked-down" {
+				loadedOrder = append(loadedOrder[:i], loadedOrder[i+1:]...)
+				break
+			}
+		}
+		refreshSig = ""
+		mu.Unlock()
+	})
+	LoadFromDirs(dir, false, dir)
+	p2, ok := Get("locked-down")
+	if !ok {
+		t.Fatal("persona not registered (untrusted load)")
+	}
+	if p2.ToolsEnforced {
+		t.Error("untrusted project dir: ToolsEnforced should be dropped (control fields disabled)")
+	}
+	if len(p2.Tools) != 0 {
+		t.Errorf("untrusted project dir: Tools should also be dropped, got %v", p2.Tools)
+	}
+}
+
 func TestLoadGuardDisabledScalar(t *testing.T) {
 	dir := t.TempDir()
 	writePersona(t, dir, "fast.md", "---\noutput_guard: none\n---\nBody.")

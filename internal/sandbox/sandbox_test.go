@@ -247,9 +247,15 @@ func TestLocalName(t *testing.T) {
 // even though the daemon process itself has them set (e.g. to authenticate
 // with the LLM provider). Otherwise a prompt-injected `shell` call could read
 // them back out and exfiltrate via web_fetch.
+//
+// Since P81.26/FIND-26 this is subsumed by the allowlist default (neither
+// name is in DefaultEnvAllow, so they would be excluded even without
+// DefaultStripEnv), but the test stays: DefaultStripEnv is a deliberate
+// second layer, and this is what pins it still doing its job.
 func TestLocalExecStripsProviderSecrets(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-secret-value")
 	t.Setenv("OPENAI_API_KEY", "sk-oai-secret-value")
+	t.Setenv("PATH", os.Getenv("PATH")) // ensure PATH is set for the child shell
 	t.Setenv("HARMLESS_VAR", "still-here")
 
 	b := NewLocalBackend()
@@ -268,14 +274,24 @@ func TestLocalExecStripsProviderSecrets(t *testing.T) {
 	if strings.Contains(out, "sk-ant-secret-value") || strings.Contains(out, "sk-oai-secret-value") {
 		t.Errorf("provider secret leaked into command environment:\n%s", out)
 	}
-	if !strings.Contains(out, "HARMLESS_VAR") {
-		t.Errorf("expected unrelated env var to survive stripping:\n%s", out)
+	// P81.26/FIND-26: the default is now an allowlist, not a denylist — an
+	// arbitrary var the operator's shell happens to export must NOT survive
+	// just because nobody thought to strip it. This is the regression test
+	// for the inversion itself.
+	if strings.Contains(out, "HARMLESS_VAR") {
+		t.Errorf("unrelated env var must NOT survive under the default allowlist:\n%s", out)
+	}
+	// An allowlisted name (PATH) must still make it through — otherwise the
+	// shell/interpreter itself can't run.
+	if !strings.Contains(out, "PATH") {
+		t.Errorf("expected PATH (a default-allowlisted var) to survive:\n%s", out)
 	}
 }
 
 // TestLocalExecStripsConfiguredExtraSecrets verifies NewLocalBackendWithEnv
 // strips additional names beyond DefaultStripEnv (e.g. an MCP token loaded
-// from .aegis/.env), without dropping unrelated vars.
+// from .aegis/.env), and that the default allowlist still excludes an
+// unrelated var never named in either list.
 func TestLocalExecStripsConfiguredExtraSecrets(t *testing.T) {
 	t.Setenv("MY_MCP_TOKEN", "super-secret-token")
 	t.Setenv("HARMLESS_VAR", "still-here")
@@ -296,9 +312,64 @@ func TestLocalExecStripsConfiguredExtraSecrets(t *testing.T) {
 	if strings.Contains(out, "super-secret-token") {
 		t.Errorf("configured extra secret leaked into command environment:\n%s", out)
 	}
-	if !strings.Contains(out, "HARMLESS_VAR") {
-		t.Errorf("expected unrelated env var to survive stripping:\n%s", out)
+	if strings.Contains(out, "HARMLESS_VAR") {
+		t.Errorf("unrelated env var must NOT survive under the default allowlist:\n%s", out)
 	}
+}
+
+// TestLocalExecEnvAllowForwardsOnlyNamedVars is the P81.26/FIND-26 regression
+// for the allowlist itself: a var named via WithEnvAllow survives, one that
+// isn't named (even though it's harmless) does not.
+func TestLocalExecEnvAllowForwardsOnlyNamedVars(t *testing.T) {
+	t.Setenv("MY_PROJECT_FLAG", "on")
+	t.Setenv("SOME_OTHER_VAR", "nope")
+
+	b := NewLocalBackend().WithEnvAllow([]string{"MY_PROJECT_FLAG"})
+	ctx := context.Background()
+
+	var command string
+	if runtime.GOOS == "windows" {
+		command = "Get-ChildItem Env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" }"
+	} else {
+		command = "env"
+	}
+	out, err := b.Exec(ctx, command, ExecOpts{Dir: t.TempDir(), Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("exec error: %v", err)
+	}
+	if !strings.Contains(out, "MY_PROJECT_FLAG") {
+		t.Errorf("expected explicitly allowlisted var to survive:\n%s", out)
+	}
+	if strings.Contains(out, "SOME_OTHER_VAR") {
+		t.Errorf("expected non-allowlisted var to be excluded:\n%s", out)
+	}
+}
+
+// TestAllowlistedEnvAppliesStripOverAllowlist verifies allowlistedEnv's two
+// layers compose: a name present in both allow and strip is still excluded —
+// DefaultStripEnv is a defensive layer over the allowlist, not the other way
+// around.
+func TestAllowlistedEnvAppliesStripOverAllowlist(t *testing.T) {
+	environ := []string{"KEEP=1", "SECRET=2", "OTHER=3"}
+	out := allowlistedEnv(environ, []string{"KEEP", "SECRET"}, []string{"SECRET"})
+	if !slicesContainsPrefix(out, "KEEP=") {
+		t.Errorf("expected KEEP to survive, got %v", out)
+	}
+	if slicesContainsPrefix(out, "SECRET=") {
+		t.Errorf("expected SECRET to be stripped even though allowlisted, got %v", out)
+	}
+	if slicesContainsPrefix(out, "OTHER=") {
+		t.Errorf("expected OTHER (not allowlisted) to be excluded, got %v", out)
+	}
+}
+
+func slicesContainsPrefix(ss []string, prefix string) bool {
+	for _, s := range ss {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFilteredEnvCaseInsensitiveOnWindows(t *testing.T) {

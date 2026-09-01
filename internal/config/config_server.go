@@ -173,10 +173,24 @@ type PermissionConfig struct {
 	PlanModeShellReads *bool `koanf:"plan_mode_shell_reads"`
 }
 
-// PlanModeShellReadsEnabled resolves PlanModeShellReads, defaulting to true
-// (the shipped behavior) when the operator has expressed no preference.
-func (p PermissionConfig) PlanModeShellReadsEnabled() bool {
-	return p.PlanModeShellReads == nil || *p.PlanModeShellReads
+// PlanModeShellReadsEnabled resolves PlanModeShellReads. An operator who set
+// it explicitly (either value) is honored regardless of workspace trust —
+// this is what lets an operator make the posture unconditional in either
+// direction. Absent an explicit preference, the default now depends on
+// trusted (P81.20/FIND-20): true (the original shipped behavior, downgrades
+// applied) for a workspace with a current trust grant
+// (config.WorkspaceTrusted), false for one without. A parser defect in
+// classifyShellCommand is a plan-mode bypass either way (CRIT-1, CRIT-2,
+// P79.1 were each one), so the posture an operator gets when reviewing an
+// untrusted repository — the canonical reason to reach for plan mode at all —
+// should not depend on that parser's correctness by default. A trusted
+// workspace keeps the convenience default since the operator has already
+// made a trust decision about it.
+func (p PermissionConfig) PlanModeShellReadsEnabled(trusted bool) bool {
+	if p.PlanModeShellReads != nil {
+		return *p.PlanModeShellReads
+	}
+	return trusted
 }
 
 // GitConfig configures the git-facing built-in tools (currently just the

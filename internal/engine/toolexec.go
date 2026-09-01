@@ -137,6 +137,42 @@ func toolTargetPath(input json.RawMessage) string {
 	return filepath.Clean(probe.Path)
 }
 
+// callPaths resolves every filesystem target a tool call names, for the same
+// ordering toolTargetPath enables — extended to a tool whose schema carries
+// no "path" field at all (P81.30 / FIND-30). Most tools are covered by
+// toolTargetPath already; a tool that isn't can implement tool.PathToucher
+// (the shell tool is the only one that currently does, since its target lives
+// inside a command string) and report every path its call touches.
+//
+// wildcard=true means the call's targets could not be determined — a chained
+// shell command, an argv the tool's parser doesn't recognize — and the caller
+// must order it against every write in the round rather than leave it
+// unordered for lack of a known target, the same fail-closed direction
+// tool.EffectiveCapability already takes for an unclassified command.
+func (e *Engine) callPaths(ctx context.Context, name string, input json.RawMessage) (paths []string, wildcard bool) {
+	if p := toolTargetPath(input); p != "" {
+		return []string{p}, false
+	}
+	if e.tools == nil {
+		return nil, false
+	}
+	t, ok := e.tools.Get(name)
+	if !ok {
+		return nil, false
+	}
+	found, resolved := tool.EffectiveTouchedPaths(e.toolCtx(ctx), t, input)
+	if len(found) == 0 {
+		return nil, !resolved
+	}
+	cleaned := make([]string, 0, len(found))
+	for _, p := range found {
+		if p != "" {
+			cleaned = append(cleaned, filepath.Clean(p))
+		}
+	}
+	return cleaned, !resolved
+}
+
 // runToolsSequential is the simple in-order path used for a single tool call.
 func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.ToolUseBlock, emit EmitFunc) ([]provider.Block, []trace.ToolCall, error) {
 	results := make([]provider.Block, 0, len(toolUses))
