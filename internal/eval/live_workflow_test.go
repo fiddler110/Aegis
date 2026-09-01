@@ -1320,3 +1320,138 @@ func TestLiveWorkflowForcedContextOverflow(t *testing.T) {
 		t.Errorf("the truncation error does not name the lever that fixes it: %q", s.errText)
 	}
 }
+
+// arch04StallSec is the parent run's cost.max_turn_stall for
+// TestLiveWorkflowFanOutChainsTheStallBeat, set far below the shipped
+// default (900s, P39.17) so the run is a stress case rather than a tolerance
+// one. A two-agent parallel fan-out this small still routinely spans this
+// many seconds between the parent's last provider stream event (the turn
+// that decides to call the agent tool) and its next one (the turn that reads
+// the tool's result) — that whole span runs synchronously inside
+// agentTool.Execute, driving two full sub-agent turns of their own, and
+// produces no event the parent's own engine.Run loop would see. Before
+// P66.8, a sub-agent's stallWatch installed itself over the same context key
+// as its parent's (stall.go, "withStallBeat" — shadowed, not chained), so
+// every child beat landed on the child and the parent watch saw total
+// silence for the whole fan-out — killing a healthy run as ErrTurnStalled
+// ("the turn is hung, not slow") long before either child, let alone the
+// fan-out's own much larger ceiling (agent.go's maxAgentDuration ladder),
+// ever got a chance to fire. This is ARCH-04's live half: confirm the fix
+// (internal/heartbeat's chaining, wired at stall.go:189-194) holds against a
+// real model and a real HTTP/SSE round trip, rather than only against the
+// scripted adapter internal/engine's TestChildStallWatchDoesNotHideItsParent
+// exercises.
+const arch04StallSec = 20
+
+// arch04FanOutPrompt asks the model to delegate two independent, mechanically
+// verifiable reads through one agent-tool call in parallel mode, instead of
+// reading the files itself. It is written as prescriptively as
+// compactionPrompt and forcedOverflowPrompt above for the same reason: a
+// local model's tool-call arguments are far more reliable when the prompt
+// states the exact shape to fill in than when it states an intent and
+// leaves the model to plan the call.
+func arch04FanOutPrompt() string {
+	return "Call the agent tool exactly once. Set \"mode\" to \"parallel\" and \"agents\" to exactly two " +
+		"entries: the first with \"subagent_type\" \"explore\" and \"prompt\" \"Read the file alpha.txt with " +
+		"the read_file tool and report its exact contents.\"; the second with \"subagent_type\" \"explore\" " +
+		"and \"prompt\" \"Read the file beta.txt with the read_file tool and report its exact contents.\" " +
+		"Do not read alpha.txt or beta.txt yourself — delegate both reads through that one agent tool call. " +
+		"After the agent tool call returns, reply with the single word DONE."
+}
+
+// TestLiveWorkflowFanOutChainsTheStallBeat is ARCH-04's live half (research/roadmap.md):
+// "whether a fan-out or debate call trips MaxTurnStall before its own timeout." Until this
+// test, nothing in this harness drove the agent tool or the debate primitive at all, so the
+// question was answerable only by reading source (research/CodeReview.md's original ARCH-04
+// finding) or by a hand-run session — this is the harness change P66.22's 2026-09-01 entry
+// asked for instead.
+//
+// It asserts mechanism, not timing: that a real parallel fan-out — which necessarily spans
+// more wall-clock than arch04StallSec between provider stream events the parent's own engine
+// loop can see — completes without the parent's stallWatch firing. It does not assert how long
+// the fan-out took, which is a property of the model and the sub-agents' own work and would
+// make the test flaky in both directions; the only comparison that matters is that wall clock
+// against the deliberately tiny stall bound the run was configured with.
+func TestLiveWorkflowFanOutChainsTheStallBeat(t *testing.T) {
+	baseURL := os.Getenv("AEGIS_EVAL_BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+	model := os.Getenv("AEGIS_EVAL_MODEL")
+	if model == "" {
+		model = "llama3.2"
+	}
+
+	dir, err := os.MkdirTemp("", "aegis-live-workflow-fanout-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Logf("cleanup: could not remove fan-out fixture dir %s: %v", dir, err)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(dir, "alpha.txt"), []byte("alpha-payload-7f3a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "beta.txt"), []byte("beta-payload-91cd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	cl := newLiveWorkflowDaemonTweaked(t, baseURL, model, "", 0, func(cfg *config.Config) {
+		cfg.Cost.MaxTurnStallSec = arch04StallSec
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Logf("session id: %s", meta.ID)
+
+	guardOff := false
+	start := time.Now()
+	events, err := cl.PostMessageReq(ctx, meta.ID, api.PostMessageRequest{
+		Text:         arch04FanOutPrompt(),
+		GuardEnabled: &guardOff,
+	})
+	if err != nil {
+		t.Fatalf("PostMessage: %v", err)
+	}
+	s := drainWorkflowEvents(t, events)
+	wall := time.Since(start)
+
+	agentCalls := countToolCalls(s.toolCalls, "agent")
+	t.Logf("=== ARCH-04: wall=%s against cost.max_turn_stall=%ds, agent tool calls=%d",
+		wall.Round(time.Second), arch04StallSec, agentCalls)
+
+	if agentCalls == 0 {
+		t.Skipf("the run completed without calling the agent tool at all (%d turns, tool calls: %v) — "+
+			"%s did not follow the fan-out instruction, so this run exercises nothing ARCH-04 cares about",
+			len(s.turns), s.toolCalls, model)
+	}
+
+	if s.errText != "" {
+		if strings.Contains(s.errText, "the turn is hung, not slow") {
+			t.Fatalf("the parent run was killed as stalled during its own fan-out call (wall=%s against "+
+				"cost.max_turn_stall=%ds): %s — the child agent's heartbeat did not reach the parent's "+
+				"stallWatch (internal/heartbeat, stall.go:189-194)", wall.Round(time.Second), arch04StallSec, s.errText)
+		}
+		t.Fatalf("engine reported an error: %s", s.errText)
+	}
+
+	if wall < arch04StallSec*time.Second {
+		t.Skipf("the run finished in %s, under the %ds stall bound it was set against — the fan-out was "+
+			"too fast on this model/hardware to exercise the chain at all; lower arch04StallSec further "+
+			"or use a slower/larger model", wall.Round(time.Second), arch04StallSec)
+	}
+}

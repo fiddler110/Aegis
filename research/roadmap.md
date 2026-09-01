@@ -319,7 +319,7 @@ without ever entering this table — see
 | --- | ------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | **P81.33**'s batched-approval half — present a parallel round's approvals as one reviewable summary | Tier 2 — S/M          | The render-bound half already shipped 2026-09-01. What's left needs a real protocol change (the daemon correlates one pending approval per *run*, not per call), not a TUI-only fix. |
 | 2   | **P81.12**'s release-artifact half — checksums/signatures/provenance on release archives            | Tier 3 — parked       | Parked behind a product decision about whether this project resumes publishing releases, not behind a trigger. Its `codeql.yml`-pinning half already shipped alongside **P81.17**. Do not build speculatively. |
-| 3   | **The live-tier remainder** (P66.22, P38.1, P62.9, P65.2, P80.4) — _parked by choice, 2026-08-16_   | Verification          | Unchanged and still last for the same reason: **the user parked it**, not a dependency. **P38.1** needs permission to launch an unattended auto-approving agent, **P62.9** needs a _better task_ rather than more runs of the current one, and **P65.2**, **LLM-03**, **LLM-10** and **ARCH-04** now have what they needed — a surviving data dir and `aegis sessions trace <id>`, shipped as **P68.1** (2026-08-22) — so whenever this row is next picked up, the next sitting can actually judge them instead of reproducing the same unreadable evidence. |
+| 3   | **The live-tier remainder** (P38.1, P65.2, P80.4) — _parked by choice, 2026-08-16; narrowed 2026-09-01_ | Verification | **P62.9 closed 2026-09-01** (6-per-arm `SecurityTriage` comparison: no correctness cost, local profile faster) and **P66.22 closed the same day** (LLM-03/LLM-10 read from a kept session trace via P68.1; ARCH-04 closed by a new live harness test, `TestLiveWorkflowFanOutChainsTheStallBeat`, passing clean on the first run) — both dropped off this row. **P65.2** is still open, but not for the reason its own text says: the mechanical blocker it names (`"summarizer returned empty output"`) is already fixed on `main` as **P79.3**, which this row's stale branch simply predated by 29 commits; the item's real remaining question — does a local model fill the structured skeleton, now that the summarizer can produce real output — needs one run against `main`. **P38.1** still needs permission to launch an unattended auto-approving agent, and **P80.4** is unchanged. |
 
 **One item is deliberately off this list, Tier 4 with no fired trigger.** **P74.21** (filed
 2026-08-21) is the half of P74.17's own roadmap entry that did not ship with it — see
@@ -1692,8 +1692,63 @@ statement rather than the prediction:**
   rate-limits was a _consequence_ of the LLM-02 disagreement, and on the P62.7 fixture it disappears
   entirely once the trigger is shared. A run that was expected to observe it should not.
 
+**2026-09-01: LLM-03 and LLM-10 read directly, using P68.1's kept data dir. Three of five closure
+conditions are now met; ARCH-04 stays unobserved because nothing in this harness makes a fan-out or
+debate call.** Ran `TestLiveWorkflow` against `qwen3.5-9B:latest` (32,768 window) with
+`AEGIS_EVAL_KEEP_DATA_DIR=1`, then read `session_traces` directly out of the kept SQLite data dirs
+(`aegis sessions trace` itself needs a live daemon against that data dir, which the test process no
+longer is by the time it's read; the table's JSON blob reads directly).
+
+- **LLM-03 — met.** `calibration_samples` climbs every turn (1→9 across a 9-turn run) and no traced
+  turn carries `"estimated": true` — both are the positive-identification signature P66.7 shipped, and
+  the "non-zero sample count" the item asked for is what the trace shows.
+- **LLM-10 — met, and the design comment already had it right.** `internal/server/toolcalling.go:14-21`
+  says the probe runs at request start "the moment the model is about to be loaded anyway, so the probe
+  shares that cold load rather than adding one." The evidence matches: in
+  `LocalPromptProfileReducesFirstTurnTokens`, right after an explicit `unloadOllamaModel`, the first
+  real session's single trivial turn took 20.1s wall-clock but recorded **no** `coldLoadNoticeThresholdMS`
+  notice on the traced turn itself — the reload cost lands on the untraced probe call that runs before
+  `engine.Run`'s own model call, so by the time the traced turn's request goes out the model is already
+  warm. No second, wasted reload between the probe and the first real turn.
+- **ARCH-04 — still not observable.** Confirmed by reading the test file end to end: nothing in
+  `live_workflow_test.go` (or the two other `live_workflow`-tagged tests,
+  `TestLiveWorkflowCompactionPrefixCacheGate` and the unvalidated `TestLiveWorkflowForcedContextOverflow`)
+  drives the `agent` tool or the debate primitive, so no run of this harness can trip `MaxTurnStall` on a
+  fan-out call. Closing this needs either a harness addition or a hand-run session using those features
+  live — not another run of what exists today.
+
+**2026-09-01, later the same day: ARCH-04 closed — the missing harness surface is built and it passed
+on the first live run.** Added `TestLiveWorkflowFanOutChainsTheStallBeat` (`internal/eval/
+live_workflow_test.go`), the harness change this item had been waiting on: it drives the `agent` tool's
+`mode:"parallel"` fan-out for the first time in this tier, against a `cost.max_turn_stall` deliberately
+set to 20s (default is 900s) so a normal-sized fan-out is a stress case rather than a tolerance case —
+the two-agent call blocks the parent's own `engine.Run` loop synchronously while both sub-agents run
+full turns of their own, which is exactly the window P66.8's fix (`internal/heartbeat`'s chaining,
+`stall.go:189-194`) exists to keep from reading as silence.
+
+Ran against `qwen3.6-fast-32k` (34.7B, `thinking`+`tools` capable, `num_ctx` pinned 32768). The model
+followed the fan-out instruction on the first attempt: one `agent` tool call, `mode:"parallel"`, both
+`explore` sub-agents as prompted. The call started at 21.7s and returned at 41.3s — the parent's engine
+loop saw nothing for that ~19.6s span, itself already most of the 20s bound — and the run finished at
+61.9s wall clock, more than 3x the stall bound, with **no `ErrTurnStalled`** and no `errText` at all.
+`--- PASS: TestLiveWorkflowFanOutChainsTheStallBeat (61.90s)`. Had the P66.8 chain regressed back to the
+pre-fix shadowing behavior the original ARCH-04 finding describes (a sub-agent's stall detector installed
+over the same context key as its parent's, hiding every child beat from it), this run would have died
+with `"the turn is hung, not slow"` well before the 61.9s mark — it did not, on the first model and
+config tried.
+
+This is one clean pass, not a stress-tested guarantee — a single run at n=1 against one model, with the
+per-agent ceiling (`agent.go`'s `maxAgentDuration` ladder) nowhere close to being tested since this
+fan-out finished in under a minute. But it is a real, live, load-bearing measurement where none existed
+before, it directly exercises the mechanism the original finding named (a child's heartbeat reaching the
+parent's `stallWatch` rather than shadowing it), and it closes the fifth and last of P66.22's five
+closure conditions.
+
 Priority: Verification — one run, five answers. Both gates shipped 2026-08-16; needs only a reachable
-model server.
+model server. **All five of LLM-01/02/03/10 and ARCH-04 are now closed** — LLM-01/LLM-02 by live
+measurement (2026-08-16), LLM-03/LLM-10 by reading a kept session trace (2026-09-01), and ARCH-04 by the
+new `TestLiveWorkflowFanOutChainsTheStallBeat` harness surface (2026-09-01, this run). Nothing left in
+this item.
 
 ### P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)
 
@@ -1909,6 +1964,29 @@ of the wrong quantity. Replacing the task is the cheaper close. Record in
 Priority: Verification — the code is in; what remains is verification competing with P38.1 for the
 same scarce live tier, and they can be run in one sitting.
 
+**2026-09-01: closed by the P68.3 instrument at n=6 per arm — no correctness cost, and the local
+profile is faster, not slower.** Ran `TestLiveWorkflow/SecurityTriage` against `qwen3.5-9B:latest`
+6 times per arm (`-count=6`, same process across runs so the model stayed resident), comparing the
+auto-detected `local` profile (`edit_file` deferred) against `AEGIS_EVAL_PROMPT_PROFILE=default`
+(`edit_file` exposed). Both arms scored a perfect **12/12 on all 12 runs** — zero correctness
+difference, and the `tool_search` detour this item was originally filed on did not happen even once.
+
+What differs is turn cost, and it runs the opposite direction from the item's worry:
+
+- **`local`: 11 tool calls every single run** (`glob ls read_file×6 write_file multi_edit shell`), ~187s
+  average (3m6s-3m9s), **identical sequence across all 6 runs** — essentially zero variance.
+- **`default`: 17-22 tool calls** (avg ~18.8), ~211s average (3m20s-3m48s). The spread comes from two
+  sources neither of which is `tool_search`: the model plans with 4 `todo_add` + 1-6 `todo_update`
+  calls that never appear under the `local` profile at all, and it fixes the two seeded bugs with 1-2
+  separate `edit_file` calls where the `local` arm's `multi_edit` does both in one.
+
+The deferred surface isn't costing anything — the `local` profile's compressed prose apparently
+discourages todo-list scaffolding the fuller default prompt invites, and `multi_edit` batches edits
+`edit_file` doesn't. **Both of this item's original watch items are now closed with real evidence: no
+`tool_search` detour, and no turn-cost penalty — if anything, a turn-cost win.**
+
+Priority: closed by live evidence, 2026-09-01.
+
 ### P65.2 — Compaction summaries are free prose, and nothing carries the file set forward (prompt half)
 
 **Deterministic half shipped 2026-08-14**: `<read-files>`/`<modified-files>` tags now accumulate
@@ -1938,6 +2016,46 @@ availability.
 
 Priority: Verification — real value, unblocked, code already built, gated on live evidence rather
 than on design.
+
+**2026-09-01: the harness change this item was blocked on shipped (P68.1), and the run it enabled found
+the mechanical blocker was already fixed on `main` as P79.3 — this item's remaining question is now the
+original one, for the first time answerable.** A same-day session ran
+`TestLiveWorkflowCompactionPrefixCacheGate` twice on a feature branch forked from `main` at `067c1297`
+(29 commits behind): against `qwen3.5-9B:latest`, every compaction across both P62.2 arms failed with
+`"summarizer returned empty output"`; against `gpt-oss:latest`, the LLM summarizer path was never
+invoked at all before the run died on an unrelated `gpt-oss`/Ollama transport error (`"llama-server chat
+error: ... The model produced output that does not match the expected peg-native format"` — worth
+flagging for whoever next touches that model, unrelated to compaction). Reading
+`internal/compaction/compaction.go` on that branch to explain the first failure found the exact
+mechanism: `MaxTokens: s.summaryTokens` (1,024) is one completion budget the Ollama path shares between
+the thinking preamble and the answer, and the read loop only ever collected `EventTextDelta` — a model
+that spends the whole budget thinking returns zero content, indistinguishable from a model that chose to
+answer with nothing.
+
+That mechanism is not a new finding. `main` already ships the fix, as **P79.3** (see
+[releases.md](releases.md)): `provider.Request.SuppressThinking` plus a one-time retry, taken only when
+a reply was empty *from a model that thought* — built against the identical failure on
+`aegis-qwen35-9b`, at the identical 1,024-token default, and verified live: *"the same run that produced
+'summarizer returned empty output' four times now reports 'context ~62% full — compacted 9→9
+messages'... The LLM summarizer succeeds, and the deterministic fallback no longer fires."* The branch
+these two runs used simply predates that fix by 29 commits. It is independent corroboration of an
+already-shipped diagnosis, not an open defect — and it is now a third-plus sighting of the same class of
+failure: `internal/compaction/compaction.go`'s own P28.4 comment (2026-07-14) already recorded identical
+`"summarizer returned empty output"` failures against `gpt-oss:20b` and `qwythos:latest`, so this was
+never `qwen3.5-9B`-specific.
+
+**What P79.3 does not answer is this item's original question.** It fixes the mechanical blocker
+(empty output) but does not itself judge the five-heading skeleton (`## Goal`/`## Constraints`/
+`## Progress`/`## Key Decisions`/`## Next Steps`) against the free-form terse-bullet compression it
+replaced — nobody has yet run a real, non-empty LLM summary through that comparison, because nobody had
+one to look at until P79.3 shipped. That is now a clean run away rather than blocked on a defect:
+re-run `TestLiveWorkflowCompactionPrefixCacheGate` (or drive a longer session and read a kept trace's
+`Compaction.summary_text` per P68.1) against `main`, where the summarizer actually produces content, and
+judge the skeleton fill directly against what free-form prose used to keep.
+
+Priority: Verification — the mechanical blocker is shipped and verified (P79.3). What remains is the
+item's original question, unblocked for the first time and needing one run against `main` with a real
+summary to judge, not a defect to fix first.
 
 ### P62.8 — The prefix-cache gate's large-window regime has never been measured
 
