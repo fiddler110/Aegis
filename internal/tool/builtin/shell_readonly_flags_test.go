@@ -176,11 +176,18 @@ func TestReadOnlyShellFlagParsing(t *testing.T) {
 
 		// --- metacharacters still reject the whole command ------------------
 		{"sort with redirection", "sort file.txt > out.txt", false},
-		{"rg piped", "rg foo | head", false},
 		{"fd chained", "fd -e go && rm -rf .", false},
 		{"tree with backticks", "tree `whoami`", false},
 		{"uniq with substitution", "uniq $(echo f)", false},
 		{"gh with semicolon", "gh pr list; rm -rf .", false},
+
+		// --- pipelines: every stage must independently classify -------------
+		{"rg piped into an admitted command", "rg foo | head", true},
+		{"pipeline with an unadmitted stage stays refused", "rg foo | rm -rf .", false},
+		{"leading pipe is an empty stage", "| head", false},
+		{"trailing pipe is an empty stage", "rg foo |", false},
+		{"double pipe is an empty stage", "rg foo || head", false},
+		{"a quoted pipe is not a real pipe and does not close", "grep -e 'a|b' file.txt", false},
 
 		// --- the exclusions that are not about writing ----------------------
 		// These do not become admissible under flag parsing, and there is no

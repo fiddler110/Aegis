@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/tool"
 )
@@ -73,6 +72,19 @@ func FuzzClassifyShellCommand(f *testing.F) {
 		`Get-Content -Path C:\Users\x\.ssh\id_rsa`,
 		`Get-Content -Path:C:\Windows\System32\drivers\etc\hosts`,
 		`Get-ChildItem C:\Windows\System32`,
+		// Pipeline stages: every stage must independently classify, and a
+		// quoted "|" (not a real pipe) must break the naive per-byte split
+		// closed rather than being silently misread.
+		"cat notes.txt | grep foo",
+		"git log | head -5",
+		"ls -la | grep foo | wc -l",
+		"gh pr list | grep open",
+		"cat notes.txt | rm -rf /",
+		"cat notes.txt |",
+		"| cat notes.txt",
+		"cat notes.txt || rm -rf /",
+		"grep -e 'a|b' notes.txt",
+		"cat '~/.ssh/id_rsa' | grep foo",
 	} {
 		for _, ps := range []bool{false, true} {
 			f.Add(seed, ps)
@@ -109,29 +121,40 @@ func FuzzClassifyShellCommand(f *testing.F) {
 		// — and re-splitting the untrimmed string produces an argv the shell
 		// will never build.
 		trimmed := strings.TrimSpace(command)
-		if strings.ContainsAny(trimmed, permission.ShellChainMetaChars) {
+		if strings.ContainsAny(trimmed, shellChainMetaCharsNoPipe) {
 			t.Fatalf("downgraded a command containing a chaining metacharacter: %q", command)
 		}
-		fields, split := splitShellWords(trimmed, !powershell)
-		if !split || len(fields) == 0 {
-			t.Fatalf("downgraded %q, which does not split into an argv", command)
-		}
-		// CRIT-2: token zero must be a bare command name resolved through PATH.
-		// A path-qualified argv0 names a file, and a file inside the workspace
-		// is attacker-supplied in exactly the threat model this gate exists for.
-		if argv0 := fields[0]; strings.ContainsAny(argv0, `/\`) ||
-			strings.HasPrefix(argv0, "~") || sandbox.IsRooted(argv0) {
-			t.Fatalf("downgraded %q, whose argv0 %q names a file rather than a PATH command", command, argv0)
-		}
-		// CRIT-1 and P32.1: every path the argv carries must resolve inside
-		// root, and must not be one the shell expands out of it first.
-		for _, arg := range fields[1:] {
-			for _, candidate := range argvPathCandidates(arg) {
-				if strings.HasPrefix(candidate, "~") {
-					t.Fatalf("downgraded %q, whose argument %q the shell expands to a home directory", command, arg)
-				}
-				if _, err := sandbox.ValidatePath(root, candidate); err != nil {
-					t.Fatalf("downgraded %q, whose argument %q resolves outside the root: %v", command, arg, err)
+		// A downgraded command may be a pipeline: classifyShellCommand splits on
+		// every top-level "|" and classifies each stage independently, so the
+		// invariant is checked per stage, the same way the classifier itself
+		// works rather than by re-parsing the whole string as one argv.
+		for _, stage := range strings.Split(trimmed, "|") {
+			stage = strings.TrimSpace(stage)
+			if stage == "" {
+				t.Fatalf("downgraded %q, which has an empty pipeline stage", command)
+			}
+			fields, split := splitShellWords(stage, !powershell)
+			if !split || len(fields) == 0 {
+				t.Fatalf("downgraded %q, whose stage %q does not split into an argv", command, stage)
+			}
+			// CRIT-2: token zero must be a bare command name resolved through
+			// PATH. A path-qualified argv0 names a file, and a file inside the
+			// workspace is attacker-supplied in exactly the threat model this
+			// gate exists for.
+			if argv0 := fields[0]; strings.ContainsAny(argv0, `/\`) ||
+				strings.HasPrefix(argv0, "~") || sandbox.IsRooted(argv0) {
+				t.Fatalf("downgraded %q, whose stage argv0 %q names a file rather than a PATH command", command, argv0)
+			}
+			// CRIT-1 and P32.1: every path the argv carries must resolve inside
+			// root, and must not be one the shell expands out of it first.
+			for _, arg := range fields[1:] {
+				for _, candidate := range argvPathCandidates(arg) {
+					if strings.HasPrefix(candidate, "~") {
+						t.Fatalf("downgraded %q, whose argument %q the shell expands to a home directory", command, arg)
+					}
+					if _, err := sandbox.ValidatePath(root, candidate); err != nil {
+						t.Fatalf("downgraded %q, whose argument %q resolves outside the root: %v", command, arg, err)
+					}
 				}
 			}
 		}

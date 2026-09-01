@@ -336,6 +336,52 @@ var readOnlyShellCommands = map[string]*commandSpec{
 		doubleDash: true, maxPositionals: anyPositionals,
 	},
 
+	// --- Path and comparison utilities ---------------------------------------
+	"diff": {
+		// GNU diff has no writing form at all — unlike sort/tree it takes no
+		// -o/--output; every mode (unified, context, ed-script, side-by-side)
+		// only ever prints to stdout. -D/--ifdef and -F/--show-function-line
+		// take a string it embeds in the output, not a path it opens for
+		// writing. Long numeric spellings (--unified=N, --context=N) are left
+		// out for parsing simplicity — an omitted flag just costs the call its
+		// downgrade, the safe direction — but the short forms (-U, -C) cover
+		// the common case.
+		flags: flagsOf(
+			noneOf("-a", "-b", "-B", "-c", "-d", "-e", "-i", "-N", "-p", "-q", "-r",
+				"-s", "-t", "-T", "-u", "-w", "-y",
+				"--text", "--brief", "--recursive", "--new-file", "--ignore-case",
+				"--ignore-blank-lines", "--ignore-space-change", "--ignore-all-space",
+				"--report-identical-files", "--side-by-side", "--expand-tabs",
+				"--initial-tab", "--show-c-function", "--strip-trailing-cr"),
+			numOf("-C", "-U", "--horizon-lines", "-W", "--width"),
+			strOf("-D", "--ifdef", "-F", "--show-function-line", "-I",
+				"--ignore-matching-lines", "-S", "--starting-file",
+				"-x", "--exclude", "-X", "--exclude-from"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"basename": {
+		flags: flagsOf(
+			noneOf("-a", "-z", "--multiple", "--zero"),
+			strOf("-s", "--suffix"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"dirname": {
+		flags:      flagsOf(noneOf("-z", "--zero")),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+	"readlink": {
+		// All of -f/-e/-m's variants just change how far the symlink chain is
+		// resolved before printing; none of them write anything.
+		flags: flagsOf(
+			noneOf("-e", "-f", "-m", "-n", "-q", "-s", "-v", "-z",
+				"--canonicalize", "--canonicalize-existing", "--canonicalize-missing",
+				"--no-newline", "--quiet", "--silent", "--verbose", "--zero"),
+		),
+		doubleDash: true, maxPositionals: anyPositionals,
+	},
+
 	// --- Metadata ------------------------------------------------------------
 	"stat": {
 		flags: flagsOf(
@@ -702,18 +748,42 @@ var readOnlyGitSubcommands = map[string]bool{
 	"whatchanged": true, "for-each-ref": true, "check-ignore": true,
 }
 
+// shellChainMetaCharsNoPipe is permission.ShellChainMetaChars with "|"
+// removed. classifyShellCommand splits a command on top-level pipes itself
+// and classifies each stage independently (see below); every other
+// chaining/redirection/substitution character — ";", "&", backticks, "$()",
+// "<>", newlines — still refuses the downgrade outright, exactly as before.
+const shellChainMetaCharsNoPipe = `;&` + "`" + `$()<>` + "\n\r"
+
 // classifyShellCommand reports the capability a shell command may be gated as
 // instead of tool.CapExecute (P25.4c, P67.8), and whether it is classified at
 // all. The command is rejected outright if any shell chaining/redirection/
-// substitution metacharacter is present anywhere in the string — including one
-// nested inside quotes, which this scan does not parse — if its binary has no
-// entry in readOnlyShellCommands, if it carries a flag that entry does not
-// list, or if any argument resolves (via sandbox.ValidatePath, the same
-// root-confinement check read_file/grep/glob already use) outside root (P32.1).
+// substitution metacharacter other than "|" is present anywhere in the
+// string — including one nested inside quotes, which this scan does not
+// parse — if its binary has no entry in readOnlyShellCommands, if it carries
+// a flag that entry does not list, or if any argument resolves (via
+// sandbox.ValidatePath, the same root-confinement check read_file/grep/glob
+// already use) outside root (P32.1).
 //
-// Being conservative here is deliberate: a false negative just means the call
-// keeps requiring an execute approval like today; a false positive would
-// auto-approve something that mutates state or exfiltrates data.
+// A top-level "|" is handled by splitting the command into pipeline stages —
+// each classified independently by classifySingleShellCommand, applying the
+// exact same allowlist, flag parsing and root confinement to every stage —
+// rather than by adding a pipe-aware grammar to the per-command flag tables.
+// The split is deliberately blunt: it cuts on every literal "|" byte with no
+// quote-awareness at all, the same posture the metacharacter scan above
+// already takes ("does not parse, fails closed"). A quoted pipe inside a
+// single stage — grep -e 'a|b' — therefore produces a stage whose quote never
+// closes; splitShellWords reports that as unparseable and the whole pipeline
+// loses its downgrade rather than being silently misread. An empty stage
+// (a leading/trailing "|", or "||") is refused for the same reason: it is not
+// a construct this parser claims to understand.
+//
+// A pipeline classifies as CapNetwork if any stage does (gh is the only
+// entry that does), CapRead otherwise; every stage must classify for the
+// pipeline to. Being conservative here is deliberate: a false negative just
+// means the call keeps requiring an execute approval like today; a false
+// positive would auto-approve something that mutates state or exfiltrates
+// data.
 //
 // powershell selects the quoting dialect the command will actually be run
 // under, which decides only one thing: whether a backslash escapes the next
@@ -722,23 +792,45 @@ var readOnlyGitSubcommands = map[string]bool{
 // rather than a guess — see splitShellWords.
 func classifyShellCommand(root, command string, powershell bool) (tool.Capability, bool) {
 	command = strings.TrimSpace(command)
-	if command == "" || strings.ContainsAny(command, permission.ShellChainMetaChars) {
+	if command == "" || strings.ContainsAny(command, shellChainMetaCharsNoPipe) {
 		return tool.CapExecute, false
 	}
 	// P81.20/FIND-20: reject any byte the allowlist below does not name, before
-	// doing anything else with the string. ShellChainMetaChars above is a
-	// denylist — CRIT-1, CRIT-2 and P79.1 were each one more spelling that
-	// denylist had not been told about yet (a bare "~", an unconfined argv0, a
-	// Windows drive-letter path), found only once each was exploited or fuzzed
-	// into existence. commandCharsetAllowed inverts that: every character
-	// permitted here is one a real read-only invocation in the table below
-	// needs — checked against the whole existing test corpus — so a construct
-	// built from anything else (a control byte, a shell operator nobody has
-	// named yet, an encoding trick) fails closed on being unrecognized rather
-	// than on being recognized as bad.
+	// doing anything else with the string. ShellChainMetaChars is a denylist —
+	// CRIT-1, CRIT-2 and P79.1 were each one more spelling that denylist had
+	// not been told about yet (a bare "~", an unconfined argv0, a Windows
+	// drive-letter path), found only once each was exploited or fuzzed into
+	// existence. commandCharsetAllowed inverts that: every character permitted
+	// here is one a real read-only invocation in the table below needs —
+	// checked against the whole existing test corpus — so a construct built
+	// from anything else (a control byte, a shell operator nobody has named
+	// yet, an encoding trick) fails closed on being unrecognized rather than
+	// on being recognized as bad.
 	if !commandCharsetAllowed(command) {
 		return tool.CapExecute, false
 	}
+	stages := strings.Split(command, "|")
+	overall := tool.CapRead
+	for _, stage := range stages {
+		stage = strings.TrimSpace(stage)
+		if stage == "" {
+			return tool.CapExecute, false
+		}
+		cap, ok := classifySingleShellCommand(root, stage, powershell)
+		if !ok {
+			return tool.CapExecute, false
+		}
+		if cap != tool.CapRead {
+			overall = cap
+		}
+	}
+	return overall, true
+}
+
+// classifySingleShellCommand is classifyShellCommand's per-stage worker: it
+// classifies one already-trimmed, metacharacter-free, non-empty command —
+// either the whole call, when there was no pipe, or one stage of a pipeline.
+func classifySingleShellCommand(root, command string, powershell bool) (tool.Capability, bool) {
 	// Split the way the shell will, not the way strings.Fields does. Quoting is
 	// not decoration here: it changes what a token *is*, and the confinement
 	// check below can only judge a path it can recognize as one. See
@@ -865,10 +957,15 @@ func shellCommandPaths(command string, powershell bool) (paths []string, resolve
 // attached-value separators ("=", ":"), size/date-format punctuation ("+",
 // "%", "."), glob metacharacters rg/fd/grep's own --glob/--include flags take
 // as an ordinary string value ("*", "?", "[", "]"), and quote characters
-// splitShellWords already parses structurally. Bytes >= 0x80 (UTF-8
-// continuation/lead bytes) are allowed separately, not through this table —
-// see commandCharsetAllowed — because a legitimate filename may be non-ASCII
-// and this classifier does not want to be the reason it cannot be read.
+// splitShellWords already parses structurally. "|" is here for the same
+// reason: classifyShellCommand strips it out and splits on it itself before
+// this check ever runs on a stage, so by the time a stage reaches this
+// allowlist no "|" remains in it — but the allowlist is checked against the
+// *original, unsplit* string first, so pipe-carrying pipelines need it listed
+// here too. Bytes >= 0x80 (UTF-8 continuation/lead bytes) are allowed
+// separately, not through this table — see commandCharsetAllowed — because a
+// legitimate filename may be non-ASCII and this classifier does not want to
+// be the reason it cannot be read.
 //
 // Deliberately absent: "!", "#", "^", "{", "}", and every ASCII control byte
 // other than space/tab. None of them appears in any read-only command's flag
@@ -876,13 +973,13 @@ func shellCommandPaths(command string, powershell bool) (paths []string, resolve
 // was written), and each has a history of being a shell metacharacter in some
 // dialect this classifier does not want to have to keep discovering one
 // exploit at a time. "(" and ")" are not repeated here — they are already
-// refused by ShellChainMetaChars above, checked first — but excluding them
-// from this list too costs nothing and keeps this table readable as "yes"
-// rather than "not one of the other list's noes".
+// refused by shellChainMetaCharsNoPipe above, checked first — but excluding
+// them from this list too costs nothing and keeps this table readable as
+// "yes" rather than "not one of the other list's noes".
 const commandCharsetAllowlist = "" +
 	"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" +
 	" \t" +
-	`-_./\~:=+,*?%'"@[]`
+	`-_./\~:=+,*?%'"@[]|`
 
 // commandCharsetAllowed reports whether every byte of command is either in
 // commandCharsetAllowlist or is part of a valid non-ASCII UTF-8 sequence (a
