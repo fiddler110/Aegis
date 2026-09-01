@@ -10,6 +10,7 @@ import (
 
 	"github.com/fiddler110/aegis/internal/egress"
 	"github.com/fiddler110/aegis/internal/tool"
+	"github.com/fiddler110/aegis/internal/webcache"
 )
 
 // TestFetchToolWrapsUntrustedContent is the FIND-04 regression: fetched web
@@ -538,5 +539,143 @@ func TestDoSearchRequestHonorsRetryAfter(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Errorf("want exactly 2 attempts (1 rate-limited + 1 retry that succeeded), got %d", attempts)
+	}
+}
+
+// TestFetchToolServesSecondCallFromCache is the P71.6 regression: a second
+// web_fetch of the same URL within one session must not hit the network at
+// all, and must say so on the result rather than silently reusing stale
+// content.
+func TestFetchToolServesSecondCallFromCache(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("hello from the web"))
+	}))
+	defer srv.Close()
+
+	orig := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = orig }()
+
+	ft := &fetchTool{userAgent: "test"}
+	ctx := tool.WithWebCache(context.Background(), webcache.New())
+
+	if _, err := ft.Execute(ctx, json.RawMessage(`{"url":"`+srv.URL+`"}`)); err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests after first call = %d, want 1", requests)
+	}
+
+	res, err := ft.Execute(ctx, json.RawMessage(`{"url":"`+srv.URL+`"}`))
+	if err != nil {
+		t.Fatalf("second Execute: %v", err)
+	}
+	if requests != 1 {
+		t.Errorf("requests after cached second call = %d, want still 1 (no network call)", requests)
+	}
+	if !strings.Contains(res.Content, "served_from_session_cache") {
+		t.Errorf("cached result should say so, got: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "hello from the web") {
+		t.Errorf("cached content missing: %q", res.Content)
+	}
+
+	// A different URL, or a fresh (no-cache) context, must still hit the network.
+	if _, err := ft.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`"}`)); err != nil {
+		t.Fatalf("uncached-context Execute: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("requests after a call with no cache on ctx = %d, want 2", requests)
+	}
+}
+
+// TestFetchToolCacheHonorsPerCallMaxChars is the correctness edge the P71.6
+// design note calls out: the cache is keyed on the URL alone, not on
+// max_chars, so a second call with a different max_chars must still be
+// truncated to what *that* call asked for rather than replaying whatever
+// length the first call happened to request.
+func TestFetchToolCacheHonorsPerCallMaxChars(t *testing.T) {
+	body := strings.Repeat("0123456789", 20) // 200 bytes
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	orig := ssrfClient.Transport
+	ssrfClient.Transport = http.DefaultTransport
+	defer func() { ssrfClient.Transport = orig }()
+
+	ft := &fetchTool{userAgent: "test"}
+	ctx := tool.WithWebCache(context.Background(), webcache.New())
+
+	first, err := ft.Execute(ctx, json.RawMessage(`{"url":"`+srv.URL+`","max_chars":200}`))
+	if err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	if !strings.Contains(first.Content, body) {
+		t.Fatalf("first call should return the untruncated body, got: %q", first.Content)
+	}
+
+	second, err := ft.Execute(ctx, json.RawMessage(`{"url":"`+srv.URL+`","max_chars":50}`))
+	if err != nil {
+		t.Fatalf("second Execute: %v", err)
+	}
+	if !strings.Contains(second.Content, "[truncated") {
+		t.Errorf("cache hit did not respect the second call's smaller max_chars, want a truncation notice: %q", second.Content)
+	}
+	if len(second.Content) >= len(first.Content) {
+		t.Errorf("second (max_chars=50) result should be shorter than first (max_chars=200): %d bytes vs %d bytes", len(second.Content), len(first.Content))
+	}
+}
+
+// TestSearchToolServesSecondCallFromCache is search_web's half of the P71.6
+// regression: a second identical query (same query, same max_results) must
+// not re-issue the search.
+func TestSearchToolServesSecondCallFromCache(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[{"title":"Go","url":"https://go.dev","content":"the language"}]}`))
+	}))
+	defer srv.Close()
+
+	st := &searchTool{provider: "searxng", baseURL: srv.URL}
+	ctx := tool.WithWebCache(context.Background(), webcache.New())
+
+	if _, err := st.Execute(ctx, json.RawMessage(`{"query":"golang"}`)); err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests after first call = %d, want 1", requests)
+	}
+
+	res, err := st.Execute(ctx, json.RawMessage(`{"query":"golang"}`))
+	if err != nil {
+		t.Fatalf("second Execute: %v", err)
+	}
+	if requests != 1 {
+		t.Errorf("requests after cached second call = %d, want still 1 (no network call)", requests)
+	}
+	if !strings.Contains(res.Content, "served_from_session_cache") {
+		t.Errorf("cached result should say so, got: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, `backend="searxng"`) {
+		t.Errorf("cached result should still name the backend that served it, got: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "go.dev") {
+		t.Errorf("cached results missing: %q", res.Content)
+	}
+
+	// A different max_results is a different call and must not hit the cache.
+	if _, err := st.Execute(ctx, json.RawMessage(`{"query":"golang","max_results":5}`)); err != nil {
+		t.Fatalf("different-max_results Execute: %v", err)
+	}
+	if requests != 2 {
+		t.Errorf("requests after a differently-sized call = %d, want 2", requests)
 	}
 }

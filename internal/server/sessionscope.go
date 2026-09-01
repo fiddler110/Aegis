@@ -17,6 +17,7 @@ import (
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
+	"github.com/fiddler110/aegis/internal/webcache"
 )
 
 // activateSessionSkill turns on a built-in skill for one session: it's added
@@ -93,6 +94,18 @@ func (s *Server) subAgentToolRegistry(parentSessionID string) *tool.Registry {
 		return s.tools.Clone()
 	}
 	return s.sessionToolRegistry(parentSessionID).Clone()
+}
+
+// sessionWebCacheFor returns the session's *webcache.Cache (P71.6), creating
+// an empty one on first use so web_fetch/web_search share the same cache
+// across a session's turns the way sessionToolRegistry shares a registry
+// clone.
+func (s *Server) sessionWebCacheFor(id string) *webcache.Cache {
+	if v, ok := s.sessionWebCache.Load(id); ok {
+		return v.(*webcache.Cache)
+	}
+	v, _ := s.sessionWebCache.LoadOrStore(id, webcache.New())
+	return v.(*webcache.Cache)
 }
 
 // taskScopeFor returns the session's per-task file-write scope (P46.1),

@@ -455,6 +455,13 @@ type model struct {
 	activeToast                  *toast
 	completion                   completionState
 	approval                     *approvalState // non-nil while engine is blocked waiting for user approval
+	// approvalQueue holds calls from the same parallel round still waiting
+	// behind m.approval (P81.33/FIND-33): a round can have more than one call
+	// pending approval at once, and queuing rather than clobbering m.approval
+	// is what turns that into "N more waiting, reviewable in turn" instead of
+	// one dialog silently replacing another while the first call's Approve()
+	// goroutine hangs until the run ends.
+	approvalQueue []*approvalState
 
 	// P16.1 attention system: notifyMode is parsed once from config/session
 	// state; focused tracks terminal focus (via tea.FocusMsg/BlurMsg) so

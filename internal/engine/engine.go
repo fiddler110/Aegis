@@ -26,6 +26,7 @@ import (
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/toolshim"
 	"github.com/fiddler110/aegis/internal/trace"
+	"github.com/fiddler110/aegis/internal/webcache"
 )
 
 // Conversation is the mutable transcript the engine drives.
@@ -408,6 +409,12 @@ type Options struct {
 	// been trusted are all made before Options is built (see
 	// config.ResolveAdditionalRoots).
 	ExtraRoots []sandbox.Root
+	// WebCache (P71.6), when set, is the session-owned cache web_fetch/
+	// web_search memoize into via tool.WithWebCache. Optional: nil disables
+	// memoization for this run — the case for the CLI, eval and other
+	// callers with no session to own a cache across turns, where a run-
+	// scoped cache would never see a second call to hit anyway.
+	WebCache *webcache.Cache
 	// ToolCallShim (P53.6, provider.tool_call_shim) switches this run to the
 	// non-native tool-calling fallback: tool schemas go into the system prompt
 	// instead of the request's tools field, and the model's tagged JSON is
@@ -477,6 +484,7 @@ type Engine struct {
 	cost      *cost.Tracker
 	approver  Approver
 	egress    *egress.Tracker
+	webCache  *webcache.Cache
 	// egressReported is the egress.Tracker total as of the last KindTurnDone
 	// emission, so each event can carry this *turn's* delta rather than a
 	// running total a multi-turn tool-calling run would otherwise sum
@@ -644,6 +652,17 @@ func (e *Engine) effectiveContextWindow() int {
 	return win
 }
 
+// EffectiveContextWindow exports effectiveContextWindow for callers outside
+// the package that need to size their own output to this run's resolved
+// serving window rather than a flat constant — P71.11's deep-research round/
+// source budget is the first of these (internal/drive reads it once per
+// phase, the same window a tool call reads via tool.ContextWindowFromContext
+// mid-turn). 0 means unresolved, matching ContextWindowFromContext's "unknown"
+// reading for callers that treat that as "assume cloud-scale".
+func (e *Engine) EffectiveContextWindow() int {
+	return e.effectiveContextWindow()
+}
+
 // New constructs an Engine.
 func New(opts Options) (*Engine, error) {
 	if opts.Adapter == nil {
@@ -688,6 +707,7 @@ func New(opts Options) (*Engine, error) {
 		cost:                opts.Cost,
 		approver:            opts.Approver,
 		egress:              egress.NewTracker(),
+		webCache:            opts.WebCache,
 		prepareStep:         opts.PrepareStep,
 		outputGuard:         opts.OutputGuard,
 		outputGuardMax:      opts.OutputGuardMaxRetries,

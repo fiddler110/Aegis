@@ -16,9 +16,7 @@
     - [P80.2 — Three packages the security audit never read](#p802--three-packages-the-security-audit-never-read)
     - [P80.3 — `Server`'s 60-field struct, after the file split](#p803--servers-60-field-struct-after-the-file-split)
     - [P74.21 — The local-model harness still can't touch a prompt or a tool description](#p7421--the-local-model-harness-still-cant-touch-a-prompt-or-a-tool-description)
-    - [P71.6 — Nothing memoizes a fetch or a search within a session](#p716--nothing-memoizes-a-fetch-or-a-search-within-a-session)
     - [P71.7 — `web_search` results carry no publication date, so the source-quality bar cannot be applied](#p717--web_search-results-carry-no-publication-date-so-the-source-quality-bar-cannot-be-applied)
-    - [P71.11 — The deep-research budgets are cloud-window constants handed to a local model](#p7111--the-deep-research-budgets-are-cloud-window-constants-handed-to-a-local-model)
     - [P71.12 — Main-content extraction for `web_fetch` — measured, and smaller than it looks](#p7112--main-content-extraction-for-web_fetch--measured-and-smaller-than-it-looks)
     - [P71.13 — Aegis could manage its own SearXNG container instead of only pointing at one](#p7113--aegis-could-manage-its-own-searxng-container-instead-of-only-pointing-at-one)
     - [P66.26 — `synchronous=NORMAL` on the three SQLite databases (PERF-02, refiled from P66.9)](#p6626--synchronousnormal-on-the-three-sqlite-databases-perf-02-refiled-from-p669)
@@ -61,24 +59,25 @@
 
 ## Status
 
-**Updated 2026-09-01: the P81 threat-model batch is down to two parked slices.** Of the 32 build items
-filed 2026-08-31, only **P81.33**'s batched-approval half and **P81.12**'s release-artifact half
-(deliberately parked behind a product decision, not a trigger) remain open — every other item shipped,
-was refuted, or was accepted as risk across eight sittings on 2026-08-31 and 2026-09-01, the last of
-which closed **P81.10** and **P81.23**. See [Up next](#up-next) for the current take order and
-[releases.md](releases.md) for every closure's full record.
+**Updated 2026-09-01: the P81 threat-model batch is down to one parked slice.** Of the 32 build items
+filed 2026-08-31, only **P81.12**'s release-artifact half (deliberately parked behind a product
+decision, not a trigger) remains open — every other item shipped, was refuted, or was accepted as risk
+across eight sittings on 2026-08-31 and 2026-09-01, the last of which closed **P81.33**'s
+approval-protocol half alongside **P81.10** and **P81.23**. See [Up next](#up-next) for the current
+take order and [releases.md](releases.md) for every closure's full record.
 
-**44 open items: 35 build + 9 verification-only.** Tier 1: **0** — both of the batch's Tier 1 items
+**41 open items: 32 build + 9 verification-only.** Tier 1: **0** — both of the batch's Tier 1 items
 closed 2026-08-31 without production code: **P81.6** was **refuted** (the trust freeze already covers
 `provider.base_url` — the report looked in `fingerprint.go`, the policy table is in `freeze.go`), and
 **P81.11** is an **accepted risk**, re-tiered to 4 after the operator confirmed the CI disablement is
-deliberate. Tier 2: **1** — **P81.33**'s batched-approval half only; every other Tier 2 item from the
-batch shipped. Tier 3: **1** — **P81.12**'s release-artifact half only; **P81.10** and **P81.23** shipped
+deliberate. Tier 2: **0** — **P81.33** shipped in full 2026-09-01, closing out the batch's Tier 2 work.
+Tier 3: **1** — **P81.12**'s release-artifact half only; **P81.10** and **P81.23** shipped
 2026-09-01, and **P76.1** (both audit sessions done, survivors shipped) and **P80.1** (closed in full)
-are also closed out of this tier. Tier 4: **33** (unchanged by this batch's closures — see its own
-section for what's in it). Verification: **9** (unchanged; **P80.4** added 2026-08-30).
+are also closed out of this tier. Tier 4: **31** — unchanged by the P81 batch's own closures, but down
+2 from **P71.6** and **P71.11** shipping 2026-09-01 out of that day's Tier 4 validation pass (see its
+own section for what's left in it). Verification: **9** (unchanged; **P80.4** added 2026-08-30).
 
-**The 2026-08-31 threat-model batch was 32 build items when filed; 2 remain**, both Tier 2/3 slices
+**The 2026-08-31 threat-model batch was 32 build items when filed; 1 remains**, the Tier 3 slice
 named above. That is intake from an external analysis rather than a backlog that accumulated. The first
 wave's result is the number worth carrying forward: of eight items worked, **three were refuted against
 the tree and two of the five real ones were smaller than filed** — while the same passes turned up four
@@ -124,8 +123,8 @@ still defaults to `"local"`, `lsp.Manager` is still one shared daemon singleton,
 asymmetries in P63.10 are still present as described — that one item has since shipped) — see each
 entry's **Promote when** for what would change that. Two of them, **P71.6** (response caching) and
 **P71.11** (window-derived budgets), were held pending phasing — "setting them first fits a constant
-to a regime about to change" — and that regime changed when P71.8 landed; the reason they were
-parked no longer applies, so re-check them rather than assuming Tier 4 still fits. **P71.12** is the
+to a regime about to change" — and that regime changed when P71.8 landed; both shipped 2026-09-01
+(see [Open Work — Tier 4](#open-work--tier-4)). **P71.12** is the
 opposite case: a filed _negative_ measurement (main-content extraction is worth 3–12% per page,
 because the existing converter already takes 66 KB of HTML down to 11 KB of text), recorded so
 nobody re-derives it. Explicitly do not schedule.
@@ -303,23 +302,22 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
-**Last updated: 2026-09-01.** The P81 threat-model batch is down to its last two parked slices:
-**P81.33**'s batched-approval half and **P81.12**'s release-artifact half. Everything else in the
-batch — all of Tier 1 and Tier 2, and all of Tier 3 including the last two build items, **P81.10** and
-**P81.23** — shipped across four sittings on 2026-08-31 and four more on 2026-09-01, run mostly as
-parallel disjoint-package sub-agents. Full narrative and per-item detail for everything that shipped is
-in [releases.md](releases.md); this table carries only what's still open. **P82** and **P83**
-(model-selection ranking and a KV-cache sizing fix) were filed and shipped from an operator report
-without ever entering this table — see
+**Last updated: 2026-09-01.** The P81 threat-model batch is down to its last parked slice:
+**P81.12**'s release-artifact half. Everything else in the batch — all of Tier 1 and Tier 2 including
+**P81.33** (both halves, the second shipping 2026-09-01), and all of Tier 3 including the last two build
+items, **P81.10** and **P81.23** — shipped across four sittings on 2026-08-31 and five more on
+2026-09-01, run mostly as parallel disjoint-package sub-agents. Full narrative and per-item detail for
+everything that shipped is in [releases.md](releases.md); this table carries only what's still open.
+**P82** and **P83** (model-selection ranking and a KV-cache sizing fix) were filed and shipped from an
+operator report without ever entering this table — see
 [their record](releases/releases-01.md#p82-and-p83-shipped-2026-08-31).
 
 **Next, cheapest and most independent first:**
 
 | #   | Item                                                                                              | Tier / size          | Why now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | --- | ------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **P81.33**'s batched-approval half — present a parallel round's approvals as one reviewable summary | Tier 2 — S/M          | The render-bound half already shipped 2026-09-01. What's left needs a real protocol change (the daemon correlates one pending approval per *run*, not per call), not a TUI-only fix. |
-| 2   | **P81.12**'s release-artifact half — checksums/signatures/provenance on release archives            | Tier 3 — parked       | Parked behind a product decision about whether this project resumes publishing releases, not behind a trigger. Its `codeql.yml`-pinning half already shipped alongside **P81.17**. Do not build speculatively. |
-| 3   | **The live-tier remainder** (P38.1, P65.2, P80.4) — _parked by choice, 2026-08-16; narrowed 2026-09-01_ | Verification | **P62.9 closed 2026-09-01** (6-per-arm `SecurityTriage` comparison: no correctness cost, local profile faster) and **P66.22 closed the same day** (LLM-03/LLM-10 read from a kept session trace via P68.1; ARCH-04 closed by a new live harness test, `TestLiveWorkflowFanOutChainsTheStallBeat`, passing clean on the first run) — both dropped off this row. **P65.2** is still open, but not for the reason its own text says: the mechanical blocker it names (`"summarizer returned empty output"`) is already fixed on `main` as **P79.3**, which this row's stale branch simply predated by 29 commits; the item's real remaining question — does a local model fill the structured skeleton, now that the summarizer can produce real output — needs one run against `main`. **P38.1** still needs permission to launch an unattended auto-approving agent, and **P80.4** is unchanged. |
+| 1   | **P81.12**'s release-artifact half — checksums/signatures/provenance on release archives            | Tier 3 — parked       | Parked behind a product decision about whether this project resumes publishing releases, not behind a trigger. Its `codeql.yml`-pinning half already shipped alongside **P81.17**. Do not build speculatively. |
+| 2   | **The live-tier remainder** (P38.1, P65.2, P80.4) — _parked by choice, 2026-08-16; narrowed 2026-09-01_ | Verification | **P62.9 closed 2026-09-01** (6-per-arm `SecurityTriage` comparison: no correctness cost, local profile faster) and **P66.22 closed the same day** (LLM-03/LLM-10 read from a kept session trace via P68.1; ARCH-04 closed by a new live harness test, `TestLiveWorkflowFanOutChainsTheStallBeat`, passing clean on the first run) — both dropped off this row. **P65.2** is still open, but not for the reason its own text says: the mechanical blocker it names (`"summarizer returned empty output"`) is already fixed on `main` as **P79.3**, which this row's stale branch simply predated by 29 commits; the item's real remaining question — does a local model fill the structured skeleton, now that the summarizer can produce real output — needs one run against `main`. **P38.1** still needs permission to launch an unattended auto-approving agent, and **P80.4** is unchanged. |
 
 **One item is deliberately off this list, Tier 4 with no fired trigger.** **P74.21** (filed
 2026-08-21) is the half of P74.17's own roadmap entry that did not ship with it — see
@@ -339,6 +337,26 @@ provider-decorator mechanism rather than the full tool-registration generalizati
 **This table outranks `scripts/roadmap-status.sh`.** That script reports open items in _document_
 order. It still cannot see the cross-tier ranking. Use it for repo state and for the parse; use this
 table for what to take.
+
+**Tier 4 validation pass, 2026-09-01.** With Tier 3 nearly clear, all 31 then-open Tier 4 entries were
+re-checked against the current tree rather than against their own filed text, since several were weeks
+old. No item had a hard trigger fire from the check itself, but it corrected two entries that had gone
+stale in a way worth recording: **P66.18**'s QUAL-04 (`hardenDBPermissions` triplication) is **already
+resolved** — the three stores share `sqlitestore.HardenPermissions` today (`CLN-3`), fixed as a side
+effect of other work with no item ever filed to close it; and **P81.31**'s "rides along with **P81.24**
+for free" framing was **wrong and is retracted** — P81.24 shipped a Windows ACL restriction, not the
+byte-cap/eviction mechanism P81.31 actually needs, so both of its halves are still fully unbuilt.
+**P71.6** and **P71.11** were flagged as the closest to a fired trigger — both gated on **P71.8**, which
+landed 2026-08-19, so their literal promote condition had technically been met for two weeks with no
+demonstrated cost behind either — and the recommendation was to leave them parked on that basis alone.
+**The user asked for both directly the same day**, which is exactly the trigger "do not build
+speculatively" is conditioned on: a request is not speculation. Both shipped 2026-09-01 — see
+[releases.md](releases/releases-01.md#p716-and-p7111-2026-09-01). Everything else — the P66/P67 residue
+grab-bags, the remaining P71 search/date items, P74.21, P77.6, P80.2/P80.3, P81.7/P81.18/P81.28 — still
+has no trigger; see each entry for what would change that. QUAL-05 (`internal/tui`'s god struct) is
+opportunistically eligible given **P81.33**'s TUI work, but that work's own diff was narrow and already
+shipped, so QUAL-05 waits for the next TUI touch made for its own reason rather than reopening a closed
+item to bolt it on.
 
 ---
 
@@ -410,7 +428,7 @@ of FIND-21 belonging to P80.1.
 | FIND-30 | 4.8 `Moderate`  | **P81.30**    | Tier 3    | Parallel rounds do not order shell against concurrent writes                                                     |
 | FIND-31 | 4.4 `Low`       | **P81.31**    | Tier 4    | Checkpoint growth is unbounded; `/rewind` discards outside edits                                                 |
 | FIND-32 | 3.9 `Low`       | **P81.32**    | Tier 2    | Scan reports land inside the repository they describe                                                            |
-| FIND-33 | 3.6 `Low`       | **P81.33**    | Tier 2    | The TUI render path is unbounded; rounds train click-through                                                     |
+| FIND-33 | 3.6 `Low`       | **P81.33**    | —         | The TUI render path is unbounded; rounds train click-through — **SHIPPED 2026-09-01**                            |
 
 **Suggested order, which is not severity order and says why — updated 2026-08-31 now that the first
 three rows are worked.** **Both Tier 1 items are already
@@ -477,10 +495,9 @@ small and has no dependency. Nothing is currently open here.
 
 ## Open Work — Tier 2
 
-**Status: 1 open** — **P81.33**'s batched-approval half only (the render-bound half shipped
-2026-09-01). Every other Tier 2 item from the P81 batch — **P81.9**, **P81.13**, **P81.15**, **P81.16**,
-**P81.17**, **P81.19**, **P81.24**, **P81.25**, **P81.29** and **P81.32** — is shipped; see
-[releases.md](releases.md) for each record. This header undercounted for a stretch after 2026-08-22 when the tier last fully cleared;
+**Status: 0 open.** Every Tier 2 item from the P81 batch — **P81.9**, **P81.13**, **P81.15**, **P81.16**,
+**P81.17**, **P81.19**, **P81.24**, **P81.25**, **P81.29**, **P81.32** and **P81.33** (shipped in full
+2026-09-01) — is shipped; see [releases.md](releases.md) for each record. This header undercounted for a stretch after 2026-08-22 when the tier last fully cleared;
 kept below for that history. **P68.1** (the live tier can now run a measurement it can read back) shipped
 2026-08-22 — record in [releases.md](releases.md). Before it, this tier's most recent shipment was
 **P74.15** (HTML
@@ -534,10 +551,13 @@ makes them a bound rather than a suggestion), **P81.16** (per-address `/ui` mint
 recon targets need an allowlist entry) and **P81.32** (scan reports default out of the workspace)
 shipped 2026-08-31. **P81.9**, **P81.13** and **P81.17** shipped 2026-09-01, along with the remainders
 of **P81.24** and **P81.25** (both the `fsguard.RestrictToOwner` mechanism, taken as one sitting as
-this entry suggested). **P81.33** shipped its render-bound half the same day and stays open below for
-the batched-approval half. See [releases.md](releases.md) for each record.
+this entry suggested). **P81.33** shipped its render-bound half the same day and closed the rest —
+the batched-approval half — later on 2026-09-01. See [releases.md](releases.md) for each record.
 
 ### P81.33 — The TUI render path is unbounded, and a parallel round trains click-through (FIND-33)
+
+**Shipped in full 2026-09-01.** Kept here rather than moved to releases.md alone because the entry below
+is the fullest record of the approval-protocol bug the batching half fixed.
 
 **Filed 2026-08-31**, from the threat model
 ([**FIND-33**](../threat-model-20260831-002123/3-findings.md#find-33-the-tui-render-path-is-unbounded-and-repeated-approvals-invite-blanket-approval),
@@ -562,14 +582,27 @@ to 20,000 runes with an SGR-safe truncation marker, closing the "one multi-megab
 render loop" half of the finding. See
 [releases.md](releases/releases-01.md#p8117-p8112-pinning-p819-p8113-p8124-p8125-and-p8133-render-bound-2026-09-01).
 
-**Still open: batching one parallel round's approvals into a single reviewable summary.** The daemon's
-approval protocol correlates one pending approval per *run*, not per call (`sseApprover.ch`/
-`ApprovalID`), so this needs a real protocol change, not a TUI-only fix — that is why it wasn't
-attempted alongside the render bound. Showing the resolved argv and effective sandbox backend in the
-prompt is unaffected by that and could ship independently.
+**Shipped 2026-09-01: the approval-protocol half.** `sseApprover` correlated one pending decision per
+*run*, not per call — a single buffered channel shared by every `Approve()` invocation, with
+`ApprovalID` set to the run id on every event. A parallel round with more than one call needing
+approval could already put two goroutines inside `Approve()` at once (up to `maxParallelTools`), and
+whichever read the shared channel first got whatever decision the operator had just sent, right call or
+not — the second call's dialog silently clobbered the first's in the TUI, and the first call's
+goroutine hung until the run ended. Fixed at the root: each `Approve()` call now mints its own id
+(`runID-<seq>`) and registers its own channel in `pendingApprovals`, so an answer lands on the call it
+was actually sent for regardless of how many are pending at once — `TestSSEApproverBatchesConcurrentCalls`
+pins it. Every `KindApprovalRequest` event now also carries `ApprovalBatch`, the full set of calls
+currently awaiting an answer through that run's approver; a batch-aware client merges it into a queue
+instead of overwriting the one dialog it shows, so a parallel round renders as "the first call, plus N
+more waiting: tool, tool…" — one reviewable summary — rather than a run of serial prompts with no
+visibility into what's still coming. The TUI is that client (`m.approvalQueue`,
+`approvalQueueSummary`); ACP and `/side` read only the unchanged single-item fields and are unaffected,
+including gaining the same correlation fix. Showing the resolved argv in the prompt (the effective
+sandbox backend already shipped with **P81.22**) is the one piece left, and is a small, independent TUI
+change against `renderApprovalBody` whenever it's next in scope.
 
-Priority: Tier 2 — S/M. The render bound (the XS part) is done; what remains is the approval-protocol
-change.
+Priority: closed — the batching half that needed a protocol change is done; the resolved-argv display
+is small enough to fold into whatever next touches that renderer rather than holding this item open.
 
 ---
 
@@ -646,16 +679,19 @@ Priority: Tier 3 — parked behind a product decision about releases, not behind
 
 ## Open Work — Tier 4
 
-**Status: 31 open** — four arrived 2026-08-31 with the P81 threat-model batch (**P81.7**,
+**Status: 29 open** — down 2 from **P71.6** and **P71.11** shipping 2026-09-01 out of that day's
+validation pass (see below). Four arrived 2026-08-31 with the P81 threat-model batch (**P81.7**,
 **P81.18**, **P81.28**, **P81.31**), each parked for a stated reason rather than by default: P81.7's
 prerequisite is a multi-user host and half its fix is upstream in Ollama; P81.18 is documentation and
 a trust-store helper with no fired trigger while the UI stays on loopback; P81.28's shim is off by
-default and the containment it wants is **P81.1**'s to build; and P81.31's reaping half rides along
-with **P81.24** for free. **P80.2** and **P80.3** were filed 2026-08-30 as the residue of the comprehensive
-audit (the three packages it never read, and the `Server` struct half of its L4 split). The other 25 are
+default and the containment it wants is **P81.1**'s to build; and P81.31's own entry corrects a since-
+retracted claim that its reaping half would ride along with **P81.24** for free — it did not, and both
+of P81.31's halves are still unbuilt. **P80.2** and **P80.3** were filed 2026-08-30 as the residue of the comprehensive
+audit (the three packages it never read, and the `Server` struct half of its L4 split). The other 23 are
 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
-6 from the P66 review batch, 5 from the P67 external-source reading, 5 from the P71 batch filed
-2026-08-19 (**P71.6**, **P71.7**, **P71.11**, **P71.12**, **P71.13**), **P74.21** (filed 2026-08-21
+6 from the P66 review batch, 5 from the P67 external-source reading, 3 from the P71 batch filed
+2026-08-19 (**P71.7**, **P71.12**, **P71.13** — **P71.6** and **P71.11** shipped 2026-09-01),
+**P74.21** (filed 2026-08-21
 the same day P74.17 shipped without it), and **P77.6** (filed 2026-08-25, spun out of P66.19). **P77.2**,
 **P77.3**, **P77.4**, and **P77.5** (filed the same
 day, same batch) all shipped 2026-08-24 — see [releases.md](releases/releases-01.md#p774-shipped-2026-08-24).
@@ -671,12 +707,12 @@ Take one only when already working in that file. The P67 entries are a different
 is a capability Aegis does not have and nobody has asked for, filed with the specific trigger that
 would make it worth building.
 
-**The four P71 entries are a third kind, and two of them are parked by _choice_ rather than by
-absence of demand.** **P71.6** (in-session response caching) and **P71.11** (window-derived research
-budgets) are both blocked on **P71.8**: phasing changes the arithmetic under each, so fixing them
-first would fit a constant to a regime about to change. **P71.7** (publication dates on search
-results) waits on a keyed provider being the default, because that is the only backend where the date
-is actually available. **P71.12** is different again — it is a filed **negative measurement**, kept
+**The remaining P71 entries are a mix of kinds.** **P71.6** (in-session response caching) and
+**P71.11** (window-derived research budgets) were both blocked on **P71.8** by choice — phasing
+changed the arithmetic under each — and both shipped 2026-09-01 once the block cleared and the user
+asked for them directly (see [Open Work — Tier 4](#open-work--tier-4)). **P71.7** (publication dates on
+search results) waits on a keyed provider being the default, because that is the only backend where the
+date is actually available. **P71.12** is different again — it is a filed **negative measurement**, kept
 so the next reader does not re-derive an intuition this batch already tested and found small.
 
 ### P80.2 — Three packages the security audit never read
@@ -784,24 +820,17 @@ this is the same wait, one layer up.
 
 Priority: Tier 4 — M. No fired trigger yet.
 
-### P71.6 — Nothing memoizes a fetch or a search within a session
-
-**Filed 2026-08-19.** `web_fetch` and `web_search` re-issue every request. The deep-research skill's
-audit trail is explicitly designed around not repeating work — "it prevents re-fetching the same dead
-ends when a topic gets revisited" (SKILL.md §2) — but that guarantee lives entirely in the model's
-context, which compaction deletes. After a compaction the model has no record of what it fetched, so
-a re-fetch is both likely and silently expensive: full network round-trip, full token cost again.
-
-An in-session cache keyed on the normalized URL (and on query+max_results for search) would make the
-audit trail's promise real rather than aspirational, and would make a re-fetch after compaction
-nearly free — which is the recovery path P64.1 deliberately chose over spilling.
-
-**Promote when** **P71.8** lands: a phased run reads the working file back into each fresh context
-and will re-fetch by design at phase boundaries, which is the first time this stops being
-speculative. Until then the compaction thrash (**P71.5**) dominates and this would be measuring the
-wrong thing.
-
-Priority: Tier 4 — S. No fired trigger yet.
+**P71.6 — nothing memoized a fetch or a search within a session — SHIPPED 2026-09-01.** Filed
+2026-08-19, parked on **P71.8** landing (it had, 2026-08-19, but with no demonstrated cost behind it —
+see the 2026-09-01 Tier 4 validation pass in [Up next](#up-next)). Built on direct request rather than
+promoted speculatively: a new session-scoped `internal/webcache.Cache` (200-entry cap, oldest-first
+eviction) reaches `web_fetch`/`web_search` the same way `egress.Tracker` does, via
+`tool.WithWebCache`/`tool.WebCacheFromContext` on the call's context; owned by `Server`
+(`sessionWebCacheFor`, freed in `handleDeleteSession`) rather than the per-turn `Engine`, since a
+session's turns each get a fresh engine. `web_fetch` keys on the URL alone and caches pre-truncation
+text so a later call's own `max_chars` is still honored on a hit; `web_search` keys on
+query+max_results. A cache hit is always visible on the result (`served_from_session_cache`, with age),
+never silent. Full record: [releases.md](releases/releases-01.md#p716-and-p7111-2026-09-01).
 
 ### P71.7 — `web_search` results carry no publication date, so the source-quality bar cannot be applied
 
@@ -834,29 +863,17 @@ enough on its own — it solves a related but different problem: "don't return o
 
 Priority: Tier 4 — S. Real, and unbuildable well on the zero-config backend.
 
-### P71.11 — The deep-research budgets are cloud-window constants handed to a local model
-
-**Filed 2026-08-19.** The skill fixes its budget in prose: "**Round cap: 8**", "roughly 5–12 quality
-sources", and it relies on `web_fetch`'s 20,000-char default per read. None of the three is a
-function of the context window.
-
-At `context_window: 16000` that budget is arithmetically impossible: 8 rounds × 5–12 sources ×
-~5,000 tokens per source is one to two orders of magnitude past a window whose compaction trigger is
-8,000 tokens. The model does not know this, so it plans a run it cannot execute and then discovers
-the wall one compaction at a time. The 16k live run's own opening plan states "**Budget:** 8 rounds
-max, targeting 5-12 quality sources" — copied faithfully from the skill, and never achievable.
-
-**Do:** derive the round and source targets from the resolved window at skill-activation time, the
-way `enginecfg` derives run limits once for every caller, rather than hard-coding a cloud-sized
-number in prose. Roughly: four rounds and three or four sources at 16k, the current numbers at 128k.
-
-**Promote when** **P71.8** lands — **it has, 2026-08-19.** Phasing changed the arithmetic: each
-round is now a fresh, disk-grounded turn (P47.4) rather than a slice of one accumulating
-conversation, so the per-_run_ budget this item measured is no longer the binding constraint the same
-way. Re-derive the numbers against the phased shape (a round's own turn budget, not the whole run's)
-before building this, rather than assuming the original math still applies unchanged.
-
-Priority: Tier 4 — S. Was blocked on **P71.8** by choice; unblocked 2026-08-19, not yet promoted.
+**P71.11 — the deep-research budgets were cloud-window constants handed to a local model — SHIPPED
+2026-09-01.** Filed 2026-08-19, parked on **P71.8** landing (it had, 2026-08-19; re-derived against the
+phased shape at build time rather than assumed unchanged — a phase's own resolved window is what's
+available per-round, not a per-run figure). Built on direct request rather than promoted speculatively:
+a new `internal/drive/research_budget.go` derives round cap and source target from
+`Engine.EffectiveContextWindow()` in four bands (≤16k: 4 rounds/3-4 sources — the anchor this item was
+filed against; ≤32k: 5/4-6; ≤64k: 6/4-8; unresolved-or-above: 8/5-12, today's numbers unchanged). A new
+`{budget}` placeholder in the phased-drive prompt templating carries it into `deep-research/SKILL.md`'s
+frontmatter prompt, rendered fresh every research round; section 0's static prose is rewritten to say
+the numbers there are the cloud-scale defaults and defer to what the round's own prompt states. Full
+record: [releases.md](releases/releases-01.md#p716-and-p7111-2026-09-01).
 
 ### P71.12 — Main-content extraction for `web_fetch` — measured, and smaller than it looks
 
@@ -992,18 +1009,27 @@ user**, so the transcript loses content the user watched arrive (ARCH-09) — th
 in this grab-bag and the one most likely to be reported as a bug. Session-scoped in-memory state leaks
 on prune, and two maps leak on delete (ARCH-10).
 
-`hardenDBPermissions` is triplicated verbatim across `internal/knowledge`, `internal/longmem` and
-`internal/session` — a **file-permission boundary** copied three times, which is the one kind of
-duplication worth de-duplicating on principle rather than on measurement (QUAL-04). `internal/tui` is
+~~`hardenDBPermissions` was triplicated verbatim across `internal/knowledge`, `internal/longmem` and
+`internal/session`~~ — **QUAL-04 is resolved.** Verified 2026-09-01: the three stores now share
+`sqlitestore.HardenPermissions`/`sqlitestore.Open` (`internal/session/session.go:150` calls it directly,
+tagged `CLN-3`), and the P81.24/P81.25/P81.27 `fsguard.RestrictToOwner` work confirmed it also covers
+the `-wal`/`-shm` sidecars ([releases.md](releases/releases-01.md#p8115-p8116-p8119-p8129-and-p8132-plus-p816-refuted-and-p8111-accepted-risk-2026-08-31)).
+No item was ever filed to close this — the de-duplication happened as a side effect of other work — so
+this note is the only record. `internal/tui` is
 a god package with a 97-field god struct (QUAL-05). Ten ad-hoc `truncate` helpers sit alongside the one
 canonical truncation policy in `truncate.go` (QUAL-07). `context.Background()` appears inside
 request-scoped handlers (QUAL-08). `internal/drive` has no package doc and ~10.5% of exported symbols
 are undocumented (QUAL-09).
 
-**Promote when:** QUAL-04 should go with any change to DB file permissions; QUAL-05 with any
-substantial TUI work (it would also make P66.15's sweep cheaper). The rest are opportunistic.
+**Promote when:** QUAL-05 with any substantial TUI work (it would also make P66.15's sweep cheaper).
+**Checked 2026-09-01: P81.33 just did substantial TUI work** (`approval.go`, `stream.go`, `tui.go`), but
+it was a protocol-correlation fix with a narrow, already-closed diff — bundling an unrelated god-struct
+split into it would have widened that diff for no reason tied to the bug being fixed. Take QUAL-05 the
+*next* time `internal/tui` is opened for its own reason, not retroactively for this one. The rest are
+opportunistic.
 
-Priority: Tier 4 — no trigger. QUAL-04 is the only one with a security-adjacent argument.
+Priority: Tier 4 — no trigger. QUAL-04 closed itself; nothing here still carries a security-adjacent
+argument.
 
 ### P66.19 — Capability gaps with no fired trigger
 
@@ -1466,16 +1492,23 @@ in effect.
 
 **What would close it.** Cap total snapshot bytes per session, evict oldest-first, and surface the cap
 as a config key. Before a rewind, compare current file state against the snapshot's recorded post-turn
-digest and require confirmation for any file changed outside the agent's own tool calls. Reap
-checkpoints when a session is archived or pruned — shared with **P81.24**'s retention work, and the
-cheapest way to get this one moving.
+digest and require confirmation for any file changed outside the agent's own tool calls.
+`internal/checkpoint.PruneOlderThan` already deletes checkpoints before a time cutoff (called from the
+session-delete handler and `session.Store.Prune`), but that is age-based, not size-based — neither a
+total-byte cap nor eviction exists yet.
 
 **Related and not the same.** **P60.3** (Tier 4) is that checkpoints capture files only, so `/rewind`
 is silent about everything else. That is a coverage gap; this is a bound and a confirmation. Take them
 together if `internal/checkpoint` is open.
 
-Priority: Tier 4 — no fired trigger (no report of a filled disk or a lost external edit), and the
-reaping half rides along with **P81.24** for free.
+**Checked 2026-09-01: the "rides along with P81.24 for free" framing this entry originally carried was
+wrong and is retracted.** P81.24's shipped mechanism is `fsguard.RestrictToOwner` — a Windows ACL
+restriction on the session DB and its `-wal`/`-shm` companions — which touches file *permissions*, not
+retention. It shipped without adding any byte cap or eviction logic; this item's two asks are both
+still fully unbuilt.
+
+Priority: Tier 4 — no fired trigger (no report of a filled disk or a lost external edit). Both halves
+are real, independent work; neither rides along with anything already shipped.
 
 ### P81.11 — The merge gate exists, passes, and does not run — accepted risk (FIND-11)
 

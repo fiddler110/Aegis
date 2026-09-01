@@ -203,6 +203,37 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// approvalByID reports whether a call with this id is already known —
+// showing (m.approval) or queued (m.approvalQueue) — so a repeated
+// ApprovalBatch listing (P81.33) doesn't duplicate an entry.
+func (m model) approvalByID(id string) *approvalState {
+	if m.approval != nil && m.approval.id == id {
+		return m.approval
+	}
+	for _, a := range m.approvalQueue {
+		if a.id == id {
+			return a
+		}
+	}
+	return nil
+}
+
+// approvalQueueSummary renders the "+N more pending" line shown under the
+// active approval dialog when a parallel round left other calls waiting
+// behind it (P81.33/FIND-33) — the reviewable-summary half of the finding:
+// the operator sees the whole round is queued, not just the one call in
+// front of them.
+func approvalQueueSummary(queue []*approvalState) string {
+	if len(queue) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(queue))
+	for _, a := range queue {
+		names = append(names, a.toolName)
+	}
+	return fmt.Sprintf("+%d more waiting: %s", len(queue), strings.Join(names, ", "))
+}
+
 // buildApproveRequest translates a dialog option into the request sent to
 // the daemon. Split out of answerApproval so the AllowAlways/Pattern
 // decision — in particular the P25.4b empty-pattern case — is directly
@@ -239,10 +270,17 @@ func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
 	if feedback != "" {
 		steerText = fmt.Sprintf("The user denied the %s call. Feedback: %s", a.toolName, feedback)
 	}
-	m.approval = nil
-	m.status = m.phaseStatus()
-	if !m.termFocused {
-		m.ta.Focus()
+	// Advance to the next queued call, if this round left any behind
+	// (P81.33/FIND-33), rather than always returning focus to the composer.
+	if len(m.approvalQueue) > 0 {
+		m.approval = m.approvalQueue[0]
+		m.approvalQueue = m.approvalQueue[1:]
+	} else {
+		m.approval = nil
+		m.status = m.phaseStatus()
+		if !m.termFocused {
+			m.ta.Focus()
+		}
 	}
 	if steerText != "" {
 		// Tagged steerOriginDenialFeedback (P33.15 #3): this is system-phrased
@@ -331,6 +369,9 @@ func (m model) renderApprovalDialog() string {
 			style.Render(truncate(labels[i], max(w-8, 16))) + key + "\n")
 	}
 	b.WriteString(" " + lipgloss.NewStyle().Foreground(colTextMuted).Render("↑/↓ select · enter confirm"))
+	if summary := approvalQueueSummary(m.approvalQueue); summary != "" {
+		b.WriteString("\n " + lipgloss.NewStyle().Foreground(colTextMuted).Render(truncate(summary, max(w-2, 16))))
+	}
 	return dialogFrame(b.String())
 }
 

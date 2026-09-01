@@ -30,8 +30,11 @@ phases:
       the sub-question or gap this round attacks, search (1-3 web_search
       calls with varied phrasings), select against the source-quality bar,
       read the selected URLs (web_fetch), and edit_file to append this
-      round's findings-log entries and audit-trail lines. Round cap: 8 —
-      count the audit trail's rounds before starting another.
+      round's findings-log entries and audit-trail lines. {budget} — sized to
+      this run's actual context window, not the fixed numbers SKILL.md
+      section 0 describes for a reader opening the file directly. Count the
+      audit trail's rounds against the cap stated here before starting
+      another.
 
       Remove the `<!-- PENDING: findings -->` line (do not replace it with
       anything) only when one of the stop conditions holds: every
@@ -96,11 +99,19 @@ never touched past its round-1 placeholders — the audit trail in the final
 report was reconstructed from memory and two of five cited URLs were wrong).
 The file is the primary record; the conversation is the cache.
 
-Set budgets up front and hold to them:
+Set budgets up front and hold to them. **The numbers below are the cloud-scale
+defaults** (roughly what a ~128k-context run gets); every research-round
+prompt states this run's *actual* round cap and source target, computed from
+the model's resolved context window (P71.11) — a small local model gets a
+proportionally smaller budget it can actually complete, rather than planning
+against numbers it has no room to execute. Follow the number in the prompt,
+not the one below, whenever they differ:
 
-- **Round cap: 8.** Most questions resolve in 2–4 rounds; 8 is the hard stop.
-- **Source target:** roughly 5–12 quality sources for a typical question.
-  More sources is not more rigor — corroborated sources are.
+- **Round cap: 8** (cloud-scale default; a 16k window gets 4). Most questions
+  resolve in 2–4 rounds regardless of the cap.
+- **Source target:** roughly 5–12 quality sources for a typical question at
+  cloud scale (3–4 at a 16k window). More sources is not more rigor —
+  corroborated sources are.
 - Anything you can answer from the workspace or your own knowledge, mark as
   uncited background rather than spending rounds re-deriving it from the web —
   but never present uncited background as a sourced finding.

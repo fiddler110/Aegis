@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,21 +92,45 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		}, nil
 	}
 
-	body, ctype, err := t.get(ctx, u.String())
-	if err != nil {
-		return tool.Result{Content: fmt.Sprintf("fetch failed: %v", err), IsError: true}, nil
+	// P71.6: a cache hit skips the network round-trip (and the egress record,
+	// since a cache hit moves no bytes) but still goes through the limit/
+	// truncate/wrap steps below fresh — the cached value is the converted
+	// text before truncation, precisely so a later call with a different
+	// max_chars is served correctly from the same entry rather than getting
+	// whatever length the first call happened to request. Keyed on the URL
+	// alone (fragment stripped, since a fragment is client-side-only and two
+	// URLs differing only by it are the same resource) — not on max_chars,
+	// matching the cache's own key space to "the same page" rather than "the
+	// same call".
+	cache, _ := tool.WebCacheFromContext(ctx)
+	cacheKey := normalizeFetchKey(u)
+	var text string
+	var cacheAge time.Duration
+	var cacheHit bool
+	if cache != nil {
+		if cached, age, ok := cache.Get(cacheKey); ok {
+			text, cacheAge, cacheHit = cached, age, true
+		}
 	}
-	// P81.8: the durable record of this fetch lives in the audit sink
-	// (hooks.Audit); this is the live counterpart a TUI/UI reads without
-	// parsing JSONL. Recorded on success only — a refused or failed fetch
-	// moved no bytes.
-	if tracker, ok := tool.EgressTrackerFromContext(ctx); ok {
-		tracker.Add(u.Hostname(), len(body))
-	}
-
-	text := string(body)
-	if strings.Contains(ctype, "html") {
-		text = htmlToText(body)
+	if !cacheHit {
+		body, ctype, err := t.get(ctx, u.String())
+		if err != nil {
+			return tool.Result{Content: fmt.Sprintf("fetch failed: %v", err), IsError: true}, nil
+		}
+		// P81.8: the durable record of this fetch lives in the audit sink
+		// (hooks.Audit); this is the live counterpart a TUI/UI reads without
+		// parsing JSONL. Recorded on success only — a refused or failed fetch
+		// moved no bytes.
+		if tracker, ok := tool.EgressTrackerFromContext(ctx); ok {
+			tracker.Add(u.Hostname(), len(body))
+		}
+		text = string(body)
+		if strings.Contains(ctype, "html") {
+			text = htmlToText(body)
+		}
+		if cache != nil {
+			cache.Set(cacheKey, text)
+		}
 	}
 	limit := defaultFetchLimit(ctx)
 	if args.MaxChars > 0 {
@@ -122,8 +147,26 @@ func (t *fetchTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	// context-budget feature into a prompt-injection laundering path. The
 	// recovery path here is a second fetch, which stays inside the wrapper.
 	text, _ = TruncateHead(text, limit, "re-fetch with a larger max_chars, or fetch a more specific URL")
-	wrapped := trust.Wrap("web_untrusted_output", [][2]string{{"url", u.String()}}, "a URL fetched from the web", text, t.scanOutput)
+	attrs := [][2]string{{"url", u.String()}}
+	if cacheHit {
+		// P71.6: visible on the result itself, not just skipped silently — the
+		// content may be stale (the actual concern raised against this
+		// mechanism when it was filed), so the model can say so if asked and
+		// re-fetch is always one call away.
+		attrs = append(attrs, [2]string{"served_from_session_cache", fmt.Sprintf("fetched %s ago", cacheAge.Round(time.Second))})
+	}
+	wrapped := trust.Wrap("web_untrusted_output", attrs, "a URL fetched from the web", text, t.scanOutput)
 	return tool.Result{Content: wrapped}, nil
+}
+
+// normalizeFetchKey returns the cache key for u: the URL with its fragment
+// stripped, since a fragment is client-side-only (never sent to the server)
+// and two URLs differing only by it name the same fetched resource.
+func normalizeFetchKey(u *url.URL) string {
+	c := *u
+	c.Fragment = ""
+	c.RawFragment = ""
+	return c.String()
 }
 
 // maxFetchLimit is today's flat default — kept as the ceiling for any window
@@ -325,6 +368,27 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 		max = 10
 	}
 
+	// P71.6: keyed on query+max_results (not on query alone) — a differently
+	// sized request against the same query is a different call whose answer
+	// this cache has not necessarily seen, unlike web_fetch's URL-only key
+	// where the underlying page is the same resource regardless of how much
+	// of it the caller asked to read.
+	cache, _ := tool.WebCacheFromContext(ctx)
+	cacheKey := searchCacheKey(args.Query, max)
+	if cache != nil {
+		if cached, age, ok := cache.Get(cacheKey); ok {
+			if backend, body, ok := decodeSearchCacheValue(cached); ok {
+				attrs := [][2]string{{"query", args.Query}}
+				if backend != "" {
+					attrs = append(attrs, [2]string{"backend", backend})
+				}
+				attrs = append(attrs, [2]string{"served_from_session_cache", fmt.Sprintf("searched %s ago", age.Round(time.Second))})
+				wrapped := trust.Wrap("web_untrusted_output", attrs, "a web search", body, t.scanOutput)
+				return tool.Result{Content: wrapped}, nil
+			}
+		}
+	}
+
 	var results []searchResult
 	var provErr error
 	var backend string
@@ -409,8 +473,39 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 			fmt.Fprintf(&b, "\n[note: configured provider %q failed (%v); DuckDuckGo served this instead]\n", t.provider, provErr)
 		}
 	}
+	if cache != nil {
+		cache.Set(cacheKey, encodeSearchCacheValue(backend, b.String()))
+	}
 	wrapped := trust.Wrap("web_untrusted_output", attrs, "a web search", b.String(), t.scanOutput)
 	return tool.Result{Content: wrapped}, nil
+}
+
+// searchCacheKey normalizes query+max into a webcache key: collapsed
+// whitespace and case-folded, since "Go generics" and "go   generics" name
+// the same search, followed by the requested result count — two requests for
+// the same query but a different count are different calls (see the P71.6
+// comment at the call site).
+func searchCacheKey(query string, max int) string {
+	norm := strings.ToLower(strings.Join(strings.Fields(query), " "))
+	return norm + "|" + strconv.Itoa(max)
+}
+
+// searchCacheSep separates the backend name from the formatted result body
+// in a cached search value. NUL never appears in either half: backend is one
+// of a small fixed set of provider names and body is text already run
+// through collapse/collapseBlankLines.
+const searchCacheSep = "\x00"
+
+func encodeSearchCacheValue(backend, body string) string {
+	return backend + searchCacheSep + body
+}
+
+// decodeSearchCacheValue splits a value produced by encodeSearchCacheValue.
+// ok is false for a value that predates this format (defensive only — every
+// value in the cache was written by encodeSearchCacheValue in this process).
+func decodeSearchCacheValue(v string) (backend, body string, ok bool) {
+	backend, body, found := strings.Cut(v, searchCacheSep)
+	return backend, body, found
 }
 
 // ddgHTMLURL, ddgLiteURL and marginaliaURL are the zero-config scrape

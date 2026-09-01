@@ -88,6 +88,53 @@ func TestDeleteSessionFreesPerSessionRunState(t *testing.T) {
 	}
 }
 
+// TestDeleteSessionFreesWebCache is P71.6's own cleanup half:
+// sessionWebCache follows the same lazily-created-on-first-use,
+// freed-on-delete shape as sessionTools, so a session's web_fetch/web_search
+// memoization does not outlive the session.
+func TestDeleteSessionFreesWebCache(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store,
+		fixedAdapter{text: "hello from agent"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	cache := srv.sessionWebCacheFor(meta.ID)
+	cache.Set("https://example.com/", "cached body")
+	if _, _, ok := srv.sessionWebCacheFor(meta.ID).Get("https://example.com/"); !ok {
+		t.Fatal("expected the entry to be readable before delete")
+	}
+
+	if err := cl.DeleteSession(ctx, meta.ID); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	if _, ok := srv.sessionWebCache.Load(meta.ID); ok {
+		t.Error("sessionWebCache still holds the deleted session's cache")
+	}
+	// A fresh lookup after delete must build a new, empty cache rather than
+	// reusing whatever survived the map deletion by reference.
+	if _, _, ok := srv.sessionWebCacheFor(meta.ID).Get("https://example.com/"); ok {
+		t.Error("cache recreated after delete should be empty")
+	}
+}
+
 func countKeys(m *sync.Map, prefix string) int {
 	n := 0
 	m.Range(func(k, _ any) bool {

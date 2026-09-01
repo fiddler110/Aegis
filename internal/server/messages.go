@@ -172,12 +172,12 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 	}()
 	defer func() { hbCancel(); <-hbDone }()
 
-	// Register a per-run approval channel keyed by a unique run id so a
-	// concurrent run on the same session can't consume this run's answer.
+	// runID prefixes every approval id this run's approver mints (P81.33):
+	// each call registers its own channel in s.pendingApprovals rather than
+	// sharing one keyed by the run, so a concurrent run on the same session
+	// still can't consume this run's answers, and neither can one call in a
+	// parallel round consume another's.
 	runID := newRunID()
-	approvalCh := make(chan approvalDecision, 1)
-	s.pendingApprovals.Store(runID, approvalCh)
-	defer s.pendingApprovals.Delete(runID)
 
 	// Track this run so concurrent parallel sessions are observable via /runs.
 	if s.runs != nil {
@@ -199,11 +199,11 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 		runApprover = permission.AutoApprove{}
 	} else {
 		runApprover = &sseApprover{
-			send:      send,
-			ch:        approvalCh,
-			runID:     runID,
-			sessionID: id,
-			permCache: &s.sessionPermCache,
+			send:             send,
+			runID:            runID,
+			sessionID:        id,
+			permCache:        &s.sessionPermCache,
+			pendingApprovals: &s.pendingApprovals,
 			persistRule: func(toolName, pattern string) {
 				s.addPermissionRuleWithOrigin(toolName, pattern, reqorigin.Normalize(sess.Origin))
 			},

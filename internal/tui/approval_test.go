@@ -339,3 +339,59 @@ func TestApprovalDialogTakesKeyPriorityOverComposer(t *testing.T) {
 		t.Fatal("expected composer focus restored after the dialog resolves")
 	}
 }
+
+// TestApprovalBatchQueuesRatherThanClobbers covers P81.33/FIND-33: a second
+// KindApprovalRequest arriving while the first is still pending (the
+// concurrent-Approve() case a parallel tool round produces) must queue behind
+// the showing dialog instead of silently replacing it, and its id/tool/input
+// must survive to be shown once the first is answered.
+func TestApprovalBatchQueuesRatherThanClobbers(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.streaming = true
+
+	m.applyEvent(api.Event{
+		Kind:           api.KindApprovalRequest,
+		Tool:           "shell",
+		ToolInput:      []byte(`{"command":"echo a"}`),
+		ApprovalReason: "call A",
+		ApprovalID:     "run-1",
+	})
+	if m.approval == nil || m.approval.id != "run-1" {
+		t.Fatalf("expected the first call showing, got %+v", m.approval)
+	}
+
+	// The second call's event carries the batch: both calls, since both were
+	// pending on the daemon side when it was sent.
+	m.applyEvent(api.Event{
+		Kind:           api.KindApprovalRequest,
+		Tool:           "write_file",
+		ToolInput:      []byte(`{"path":"x.txt"}`),
+		ApprovalReason: "call B",
+		ApprovalID:     "run-2",
+		ApprovalBatch: []api.ApprovalItem{
+			{ID: "run-1", Tool: "shell", Input: []byte(`{"command":"echo a"}`), Reason: "call A"},
+			{ID: "run-2", Tool: "write_file", Input: []byte(`{"path":"x.txt"}`), Reason: "call B"},
+		},
+	})
+
+	if m.approval == nil || m.approval.id != "run-1" {
+		t.Fatalf("expected the first call to still be showing, got %+v", m.approval)
+	}
+	if len(m.approvalQueue) != 1 || m.approvalQueue[0].id != "run-2" {
+		t.Fatalf("expected the second call queued behind it, got %+v", m.approvalQueue)
+	}
+	if summary := approvalQueueSummary(m.approvalQueue); summary != "+1 more waiting: write_file" {
+		t.Errorf("unexpected queue summary %q", summary)
+	}
+
+	// Answering the first pops the second into view.
+	m2, _ := m.answerApproval(apprAllowOnce, "")
+	mm := m2.(model)
+	if mm.approval == nil || mm.approval.id != "run-2" {
+		t.Fatalf("expected the queued call to take over, got %+v", mm.approval)
+	}
+	if len(mm.approvalQueue) != 0 {
+		t.Fatalf("expected the queue drained, got %+v", mm.approvalQueue)
+	}
+}

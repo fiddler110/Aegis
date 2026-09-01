@@ -276,6 +276,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	s.sessionSkills.Delete(id)
 	s.taskScopes.Delete(id)
 	s.promptSectionCache.Delete(id)
+	s.sessionWebCache.Delete(id)
 	s.forgetSessionRunState(id)
 	if hadWorkdir {
 		if root, ok := workdir.(string); ok {

@@ -71,9 +71,28 @@ type PhaseParams struct {
 	skillDir string
 	cwd      string
 	runDir   string
+	// contextWindow is this run's resolved serving context window in tokens
+	// (P71.11), read once per phase from st.Engine.EffectiveContextWindow() —
+	// the same figure a mid-turn tool call reads via
+	// tool.ContextWindowFromContext. 0 means unresolved; declaredPhasePrompt's
+	// {budget} substitution treats that the same as an unknown/cloud-scale
+	// window.
+	contextWindow int
 }
 
 func (ph Phase) label() string { return strings.ReplaceAll(ph.name, "-", " ") }
+
+// contextWindow returns st.Engine's resolved serving context window
+// (P71.11), or 0 when st.Engine is nil — a handful of tests build a State
+// with no Engine at all (they exercise conversation-building helpers
+// directly, never Run), and 0 is EffectiveContextWindow's own "unresolved"
+// reading, so this just extends that convention to "no engine to ask."
+func (st *State) contextWindow() int {
+	if st.Engine == nil {
+		return 0
+	}
+	return st.Engine.EffectiveContextWindow()
+}
 
 // threatModelSkill is the one skill with a built-in, hand-tuned plan (and a
 // built-in verifier and run-dir layout to match). Every other skill declares
@@ -266,6 +285,11 @@ func declaredPhasePrompt(spec skills.PhaseSpec, p PhaseParams) string {
 		"{cwd}", filepath.ToSlash(p.cwd),
 		"{phase}", spec.Name,
 		"{files}", strings.Join(spec.Files, ", "),
+		// P71.11: only deep-research's frontmatter prompt currently contains
+		// this placeholder; every other skill's Replace call leaves it
+		// untouched as a no-op, the same as {run_dir} etc. would for a skill
+		// that never mentions them.
+		"{budget}", researchBudgetLine(p.contextWindow),
 	)
 	return r.Replace(body) + "\n\n" + phase6IncrementalEditRule +
 		" Work one marker at a time and keep going until this phase's files carry no `<!-- PENDING` markers. " +
@@ -534,6 +558,7 @@ func Run(ctx context.Context, st *State, phases []Phase) error {
 		conv := &engine.Conversation{System: st.System}
 		conv.Append(userMessage(ph.promptFn(PhaseParams{
 			task: st.TaskPrompt, skillDir: st.SkillDir, cwd: st.Cwd, runDir: runDir,
+			contextWindow: st.contextWindow(),
 		})))
 		st.Logger.Info("phased drive: starting phase", "phase", ph.name, "run_dir", runDir)
 
@@ -771,6 +796,7 @@ func (st *State) freshPhaseConv(ph Phase, runDir string, pending []string, nudge
 	if runDir == "" {
 		conv.Append(userMessage(nudge + ph.promptFn(PhaseParams{
 			task: st.TaskPrompt, skillDir: st.SkillDir, cwd: st.Cwd, runDir: runDir,
+			contextWindow: st.contextWindow(),
 		})))
 	} else {
 		conv.Append(userMessage(nudge + phaseContinuePrompt(ph, pending, ph.contentGateReason(runDir))))

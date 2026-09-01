@@ -313,11 +313,31 @@ type Event struct {
 	TokensEstimated bool `json:"tokens_estimated,omitempty"`
 	// KindApprovalRequest fields
 	ApprovalReason string `json:"approval_reason,omitempty"`
-	ApprovalID     string `json:"approval_id,omitempty"` // run id to echo back when answering
+	ApprovalID     string `json:"approval_id,omitempty"` // this call's approval id — echo back when answering
+	// ApprovalBatch lists every call currently awaiting an answer through the
+	// same run's approver at the moment this event was sent, including this
+	// one (P81.33/FIND-33): a parallel tool round can have more than one call
+	// waiting on the operator at once, and this lets a batch-aware client
+	// render the whole round as one reviewable summary instead of a run of
+	// serial prompts that trains click-through. Nil/empty when this is the
+	// only call pending — a client that ignores the field still gets a
+	// correct single-item prompt from the fields above.
+	ApprovalBatch []ApprovalItem `json:"approval_batch,omitempty"`
 	// GuardRetrying marks a KindGuard failure whose answer is about to be
 	// replaced by a corrective retry (P25.3): clients should withdraw the
 	// answer text they just rendered — the retry replaces it, not follows it.
 	GuardRetrying bool `json:"guard_retrying,omitempty"`
+}
+
+// ApprovalItem is one call awaiting the operator's answer, carried in
+// Event.ApprovalBatch (P81.33/FIND-33). ID matches what a KindApprovalRequest
+// event for this same call carries as ApprovalID, and is what an
+// ApproveRequest answering it must echo back.
+type ApprovalItem struct {
+	ID     string          `json:"id"`
+	Tool   string          `json:"tool"`
+	Input  json.RawMessage `json:"input,omitempty"`
+	Reason string          `json:"reason,omitempty"`
 }
 
 // ApproveRequest is posted to /sessions/{id}/approve to answer a pending

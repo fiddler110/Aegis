@@ -277,8 +277,10 @@ type Server struct {
 	// in-memory only, does not persist across restarts. Surfaced on GET /status.
 	agentLimiter *swarm.AdaptiveLimiter
 
-	// pendingApprovals maps run ID → chan approvalDecision for interactive approval.
-	// The channel is written by handleApprove and read by sseApprover.Approve.
+	// pendingApprovals maps a per-call approval id (P81.33: the run id plus
+	// that sseApprover's own sequence number, not the run id alone) → chan
+	// approvalDecision for interactive approval. The channel is written by
+	// handleApprove and read by sseApprover.Approve.
 	pendingApprovals sync.Map
 
 	// sessionPermCache maps "sessionID\x00toolName" → struct{} for tools the
@@ -337,6 +339,17 @@ type Server struct {
 	// handleDeleteSession alongside the other per-session maps, which is what
 	// keeps it from growing without bound in a long-lived daemon.
 	promptSectionCache sync.Map // string → *sync.Map
+
+	// sessionWebCache maps session ID → that session's *webcache.Cache
+	// (P71.6): web_fetch/web_search memoization, so a URL or query already
+	// seen this session is served from memory instead of re-issued — the
+	// mechanism the deep-research skill's audit trail always claimed to
+	// have. Lazily created per session and reused across its turns, exactly
+	// like sessionToolRegistry, so a page fetched in turn 1 is still cached
+	// after a compaction has erased the model's own memory of fetching it.
+	// Cleared for a session in handleDeleteSession alongside the other
+	// per-session maps.
+	sessionWebCache sync.Map // string → *webcache.Cache
 
 	// closeOnce makes Close idempotent: ListenAndServe defers it, and an
 	// embedder driving the Server through Handler() calls it directly, so both

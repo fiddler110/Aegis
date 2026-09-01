@@ -17,6 +17,7 @@ import (
 	"github.com/fiddler110/aegis/internal/egress"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/sandbox"
+	"github.com/fiddler110/aegis/internal/webcache"
 )
 
 // Result is the outcome of executing a tool.
@@ -988,6 +989,32 @@ func WithEgressTracker(ctx context.Context, t *egress.Tracker) context.Context {
 func EgressTrackerFromContext(ctx context.Context) (*egress.Tracker, bool) {
 	t, ok := ctx.Value(egressTrackerCtxKey{}).(*egress.Tracker)
 	return t, ok
+}
+
+// webCacheCtxKey is the context key for the session's web_fetch/web_search
+// memoization cache (P71.6).
+type webCacheCtxKey struct{}
+
+// WithWebCache returns a context carrying c, so web_fetch/web_search can
+// memoize within the session that owns c without either tool importing
+// internal/server. A nil c carries nothing, matching WebCacheFromContext's
+// "unset" reading — the same convention WithEgressTracker uses, since both
+// exist so a daemon-wide Registry's tool instances can reach session-scoped
+// state through the call's context rather than their own construction-time
+// fields.
+func WithWebCache(ctx context.Context, c *webcache.Cache) context.Context {
+	if c == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, webCacheCtxKey{}, c)
+}
+
+// WebCacheFromContext returns the webcache.Cache carried by ctx, if any. ok
+// is false when unset, in which case the caller should skip memoization
+// rather than construct a throwaway cache that dies with the call.
+func WebCacheFromContext(ctx context.Context) (*webcache.Cache, bool) {
+	c, ok := ctx.Value(webCacheCtxKey{}).(*webcache.Cache)
+	return c, ok
 }
 
 // Get returns a registered tool by name.

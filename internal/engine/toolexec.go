@@ -477,6 +477,7 @@ func (e *Engine) toolCtx(ctx context.Context) context.Context {
 	}
 	ctx = tool.WithExtraRoots(ctx, e.extraRoots)
 	ctx = tool.WithEgressTracker(ctx, e.egress)
+	ctx = tool.WithWebCache(ctx, e.webCache)
 	return tool.WithContextWindow(ctx, e.effectiveContextWindow())
 }
 

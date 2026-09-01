@@ -8,7 +8,15 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-01 (thirty-third record) — **P81.10 and P81.23 shipped: the last two Tier 3
+**Last updated:** 2026-09-01 (thirty-fourth record) — **P71.6 and P71.11 shipped**, out of the Tier 4
+validation pass this same day: in-session web_fetch/web_search memoization (a new `internal/webcache`
+package, session-scoped and freed on session delete) and a deep-research round/source budget derived
+from the run's resolved context window instead of a flat cloud-sized prose number. Both were parked —
+unblocked since **P71.8** landed 2026-08-19 but with no demonstrated cost behind them — and were built
+on direct request rather than promoted speculatively. Full record:
+[P71.6 and P71.11, 2026-09-01](#p716-and-p7111-2026-09-01).
+
+**Last updated (previous):** 2026-09-01 (thirty-third record) — **P81.10 and P81.23 shipped: the last two Tier 3
 build items from the P81 batch**, closing the batch down to P81.33's batched-approval half and P81.12's
 release-artifact half (both parked, not blocked). The container sandbox (**P81.10**) now shadows
 `.aegis/.env` (plus `sandbox.secret_exclude_paths`) out of every mount — one-shot and persistent alike —
@@ -660,6 +668,58 @@ likewise left for the rotation decision that already covers it.
 Every change was run against its package's test suite (`go test ./internal/server/...`,
 `./internal/security/...`, `./internal/sandbox/...`, `./internal/tui/...`, `./internal/config/...`,
 `./internal/cli/...`) plus a full `go build ./...`; new regression tests were added at each layer.
+
+### P71.6 and P71.11, 2026-09-01
+
+Both were Tier 4, parked on **P71.8** landing — it had, 2026-08-19, but neither had a demonstrated cost
+behind it, so a 2026-09-01 Tier 4 validation pass (see [roadmap.md](../roadmap.md#up-next)) left them
+parked rather than force-promoting on the unblock alone. The user asked for them directly, which is the
+trigger this document's own "do not build speculatively" rule was waiting on.
+
+**P71.6 — in-session web_fetch/web_search memoization.** A new leaf package, `internal/webcache`, is a
+thread-safe, session-scoped `Cache` (nil-safe receiver, `egress.Tracker`'s own convention) capped at 200
+entries with oldest-first eviction. It reaches the two tools the same way `egress.Tracker` and the
+resolved context window already do — `tool.WithWebCache`/`tool.WebCacheFromContext` on the call's
+context, set in `Engine.toolCtx` from a new `Options.WebCache` field. The cache itself is owned by
+`Server`, not the engine: a new `sessionWebCache sync.Map` (session ID → `*webcache.Cache`), lazily
+created by `sessionWebCacheFor` and freed in `handleDeleteSession` alongside the other per-session maps
+— the engine that runs each turn is rebuilt per turn (P52.14's own point), so the cache has to live one
+level up to survive across a session's turns and, specifically, across the compaction that erases the
+model's own memory of what it already fetched.
+
+`web_fetch` keys on the URL alone (fragment stripped) and caches the page's converted text *before*
+truncation — deliberately not the wrapped result — so a later call with a different `max_chars` is
+served correctly from the same entry rather than replaying whatever length the first call happened to
+request (`TestFetchToolCacheHonorsPerCallMaxChars` pins this). `web_search` keys on
+query+max_results (a differently-sized request is a different call, unlike a fetch's URL which names
+the same resource regardless of how much of it was read) and caches the assembled result body plus
+which backend served it, so a cache hit still names its backend the way **P71.4** already does for a
+live result. Both cache hits are visible on the result itself — a `served_from_session_cache` attribute
+naming the age — never silent, since the content may be stale and that was the concern raised against
+this mechanism when it was filed. A cache hit skips the egress tracker too (P81.8): no bytes moved.
+
+**P71.11 — deep-research's round/source budget scales with the context window.** A new
+`internal/drive/research_budget.go` derives `(rounds, sourcesLow, sourcesHigh)` from
+`Engine.EffectiveContextWindow()` (a new exported wrapper around the engine's own
+`effectiveContextWindow`) in four bands — ≤16k: 4 rounds/3-4 sources (the project's own shipped
+local-profile default, and the anchor the item was filed against), ≤32k: 5/4-6, ≤64k: 6/4-8, and
+unresolved-or-above: 8/5-12 (today's flat numbers, unchanged, matching `defaultFetchLimit`'s own
+"only ever shrinks a small window" posture). `PhaseParams` gained a `contextWindow` field, read once
+per phase via a new nil-safe `State.contextWindow()` (a handful of tests build a `State` with no
+`Engine`), and `declaredPhasePrompt` gained a `{budget}` placeholder — a no-op substitution for every
+skill whose prompt doesn't mention it. `deep-research/SKILL.md`'s frontmatter prompt now reads
+`{budget}` instead of a hard-coded `Round cap: 8`; section 0's prose keeps the old numbers but is
+rewritten to say they are the cloud-scale defaults and that each round's own prompt carries this run's
+actual, window-sized budget — the numbers a reader sees by opening the file directly no longer disagree
+with what the model is actually told turn to turn.
+
+New tests: `internal/webcache/webcache_test.go` (miss-on-empty, set-then-get, nil-receiver no-op,
+oldest-first eviction at the 200-entry cap); `TestFetchToolServesSecondCallFromCache`,
+`TestFetchToolCacheHonorsPerCallMaxChars`, `TestSearchToolServesSecondCallFromCache` in
+`internal/tool/builtin/web_test.go`; `TestDeleteSessionFreesWebCache` in
+`internal/server/session_state_cleanup_test.go`; `TestResearchBudgetShrinksForASmallWindow` and
+`TestDeclaredPhasePromptSubstitutesBudget` in `internal/drive`. `go build ./...` and `go test ./...`
+are green across the whole tree.
 
 ### P81.10 and P81.23, 2026-09-01
 

@@ -345,10 +345,14 @@ func (s *Server) newEngine(sessionID, mode string, approver permission.Approver,
 		ZeroToolNudgeMaxRetries: s.cfg.Provider.ZeroToolNudge,
 		// P67.1: the per-call caps in truncate.go are per *call*; this bounds
 		// what a parallel round contributes in aggregate.
-		RoundResultCap:      roundCapFor(workdir),
-		Logger:              s.logger,
-		Workdir:             workdir,
-		ExtraRoots:          s.workspaceRootsFor(workdir),
+		RoundResultCap: roundCapFor(workdir),
+		Logger:         s.logger,
+		Workdir:        workdir,
+		ExtraRoots:     s.workspaceRootsFor(workdir),
+		// P71.6: newEngine's only caller (handlePostMessage) always has a real
+		// session id here, so this always creates or reuses that session's own
+		// cache — cleared in handleDeleteSession like the registry clone above.
+		WebCache:            s.sessionWebCacheFor(sessionID),
 		InitialStartedTools: initialStarted,
 		OnToolStarted:       onToolStarted,
 		OnToolFinished:      onToolFinished,

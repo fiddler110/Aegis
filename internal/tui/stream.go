@@ -290,21 +290,46 @@ func (m *model) applyEvent(ev api.Event) {
 		// JSON excerpt strips anything, so a per-renderer fix would only hold
 		// until the next branch is added. The reason string is daemon-authored,
 		// but it renders in the same header and costs nothing to sanitize.
-		toolName := stripControlSeqs(ev.Tool)
-		input := sanitizeToolInputJSON(string(ev.ToolInput))
-		m.approval = &approvalState{
-			toolName: toolName,
-			input:    input,
-			reason:   stripControlSeqs(ev.ApprovalReason),
-			id:       ev.ApprovalID,
-			pattern:  suggestRulePattern(input),
+		// ApprovalBatch lists every call the daemon currently has pending
+		// through this run's approver (P81.33/FIND-33), including this one —
+		// a parallel round can have more than one call waiting on the
+		// operator at once. Fall back to the single-item fields when it's
+		// empty (this is the only pending call, or an older daemon that
+		// doesn't send it). approvalByID skips a call already known — from
+		// an earlier event's batch, or because it's the one already showing.
+		items := ev.ApprovalBatch
+		if len(items) == 0 {
+			items = []api.ApprovalItem{{ID: ev.ApprovalID, Tool: ev.Tool, Input: ev.ToolInput, Reason: ev.ApprovalReason}}
+		}
+		var toolName string
+		for _, it := range items {
+			if m.approvalByID(it.ID) != nil {
+				continue
+			}
+			tn := stripControlSeqs(it.Tool)
+			input := sanitizeToolInputJSON(string(it.Input))
+			st := &approvalState{
+				toolName: tn,
+				input:    input,
+				reason:   stripControlSeqs(it.Reason),
+				id:       it.ID,
+				pattern:  suggestRulePattern(input),
+			}
+			if m.approval == nil {
+				m.approval = st
+				toolName = tn
+			} else {
+				m.approvalQueue = append(m.approvalQueue, st)
+			}
 		}
 		m.status = "approval required"
 		// Blur the composer so its cursor stops implying it's the thing
 		// listening (P25.4a) — the approval dialog is the only visual and
 		// input focus target until it's answered.
 		m.ta.Blur()
-		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + toolName}
+		if toolName != "" {
+			m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + toolName}
+		}
 
 	case api.KindSteer:
 		// A steering instruction was injected mid-run. Flush any partial model
