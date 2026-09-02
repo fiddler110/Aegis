@@ -93,23 +93,23 @@ func TestBatchEventMsgEquivalentToSequential(t *testing.T) {
 
 	seq := followBottomTestModel(t)
 	seq.appendUser("write a long answer", nil)
-	seq.streaming = true
-	seq.followBottom = true
+	seq.streamState.streaming = true
+	seq.streamState.followBottom = true
 	for _, ev := range events {
 		seq = driveUpdate(t, seq, eventMsg(ev))
 	}
 
 	batched := followBottomTestModel(t)
 	batched.appendUser("write a long answer", nil)
-	batched.streaming = true
-	batched.followBottom = true
+	batched.streamState.streaming = true
+	batched.streamState.followBottom = true
 	batched = driveUpdate(t, batched, batchEventMsg{events: events})
 
-	if seq.liveText.String() != batched.liveText.String() {
-		t.Fatalf("batched streamed text differs from sequential:\nseq=%q\nbatched=%q", seq.liveText.String(), batched.liveText.String())
+	if seq.streamState.liveText.String() != batched.streamState.liveText.String() {
+		t.Fatalf("batched streamed text differs from sequential:\nseq=%q\nbatched=%q", seq.streamState.liveText.String(), batched.streamState.liveText.String())
 	}
-	if seq.followBottom != batched.followBottom {
-		t.Fatalf("followBottom diverged: sequential=%v batched=%v", seq.followBottom, batched.followBottom)
+	if seq.streamState.followBottom != batched.streamState.followBottom {
+		t.Fatalf("followBottom diverged: sequential=%v batched=%v", seq.streamState.followBottom, batched.streamState.followBottom)
 	}
 	if plainView(seq) != plainView(batched) {
 		t.Fatal("batched and sequential rendering produced different transcripts")
@@ -123,15 +123,15 @@ func TestBatchEventMsgEquivalentToSequential(t *testing.T) {
 func TestBatchEventMsgClosedTearsDownStream(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("answer", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	m = driveUpdate(t, m, batchEventMsg{
 		events: []api.Event{{Kind: api.KindText, Text: "final answer\n"}},
 		closed: true,
 	})
 
-	if m.streaming {
+	if m.streamState.streaming {
 		t.Fatal("expected streaming to be cleared after a closed batch")
 	}
 	if m.status != "ready" {

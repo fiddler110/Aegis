@@ -340,7 +340,7 @@ func (r *toolRound) run(s *toolSlot) {
 	// P67.4: roundCtx, so a sibling's failure reaches this call's subprocess.
 	// Everything that ends the *turn* still reaches it too, since roundCtx is
 	// derived from ctx.
-	content, isErr := r.e.executeTool(r.roundCtx, s.tu)
+	content, isErr, presentation := r.e.executeTool(r.roundCtx, s.tu)
 	// Read the round's state before failRound below, so a call cannot annotate
 	// its own result with a cancellation it is about to cause. A call that was
 	// genuinely running while a *sibling* failed does get the annotation, which
@@ -355,8 +355,8 @@ func (r *toolRound) run(s *toolSlot) {
 	if isErr {
 		s.trace.ErrorText = boundToolError(content)
 	}
-	r.safeEmit(Event{Kind: KindToolResult, ToolName: s.tu.Name, ToolID: s.tu.ID, ToolResult: content, ToolIsError: isErr})
-	s.result = provider.ToolResultBlock{ToolUseID: s.tu.ID, Content: content, IsError: isErr}
+	r.safeEmit(Event{Kind: KindToolResult, ToolName: s.tu.Name, ToolID: s.tu.ID, ToolResult: content, ToolIsError: isErr, ToolPresentation: presentation})
+	s.result = provider.ToolResultBlock{ToolUseID: s.tu.ID, Content: content, IsError: isErr, Presentation: presentation}
 	// Which failures qualify (P67.4). A read that fails is a normal negative
 	// result — `read_file` on a path the model guessed wrong is how it learns the
 	// path is wrong, and killing its siblings for that would make speculative

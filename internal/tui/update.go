@@ -27,18 +27,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Wizard overlay: delegate all messages while the wizard is open.
-	if m.wizard != nil {
+	if m.overlays.wizard != nil {
 		return m.updateWizard(msg)
 	}
 
 	// Security-config overlay: delegate all messages while it's open (P11.11).
-	if m.securityConfig != nil {
+	if m.overlays.securityConfig != nil {
 		return m.updateSecurityConfig(msg)
 	}
 
 	// Transient informational panel (P33.11): modal except for the
 	// stream-lifecycle allowlist (P33.20), which falls through.
-	if m.transientPanel != nil {
+	if m.overlays.transientPanel != nil {
 		var cmd tea.Cmd
 		var done bool
 		m, cmd, done = m.updateTransientPanel(msg)
@@ -49,7 +49,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Dialog overlay (command palette, persona/session/timeline/model picker):
 	// modal except for its own P33.20 allowlist.
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		var cmd tea.Cmd
 		var done bool
 		m, cmd, done = m.updateDialog(msg)
@@ -60,12 +60,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Quit-confirmation overlay: shown instead of quitting outright when a
 	// turn is streaming (ctrl+c / /quit / /exit) — P16.6.
-	if m.quitConfirm {
+	if m.overlays.quitConfirm {
 		return m.updateQuitConfirm(msg)
 	}
 
 	// Help overlay: only Escape or F1 closes it.
-	if m.helpOpen {
+	if m.overlays.helpOpen {
 		return m.updateHelp(msg)
 	}
 

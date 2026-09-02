@@ -56,6 +56,51 @@ func TestWriteReadEdit(t *testing.T) {
 	}
 }
 
+// TestWriteFilePresentationCarriesPriorContent is P64.4's producer-side
+// check: write_file's Result must attach a Presentation payload carrying the
+// file's content immediately before an overwrite — the only way a presenter
+// can show an accurate diff instead of the "everything added" preview its
+// own call input alone would produce — but must not attach one for a brand
+// new file (nothing to diff against) or a no-op write (old == new).
+func TestWriteFilePresentationCarriesPriorContent(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	w := &writeTool{root: root}
+
+	// New file: nothing to diff against.
+	res, err := w.Execute(ctx, mustJSON(t, map[string]any{"path": "a.txt", "content": "v1\n"}))
+	if err != nil || res.IsError {
+		t.Fatalf("write: %v %+v", err, res)
+	}
+	if res.Presentation != nil {
+		t.Errorf("expected no Presentation for a new file, got %s", res.Presentation)
+	}
+
+	// Overwrite: Presentation must carry the prior content.
+	res, err = w.Execute(ctx, mustJSON(t, map[string]any{"path": "a.txt", "content": "v2\n"}))
+	if err != nil || res.IsError {
+		t.Fatalf("overwrite: %v %+v", err, res)
+	}
+	var payload struct {
+		Old string `json:"old"`
+	}
+	if err := json.Unmarshal(res.Presentation, &payload); err != nil {
+		t.Fatalf("expected valid Presentation JSON, got %s: %v", res.Presentation, err)
+	}
+	if payload.Old != "v1\n" {
+		t.Errorf("expected Presentation.Old %q, got %q", "v1\n", payload.Old)
+	}
+
+	// No-op rewrite (content unchanged): nothing meaningful to diff.
+	res, err = w.Execute(ctx, mustJSON(t, map[string]any{"path": "a.txt", "content": "v2\n"}))
+	if err != nil || res.IsError {
+		t.Fatalf("no-op write: %v %+v", err, res)
+	}
+	if res.Presentation != nil {
+		t.Errorf("expected no Presentation for an unchanged rewrite, got %s", res.Presentation)
+	}
+}
+
 func TestEditAmbiguous(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(root, "f.txt"), []byte("x x x"), 0o644)

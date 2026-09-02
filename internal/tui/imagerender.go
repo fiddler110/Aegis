@@ -201,6 +201,12 @@ const kittyChunk = 4096
 // APC `_G … ST` envelope. Format per
 // https://sw.kovidgoyal.net/kitty/graphics-protocol/. Pure and deterministic so
 // it can be unit-tested without a terminal (see imagerender_test.go).
+// kittyGraphicsSequence's APC chunks are transmission framing, not SGR style
+// state or transitions (see internal/termsafe's package doc, P67.14) — each
+// chunk is self-contained and order-dependent by protocol, not by the
+// state/transition distinction that rule governs, so nothing here is exempt
+// from it so much as outside its scope. Note this before ever adding a batch
+// or dedupe pass over rendered frames that would touch this output.
 func kittyGraphicsSequence(pngData []byte, cols, rows int) string {
 	payload := base64.StdEncoding.EncodeToString(pngData)
 	var sb strings.Builder

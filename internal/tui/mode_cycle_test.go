@@ -46,11 +46,11 @@ func TestCtrlTabCyclesMode(t *testing.T) {
 }
 
 // While streaming, shift+tab must not change the mode (mode is locked for the
-// duration of a run) — the handler only cycles when !m.streaming.
+// duration of a run) — the handler only cycles when !m.streamState.streaming.
 func TestShiftTabIgnoredWhileStreaming(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 	// Pre-seed the custom-command cache so the fall-through completion sync
 	// (shift+tab isn't consumed while streaming) doesn't hit the nil test client.
 	m.slash.customs = []api.CommandInfo{}

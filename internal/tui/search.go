@@ -100,10 +100,10 @@ func (p *transcriptPane) ItemSegment(idx int) int { return idx + p.markerOffset(
 // openSearch enters transcript-search mode, blurring the composer so the
 // search bar owns keyboard input. A no-op if search is already open.
 func (m *model) openSearch() {
-	if m.search != nil {
+	if m.overlays.search != nil {
 		return
 	}
-	m.search = &searchState{current: -1}
+	m.overlays.search = &searchState{current: -1}
 	m.ta.Blur()
 	m.refresh()
 }
@@ -111,7 +111,7 @@ func (m *model) openSearch() {
 // closeSearch leaves search mode, clearing the match highlight and returning
 // keyboard focus to the composer.
 func (m *model) closeSearch() {
-	m.search = nil
+	m.overlays.search = nil
 	m.focusedIdx = -1
 	m.ta.Focus()
 	m.refresh()
@@ -121,7 +121,7 @@ func (m *model) closeSearch() {
 // of the viewport and marks it with the focused-item accent bar. With no
 // current match it just clears the marker.
 func (m *model) jumpToSearchMatch() {
-	idx := m.search.currentItem()
+	idx := m.overlays.search.currentItem()
 	if idx < 0 {
 		m.focusedIdx = -1
 		m.refresh()
@@ -129,7 +129,7 @@ func (m *model) jumpToSearchMatch() {
 	}
 	m.transcript.ScrollToItem(idx)
 	m.focusedIdx = m.transcript.ItemSegment(idx)
-	m.followBottom = false
+	m.streamState.followBottom = false
 	m.refresh()
 }
 
@@ -142,17 +142,17 @@ func (m model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.closeSearch()
 		return m, nil
 	case "enter", "down", "ctrl+n", "ctrl+f":
-		m.search.step(1)
+		m.overlays.search.step(1)
 		m.jumpToSearchMatch()
 		return m, nil
 	case "up", "ctrl+p":
-		m.search.step(-1)
+		m.overlays.search.step(-1)
 		m.jumpToSearchMatch()
 		return m, nil
 	case "backspace":
-		if r := []rune(m.search.query); len(r) > 0 {
-			m.search.query = string(r[:len(r)-1])
-			m.search.run(m.transcript)
+		if r := []rune(m.overlays.search.query); len(r) > 0 {
+			m.overlays.search.query = string(r[:len(r)-1])
+			m.overlays.search.run(m.transcript)
 			m.jumpToSearchMatch()
 		}
 		return m, nil
@@ -160,8 +160,8 @@ func (m model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Printable text (kp.Text is empty for control/navigation keys) extends the
 	// query and re-runs the incremental search.
 	if kp, ok := msg.(tea.KeyPressMsg); ok && kp.Text != "" {
-		m.search.query += kp.Text
-		m.search.run(m.transcript)
+		m.overlays.search.query += kp.Text
+		m.overlays.search.run(m.transcript)
 		m.jumpToSearchMatch()
 	}
 	return m, nil
@@ -180,15 +180,15 @@ func (m model) renderSearchStatus() string {
 
 	var count string
 	switch {
-	case strings.TrimSpace(m.search.query) == "":
+	case strings.TrimSpace(m.overlays.search.query) == "":
 		count = m.th.statusDim.Render("type to search · esc close")
-	case len(m.search.matches) == 0:
+	case len(m.overlays.search.matches) == 0:
 		count = lipgloss.NewStyle().Foreground(colWarning).Render("no matches")
 	default:
 		count = m.th.statusDim.Render(fmt.Sprintf("%d/%d · ⏎/↑↓ next · esc close",
-			m.search.current+1, len(m.search.matches)))
+			m.overlays.search.current+1, len(m.overlays.search.matches)))
 	}
-	return label + " " + m.search.query + cursor + "  " + count
+	return label + " " + m.overlays.search.query + cursor + "  " + count
 }
 
 // highlightSearchMatches reverse-highlights every occurrence of query within a

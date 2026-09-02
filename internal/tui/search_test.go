@@ -92,7 +92,7 @@ func TestTranscriptSearchOverlayFlow(t *testing.T) {
 
 	// Open search.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
-	if m.search == nil {
+	if m.overlays.search == nil {
 		t.Fatal("ctrl+f did not open the search overlay")
 	}
 
@@ -100,11 +100,11 @@ func TestTranscriptSearchOverlayFlow(t *testing.T) {
 	for _, r := range "parser" {
 		m = driveUpdate(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
-	if m.search.query != "parser" {
-		t.Fatalf("query = %q, want %q", m.search.query, "parser")
+	if m.overlays.search.query != "parser" {
+		t.Fatalf("query = %q, want %q", m.overlays.search.query, "parser")
 	}
-	if len(m.search.matches) != 1 || m.search.currentItem() != 1 {
-		t.Fatalf("matches=%v current item=%d, want only item 1", m.search.matches, m.search.currentItem())
+	if len(m.overlays.search.matches) != 1 || m.overlays.search.currentItem() != 1 {
+		t.Fatalf("matches=%v current item=%d, want only item 1", m.overlays.search.matches, m.overlays.search.currentItem())
 	}
 
 	// The search bar and (highlighted) match text are on screen.
@@ -118,13 +118,13 @@ func TestTranscriptSearchOverlayFlow(t *testing.T) {
 
 	// Backspace shortens the query and widens the result set.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace})
-	if m.search.query != "parse" {
-		t.Fatalf("after backspace query = %q, want %q", m.search.query, "parse")
+	if m.overlays.search.query != "parse" {
+		t.Fatalf("after backspace query = %q, want %q", m.overlays.search.query, "parse")
 	}
 
 	// Esc closes and refocuses the composer.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.search != nil {
+	if m.overlays.search != nil {
 		t.Fatal("esc did not close the search overlay")
 	}
 	if m.focusedIdx != -1 {

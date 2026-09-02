@@ -8,7 +8,26 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-02 (thirty-sixth record) — **P74.21 shipped: the local-model harness can now
+**Last updated:** 2026-09-02 (thirty-seventh record) — **QUAL-05, P67.14, P64.4 shipped, and P81.33's
+argv half done in part: the `internal/tui` package was opened for its own reason and four items folded
+in, as QUAL-05's own "promote when" condition asked for.** `model` (`tui.go`) dropped from 97 flat
+fields to 19, grouped into ten cohesive sub-structs (`streamState`, `toolsUI`, `overlays`, `chrome`,
+`usage`, `conn`, `composer`, `sessionMeta`, `splitTerm`, `attention`) continuing the `streamPhase`/
+`toolState` precedent (P77.2) rather than a new one, each group moved and verified independently.
+P67.14's state-vs-transition rule for hand-composed ANSI is now written down in `internal/termsafe`'s
+package doc, with pointers from `ansi16.go` and `imagerender.go`. P81.33's approval prompt now shows
+the effective sandbox backend for a pending shell call (`renderApprovalBody`) — full resolved-argv
+display was scoped out, since it turned out to need touching `classifyShellCommand`, the plan-mode
+security-boundary parser CLAUDE.md flags, not the small TUI-only change the entry's own text suggested.
+P64.4 gave tool results an opaque `Presentation` payload (`tool.Result.Presentation`), threaded through
+the engine, session storage and the TUI, with `write_file` as its first consumer: the approval/transcript
+diff now shows the file's actual prior content instead of an "everything added" preview, live and on
+replay. `go build ./...`, `go vet ./...` and `go test ./...` are green except one pre-existing,
+unrelated failure (`TestEveryRegisterCallSiteDecidesTheLocalProfile`, from the same-day P74.21 commit,
+confirmed to fail identically on the unmodified tree). Full record:
+[QUAL-05, P67.14, P64.4 and P81.33's argv half, 2026-09-02](#qual-05-p6714-p644-and-p8133s-argv-half-2026-09-02).
+
+**Last updated (previous):** 2026-09-02 (thirty-sixth record) — **P74.21 shipped: the local-model harness can now
 touch a prompt or a tool description, built speculatively at direct request with no concrete cargo
 behind it yet.** `profile.Harness` gained `PromptSuffix`, `ToolDescriptionOverrides` and
 `DeferredTools`, layered additively by `profile.NewResolver` exactly as the two existing repair bools
@@ -704,6 +723,109 @@ likewise left for the rotation decision that already covers it.
 Every change was run against its package's test suite (`go test ./internal/server/...`,
 `./internal/security/...`, `./internal/sandbox/...`, `./internal/tui/...`, `./internal/config/...`,
 `./internal/cli/...`) plus a full `go build ./...`; new regression tests were added at each layer.
+
+### QUAL-05, P67.14, P64.4 and P81.33's argv half, 2026-09-02
+
+Four items taken together in one sitting: QUAL-05 was parked with an explicit "take it the next time
+`internal/tui` is opened for its own reason" (see [P66.18](../roadmap.md#p6618--architecture-quality-and-maintainability-residue)),
+and the user asked for exactly that plus three related small items folded in while the package was open
+— P67.14 (a documentation-only rule), the resolved-argv/sandbox-backend half of P81.33's already-shipped
+approval-protocol fix, and P64.4 (edit results carry no diff).
+
+**QUAL-05 — the 97-field `model` struct.** `internal/tui/tui.go`'s `model` (the Bubble Tea root, value-
+receiver `Update`/`View`) already had two fields grouped this way — `streamPhase` and `toolState`
+(P77.2) — and every other field sat flat. QUAL-05 continued that precedent rather than inventing a new
+one: ten sub-structs, each a cohesive slice of the field comments already implied —
+
+- `streamState` — live-streaming and last-turn state (buffers, renderer, cancellation, `phase`,
+  `lastAssistantText`/`lastAnswerBlock`/`thinkEntries`).
+- `toolsUI` — tool-call display state, folding in the existing `toolState` as `toolsUI.state`.
+- `overlays` — every modal/dialog (`dialog`, `wizard`, `securityConfig`, `transientPanel`, `approval`/
+  `approvalQueue`, `completion`, `search`, `keys`, …).
+- `chrome` — terminal geometry and per-session display toggles (size, sidebar, scrollback, mouse,
+  reduced-motion, dashboard sections).
+- `usage` / `conn` — token/cost accounting and the daemon connection-health/cron/sandbox readout.
+- `composer` — input-box bookkeeping (history, queue, pending steers, completion caches); the Bubbles
+  textarea itself stays top-level (`model.ta`), since it's the component, not bookkeeping around it.
+- `sessionMeta` — workspace root, draft persistence, sidebar file/agent/timeline listings.
+- `splitTerm` — the embedded terminal split pane, named to avoid colliding with its own `term termPane`
+  field.
+- `attention` — the P16.1 notification system, named to avoid colliding with the imported `notify`
+  package.
+
+`model` itself is down to 19 top-level fields (`cfg`, `ta`, `sp`, `transcript`, `slash`, the ten group
+fields above, plus `status`, `th`, `sel`/`focusedIdx`, all too small or too central to be worth their
+own wrapper). Each group was a separate step — add the type, move the constructor literal, mechanically
+rewrite every `m.<field>` reference package-wide, remove the old top-level field, then `go build`/
+`go vet`/`go test ./internal/tui/...` before the next group — so a mistake in one group never had to be
+untangled from nine others. The mechanical rewrite's real hazard, confirmed a few times along the way:
+`m` is also the receiver name for `securityConfigModel` and `modelItem` in the same package, so a
+field-name collision (`securityConfigModel.phase`, a `securityConfigPhase`, unrelated to `streamState.
+phase`) silently renamed the wrong struct's field until caught by the next build. Every group's rename
+was checked against every type sharing the `m` receiver name before running, not just against `model`
+itself.
+
+**P67.14 — the state-vs-transition rule.** A discipline note, not a feature, exactly as the entry asked
+for: `internal/termsafe`'s package doc now states the rule for anywhere Aegis hand-composes or rewrites
+escape sequences — a transition sequence (an SGR run computed as a diff from the previous style) may
+never drop an earlier one when concatenating, since its reset codes aren't guaranteed to be a subset of
+the later one's; a state sequence (absolute cursor position, an explicit colour) can be collapsed to the
+last one freely. `internal/tui/ansi16.go`'s `remapANSI16` and `imagerender.go`'s
+`kittyGraphicsSequence` both gained a comment pointing at the rule — the former is exactly the
+transition case the rule warns about, the latter is protocol framing outside the rule's scope entirely.
+No behavior change; the comment is the whole deliverable, as filed.
+
+**P81.33's argv half — done in part.** The entry asked for two things in the approval prompt: the
+resolved argv and the effective sandbox backend. The backend half shipped —
+`renderApprovalBody` (`approval.go`) now appends the session's effective sandbox backend
+(`m.conn.sandboxBackend`, already known from `/status`) to a shell call's approval preview, reusing the
+existing sidebar badge renderer, so confinement is visible in the one place an operator is actually
+about to decide something rather than only in the sidebar. **Resolved-argv display was not built.**
+Investigating it found the entry's "small, independent TUI change" framing didn't hold: showing the
+argv as the shell/path confinement will actually interpret it (after `~` expansion, quoting, argv
+splitting) needs the same parsing `classifyShellCommand` does — the ~1,080-line plan-mode security-
+boundary parser CLAUDE.md names explicitly ("a change to that file is a change to a security boundary").
+Reusing it read-only for display isn't unsafe in principle, but it's a materially bigger and more
+security-adjacent change than a renderer tweak, and was left out of this sitting rather than done
+quickly. `TestApprovalBodyShowsSandboxBackendForShell` (`approval_test.go`) covers the shipped half.
+
+**P64.4 — edit results carry a diff.** The mechanism the entry asked for: `execute` attaches an opaque,
+tool-private JSON payload alongside a result, persisted with it, read back unchanged on replay (no I/O
+at render time). `tool.Result` gained `Presentation json.RawMessage`, threaded through both engine tool-
+execution paths (`executeTool`, called from the sequential path in `toolexec.go` and the parallel-round
+path in `toolround.go`) into `engine.Event.ToolPresentation` → `api.Event.ToolPresentation` (live
+streaming) and `provider.ToolResultBlock.Presentation` (session storage/replay, wired through
+`codec.go`'s `wireBlockJSON`). It never reaches the model: provider adapters build their own request
+bodies field-by-field and simply don't reference it, confirmed by reading both before relying on it
+rather than assuming a shared codec meant a shared blast radius. Two places explicitly drop the payload
+rather than let it leak: the P24.12 secret-redaction branch (`redact.Text` only scrubs `Content`, so a
+`Presentation` diff echoing raw file text would defeat the redaction) and the P81.1 scan-hit-withheld
+branch (withholding `Content` and still shipping `Presentation` would be withholding in name only).
+
+`write_file` is the first, and so far only, consumer — it already read the file's prior content for
+`filetracker.RecordAgentWrite`'s hunk attribution, just never kept it past that call; `writeDiffPresentation`
+(`internal/tool/builtin/file.go`) now attaches it (capped at 256 KiB combined old+new — not covered by
+`roundcap.go`'s per-round bound, which only trims `Content`, so it needed its own), nil for a new file or
+a no-op rewrite. Before this, every write_file diff — call-time preview and finished-card render alike —
+showed every line as "added," even when overwriting a file with only one changed line, because the
+model's own call input carries only the new content. The TUI now recomputes the diff at result time: live,
+`toolCard` gained a `writeInput` field (P64.4 is the second reason a call needs to remember its own input
+past `KindToolCall`, after P74.4's `groupLabel`) so the `KindToolResult` handler can replace `card.call`
+with an accurate diff once `ev.ToolPresentation` arrives; on replay, `update_session.go`'s `loadHistory`
+appends a write_file call as an addressable transcript item (`AppendBlock`, mirroring the live `toolCard`
+mechanism) instead of the plain immediate `Append` every other tool uses, so the matching
+`ToolResultBlock` can upgrade it in place — and so an orphaned call with no matching result (shouldn't
+happen; `repairOrphanedToolUses` exists specifically to prevent it) still renders instead of silently
+vanishing, which a naive "defer the append entirely" version would have risked.
+
+**Tests:** `internal/tool/builtin/builtin_test.go` (`TestWriteFilePresentationCarriesPriorContent` — new
+file gets no payload, an overwrite carries the prior content, a no-op rewrite gets no payload);
+`internal/tui/toolcard_test.go` (`TestToolCard_WriteFileResultUpgradesToAccurateDiff` — live path);
+`internal/tui/update_session_test.go` (new file: `TestLoadHistoryUpgradesWriteFileToAccurateDiff` for
+replay, `TestLoadHistoryOrphanedWriteFileStillRenders` for the orphan safety net);
+`internal/tui/approval_test.go` (`TestApprovalBodyShowsSandboxBackendForShell`). `go build ./...`,
+`go vet ./...` and the full `go test ./...` are green tree-wide except the one pre-existing,
+unrelated `internal/tool/builtin` failure named above.
 
 ### P74.21, 2026-09-02
 

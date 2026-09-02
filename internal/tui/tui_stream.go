@@ -87,9 +87,9 @@ const (
 // phaseStatus is the status word for the run's current phase.
 func (m model) phaseStatus() string {
 	switch {
-	case m.phase.firstTokenAt.IsZero():
+	case m.streamState.phase.firstTokenAt.IsZero():
 		return statusWaiting
-	case !m.phase.modelWaitAt.IsZero():
+	case !m.streamState.phase.modelWaitAt.IsZero():
 		return statusReeval
 	default:
 		return statusGenerating
@@ -103,13 +103,13 @@ func (m model) phaseStatus() string {
 // ramp exists to flag the *absence* of that progress. Feeds stallRampColor.
 func (m model) stallElapsed() time.Duration {
 	switch {
-	case m.phase.firstTokenAt.IsZero():
-		if m.phase.streamStart.IsZero() {
+	case m.streamState.phase.firstTokenAt.IsZero():
+		if m.streamState.phase.streamStart.IsZero() {
 			return 0
 		}
-		return time.Since(m.phase.streamStart)
-	case !m.phase.modelWaitAt.IsZero():
-		return time.Since(m.phase.modelWaitAt)
+		return time.Since(m.streamState.phase.streamStart)
+	case !m.streamState.phase.modelWaitAt.IsZero():
+		return time.Since(m.streamState.phase.modelWaitAt)
 	default:
 		return 0
 	}
@@ -119,20 +119,20 @@ func (m model) stallElapsed() time.Duration {
 // streamStart is zeroed too so the elapsed readout can't briefly quote the
 // previous run's clock in the frames before streamStartedMsg lands.
 func (m *model) beginStream() {
-	m.streaming = true
+	m.streamState.streaming = true
 	// P33.10: re-arm the first-keystroke pre-warm for the next message. The run
 	// starting now loads the model itself, but it may have unloaded again by the
 	// time the user composes their next turn.
-	m.warmPinged = false
-	m.phase.streamStart = time.Time{}
-	m.phase.firstTokenAt = time.Time{}
-	m.phase.modelWaitAt = time.Time{}
-	m.phase.outBytes = 0
+	m.composer.warmPinged = false
+	m.streamState.phase.streamStart = time.Time{}
+	m.streamState.phase.firstTokenAt = time.Time{}
+	m.streamState.phase.modelWaitAt = time.Time{}
+	m.streamState.phase.outBytes = 0
 	m.status = statusWaiting
 	// P33.17: the previous turn's inputTokens is now stale for this turn's
 	// prompt size — streamStats() must hide the ↑ segment rather than quote it
 	// until KindTurnDone reports this turn's real usage.
-	m.inputTokensKnown = false
+	m.usage.inputTokensKnown = false
 }
 
 // markModelOutput ends the waiting phase and accumulates n output bytes. Any
@@ -141,18 +141,18 @@ func (m *model) beginStream() {
 // claims the run is still waiting while P33.3's provisional "preparing <tool>…"
 // card is on screen saying otherwise.
 func (m *model) markModelOutput(n int) {
-	if m.phase.firstTokenAt.IsZero() {
-		m.phase.firstTokenAt = time.Now()
+	if m.streamState.phase.firstTokenAt.IsZero() {
+		m.streamState.phase.firstTokenAt = time.Now()
 		m.status = statusGenerating
 	}
 	// The model has resumed producing output, so any post-tool-round wait
 	// (P33.19) has ended — clear it unconditionally, since a later round sets
 	// it afresh from its own last tool result.
-	if !m.phase.modelWaitAt.IsZero() {
-		m.phase.modelWaitAt = time.Time{}
+	if !m.streamState.phase.modelWaitAt.IsZero() {
+		m.streamState.phase.modelWaitAt = time.Time{}
 		m.status = statusGenerating
 	}
-	m.phase.outBytes += n
+	m.streamState.phase.outBytes += n
 }
 
 // streamStats snapshots the in-flight run's throughput for the status line.
@@ -174,18 +174,18 @@ func (m model) streamStats() streamStats {
 	// KindTurnDone lands — showing it mid-stream would misrepresent it as the
 	// current turn's prompt size, so the ↑ segment stays absent (inputToks
 	// zero) rather than quote a stale figure.
-	if m.inputTokensKnown {
-		st.inputToks = m.inputTokens
+	if m.usage.inputTokensKnown {
+		st.inputToks = m.usage.inputTokens
 	}
-	if !m.phase.streamStart.IsZero() {
-		st.elapsedSecs = int(time.Since(m.phase.streamStart).Seconds())
+	if !m.streamState.phase.streamStart.IsZero() {
+		st.elapsedSecs = int(time.Since(m.streamState.phase.streamStart).Seconds())
 	}
-	st.outputToks = m.phase.outBytes / bytesPerTokenEstimate
+	st.outputToks = m.streamState.phase.outBytes / bytesPerTokenEstimate
 	// Rate over the generation window only. The wait for the first token runs
 	// to a minute on a cold local model; averaging it in would report a
 	// throughput the model never ran at.
-	if !m.phase.firstTokenAt.IsZero() && st.outputToks > 0 {
-		if secs := time.Since(m.phase.firstTokenAt).Seconds(); secs >= 1 {
+	if !m.streamState.phase.firstTokenAt.IsZero() && st.outputToks > 0 {
+		if secs := time.Since(m.streamState.phase.firstTokenAt).Seconds(); secs >= 1 {
 			st.tokPerSec = float64(st.outputToks) / secs
 		}
 	}
@@ -195,11 +195,11 @@ func (m model) streamStats() streamStats {
 // sendUserMessage appends text as a user turn and starts the stream. Shared by
 // the enter/alt+enter key paths and the queued-message drain (TQ8).
 func (m *model) sendUserMessage(text string) tea.Cmd {
-	m.history = append(m.history, text)
-	m.histIdx = -1
-	m.draftInput = ""
+	m.composer.history = append(m.composer.history, text)
+	m.composer.histIdx = -1
+	m.composer.draftInput = ""
 	cleanText, images := extractImageRefs(text, m.cfg.WorkDir)
-	cleanText = extractShellRefs(cleanText, m.term)
+	cleanText = extractShellRefs(cleanText, m.splitTerm.term)
 	displayText := cleanText
 	if displayText == "" && len(images) > 0 {
 		suffix := ""
@@ -210,11 +210,11 @@ func (m *model) sendUserMessage(text string) tea.Cmd {
 	}
 	m.appendUser(displayText, m.renderImageThumbnails(images))
 	m.beginStream()
-	m.followBottom = true // jump to the freshly sent message
+	m.streamState.followBottom = true // jump to the freshly sent message
 	// The callers reset the textarea just before this; with DynamicHeight
 	// that changes fixedH, so resync the pane height (which also re-pins).
-	// Skipped before the first WindowSizeMsg, when m.height is still zero.
-	if m.height > 0 {
+	// Skipped before the first WindowSizeMsg, when m.chrome.height is still zero.
+	if m.chrome.height > 0 {
 		m.applyViewportHeight()
 	}
 	m.refresh()
@@ -227,13 +227,13 @@ func (m *model) sendUserMessage(text string) tea.Cmd {
 // shell tool call the model makes itself needs no such bridge, since its
 // result already flows back to the model on the next turn automatically.
 func (m *model) diagnoseLastFailureCmd() tea.Cmd {
-	f := m.lastFailure
-	if f == nil || m.streaming {
+	f := m.sessionMeta.lastFailure
+	if f == nil || m.streamState.streaming {
 		return nil
 	}
-	m.lastFailure = nil
-	if m.termFocused {
-		m.termFocused = false
+	m.sessionMeta.lastFailure = nil
+	if m.splitTerm.termFocused {
+		m.splitTerm.termFocused = false
 		m.ta.Focus()
 	}
 	out := truncate(strings.TrimSpace(f.output), 4000)
@@ -268,10 +268,10 @@ func (m model) sendSteerCmd(text string, origin steerOrigin) tea.Cmd {
 // stream already closed and swept pendingSteers itself) can tell it has
 // nothing left to do.
 func (m *model) resolvePendingSteer(text string) (steerOrigin, bool) {
-	for i, st := range m.pendingSteers {
+	for i, st := range m.composer.pendingSteers {
 		if st.text == text {
 			origin := st.origin
-			m.pendingSteers = append(m.pendingSteers[:i], m.pendingSteers[i+1:]...)
+			m.composer.pendingSteers = append(m.composer.pendingSteers[:i], m.composer.pendingSteers[i+1:]...)
 			return origin, true
 		}
 	}
@@ -295,11 +295,11 @@ func (m *model) requeueSteer(text string, origin steerOrigin) {
 		m.transcript.Append(m.th.statusDim.Render("⇢ feedback not delivered: "+oneLine(text)) + "\n\n")
 		return
 	}
-	if m.interrupted {
+	if m.composer.interrupted {
 		m.transcript.Append(m.th.statusDim.Render("⇢ steer not delivered (interrupted): "+oneLine(text)) + "\n\n")
 		return
 	}
-	m.queued = append(m.queued, text)
+	m.composer.queued = append(m.composer.queued, text)
 }
 
 // maxEventsPerBatch caps how many events a single waitForEvent drain collapses
@@ -356,15 +356,15 @@ func isStreamLifecycleMsg(msg tea.Msg) bool {
 // flushLiveText renders accumulated assistant text through glamour and appends
 // it to the transcript. Called at KindTurnDone, KindToolCall, and KindError.
 func (m *model) flushLiveText() {
-	if m.liveText.Len() == 0 {
+	if m.streamState.liveText.Len() == 0 {
 		return
 	}
-	raw := m.liveText.String()
-	m.liveText.Reset()
-	m.live.reset()
-	m.lastAssistantText = raw // TQ4: capture for /copy
+	raw := m.streamState.liveText.String()
+	m.streamState.liveText.Reset()
+	m.streamState.live.reset()
+	m.streamState.lastAssistantText = raw // TQ4: capture for /copy
 	// AppendBlock rather than Append so a guard-retry event can withdraw this
 	// answer in place (P25.3); nil when the render was empty or the block was
 	// immediately trimmed out.
-	m.lastAnswerBlock = m.transcript.AppendBlock(m.mdRender(raw))
+	m.streamState.lastAnswerBlock = m.transcript.AppendBlock(m.mdRender(raw))
 }

@@ -14,7 +14,7 @@ import (
 // the srvCtxWin fallback logic that statusInfoMsg also drives.
 func TestStatusInfoMsgUpdatesConnectionState(t *testing.T) {
 	var m model
-	if m.connKnown {
+	if m.conn.connKnown {
 		t.Fatal("connKnown should start false")
 	}
 
@@ -23,51 +23,51 @@ func TestStatusInfoMsgUpdatesConnectionState(t *testing.T) {
 	if cmd != nil {
 		t.Errorf("expected nil cmd from statusInfoMsg, got %v", cmd)
 	}
-	if !m.connKnown {
+	if !m.conn.connKnown {
 		t.Fatal("connKnown should be true after a /status response")
 	}
-	if !m.connReachable {
+	if !m.conn.connReachable {
 		t.Error("connReachable should be true")
 	}
-	if m.connLatencyMS != 42 {
-		t.Errorf("connLatencyMS = %d, want 42", m.connLatencyMS)
+	if m.conn.connLatencyMS != 42 {
+		t.Errorf("connLatencyMS = %d, want 42", m.conn.connLatencyMS)
 	}
 
 	// A daemon-unreachable error (the client.StatusInfo call itself failing)
 	// must flip to unreachable even though info.ProviderReachable is unset.
 	next, _ = m.Update(statusInfoMsg{err: errTestDaemonDown})
 	m = next.(model)
-	if !m.connKnown {
+	if !m.conn.connKnown {
 		t.Fatal("connKnown should remain true")
 	}
-	if m.connReachable {
+	if m.conn.connReachable {
 		t.Error("connReachable should be false after a /status request error")
 	}
-	if m.connLatencyMS != 0 {
-		t.Errorf("connLatencyMS = %d, want 0 after an error", m.connLatencyMS)
+	if m.conn.connLatencyMS != 0 {
+		t.Errorf("connLatencyMS = %d, want 0 after an error", m.conn.connLatencyMS)
 	}
 }
 
 // TestStatusInfoMsgUpdatesSandboxBackend covers the P81.22/FIND-22 sidebar
-// signal: a /status response's SandboxBackend populates m.sandboxBackend, and
+// signal: a /status response's SandboxBackend populates m.conn.sandboxBackend, and
 // a later transient error (SandboxBackend empty, err set) must NOT blank it
 // out — the whole point is a signal that doesn't flicker on a daemon hiccup.
 func TestStatusInfoMsgUpdatesSandboxBackend(t *testing.T) {
 	var m model
-	if m.sandboxBackend != "" {
+	if m.conn.sandboxBackend != "" {
 		t.Fatal("sandboxBackend should start empty")
 	}
 
 	next, _ := m.Update(statusInfoMsg{info: api.StatusInfo{SandboxBackend: "local"}})
 	m = next.(model)
-	if m.sandboxBackend != "local" {
-		t.Errorf("sandboxBackend = %q, want %q", m.sandboxBackend, "local")
+	if m.conn.sandboxBackend != "local" {
+		t.Errorf("sandboxBackend = %q, want %q", m.conn.sandboxBackend, "local")
 	}
 
 	next, _ = m.Update(statusInfoMsg{err: errTestDaemonDown})
 	m = next.(model)
-	if m.sandboxBackend != "local" {
-		t.Errorf("sandboxBackend should survive a transient /status error, got %q", m.sandboxBackend)
+	if m.conn.sandboxBackend != "local" {
+		t.Errorf("sandboxBackend should survive a transient /status error, got %q", m.conn.sandboxBackend)
 	}
 }
 
@@ -85,7 +85,7 @@ func TestRenderSandboxBadge(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.backend, func(t *testing.T) {
-			m := model{sandboxBackend: tc.backend}
+			m := model{conn: conn{sandboxBackend: tc.backend}}
 			got := m.renderSandboxBadge(40)
 			if !strings.Contains(got, tc.wantSub) {
 				t.Errorf("renderSandboxBadge() = %q, want substring %q", got, tc.wantSub)
@@ -116,9 +116,9 @@ func TestRenderConnBadgeAndDetail(t *testing.T) {
 		wantSub string // substring expected in renderConnDetail's output
 	}{
 		{"unknown", model{}, "checking"},
-		{"reachable with latency", model{connKnown: true, connReachable: true, connLatencyMS: 7}, "7ms"},
-		{"reachable no latency", model{connKnown: true, connReachable: true}, "reachable"},
-		{"unreachable", model{connKnown: true, connReachable: false}, "unreachable"},
+		{"reachable with latency", model{conn: conn{connKnown: true, connReachable: true, connLatencyMS: 7}}, "7ms"},
+		{"reachable no latency", model{conn: conn{connKnown: true, connReachable: true}}, "reachable"},
+		{"unreachable", model{conn: conn{connKnown: true, connReachable: false}}, "unreachable"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

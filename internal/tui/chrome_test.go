@@ -19,7 +19,7 @@ func TestSidebarOverlayDoesNotChangeTranscriptGeometry(t *testing.T) {
 
 	closedW, closedH := m.transcript.Width(), m.transcript.Height()
 
-	m.sidebarOpen = true
+	m.chrome.sidebarOpen = true
 	m.layout()
 	if w, h := m.transcript.Width(), m.transcript.Height(); w != closedW || h != closedH {
 		t.Fatalf("sidebar open: transcript geometry changed to (%d,%d), want unchanged (%d,%d)", w, h, closedW, closedH)
@@ -30,7 +30,7 @@ func TestSidebarOverlayDoesNotChangeTranscriptGeometry(t *testing.T) {
 		t.Errorf("expected the sidebar overlay to render with sidebarOpen=true, got:\n%s", got)
 	}
 
-	m.sidebarOpen = false
+	m.chrome.sidebarOpen = false
 	m.layout()
 	if w, h := m.transcript.Width(), m.transcript.Height(); w != closedW || h != closedH {
 		t.Fatalf("sidebar closed again: transcript geometry = (%d,%d), want unchanged (%d,%d)", w, h, closedW, closedH)
@@ -39,8 +39,8 @@ func TestSidebarOverlayDoesNotChangeTranscriptGeometry(t *testing.T) {
 
 // TestSidebarToggleRespectsKeybindingOverride is the regression guard for the
 // dead-binding bug: update_key.go used to hardcode a literal "ctrl+b" case
-// instead of consulting m.keys.SidebarToggle, so a tui.keybindings override
-// for sidebartoggle silently did nothing. It must now flip m.sidebarOpen on
+// instead of consulting m.overlays.keys.SidebarToggle, so a tui.keybindings override
+// for sidebartoggle silently did nothing. It must now flip m.chrome.sidebarOpen on
 // the configured key and no longer on the old default.
 func TestSidebarToggleRespectsKeybindingOverride(t *testing.T) {
 	m := newModel(Config{
@@ -58,33 +58,33 @@ func TestSidebarToggleRespectsKeybindingOverride(t *testing.T) {
 	m.slash.customs = []api.CommandInfo{}
 
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
-	if m.sidebarOpen {
+	if m.chrome.sidebarOpen {
 		t.Fatal("expected the old default ctrl+b to no longer toggle the sidebar once overridden")
 	}
 
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
-	if !m.sidebarOpen {
+	if !m.chrome.sidebarOpen {
 		t.Fatal("expected the configured override ctrl+p to toggle the sidebar")
 	}
 }
 
 // TestSidebarShowsApprovalsSectionWhenPending asserts the passive APPROVALS
 // indicator only appears while something is actually blocked on an answer
-// (m.approval and/or m.approvalQueue), and renders before MODEL/SANDBOX in
+// (m.overlays.approval and/or m.overlays.approvalQueue), and renders before MODEL/SANDBOX in
 // the default section order (approvals are time-sensitive, so they sit near
 // the top rather than being scrolled past).
 func TestSidebarShowsApprovalsSectionWhenPending(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
-	m.sidebarOpen = true
+	m.chrome.sidebarOpen = true
 	m.layout()
 
 	if got := plainView(m); strings.Contains(got, "◇ APPROVALS") {
 		t.Fatalf("expected no APPROVALS section with nothing pending, got:\n%s", got)
 	}
 
-	m.approval = &approvalState{toolName: "shell", id: "ap_1"}
-	m.approvalQueue = []*approvalState{{toolName: "write_file", id: "ap_2"}}
+	m.overlays.approval = &approvalState{toolName: "shell", id: "ap_1"}
+	m.overlays.approvalQueue = []*approvalState{{toolName: "write_file", id: "ap_2"}}
 	m.refresh()
 	got := plainView(m)
 	if !strings.Contains(got, "◇ APPROVALS") {
@@ -111,14 +111,14 @@ func TestScrollbarAutoHidesWhilePinnedToBottom(t *testing.T) {
 	}
 	m.applyViewportHeight()
 
-	if !m.followBottom {
+	if !m.streamState.followBottom {
 		t.Fatal("expected followBottom true immediately after appending content")
 	}
 	if bar := ansi.Strip(m.renderScrollbar()); strings.ContainsAny(bar, "┃│") {
 		t.Errorf("expected a blank scrollbar column while pinned to the bottom, got %q", bar)
 	}
 
-	m.followBottom = false
+	m.streamState.followBottom = false
 	if bar := ansi.Strip(m.renderScrollbar()); !strings.ContainsAny(bar, "┃│") {
 		t.Errorf("expected a visible scrollbar track/thumb once scrolled away from the bottom, got %q", bar)
 	}
@@ -182,7 +182,7 @@ func TestTitleBarFoldedIntoStatusLine(t *testing.T) {
 func TestSidebarOverlayOccludesPaneMouseCoords(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
-	m.sidebarOpen = true
+	m.chrome.sidebarOpen = true
 
 	if _, _, ok := m.toPaneCoord(1, 0); ok {
 		t.Fatal("expected a click under the sidebar overlay to fall outside the pane")

@@ -323,7 +323,7 @@ func init() { applyScheme(darkScheme()) }
 // Must run before newModel, since lipgloss styles capture colors at
 // creation. Also called at runtime by /theme: rebinding the package-level
 // col* vars here is only half of a live switch — the caller must also
-// rebuild m.th (newTheme) and m.renderer (newGlamourRenderer), which capture
+// rebuild m.th (newTheme) and m.streamState.renderer (newGlamourRenderer), which capture
 // colors/style at creation time too.
 // isAutoTheme reports whether a configured theme name requests automatic
 // light/dark detection from the terminal background (P40.5). Empty and "auto"

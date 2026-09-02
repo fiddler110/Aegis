@@ -91,7 +91,7 @@ func TestBuildApproveRequestEmptyPatternNeverAllowsAlways(t *testing.T) {
 func TestApprovalCursorPosTracksSelectionAndFeedbackMode(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{
 		Kind:           api.KindApprovalRequest,
 		Tool:           "shell",
@@ -99,7 +99,7 @@ func TestApprovalCursorPosTracksSelectionAndFeedbackMode(t *testing.T) {
 		ApprovalReason: "execute capability requires approval",
 		ApprovalID:     "run-1",
 	})
-	if m.approval == nil {
+	if m.overlays.approval == nil {
 		t.Fatal("expected pending approval state")
 	}
 
@@ -120,7 +120,7 @@ func TestApprovalCursorPosTracksSelectionAndFeedbackMode(t *testing.T) {
 	}
 
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'f', Text: "f"})
-	if !m.approval.feedbackMode {
+	if !m.overlays.approval.feedbackMode {
 		t.Fatal("expected feedback mode after 'f'")
 	}
 	fg = m.renderApprovalDialog()
@@ -144,7 +144,7 @@ func TestApprovalDialogFlow_NoPTY(t *testing.T) {
 	newApprovalModel := func() model {
 		m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 		m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-		m.streaming = true
+		m.streamState.streaming = true
 		m.applyEvent(api.Event{
 			Kind:           api.KindApprovalRequest,
 			Tool:           "shell",
@@ -156,11 +156,11 @@ func TestApprovalDialogFlow_NoPTY(t *testing.T) {
 	}
 
 	m := newApprovalModel()
-	if m.approval == nil {
+	if m.overlays.approval == nil {
 		t.Fatal("expected pending approval state")
 	}
-	if m.approval.pattern != "npm test*" {
-		t.Fatalf("expected suggested pattern %q, got %q", "npm test*", m.approval.pattern)
+	if m.overlays.approval.pattern != "npm test*" {
+		t.Fatalf("expected suggested pattern %q, got %q", "npm test*", m.overlays.approval.pattern)
 	}
 
 	view := plainView(m)
@@ -172,37 +172,37 @@ func TestApprovalDialogFlow_NoPTY(t *testing.T) {
 
 	// Arrow-key navigation moves the selection and wraps.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	if m.approval.selected != apprAllowAlways {
-		t.Fatalf("expected selection to move to allow-always, got %d", m.approval.selected)
+	if m.overlays.approval.selected != apprAllowAlways {
+		t.Fatalf("expected selection to move to allow-always, got %d", m.overlays.approval.selected)
 	}
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
-	if m.approval.selected != apprDenyFeedback {
-		t.Fatalf("expected selection to wrap to deny-with-feedback, got %d", m.approval.selected)
+	if m.overlays.approval.selected != apprDenyFeedback {
+		t.Fatalf("expected selection to wrap to deny-with-feedback, got %d", m.overlays.approval.selected)
 	}
 
 	// 'f' enters feedback mode; typed runes accumulate; esc backs out.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'f', Text: "f"})
-	if !m.approval.feedbackMode {
+	if !m.overlays.approval.feedbackMode {
 		t.Fatal("expected feedback mode after 'f'")
 	}
 	for _, r := range "bad" {
 		m = driveUpdate(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
-	if m.approval.feedback != "bad" {
-		t.Fatalf("expected typed feedback %q, got %q", "bad", m.approval.feedback)
+	if m.overlays.approval.feedback != "bad" {
+		t.Fatalf("expected typed feedback %q, got %q", "bad", m.overlays.approval.feedback)
 	}
 	if fb := plainView(m); !strings.Contains(fb, "deny — why? bad") {
 		t.Errorf("expected feedback prompt in view, got:\n%s", fb)
 	}
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.approval.feedbackMode {
+	if m.overlays.approval.feedbackMode {
 		t.Fatal("expected esc to leave feedback mode")
 	}
 
 	// 'y' resolves the dialog (the network cmd itself is not executed here).
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'y', Text: "y"})
-	if m.approval != nil {
+	if m.overlays.approval != nil {
 		t.Fatal("expected approval state cleared after answering")
 	}
 }
@@ -215,7 +215,7 @@ func TestApprovalDialogFlow_NoPTY(t *testing.T) {
 func TestApprovalOverlayLeavesTranscriptGeometryAlone(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 
 	beforeH, beforeFixed := m.transcript.Height(), m.fixedH()
 	beforeChat := lipgloss.Height(m.renderChat())
@@ -268,7 +268,7 @@ func TestApprovalOverlayLeavesTranscriptGeometryAlone(t *testing.T) {
 func TestApprovalOverlayHeightIsStableAcrossOptionAndFeedbackModes(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{
 		Kind:       api.KindApprovalRequest,
 		Tool:       "shell",
@@ -278,7 +278,7 @@ func TestApprovalOverlayHeightIsStableAcrossOptionAndFeedbackModes(t *testing.T)
 
 	before := m.transcript.Height()
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'f', Text: "f"})
-	if !m.approval.feedbackMode {
+	if !m.overlays.approval.feedbackMode {
 		t.Fatal("expected feedback mode after 'f'")
 	}
 	if got := m.transcript.Height(); got != before {
@@ -297,7 +297,7 @@ func TestApprovalOverlayHeightIsStableAcrossOptionAndFeedbackModes(t *testing.T)
 func TestApprovalDialogTakesKeyPriorityOverComposer(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 	m.setQueueMode(true)
 
 	// The composer has focus and a partial draft before the dialog opens —
@@ -326,10 +326,10 @@ func TestApprovalDialogTakesKeyPriorityOverComposer(t *testing.T) {
 
 	// Repeated 'y' presses — the reported dead-hotkey symptom — must reach
 	// the dialog, not accumulate as text in the still-blurred composer.
-	for i := 0; i < 5 && m.approval != nil; i++ {
+	for i := 0; i < 5 && m.overlays.approval != nil; i++ {
 		m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'y', Text: "y"})
 	}
-	if m.approval != nil {
+	if m.overlays.approval != nil {
 		t.Fatal("expected 'y' to resolve the approval dialog")
 	}
 	if m.ta.Value() != "h" {
@@ -348,7 +348,7 @@ func TestApprovalDialogTakesKeyPriorityOverComposer(t *testing.T) {
 func TestApprovalBatchQueuesRatherThanClobbers(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 
 	m.applyEvent(api.Event{
 		Kind:           api.KindApprovalRequest,
@@ -357,8 +357,8 @@ func TestApprovalBatchQueuesRatherThanClobbers(t *testing.T) {
 		ApprovalReason: "call A",
 		ApprovalID:     "run-1",
 	})
-	if m.approval == nil || m.approval.id != "run-1" {
-		t.Fatalf("expected the first call showing, got %+v", m.approval)
+	if m.overlays.approval == nil || m.overlays.approval.id != "run-1" {
+		t.Fatalf("expected the first call showing, got %+v", m.overlays.approval)
 	}
 
 	// The second call's event carries the batch: both calls, since both were
@@ -375,23 +375,47 @@ func TestApprovalBatchQueuesRatherThanClobbers(t *testing.T) {
 		},
 	})
 
-	if m.approval == nil || m.approval.id != "run-1" {
-		t.Fatalf("expected the first call to still be showing, got %+v", m.approval)
+	if m.overlays.approval == nil || m.overlays.approval.id != "run-1" {
+		t.Fatalf("expected the first call to still be showing, got %+v", m.overlays.approval)
 	}
-	if len(m.approvalQueue) != 1 || m.approvalQueue[0].id != "run-2" {
-		t.Fatalf("expected the second call queued behind it, got %+v", m.approvalQueue)
+	if len(m.overlays.approvalQueue) != 1 || m.overlays.approvalQueue[0].id != "run-2" {
+		t.Fatalf("expected the second call queued behind it, got %+v", m.overlays.approvalQueue)
 	}
-	if summary := approvalQueueSummary(m.approvalQueue); summary != "+1 more waiting: write_file" {
+	if summary := approvalQueueSummary(m.overlays.approvalQueue); summary != "+1 more waiting: write_file" {
 		t.Errorf("unexpected queue summary %q", summary)
 	}
 
 	// Answering the first pops the second into view.
 	m2, _ := m.answerApproval(apprAllowOnce, "")
 	mm := m2.(model)
-	if mm.approval == nil || mm.approval.id != "run-2" {
-		t.Fatalf("expected the queued call to take over, got %+v", mm.approval)
+	if mm.overlays.approval == nil || mm.overlays.approval.id != "run-2" {
+		t.Fatalf("expected the queued call to take over, got %+v", mm.overlays.approval)
 	}
-	if len(mm.approvalQueue) != 0 {
-		t.Fatalf("expected the queue drained, got %+v", mm.approvalQueue)
+	if len(mm.overlays.approvalQueue) != 0 {
+		t.Fatalf("expected the queue drained, got %+v", mm.overlays.approvalQueue)
+	}
+}
+
+// TestApprovalBodyShowsSandboxBackendForShell is the P81.33/FIND-33 residual:
+// a shell call's rendered command text can't show what confines it, so the
+// approval prompt must surface the effective sandbox backend (already known
+// session-wide via /status, P81.22/FIND-22) alongside the command, not just
+// leave it to the sidebar. Non-shell calls (no sandbox-backend concept) must
+// not grow the extra line.
+func TestApprovalBodyShowsSandboxBackendForShell(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m.conn.sandboxBackend = "container:docker"
+
+	m.overlays.approval = &approvalState{id: "run-1", toolName: "shell", input: `{"command":"npm test"}`}
+	body := ansi.Strip(m.renderApprovalBody(80))
+	if !strings.Contains(body, "sandbox:") || !strings.Contains(body, "container:docker") {
+		t.Errorf("expected shell approval body to show the sandbox backend, got %q", body)
+	}
+
+	m.overlays.approval = &approvalState{id: "run-2", toolName: "write_file", input: `{"path":"x.txt"}`}
+	body = ansi.Strip(m.renderApprovalBody(80))
+	if strings.Contains(body, "sandbox:") {
+		t.Errorf("expected write_file approval body to omit the sandbox line, got %q", body)
 	}
 }

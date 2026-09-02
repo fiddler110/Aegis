@@ -99,7 +99,7 @@ func TestApprovalDialogStripsControlSequencesFromToolInput(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 			m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-			m.streaming = true
+			m.streamState.streaming = true
 			m.applyEvent(api.Event{
 				Kind:           api.KindApprovalRequest,
 				Tool:           c.tool,
@@ -107,7 +107,7 @@ func TestApprovalDialogStripsControlSequencesFromToolInput(t *testing.T) {
 				ApprovalReason: "approval required " + clearRaw,
 				ApprovalID:     "run-1",
 			})
-			if m.approval == nil {
+			if m.overlays.approval == nil {
 				t.Fatal("expected pending approval state")
 			}
 
@@ -123,7 +123,7 @@ func TestApprovalDialogStripsControlSequencesFromToolInput(t *testing.T) {
 			// The stored state is sanitized too, so whatever reads it next —
 			// the desktop notification body, a preview branch added later —
 			// is covered by the same one fix.
-			joined := m.approval.toolName + m.approval.input + m.approval.reason + m.approval.pattern
+			joined := m.overlays.approval.toolName + m.overlays.approval.input + m.overlays.approval.reason + m.overlays.approval.pattern
 			if strings.ContainsRune(joined, 0x1b) {
 				t.Errorf("approvalState still holds an ESC byte: %q", joined)
 			}
@@ -138,7 +138,7 @@ func TestApprovalDialogStripsControlSequencesFromToolInput(t *testing.T) {
 func TestApprovalDialogSanitizationKeepsThePreviewIntact(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{
 		Kind:           api.KindApprovalRequest,
 		Tool:           "write_file",
@@ -146,7 +146,7 @@ func TestApprovalDialogSanitizationKeepsThePreviewIntact(t *testing.T) {
 		ApprovalReason: "write capability requires approval",
 		ApprovalID:     "run-1",
 	})
-	if got := m.approval.pattern; got != "src/*" {
+	if got := m.overlays.approval.pattern; got != "src/*" {
 		t.Errorf("expected the suggested rule pattern to survive sanitization, got %q", got)
 	}
 	view := plainView(m)

@@ -53,7 +53,7 @@ func TestMermaidRendersInTranscript(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{Kind: api.KindText, Text: "Flow:\n\n```mermaid\ngraph TD\nA-->B\n```\n"})
 	m.applyEvent(api.Event{Kind: api.KindTurnDone})
 	m.refresh()

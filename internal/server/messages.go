@@ -938,13 +938,14 @@ func newRunID() string {
 
 func toAPIEvent(ev engine.Event) api.Event {
 	out := api.Event{
-		Kind:        api.EventKind(ev.Kind),
-		Text:        ev.Text,
-		Tool:        ev.ToolName,
-		ToolInput:   ev.ToolInput,
-		ToolID:      ev.ToolID,
-		ToolResult:  ev.ToolResult,
-		ToolIsError: ev.ToolIsError,
+		Kind:             api.EventKind(ev.Kind),
+		Text:             ev.Text,
+		Tool:             ev.ToolName,
+		ToolInput:        ev.ToolInput,
+		ToolID:           ev.ToolID,
+		ToolResult:       ev.ToolResult,
+		ToolIsError:      ev.ToolIsError,
+		ToolPresentation: ev.ToolPresentation,
 	}
 	if ev.Err != nil {
 		out.Error = ev.Err.Error()

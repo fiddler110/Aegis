@@ -696,6 +696,17 @@ func renderMultiEditDiff(th theme, name string, input json.RawMessage, width int
 }
 
 func renderWriteDiff(th theme, name string, input json.RawMessage, width int) (string, bool) {
+	return renderWriteDiffAgainst(th, name, input, "", width)
+}
+
+// renderWriteDiffAgainst is renderWriteDiff with an explicit prior-content
+// baseline (P64.4): write_file's call-time preview has only the new content
+// and must show every line as added even when overwriting an unchanged
+// file, since the model's own call never carries what it's replacing. old
+// is the presenter's own knowledge — the tool's Presentation payload,
+// resolved by the caller — never re-read from disk here (P64.4's own
+// requirement: no I/O at render time, so replay stays deterministic).
+func renderWriteDiffAgainst(th theme, name string, input json.RawMessage, old string, width int) (string, bool) {
 	var a struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -703,8 +714,25 @@ func renderWriteDiff(th theme, name string, input json.RawMessage, width int) (s
 	if json.Unmarshal(input, &a) != nil || a.Path == "" {
 		return "", false
 	}
-	lines, hidden := diffLines(th, a.Path, "", a.Content, width, maxDiffLines)
+	lines, hidden := diffLines(th, a.Path, old, a.Content, width, maxDiffLines)
 	return assembleDiff(th, name, a.Path, lines, hidden), true
+}
+
+// writePresentationOld extracts the {"old": "..."} payload writeDiffPresentation
+// (internal/tool/builtin) attaches to a write_file result. Returns "", false
+// when absent or malformed — the caller falls back to the old all-added
+// preview rather than treating a decode failure as an error.
+func writePresentationOld(presentation json.RawMessage) (string, bool) {
+	if len(presentation) == 0 {
+		return "", false
+	}
+	var p struct {
+		Old string `json:"old"`
+	}
+	if json.Unmarshal(presentation, &p) != nil {
+		return "", false
+	}
+	return p.Old, true
 }
 
 func renderShellCall(th theme, name string, input json.RawMessage, width int) (string, bool) {

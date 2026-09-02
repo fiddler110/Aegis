@@ -63,7 +63,7 @@ func (m *model) paneOrigin() (col, row int) {
 // reserves layout width), but visually covered, so mouse coordinates in
 // that band must not resolve to transcript content.
 func (m *model) sidebarOccludes(x int) bool {
-	return m.sidebarOpen && m.width >= sidebarMinTermW && x < m.sidebarW+1
+	return m.chrome.sidebarOpen && m.chrome.width >= sidebarMinTermW && x < m.chrome.sidebarW+1
 }
 
 // toPaneCoord translates absolute mouse coordinates to pane-relative
@@ -90,7 +90,7 @@ func (m *model) toPaneCoord(x, y int) (col, row int, ok bool) {
 func (m *model) clampPaneCoord(x, y int) (col, row int) {
 	ox, oy := m.paneOrigin()
 	if m.sidebarOccludes(x) {
-		x = ox + m.sidebarW + 1
+		x = ox + m.chrome.sidebarW + 1
 	}
 	col = max(0, min(x-ox, m.transcript.Width()-1))
 	row = max(0, min(y-oy, m.transcript.Height()-1))
@@ -190,13 +190,13 @@ func selectedText(lines []string, r1, c1, r2, c2 int) string {
 // toolBlockAt returns the toolBlock tracked for a transcript item, or nil if
 // it isn't a resolved tool card/group (pending, replayed, or not a tool
 // block at all) — the mouse-click half of P75.1's per-block toggle, sharing
-// the same model.toolState.toolBlocks registry the keyboard path
+// the same model.toolsUI.state.toolBlocks registry the keyboard path
 // (toggleLastToolBlock) already addresses by "last resolved block".
 func (m *model) toolBlockAt(it *transcriptItem) toolBlock {
 	if it == nil {
 		return nil
 	}
-	for _, b := range m.toolState.toolBlocks {
+	for _, b := range m.toolsUI.state.toolBlocks {
 		if b.blkItem() == it {
 			return b
 		}
@@ -349,10 +349,10 @@ func (m model) renderTranscriptContent() string {
 	// the visible window. Applied before the focused-item bar and selection
 	// overlays below, all of which preserve each line's cell width so the
 	// offsets they compute stay valid after this pass.
-	if m.search != nil && strings.TrimSpace(m.search.query) != "" {
+	if m.overlays.search != nil && strings.TrimSpace(m.overlays.search.query) != "" {
 		hl := lipgloss.NewStyle().Foreground(colBrandFg).Background(colBrandBg).Bold(true)
 		for row := range lines {
-			lines[row] = highlightSearchMatches(lines[row], m.search.query, hl)
+			lines[row] = highlightSearchMatches(lines[row], m.overlays.search.query, hl)
 		}
 	}
 
@@ -409,14 +409,14 @@ func (m model) renderTranscriptContent() string {
 // dim track. P74.2: it carries no information while pinned to the bottom —
 // the normal state — so it renders as a blank column there, the way a GUI
 // overlay scrollbar auto-hides; it only draws once the user has scrolled
-// away (m.followBottom false), or when nothing is scrollable at all.
+// away (m.streamState.followBottom false), or when nothing is scrollable at all.
 func (m model) renderScrollbar() string {
 	h := m.transcript.Height()
 	if h <= 0 {
 		return ""
 	}
 	start, end, ok := m.transcript.ScrollbarThumb()
-	ok = ok && !m.followBottom
+	ok = ok && !m.streamState.followBottom
 	track := lipgloss.NewStyle().Foreground(colBorder)
 	thumb := lipgloss.NewStyle().Foreground(colAccent)
 

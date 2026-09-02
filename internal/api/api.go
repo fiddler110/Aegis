@@ -288,12 +288,19 @@ type Event struct {
 	// its matching KindToolResult so a client can correlate the two exactly
 	// — e.g. for concurrent tool calls, which don't necessarily produce
 	// results in call order (P21.2; see engine.Event.ToolID).
-	ToolID       string  `json:"tool_id,omitempty"`
-	ToolResult   string  `json:"tool_result,omitempty"`
-	ToolIsError  bool    `json:"tool_is_error,omitempty"`
-	InputTokens  int     `json:"input_tokens,omitempty"`
-	OutputTokens int     `json:"output_tokens,omitempty"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
+	ToolID      string `json:"tool_id,omitempty"`
+	ToolResult  string `json:"tool_result,omitempty"`
+	ToolIsError bool   `json:"tool_is_error,omitempty"`
+	// ToolPresentation (P64.4) mirrors tool.Result.Presentation on
+	// KindToolResult: an opaque, tool-private JSON payload a client-side
+	// renderer may use instead of ToolResult — e.g. a diff hunk computed from
+	// content the tool read but the model's own call never carried. Empty
+	// when the tool has nothing better than ToolResult to offer; a client
+	// that ignores this field still renders correctly off ToolResult alone.
+	ToolPresentation json.RawMessage `json:"tool_presentation,omitempty"`
+	InputTokens      int             `json:"input_tokens,omitempty"`
+	OutputTokens     int             `json:"output_tokens,omitempty"`
+	CostUSD          float64         `json:"cost_usd,omitempty"`
 	// EgressBytes is the web_fetch byte count pulled in this turn (P81.8) — a
 	// delta, safe to sum across every turn of a run — mirroring the durable
 	// per-call record written to the audit sink for the same calls.

@@ -68,8 +68,8 @@ func TestRenderOverlayCompositesOverChat(t *testing.T) {
 		t.Fatalf("expected welcome banner in base chat view, got: %q", base)
 	}
 
-	pal := newPalette(m.width, m.height, allCommandEntries(nil))
-	m.dialog = &pal
+	pal := newPalette(m.chrome.width, m.chrome.height, allCommandEntries(nil))
+	m.overlays.dialog = &pal
 
 	full := ansi.Strip(m.renderContent())
 	if !strings.Contains(full, "Command Palette") {
@@ -95,17 +95,17 @@ func TestDimOutsideLeavesDialogRegionUntouched(t *testing.T) {
 func TestQuitConfirmGatesStreamingQuit(t *testing.T) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 
 	m = driveUpdate(t, m, slashResultMsg{Quit: true})
-	if !m.quitConfirm {
+	if !m.overlays.quitConfirm {
 		t.Fatal("expected quitConfirm to be set while streaming")
 	}
 
 	// esc cancels: streaming continues, no quit.
 	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = next.(model)
-	if m.quitConfirm {
+	if m.overlays.quitConfirm {
 		t.Error("expected quitConfirm cleared after esc")
 	}
 	if cmd != nil {
@@ -113,7 +113,7 @@ func TestQuitConfirmGatesStreamingQuit(t *testing.T) {
 	}
 
 	// Re-open and confirm.
-	m.quitConfirm = true
+	m.overlays.quitConfirm = true
 	_, cmd = m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	if cmd == nil {
 		t.Fatal("expected a quit cmd from confirming")
@@ -131,7 +131,7 @@ func TestQuitImmediateWhenNotStreaming(t *testing.T) {
 
 	next, cmd := m.Update(slashResultMsg{Quit: true})
 	m = next.(model)
-	if m.quitConfirm {
+	if m.overlays.quitConfirm {
 		t.Error("did not expect quitConfirm when not streaming")
 	}
 	if cmd == nil {
@@ -209,8 +209,8 @@ func TestRenderReturnsDialogCursor(t *testing.T) {
 		t.Errorf("expected no cursor with no dialog open, got %#v", cur)
 	}
 
-	pal := newPalette(m.width, m.height, allCommandEntries(nil))
-	m.dialog = &pal
+	pal := newPalette(m.chrome.width, m.chrome.height, allCommandEntries(nil))
+	m.overlays.dialog = &pal
 
 	_, cur := m.render()
 	if cur == nil {

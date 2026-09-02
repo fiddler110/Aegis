@@ -20,7 +20,7 @@ func escKeyMsg() tea.KeyMsg { return tea.KeyPressMsg{Code: tea.KeyEscape} }
 func TestEscEsc_EmptyInputNotStreaming_OpensBacktrackPicker(t *testing.T) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if m.streaming {
+	if m.streamState.streaming {
 		t.Fatal("precondition: model should not be streaming")
 	}
 	if m.ta.Value() != "" {
@@ -30,7 +30,7 @@ func TestEscEsc_EmptyInputNotStreaming_OpensBacktrackPicker(t *testing.T) {
 	// First Esc: arms the double-tap, does not fire anything yet.
 	next, cmd := m.Update(escKeyMsg())
 	m = next.(model)
-	if !m.backtrackArmed {
+	if !m.composer.backtrackArmed {
 		t.Fatal("expected first Esc on empty input to arm backtrackArmed")
 	}
 	if cmd != nil {
@@ -40,7 +40,7 @@ func TestEscEsc_EmptyInputNotStreaming_OpensBacktrackPicker(t *testing.T) {
 	// Second Esc: fires the backtrack picker fetch and disarms.
 	next, cmd = m.Update(escKeyMsg())
 	m = next.(model)
-	if m.backtrackArmed {
+	if m.composer.backtrackArmed {
 		t.Error("expected backtrackArmed to reset after the second Esc")
 	}
 	if cmd == nil {
@@ -58,7 +58,7 @@ func TestEscEsc_SameFrameAltEsc(t *testing.T) {
 
 	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape, Mod: tea.ModAlt})
 	m = next.(model)
-	if m.backtrackArmed {
+	if m.composer.backtrackArmed {
 		t.Error("alt+esc should fire immediately, not leave backtrackArmed armed")
 	}
 	if cmd == nil {
@@ -80,7 +80,7 @@ func TestEsc_NonEmptyInput_ClearsWithoutArming(t *testing.T) {
 	if m.ta.Value() != "" {
 		t.Errorf("expected Esc to clear the input, got %q", m.ta.Value())
 	}
-	if m.backtrackArmed {
+	if m.composer.backtrackArmed {
 		t.Error("clearing non-empty input should not arm the backtrack double-tap")
 	}
 	if cmd != nil {
@@ -99,7 +99,7 @@ func TestEscEsc_InterveningKeyDisarms(t *testing.T) {
 	m.slash.customs = []api.CommandInfo{}
 
 	m = driveUpdate(t, m, escKeyMsg())
-	if !m.backtrackArmed {
+	if !m.composer.backtrackArmed {
 		t.Fatal("expected first Esc to arm backtrackArmed")
 	}
 
@@ -109,7 +109,7 @@ func TestEscEsc_InterveningKeyDisarms(t *testing.T) {
 	// intervening key disarms" behavior from the "Esc always clears
 	// non-empty input first" behavior exercised separately above.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	if m.backtrackArmed {
+	if m.composer.backtrackArmed {
 		t.Fatal("expected a non-Esc key to disarm backtrackArmed")
 	}
 	if m.ta.Value() != "" {
@@ -120,7 +120,7 @@ func TestEscEsc_InterveningKeyDisarms(t *testing.T) {
 	// sequence was broken.
 	next, cmd := m.Update(escKeyMsg())
 	m = next.(model)
-	if !m.backtrackArmed {
+	if !m.composer.backtrackArmed {
 		t.Error("expected Esc after the break to re-arm rather than fire")
 	}
 	if cmd != nil {

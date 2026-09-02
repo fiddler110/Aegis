@@ -26,7 +26,6 @@
     - [P66.19 — Capability gaps with no fired trigger](#p6619--capability-gaps-with-no-fired-trigger)
     - [P77.6 — No OS-level process sandbox on Windows (GAP-05, spun out of P66.19)](#p776--no-os-level-process-sandbox-on-windows-gap-05-spun-out-of-p6619)
     - [P66.20 — Efficiency residue](#p6620--efficiency-residue)
-    - [P64.4 — Edit results carry no diff, and a tool cannot attach anything a replay can render](#p644--edit-results-carry-no-diff-and-a-tool-cannot-attach-anything-a-replay-can-render)
     - [P64.5 — `ask_user` is one free-form question; unattended answers cannot be routed](#p645--ask_user-is-one-free-form-question-unattended-answers-cannot-be-routed)
     - [P61.7 — Retry/terminal classification over _backend-echoed_ text (remainder)](#p617--retryterminal-classification-over-backend-echoed-text-remainder)
     - [P60.3 — Checkpoints capture files only, so `/rewind` is silent about everything else](#p603--checkpoints-capture-files-only-so-rewind-is-silent-about-everything-else)
@@ -38,7 +37,6 @@
     - [P67.11 — Every budget is a ceiling; none expresses how much effort is wanted](#p6711--every-budget-is-a-ceiling-none-expresses-how-much-effort-is-wanted)
     - [P67.12 — Personas cannot accumulate anything across runs](#p6712--personas-cannot-accumulate-anything-across-runs)
     - [P67.13 — There is no way to execute a plan without committing to it](#p6713--there-is-no-way-to-execute-a-plan-without-committing-to-it)
-    - [P67.14 — Hand-composed ANSI has no rule about transitions versus state](#p6714--hand-composed-ansi-has-no-rule-about-transitions-versus-state)
     - [P81.7 — The local model endpoint is unauthenticated plaintext HTTP on loopback (FIND-07)](#p817--the-local-model-endpoint-is-unauthenticated-plaintext-http-on-loopback-find-07)
     - [P81.18 — The self-signed certificate warning conditions operators to click through (FIND-18)](#p8118--the-self-signed-certificate-warning-conditions-operators-to-click-through-find-18)
     - [P81.28 — Prose tool-call parsing can promote quoted untrusted text into real calls (FIND-28)](#p8128--prose-tool-call-parsing-can-promote-quoted-untrusted-text-into-real-calls-find-28)
@@ -66,16 +64,17 @@ across eight sittings on 2026-08-31 and 2026-09-01, the last of which closed **P
 approval-protocol half alongside **P81.10** and **P81.23**. See [Up next](#up-next) for the current
 take order and [releases.md](releases.md) for every closure's full record.
 
-**41 open items: 32 build + 9 verification-only.** Tier 1: **0** — both of the batch's Tier 1 items
+**39 open items: 30 build + 9 verification-only.** Tier 1: **0** — both of the batch's Tier 1 items
 closed 2026-08-31 without production code: **P81.6** was **refuted** (the trust freeze already covers
 `provider.base_url` — the report looked in `fingerprint.go`, the policy table is in `freeze.go`), and
 **P81.11** is an **accepted risk**, re-tiered to 4 after the operator confirmed the CI disablement is
 deliberate. Tier 2: **0** — **P81.33** shipped in full 2026-09-01, closing out the batch's Tier 2 work.
 Tier 3: **1** — **P81.12**'s release-artifact half only; **P81.10** and **P81.23** shipped
 2026-09-01, and **P76.1** (both audit sessions done, survivors shipped) and **P80.1** (closed in full)
-are also closed out of this tier. Tier 4: **31** — unchanged by the P81 batch's own closures, but down
-2 from **P71.6** and **P71.11** shipping 2026-09-01 out of that day's Tier 4 validation pass (see its
-own section for what's left in it). Verification: **9** (unchanged; **P80.4** added 2026-08-30).
+are also closed out of this tier. Tier 4: **29** — down 2 from **P71.6** and **P71.11** shipping
+2026-09-01, and down another 2 from **P67.14** and **P64.4** shipping 2026-09-02 out of the same
+`internal/tui` sitting that closed **QUAL-05** (see [Up next](#up-next) and the Tier 4 section for what's
+left). Verification: **9** (unchanged; **P80.4** added 2026-08-30).
 
 **The 2026-08-31 threat-model batch was 32 build items when filed; 1 remains**, the Tier 3 slice
 named above. That is intake from an external analysis rather than a backlog that accumulated. The first
@@ -302,7 +301,10 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
-**Last updated: 2026-09-02** (P65.2 closed by live evidence, negative result; follow-up filed and fixed
+**Last updated: 2026-09-02** (**QUAL-05, P67.14 and P64.4 shipped**, and **P81.33**'s argv half done in
+part — the user opened `internal/tui` for its own reason, QUAL-05's own "promote when" condition, and
+folded in the other three; full record in [releases.md](releases/releases-01.md#qual-05-p6714-p644-and-p8133s-argv-half-2026-09-02).
+Before that, **P65.2** closed by live evidence, negative result; follow-up filed and fixed
 same day as **P84.4** — see [its record](#p844--the-compaction-skeletons-dynamic-headings-echo-the-opening-instruction-instead-of-the-transcripts-current-state)).
 The P81 threat-model batch is down to its last parked slice: **P81.12**'s release-artifact half.
 Everything else in the batch — all of Tier 1 and Tier 2 including **P81.33** (both halves, the second
@@ -602,14 +604,23 @@ pins it. Every `KindApprovalRequest` event now also carries `ApprovalBatch`, the
 currently awaiting an answer through that run's approver; a batch-aware client merges it into a queue
 instead of overwriting the one dialog it shows, so a parallel round renders as "the first call, plus N
 more waiting: tool, tool…" — one reviewable summary — rather than a run of serial prompts with no
-visibility into what's still coming. The TUI is that client (`m.approvalQueue`,
-`approvalQueueSummary`); ACP and `/side` read only the unchanged single-item fields and are unaffected,
-including gaining the same correlation fix. Showing the resolved argv in the prompt (the effective
-sandbox backend already shipped with **P81.22**) is the one piece left, and is a small, independent TUI
-change against `renderApprovalBody` whenever it's next in scope.
+visibility into what's still coming. The TUI is that client (`m.overlays.approvalQueue` since QUAL-05's
+struct split, `approvalQueueSummary`); ACP and `/side` read only the unchanged single-item fields and
+are unaffected, including gaining the same correlation fix.
 
-Priority: closed — the batching half that needed a protocol change is done; the resolved-argv display
-is small enough to fold into whatever next touches that renderer rather than holding this item open.
+**Sandbox-backend half shipped 2026-09-02, resolved-argv half deliberately not built.**
+`renderApprovalBody` now appends the effective sandbox backend (already shipped with **P81.22**) to a
+shell call's approval preview — done while `internal/tui` was open for QUAL-05, per this entry's own
+note that it was "a small, independent TUI change... whenever it's next in scope."
+The resolved-argv half turned out not to fit that description: showing the argv as the confinement will
+actually interpret it needs `classifyShellCommand`'s own parsing (`~` expansion, quoting, argv
+splitting) — the plan-mode security-boundary parser CLAUDE.md names explicitly, not a renderer-only
+concern. Left for a dedicated sitting rather than done quickly inside this one. Record:
+[releases.md](releases/releases-01.md#qual-05-p6714-p644-and-p8133s-argv-half-2026-09-02).
+
+Priority: closed — the batching half that needed a protocol change is done, and so is the sandbox-
+backend display; resolved-argv display is real but bigger than filed, and is not a fired trigger on its
+own.
 
 ---
 
@@ -779,18 +790,21 @@ a blocker on this item.
 
 ## Open Work — Tier 4
 
-**Status: 29 open** — down 2 from **P71.6** and **P71.11** shipping 2026-09-01 out of that day's
-validation pass (see below). Four arrived 2026-08-31 with the P81 threat-model batch (**P81.7**,
+**Status: 29 open** — down 2 (from 31) on **2026-09-02**, when **P67.14** and **P64.4** shipped out of
+the same `internal/tui` sitting that closed QUAL-05 (a P66.18 sub-finding, not its own item here — see
+that entry). Four arrived 2026-08-31 with the P81 threat-model batch (**P81.7**,
 **P81.18**, **P81.28**, **P81.31**), each parked for a stated reason rather than by default: P81.7's
 prerequisite is a multi-user host and half its fix is upstream in Ollama; P81.18 is documentation and
 a trust-store helper with no fired trigger while the UI stays on loopback; P81.28's shim is off by
 default and the containment it wants is **P81.1**'s to build; and P81.31's own entry corrects a since-
 retracted claim that its reaping half would ride along with **P81.24** for free — it did not, and both
 of P81.31's halves are still unbuilt. **P80.2** and **P80.3** were filed 2026-08-30 as the residue of the comprehensive
-audit (the three packages it never read, and the `Server` struct half of its L4 split). The other 23 are
+audit (the three packages it never read, and the `Server` struct half of its L4 split). The rest are
 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
-6 from the P66 review batch, 5 from the P67 external-source reading, 3 from the P71 batch filed
-2026-08-19 (**P71.7**, **P71.12**, **P71.13** — **P71.6** and **P71.11** shipped 2026-09-01),
+6 from the P66 review batch, 4 from the P67 external-source reading (down from 5 — **P67.14** shipped
+2026-09-02), 3 from the P71 batch filed
+2026-08-19 (**P71.7**, **P71.12**, **P71.13** — **P71.6** and **P71.11** shipped 2026-09-01, and were
+never their own heading in this tier),
 **P74.21** (filed 2026-08-21
 the same day P74.17 shipped without it), and **P77.6** (filed 2026-08-25, spun out of P66.19). **P77.2**,
 **P77.3**, **P77.4**, and **P77.5** (filed the same
@@ -1115,21 +1129,20 @@ on prune, and two maps leak on delete (ARCH-10).
 tagged `CLN-3`), and the P81.24/P81.25/P81.27 `fsguard.RestrictToOwner` work confirmed it also covers
 the `-wal`/`-shm` sidecars ([releases.md](releases/releases-01.md#p8115-p8116-p8119-p8129-and-p8132-plus-p816-refuted-and-p8111-accepted-risk-2026-08-31)).
 No item was ever filed to close this — the de-duplication happened as a side effect of other work — so
-this note is the only record. `internal/tui` is
-a god package with a 97-field god struct (QUAL-05). Ten ad-hoc `truncate` helpers sit alongside the one
+this note is the only record. ~~`internal/tui` is
+a god package with a 97-field god struct (QUAL-05).~~ **QUAL-05 shipped 2026-09-02** — the next time
+`internal/tui` was opened for its own reason, exactly as this entry's own "promote when" asked for.
+`model` (`tui.go`) is now 19 top-level fields grouped into ten cohesive sub-structs
+(`streamState`/`toolsUI`/`overlays`/`chrome`/`usage`/`conn`/`composer`/`sessionMeta`/`splitTerm`/
+`attention`), continuing the `streamPhase`/`toolState` precedent (P77.2) instead of inventing a new one.
+Full record: [releases.md](releases/releases-01.md#qual-05-p6714-p644-and-p8133s-argv-half-2026-09-02).
+Ten ad-hoc `truncate` helpers sit alongside the one
 canonical truncation policy in `truncate.go` (QUAL-07). `context.Background()` appears inside
 request-scoped handlers (QUAL-08). `internal/drive` has no package doc and ~10.5% of exported symbols
 are undocumented (QUAL-09).
 
-**Promote when:** QUAL-05 with any substantial TUI work (it would also make P66.15's sweep cheaper).
-**Checked 2026-09-01: P81.33 just did substantial TUI work** (`approval.go`, `stream.go`, `tui.go`), but
-it was a protocol-correlation fix with a narrow, already-closed diff — bundling an unrelated god-struct
-split into it would have widened that diff for no reason tied to the bug being fixed. Take QUAL-05 the
-*next* time `internal/tui` is opened for its own reason, not retroactively for this one. The rest are
-opportunistic.
-
-Priority: Tier 4 — no trigger. QUAL-04 closed itself; nothing here still carries a security-adjacent
-argument.
+Priority: Tier 4 — no trigger. QUAL-04 and QUAL-05 closed themselves; nothing here still carries a
+security-adjacent argument.
 
 ### P66.19 — Capability gaps with no fired trigger
 
@@ -1208,20 +1221,18 @@ re-read the item; do not treat a Tier-4 write-up as a build plan. Details of pas
 
 ### P64.4 — Edit results carry no diff, and a tool cannot attach anything a replay can render
 
-`edit_file`, `edit_section`, `multi_edit` and `fill_marker` return prose ("updated successfully", a
-replacement count); the TUI and web transcript have nothing else to render for an edit. The presenter
-runs on both live streaming and transcript replay, so it must be deterministic and cannot do I/O at
-replay time. A **tool-private, persisted presentation channel** — `execute` attaches an opaque JSON
-payload the core stores with the result and hands back to the presenter, computed once at result time
-and read back on every replay — is the reusable mechanism; a diff (applied hunk ± context lines) would
-be the first consumer. Cost: an overwrite would need to hold both prior and new text in memory to
-compute a UI-only hunk.
-
-**Promote when:** the TUI or web transcript is being worked on for another reason, or a user reports
-not being able to tell what an edit actually changed. This is presentation with no correctness or
-security edge.
-
-Priority: Tier 4 — real, cheap-ish, no trigger. Do not build speculatively.
+**Shipped 2026-09-02**, taken while `internal/tui` was open for QUAL-05. Built exactly the mechanism
+this entry named — `tool.Result.Presentation`, an opaque tool-private JSON payload threaded through the
+engine into both live streaming (`api.Event.ToolPresentation`) and session storage/replay
+(`provider.ToolResultBlock.Presentation`), computed once and never re-derived at render time — with
+`write_file` as its first consumer rather than the four tools originally named here. `edit_file` and
+`multi_edit` turned out not to need it: their call input already carries `old_string`/`new_string`, so
+the existing call-time diff renderer was already accurate — this entry's premise ("the TUI has nothing
+else to render for an edit") held for `write_file` specifically, whose input never carries what it's
+replacing, and did not hold for those two. `edit_section` and `fill_marker` still have no diff rendering
+at all (same gap as before this shipped) — the mechanism now covers them too if a future sitting wants
+it; nothing about the plumbing is `write_file`-specific. Full record:
+[releases.md](releases/releases-01.md#qual-05-p6714-p644-and-p8133s-argv-half-2026-09-02).
 
 ### P64.5 — `ask_user` is one free-form question; unattended answers cannot be routed
 
@@ -1475,23 +1486,13 @@ Priority: Tier 4 — no fired trigger, L. Do not build speculatively.
 
 ### P67.14 — Hand-composed ANSI has no rule about transitions versus state
 
-Small, and filed as a discipline note rather than a feature. Where Aegis emits escape sequences
-directly — kitty graphics chunking in `internal/tui/imagerender.go`, the stripping and rewriting in
-`internal/termsafe` — there is no stated rule distinguishing sequences that express **state** from
-sequences that express a **transition**.
-
-The distinction has teeth. Style sequences computed as a diff from the previous style are transitions:
-two adjacent ones may be concatenated but the earlier one may never be dropped as redundant, because
-its reset codes are not guaranteed to be a subset of the later one's — and a dropped background reset
-leaks into the next erase via background-colour erase. State-setting sequences (an absolute cursor
-position, an explicit colour) can be collapsed to the last one freely. Optimizations that are correct
-for one class silently corrupt the other, on one terminal, months later.
-
-Write the rule down where those sequences are composed. **Promote to real work when** Aegis gains a
-frame-diff or output-batching layer that would be tempted to dedupe them — until then the comment is
-the whole deliverable.
-
-Priority: Tier 4 — no concrete trigger, XS. A comment, not a feature.
+**Shipped 2026-09-02**, taken while `internal/tui` was open for QUAL-05 — exactly the comment this entry
+asked for, no behavior change. The rule now lives in `internal/termsafe`'s package doc (the shared
+reference point for the whole package's escape-sequence handling), with pointers to it from
+`internal/tui/ansi16.go`'s `remapANSI16` (the actual transition case the rule warns about) and
+`imagerender.go`'s `kittyGraphicsSequence` (protocol framing, outside the rule's scope entirely — noted
+so a future reader doesn't wonder why it's exempt). Full record:
+[releases.md](releases/releases-01.md#qual-05-p6714-p644-and-p8133s-argv-half-2026-09-02).
 
 **P78.1**–**P78.9** (filed and shipped 2026-08-26, from a five-track code-quality/sprawl/duplication
 audit of the whole tree) — full record: [releases.md](releases/releases-01.md#p781-p789-shipped-2026-08-26).

@@ -53,17 +53,17 @@ func TestStallElapsedTracksTheActivePhase(t *testing.T) {
 		t.Errorf("expected zero stallElapsed when idle, got %v", got)
 	}
 
-	m.phase.streamStart = time.Now().Add(-45 * time.Second)
+	m.streamState.phase.streamStart = time.Now().Add(-45 * time.Second)
 	if got := m.stallElapsed(); got < 44*time.Second || got > 46*time.Second {
 		t.Errorf("expected ~45s stallElapsed while waiting for the first token, got %v", got)
 	}
 
-	m.phase.firstTokenAt = time.Now()
+	m.streamState.phase.firstTokenAt = time.Now()
 	if got := m.stallElapsed(); got != 0 {
 		t.Errorf("expected zero stallElapsed once generating (no re-eval wait), got %v", got)
 	}
 
-	m.phase.modelWaitAt = time.Now().Add(-10 * time.Second)
+	m.streamState.phase.modelWaitAt = time.Now().Add(-10 * time.Second)
 	if got := m.stallElapsed(); got < 9*time.Second || got > 11*time.Second {
 		t.Errorf("expected ~10s stallElapsed during a post-tool-round re-eval wait, got %v", got)
 	}

@@ -23,9 +23,9 @@ func phaseModel(t *testing.T, sinceStart time.Duration) model {
 	// KindTurnDone had reported it) so the phase/hint tests below have a
 	// number to assert on. TestStreamHintHidesStaleInputTokensAtNewTurn covers
 	// the opposite case: inputTokens set but inputTokensKnown still false.
-	m.inputTokens = 4200
-	m.inputTokensKnown = true
-	m.phase.streamStart = time.Now().Add(-sinceStart)
+	m.usage.inputTokens = 4200
+	m.usage.inputTokensKnown = true
+	m.streamState.phase.streamStart = time.Now().Add(-sinceStart)
 	m.refresh()
 	return m
 }
@@ -53,7 +53,7 @@ func TestStreamPhaseSplitAtFirstToken(t *testing.T) {
 	if m.status != statusGenerating {
 		t.Fatalf("status = %q, want %q once the first token arrived", m.status, statusGenerating)
 	}
-	if m.phase.firstTokenAt.IsZero() {
+	if m.streamState.phase.firstTokenAt.IsZero() {
 		t.Error("expected the first token to have started the generation clock")
 	}
 	if got := plainView(m); strings.Contains(got, statusWaiting) {
@@ -106,7 +106,7 @@ func TestStreamHintStaysVisibleDuringGeneration(t *testing.T) {
 	m := phaseModel(t, 25*time.Second)
 
 	m.applyEvent(api.Event{Kind: api.KindText, Text: strings.Repeat("streamed answer text. ", 80)})
-	m.phase.firstTokenAt = time.Now().Add(-20 * time.Second) // backdate the generation window
+	m.streamState.phase.firstTokenAt = time.Now().Add(-20 * time.Second) // backdate the generation window
 	m.refresh()
 
 	got := plainView(m)
@@ -129,8 +129,8 @@ func TestStreamHintStaysVisibleDuringGeneration(t *testing.T) {
 // rate the model never ran at.
 func TestStreamStatsRateExcludesTheWait(t *testing.T) {
 	m := phaseModel(t, 60*time.Second)
-	m.phase.outBytes = 4000
-	m.phase.firstTokenAt = time.Now().Add(-10 * time.Second)
+	m.streamState.phase.outBytes = 4000
+	m.streamState.phase.firstTokenAt = time.Now().Add(-10 * time.Second)
 
 	st := m.streamStats()
 	if st.outputToks != 1000 {
@@ -145,7 +145,7 @@ func TestStreamStatsRateExcludesTheWait(t *testing.T) {
 }
 
 // TestStreamHintHidesStaleInputTokensAtNewTurn is the P33.17 regression: once
-// a turn's usage lands, m.inputTokens holds a real number — but it is *that
+// a turn's usage lands, m.usage.inputTokens holds a real number — but it is *that
 // turn's* number. beginStream() must not let it leak into the next turn's
 // hint as if it were the new turn's prompt size until a fresh KindTurnDone
 // reports it. An absent ↑ segment during that dead zone beats a wrong one.
@@ -156,13 +156,13 @@ func TestStreamHintHidesStaleInputTokensAtNewTurn(t *testing.T) {
 	// First turn completes with real usage.
 	m.beginStream()
 	m.applyEvent(api.Event{Kind: api.KindTurnDone, InputTokens: 4200, OutputTokens: 100})
-	if !m.inputTokensKnown || m.inputTokens != 4200 {
-		t.Fatalf("setup: expected first turn's usage recorded, got inputTokens=%d known=%v", m.inputTokens, m.inputTokensKnown)
+	if !m.usage.inputTokensKnown || m.usage.inputTokens != 4200 {
+		t.Fatalf("setup: expected first turn's usage recorded, got inputTokens=%d known=%v", m.usage.inputTokens, m.usage.inputTokensKnown)
 	}
 
 	// A second turn starts sending before any usage event for it has arrived.
 	m.beginStream()
-	m.phase.streamStart = time.Now().Add(-5 * time.Second)
+	m.streamState.phase.streamStart = time.Now().Add(-5 * time.Second)
 	m.refresh()
 
 	if st := m.streamStats(); st.inputToks != 0 {

@@ -16,7 +16,7 @@ import (
 // means the message falls through to the main update path.
 func (m model) updateDialog(msg tea.Msg) (model, tea.Cmd, bool) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
-		m.width, m.height = ws.Width, ws.Height
+		m.chrome.width, m.chrome.height = ws.Width, ws.Height
 		m.layout()
 		return m, nil, true
 	}
@@ -24,27 +24,27 @@ func (m model) updateDialog(msg tea.Msg) (model, tea.Cmd, bool) {
 	// here rather than left to the spinner.TickMsg case in the main switch,
 	// which this block returns ahead of, and re-queued only while a fetch is
 	// actually outstanding — once the rows land it stops on its own.
-	if _, ok := msg.(spinner.TickMsg); ok && m.dialog.loading {
+	if _, ok := msg.(spinner.TickMsg); ok && m.overlays.dialog.loading {
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
-		m.dialog.setLoadingFrame(m.sp.View())
+		m.overlays.dialog.setLoadingFrame(m.sp.View())
 		return m, cmd, true
 	}
-	if c, ok := msg.(dialogCancelMsg); ok && c.kind == m.dialog.kind {
-		m.dialog = nil
+	if c, ok := msg.(dialogCancelMsg); ok && c.kind == m.overlays.dialog.kind {
+		m.overlays.dialog = nil
 		m.ta.Focus()
 		if c.kind == dialogPersonaPicker {
 			m.refresh()
 		}
 		if c.kind == dialogThreatModelPicker {
-			m.pendingThreatModelTarget = ""
-			m.pendingThreatModelUnattended = false
+			m.overlays.pendingThreatModelTarget = ""
+			m.overlays.pendingThreatModelUnattended = false
 		}
 		return m, nil, true
 	}
-	if sel, ok := msg.(dialogSelectedMsg); ok && sel.kind == m.dialog.kind {
-		kind := m.dialog.kind
-		m.dialog = nil
+	if sel, ok := msg.(dialogSelectedMsg); ok && sel.kind == m.overlays.dialog.kind {
+		kind := m.overlays.dialog.kind
+		m.overlays.dialog = nil
 		m.ta.Focus()
 		switch kind {
 		case dialogPalette:
@@ -70,7 +70,7 @@ func (m model) updateDialog(msg tea.Msg) (model, tea.Cmd, bool) {
 			item := sel.item.(timelineItem)
 			// Scroll to the selected turn's recorded item position.
 			m.transcript.ScrollToItem(item.e.blockIndex)
-			m.followBottom = false
+			m.streamState.followBottom = false
 			m.refresh()
 			return m, nil, true
 		case dialogModelPicker:
@@ -79,10 +79,10 @@ func (m model) updateDialog(msg tea.Msg) (model, tea.Cmd, bool) {
 			return m, m.handleSlashCommand(parsed), true
 		case dialogThreatModelPicker:
 			item := sel.item.(frameworkItem)
-			target := m.pendingThreatModelTarget
-			unattended := m.pendingThreatModelUnattended
-			m.pendingThreatModelTarget = ""
-			m.pendingThreatModelUnattended = false
+			target := m.overlays.pendingThreatModelTarget
+			unattended := m.overlays.pendingThreatModelUnattended
+			m.overlays.pendingThreatModelTarget = ""
+			m.overlays.pendingThreatModelUnattended = false
 			args := strings.Fields(item.name) // splits "NIST 800-154" into the two tokens extractThreatModelFramework expects
 			if target != "" {
 				args = append(args, target)
@@ -101,8 +101,8 @@ func (m model) updateDialog(msg tea.Msg) (model, tea.Cmd, bool) {
 			// sending, same as a shell reverse-search accepting a match —
 			// it does not send immediately.
 			m.ta.SetValue(item.text)
-			m.histIdx = -1
-			m.draftInput = ""
+			m.composer.histIdx = -1
+			m.composer.draftInput = ""
 			return m, nil, true
 		case dialogBacktrackPicker:
 			item := sel.item.(backtrackItem)
@@ -134,14 +134,14 @@ func (m model) updateDialog(msg tea.Msg) (model, tea.Cmd, bool) {
 		// one picker) it can only fall through here while the dialog on
 		// screen is actually the persona picker awaiting it — anything
 		// else stays swallowed by the dialog below, same as always.
-		if m.dialog.kind != dialogPersonaPicker {
-			updated, cmd := m.dialog.Update(msg)
-			m.dialog = &updated
+		if m.overlays.dialog.kind != dialogPersonaPicker {
+			updated, cmd := m.overlays.dialog.Update(msg)
+			m.overlays.dialog = &updated
 			return m, cmd, true
 		}
 	default:
-		updated, cmd := m.dialog.Update(msg)
-		m.dialog = &updated
+		updated, cmd := m.overlays.dialog.Update(msg)
+		m.overlays.dialog = &updated
 		return m, cmd, true
 	}
 	return m, nil, false

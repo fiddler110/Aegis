@@ -7,10 +7,10 @@ import (
 // updateWindowSize re-lays-out for a terminal resize. It does not consume the
 // message: the composer still forwards it to the textarea.
 func (m model) updateWindowSize(msg tea.WindowSizeMsg) model {
-	m.width, m.height = msg.Width, msg.Height
+	m.chrome.width, m.chrome.height = msg.Width, msg.Height
 	m.layout()
 	m.refresh()
-	m.ready = true
+	m.chrome.ready = true
 	return m
 }
 
@@ -20,7 +20,7 @@ func (m model) updateWindowSize(msg tea.WindowSizeMsg) model {
 // styles/renderer the same way the live /theme switch does — the provisional
 // scheme was bound at startup.
 func (m model) updateBackgroundColor(msg tea.BackgroundColorMsg) model {
-	if m.autoTheme {
+	if m.chrome.autoTheme {
 		want := "dark"
 		if !msg.IsDark() {
 			want = "light"
@@ -31,8 +31,8 @@ func (m model) updateBackgroundColor(msg tea.BackgroundColorMsg) model {
 			// rendererW is 0 until the first WindowSizeMsg; if this arrives
 			// first, layout() rebuilds the renderer with the new glamour
 			// style on the imminent resize, so only rebuild here once sized.
-			if m.rendererW > 0 {
-				m.renderer = newGlamourRenderer(m.rendererW)
+			if m.streamState.rendererW > 0 {
+				m.streamState.renderer = newGlamourRenderer(m.streamState.rendererW)
 			}
 			m.refresh()
 		}

@@ -45,7 +45,7 @@ func TestSendUserMessageRendersImageThumbnail(t *testing.T) {
 	work := t.TempDir()
 	m := newModel(Config{SessionID: "test-session", Mode: "build", Model: "test-model", WorkDir: work})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.imageProto = protocolHalfBlock
+	m.chrome.imageProto = protocolHalfBlock
 
 	imgPath := filepath.Join(work, "shot.png")
 	writeFixturePNG(t, imgPath, 40, 40)
@@ -83,7 +83,7 @@ func TestSendUserMessageSkipsThumbnailWhenProtocolNone(t *testing.T) {
 	work := t.TempDir()
 	m := newModel(Config{SessionID: "test-session", Mode: "build", Model: "test-model", WorkDir: work})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.imageProto = protocolNone
+	m.chrome.imageProto = protocolNone
 
 	imgPath := filepath.Join(work, "shot.png")
 	writeFixturePNG(t, imgPath, 40, 40)
@@ -102,7 +102,7 @@ func TestSendUserMessageSkipsThumbnailWhenProtocolNone(t *testing.T) {
 // undecodable ImageBlock, e.g. corrupted or unsupported-format base64 data.
 func TestRenderImageThumbnailsFromBlocksSkipsBadData(t *testing.T) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", Model: "test-model", WorkDir: t.TempDir()})
-	m.imageProto = protocolHalfBlock
+	m.chrome.imageProto = protocolHalfBlock
 
 	out := m.renderImageThumbnailsFromBlocks([]provider.ImageBlock{{Data: "not-valid-base64!!"}})
 	if out != nil {
@@ -112,7 +112,7 @@ func TestRenderImageThumbnailsFromBlocksSkipsBadData(t *testing.T) {
 
 func TestRenderImageThumbnailsSkipsUnreadablePath(t *testing.T) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", Model: "test-model", WorkDir: t.TempDir()})
-	m.imageProto = protocolHalfBlock
+	m.chrome.imageProto = protocolHalfBlock
 
 	out := m.renderImageThumbnails([]api.ImageInput{{Path: filepath.Join(t.TempDir(), "missing.png")}})
 	if out != nil {

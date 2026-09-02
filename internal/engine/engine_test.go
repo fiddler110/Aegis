@@ -94,7 +94,7 @@ func TestExecuteToolWarnsOnZeroPathWriteCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+	_, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 		ID: "tu_1", Name: "odd_write", Input: json.RawMessage(`{"unexpected_field":"value.txt"}`),
 	})
 	if isErr {
@@ -141,7 +141,7 @@ func TestExecuteToolNormalizesEmptySuccessResult(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+	content, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 		ID: "tu_1", Name: "empty_tool", Input: json.RawMessage(`{}`),
 	})
 	if isErr {
@@ -157,7 +157,7 @@ func TestExecuteToolNormalizesEmptySuccessResult(t *testing.T) {
 	// Same call twice must produce byte-identical placeholders, so the loop
 	// detector's turn signature (name + canonicalized input) is the only thing
 	// that can ever distinguish two rounds — never the result content.
-	content2, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
+	content2, _, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 		ID: "tu_2", Name: "empty_tool", Input: json.RawMessage(`{}`),
 	})
 	if content != content2 {
@@ -180,7 +180,7 @@ func TestExecuteToolLeavesErrorResultsAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+	content, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 		ID: "tu_1", Name: "error_tool", Input: json.RawMessage(`{}`),
 	})
 	if !isErr {
@@ -242,7 +242,7 @@ func TestExecuteToolScanHitRequiresApproval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		content, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 			ID: "tu_1", Name: "flagged_tool", Input: json.RawMessage(`{}`),
 		})
 		if !approver.called {
@@ -265,7 +265,7 @@ func TestExecuteToolScanHitRequiresApproval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		content, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 			ID: "tu_1", Name: "flagged_tool", Input: json.RawMessage(`{}`),
 		})
 		if !approver.called {
@@ -287,7 +287,7 @@ func TestExecuteToolScanHitRequiresApproval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		content, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 			ID: "tu_1", Name: "flagged_tool", Input: json.RawMessage(`{}`),
 		})
 		if isErr {
@@ -308,7 +308,7 @@ func TestExecuteToolScanHitRequiresApproval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		content, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 			ID: "tu_1", Name: "echo", Input: json.RawMessage(`{"msg":"hi"}`),
 		})
 		if approver.called {
@@ -329,7 +329,7 @@ func TestExecuteToolScanHitRequiresApproval(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		content, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+		content, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 			ID: "tu_1", Name: "flagged_tool", Input: json.RawMessage(`{}`),
 		})
 		if approver.called {
@@ -450,7 +450,7 @@ func TestExecuteToolRecordsWrittenPathsByEffectiveCapability(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if _, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+			if _, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 				ID: "tu_1", Name: "reclassify", Input: json.RawMessage(tc.input),
 			}); isErr {
 				t.Fatalf("tool call reported an error")

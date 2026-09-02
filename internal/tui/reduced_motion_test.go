@@ -15,16 +15,16 @@ import (
 // as before.
 func TestReducedMotionFreezesAnimStep(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir(), ReducedMotion: true})
-	if !m.reducedMotion {
-		t.Fatal("expected Config.ReducedMotion to set model.reducedMotion")
+	if !m.chrome.reducedMotion {
+		t.Fatal("expected Config.ReducedMotion to set model.chrome.reducedMotion")
 	}
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
-	before := m.animStep
+	before := m.streamState.animStep
 	next, _ := m.updateSpinnerTick(spinner.TickMsg{Time: time.Now(), ID: m.sp.ID()})
-	if next.animStep != before {
-		t.Errorf("expected animStep frozen at %d under reduced motion, got %d", before, next.animStep)
+	if next.streamState.animStep != before {
+		t.Errorf("expected animStep frozen at %d under reduced motion, got %d", before, next.streamState.animStep)
 	}
 }
 
@@ -33,12 +33,12 @@ func TestReducedMotionFreezesAnimStep(t *testing.T) {
 // a streaming spinner tick still advances animStep.
 func TestMotionDefaultAdvancesAnimStep(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
-	before := m.animStep
+	before := m.streamState.animStep
 	next, _ := m.updateSpinnerTick(spinner.TickMsg{Time: time.Now(), ID: m.sp.ID()})
-	if next.animStep == before {
+	if next.streamState.animStep == before {
 		t.Errorf("expected animStep to advance past %d with motion enabled", before)
 	}
 }
@@ -48,8 +48,8 @@ func TestMotionDefaultAdvancesAnimStep(t *testing.T) {
 // animStep counter.
 func TestReducedMotionStillPollsTeammates(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir(), ReducedMotion: true})
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	var sawPoll bool
 	for i := 0; i < 20; i++ {
@@ -71,13 +71,13 @@ func TestReducedMotionStillPollsTeammates(t *testing.T) {
 func TestReducedMotionCaretStaysStaticOnce(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.cfg.ReducedMotion = true
-	m.reducedMotion = true
+	m.chrome.reducedMotion = true
 	m.appendUser("hi", nil)
-	m.streaming = true
-	m.followBottom = true
-	m.liveText.WriteString("hello world")
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
+	m.streamState.liveText.WriteString("hello world")
 
-	m.animStep = 0
+	m.streamState.animStep = 0
 	m.refresh()
 	if !strings.Contains(plainView(m), caretChar) {
 		t.Fatal("expected the caret glyph present while streaming under reduced motion")

@@ -16,25 +16,25 @@ func (m model) updateSessionsLoaded(msg sessionsLoadedMsg) (tea.Model, tea.Cmd) 
 	if !m.awaitingPicker(dialogSessionPicker) {
 		if msg.err != nil {
 			t, cmd := newToastCmd("sessions: "+msg.err.Error(), toastError)
-			m.activeToast = t
+			m.overlays.activeToast = t
 			return m, cmd
 		}
 		return m, nil
 	}
 	if msg.err != nil {
-		return m, m.dialog.setNotice("sessions: " + msg.err.Error())
+		return m, m.overlays.dialog.setNotice("sessions: " + msg.err.Error())
 	}
 	if len(msg.items) == 0 {
-		return m, m.dialog.setNotice("no sessions to switch to")
+		return m, m.overlays.dialog.setNotice("no sessions to switch to")
 	}
-	return m, m.dialog.setItems(sessionPickerItems(msg.items), sessionPickerH(m.height, len(msg.items)))
+	return m, m.overlays.dialog.setItems(sessionPickerItems(msg.items), sessionPickerH(m.chrome.height, len(msg.items)))
 }
 
 // updateSessionSwitched adopts a session the user switched to.
 func (m model) updateSessionSwitched(msg sessionSwitchedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		t, cmd := newToastCmd("switch: "+msg.err.Error(), toastError)
-		m.activeToast = t
+		m.overlays.activeToast = t
 		return m, cmd
 	}
 	m.applySwitchedSession(msg.sess)
@@ -48,25 +48,25 @@ func (m model) updateBacktrackTargets(msg backtrackTargetsMsg) (tea.Model, tea.C
 	if !m.awaitingPicker(dialogBacktrackPicker) {
 		if msg.err != nil {
 			t, cmd := newToastCmd("backtrack: "+msg.err.Error(), toastError)
-			m.activeToast = t
+			m.overlays.activeToast = t
 			return m, cmd
 		}
 		return m, nil
 	}
 	if msg.err != nil {
-		return m, m.dialog.setNotice("backtrack: " + msg.err.Error())
+		return m, m.overlays.dialog.setNotice("backtrack: " + msg.err.Error())
 	}
 	if len(msg.items) == 0 {
-		return m, m.dialog.setNotice("no checkpoints yet — send a message first")
+		return m, m.overlays.dialog.setNotice("no checkpoints yet — send a message first")
 	}
-	return m, m.dialog.setItems(backtrackPickerItems(msg.items), backtrackPickerH(m.height, len(msg.items)))
+	return m, m.overlays.dialog.setItems(backtrackPickerItems(msg.items), backtrackPickerH(m.chrome.height, len(msg.items)))
 }
 
 // updateForked adopts the session a backtrack fork created.
 func (m model) updateForked(msg forkedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		t, cmd := newToastCmd("fork: "+msg.err.Error(), toastError)
-		m.activeToast = t
+		m.overlays.activeToast = t
 		return m, cmd
 	}
 	m.applySwitchedSession(msg.sess)
@@ -76,7 +76,7 @@ func (m model) updateForked(msg forkedMsg) (tea.Model, tea.Cmd) {
 		m.ta.SetValue(msg.prefill)
 	}
 	t, cmd := newToastCmd(fmt.Sprintf("Forked into %q — edit and send to continue.", msg.title), toastInfo)
-	m.activeToast = t
+	m.overlays.activeToast = t
 	m.refresh()
 	return m, cmd
 }
@@ -96,30 +96,30 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 	m.cfg.Model = m.slash.EffectiveModel()
 
 	m.transcript.Reset()
-	m.lastAnswerBlock = nil
-	m.thinkEntries = nil
-	m.tools = m.tools[:0]
-	m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
-	m.egressBytes = 0
-	m.displayedInputTokens, m.displayedOutputTokens = 0, 0
-	m.cacheReadTokens, m.cacheCreationTokens = 0, 0
-	m.tokensEstimated = false
-	m.turnCount = 0
-	m.changedFiles = nil
-	m.teammates = nil
-	m.timelineEntries = nil
-	m.toolState.pendingReadPaths = nil
-	m.toolState.pendingTools = nil
-	m.toolState.pendingToolOrder = nil
-	m.toolState.activeReadGroup = nil
-	m.toolState.soloReadCard = nil
-	m.streaming = false
+	m.streamState.lastAnswerBlock = nil
+	m.streamState.thinkEntries = nil
+	m.toolsUI.tools = m.toolsUI.tools[:0]
+	m.usage.inputTokens, m.usage.outputTokens, m.usage.costUSD = 0, 0, 0
+	m.usage.egressBytes = 0
+	m.usage.displayedInputTokens, m.usage.displayedOutputTokens = 0, 0
+	m.usage.cacheReadTokens, m.usage.cacheCreationTokens = 0, 0
+	m.usage.tokensEstimated = false
+	m.streamState.turnCount = 0
+	m.sessionMeta.changedFiles = nil
+	m.sessionMeta.teammates = nil
+	m.sessionMeta.timelineEntries = nil
+	m.toolsUI.state.pendingReadPaths = nil
+	m.toolsUI.state.pendingTools = nil
+	m.toolsUI.state.pendingToolOrder = nil
+	m.toolsUI.state.activeReadGroup = nil
+	m.toolsUI.state.soloReadCard = nil
+	m.streamState.streaming = false
 	m.status = "ready"
-	m.lastFailure = nil
+	m.sessionMeta.lastFailure = nil
 
-	m.transcript.Append(buildWelcomeContent(m.cfg, m.workDir, m.th))
+	m.transcript.Append(buildWelcomeContent(m.cfg, m.sessionMeta.workDir, m.th))
 	m.loadHistory(sess.Messages)
-	m.followBottom = true
+	m.streamState.followBottom = true
 }
 
 // loadHistory replays stored conversation messages into the transcript so a
@@ -128,6 +128,18 @@ func (m *model) applySwitchedSession(sess *session.Session) {
 func (m *model) loadHistory(msgs []provider.Message) {
 	toolNames := map[string]string{} // tool_use ID → name, for labelling results
 	toolPaths := map[string]string{} // tool_use ID → path, for read_file highlighting (P16.2)
+	// writeCards holds a write_file call's transcript item and input, keyed by
+	// tool_use ID (P64.4): appended immediately like every other tool's call
+	// (so an orphaned call with no matching result still ends up in the
+	// transcript, same as before this existed), but kept addressable so the
+	// matching ToolResultBlock below can replace it in place with an accurate
+	// diff once its Presentation payload — the file's actual prior content —
+	// is available, mirroring what the live-streaming path does for the same
+	// event via toolCard.
+	writeCards := map[string]struct {
+		item  *transcriptItem
+		input json.RawMessage
+	}{}
 	for _, msg := range msgs {
 		switch msg.Role {
 		case provider.RoleUser:
@@ -166,6 +178,14 @@ func (m *model) loadHistory(msgs []provider.Message) {
 				if name == "" {
 					name = "tool"
 				}
+				if wc, ok := writeCards[r.ToolUseID]; ok {
+					if old, ok := writePresentationOld(r.Presentation); ok {
+						if s, ok := renderWriteDiffAgainst(m.th, name, wc.input, old, m.transcript.Width()); ok {
+							m.transcript.SetItemRaw(wc.item, "\n"+s+"\n")
+						}
+					}
+					delete(writeCards, r.ToolUseID)
+				}
 				m.transcript.Append(renderToolResult(m.th, name, r.Content, r.IsError, m.transcript.Width(), m.toolMaxLines(), toolPaths[r.ToolUseID]) + "\n")
 			}
 		case provider.RoleAssistant:
@@ -177,7 +197,7 @@ func (m *model) loadHistory(msgs []provider.Message) {
 					}
 				case provider.TextBlock:
 					if v.Text != "" {
-						m.liveText.WriteString(v.Text)
+						m.streamState.liveText.WriteString(v.Text)
 						m.flushLiveText()
 					}
 				case provider.ToolUseBlock:
@@ -189,6 +209,19 @@ func (m *model) loadHistory(msgs []provider.Message) {
 						if json.Unmarshal(v.Input, &inp) == nil {
 							toolPaths[v.ID] = inp.Path
 						}
+					}
+					if v.Name == "write_file" {
+						// Kept addressable so the matching ToolResultBlock
+						// above can upgrade this to an accurate diff (P64.4);
+						// appended now regardless, so an orphaned call still
+						// shows up even if no result ever arrives.
+						if item := m.transcript.AppendBlock("\n" + renderToolCall(m.th, v.Name, v.Input, m.transcript.Width()) + "\n"); item != nil {
+							writeCards[v.ID] = struct {
+								item  *transcriptItem
+								input json.RawMessage
+							}{item, v.Input}
+						}
+						continue
 					}
 					m.transcript.Append("\n" + renderToolCall(m.th, v.Name, v.Input, m.transcript.Width()) + "\n")
 				}

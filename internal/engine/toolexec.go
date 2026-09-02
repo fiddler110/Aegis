@@ -190,15 +190,16 @@ func (e *Engine) runToolsSequential(ctx context.Context, toolUses []provider.Too
 		// short tools from ever looking silent.
 		beat(ctx)
 		start := time.Now()
-		content, isErr := e.executeTool(ctx, tu)
+		content, isErr, presentation := e.executeTool(ctx, tu)
 		beat(ctx)
 		traces = append(traces, trace.ToolCall{Name: tu.Name, DurationMS: time.Since(start).Milliseconds(), IsError: isErr})
-		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr})
+		emit(Event{Kind: KindToolResult, ToolName: tu.Name, ToolID: tu.ID, ToolResult: content, ToolIsError: isErr, ToolPresentation: presentation})
 
 		results = append(results, provider.ToolResultBlock{
-			ToolUseID: tu.ID,
-			Content:   content,
-			IsError:   isErr,
+			ToolUseID:    tu.ID,
+			Content:      content,
+			IsError:      isErr,
+			Presentation: presentation,
 		})
 	}
 	return results, traces, nil
@@ -483,25 +484,25 @@ func (e *Engine) toolCtx(ctx context.Context) context.Context {
 
 // executeTool looks up and runs a single tool, converting failures into
 // model-visible error results rather than aborting the whole run.
-func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (string, bool) {
+func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (string, bool, json.RawMessage) {
 	if e.tools == nil {
-		return fmt.Sprintf("no tools available (requested %q)", tu.Name), true
+		return fmt.Sprintf("no tools available (requested %q)", tu.Name), true, nil
 	}
 	ctx = e.toolCtx(ctx)
 	t, ok := e.tools.Get(tu.Name)
 	if !ok {
-		return fmt.Sprintf("unknown tool %q; registered tools: %s", tu.Name, registeredToolNames(e.tools)), true
+		return fmt.Sprintf("unknown tool %q; registered tools: %s", tu.Name, registeredToolNames(e.tools)), true, nil
 	}
 	if e.gate != nil {
 		if allowed, reason := e.gate.Check(ctx, t, tu.Input); !allowed {
 			e.logger.Info("tool call blocked by gate", "tool", tu.Name, "reason", reason)
-			return reason, true
+			return reason, true, nil
 		}
 	}
 	if e.hooks != nil {
 		if err := e.hooks.PreToolUse(ctx, tu.Name, tu.Input); err != nil {
 			e.logger.Info("tool call blocked by hook", "tool", tu.Name, "err", err)
-			return fmt.Sprintf("blocked by hook: %v", err), true
+			return fmt.Sprintf("blocked by hook: %v", err), true, nil
 		}
 	}
 	// P65.1: mark the call started here rather than at the top of executeTool.
@@ -524,10 +525,10 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	if e.onToolFinished != nil {
 		e.onToolFinished(tu.ID)
 	}
-	content, isErr := res.Content, res.IsError
+	content, isErr, presentation := res.Content, res.IsError, res.Presentation
 	if err != nil {
 		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)
-		content, isErr = fmt.Sprintf("tool error: %v", err), true
+		content, isErr, presentation = fmt.Sprintf("tool error: %v", err), true, nil
 	}
 	// P74.9: a legitimately empty, non-error result is indistinguishable from a
 	// failure to a model, and a local model in particular tends to re-issue the
@@ -574,6 +575,11 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 		// secrets-bearing file gets the same scrub a read_file call would.
 		if redacted, findings, scanErr := redactSecretsFn(ctx, content); scanErr == nil && len(findings) > 0 {
 			content = redacted
+			// P64.4: redact.Text only scrubs Content — a Presentation payload
+			// echoing raw file text (a diff hunk) would defeat the redaction,
+			// so drop it here rather than ship an unredacted copy alongside
+			// the redacted one.
+			presentation = nil
 			e.logger.Info("redacted secret pattern(s) from tool output", "tool", tu.Name, "count", len(findings))
 		}
 	}
@@ -599,11 +605,11 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 				e.hooks.PostToolUse(ctx, tu.Name, tu.Input, content, isErr)
 			}
 			return "tool result withheld: a heuristic prompt-injection scan flagged this output and the operator " +
-				"denied it entering context. If this looks like a false positive, ask the user to retry and approve it.", true
+				"denied it entering context. If this looks like a false positive, ask the user to retry and approve it.", true, nil
 		}
 	}
 	if e.hooks != nil {
 		e.hooks.PostToolUse(ctx, tu.Name, tu.Input, content, isErr)
 	}
-	return content, isErr
+	return content, isErr, presentation
 }

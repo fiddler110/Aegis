@@ -50,12 +50,12 @@ func TestScrollbackToggleLive(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 
-	if m.rawScrollback {
+	if m.chrome.rawScrollback {
 		t.Fatal("expected raw scrollback mode off by default")
 	}
 
 	m = driveUpdate(t, m, slashResultMsg{Output: "\x00scrollback-on"})
-	if !m.rawScrollback {
+	if !m.chrome.rawScrollback {
 		t.Fatal("expected raw scrollback mode on after \\x00scrollback-on")
 	}
 	if got := plainView(m); !strings.Contains(got, "Raw scrollback mode: on") {
@@ -63,7 +63,7 @@ func TestScrollbackToggleLive(t *testing.T) {
 	}
 
 	m = driveUpdate(t, m, slashResultMsg{Output: "\x00scrollback-toggle"})
-	if m.rawScrollback {
+	if m.chrome.rawScrollback {
 		t.Fatal("expected toggle to flip raw scrollback mode back off")
 	}
 	if got := plainView(m); !strings.Contains(got, "Raw scrollback mode: off") {
@@ -72,7 +72,7 @@ func TestScrollbackToggleLive(t *testing.T) {
 
 	m = driveUpdate(t, m, slashResultMsg{Output: "\x00scrollback-on"})
 	m = driveUpdate(t, m, slashResultMsg{Output: "\x00scrollback-off"})
-	if m.rawScrollback {
+	if m.chrome.rawScrollback {
 		t.Fatal("expected explicit off to force raw scrollback mode off")
 	}
 }
@@ -209,7 +209,7 @@ func TestScrollbackModeHidesSidebar(t *testing.T) {
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	m = driveUpdate(t, m, slashResultMsg{Output: "\x00sidebar-toggle"})
-	if !m.sidebarOpen {
+	if !m.chrome.sidebarOpen {
 		t.Fatal("expected sidebar open after toggling it on")
 	}
 	if got := plainView(m); !strings.Contains(got, "SESSION") {
@@ -217,7 +217,7 @@ func TestScrollbackModeHidesSidebar(t *testing.T) {
 	}
 
 	m = driveUpdate(t, m, slashResultMsg{Output: "\x00scrollback-on"})
-	if !m.sidebarOpen {
+	if !m.chrome.sidebarOpen {
 		t.Fatal("expected sidebarOpen to stay true (raw mode only suppresses rendering it)")
 	}
 	if got := plainView(m); strings.Contains(got, "◇ SESSION") {

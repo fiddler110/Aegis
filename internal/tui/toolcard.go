@@ -1,6 +1,9 @@
 package tui
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // toolEntry tracks one tool call for the sidebar activity panel. status
 // "awaiting_approval" is a transient sub-state of "pending" (set when a
@@ -51,6 +54,13 @@ type toolCard struct {
 	resultIsErr bool
 	resultPath  string
 	hasResult   bool
+
+	// writeInput is ev.ToolInput, captured only for a write_file call (P64.4):
+	// the only way to re-render call as an accurate diff once the matching
+	// KindToolResult's Presentation payload supplies the file's prior
+	// content, since the engine's KindToolResult does not repeat a call's
+	// input (see call's own doc above). Empty for every other tool.
+	writeInput json.RawMessage
 }
 
 // blkItem implements toolBlock.
@@ -68,7 +78,7 @@ func (c *toolCard) toggleFull(m *model) {
 }
 
 // toolGroup is the open collapsed card for a run of consecutive, successful
-// read_file/grep/glob calls (P74.4) — model.toolState.activeReadGroup's live state.
+// read_file/grep/glob calls (P74.4) — model.toolsUI.state.activeReadGroup's live state.
 // blk is an existing tool card's transcript item, repurposed as the group's
 // one visible slot the moment a second member merges into it; no extra
 // transcript item is ever created for the group itself (see

@@ -8,7 +8,7 @@ import (
 )
 
 // P76.2: every quit path must cancel the interactive terminal pane's command
-// context (m.termRun.cancel), not only the model-turn context (m.cancel).
+// context (m.splitTerm.termRun.cancel), not only the model-turn context (m.streamState.cancel).
 // Without it, the execTermCmd goroutine and the child process behind it are
 // orphaned past p.Run() returning. Run()'s doc comment in tui.go states this
 // as a property of the package; these tests are what keeps it true. Each of
@@ -19,7 +19,7 @@ func TestQuitPathsCancelTheTerminalRun(t *testing.T) {
 	// armTermRun gives m a termRun whose cancel func is observable.
 	armTermRun := func(m *model) context.Context {
 		ctx, cancel := context.WithCancel(context.Background())
-		m.termRun = &termRun{cancel: cancel}
+		m.splitTerm.termRun = &termRun{cancel: cancel}
 		return ctx
 	}
 
@@ -34,7 +34,7 @@ func TestQuitPathsCancelTheTerminalRun(t *testing.T) {
 
 	t.Run("quit confirmation", func(t *testing.T) {
 		m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
-		m.quitConfirm = true
+		m.overlays.quitConfirm = true
 		ctx := armTermRun(&m)
 		if _, cmd := m.updateQuitConfirm(tea.KeyPressMsg{Code: 'y'}); cmd == nil {
 			t.Fatal("confirming the quit dialog should return a quit command")

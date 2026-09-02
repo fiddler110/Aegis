@@ -19,7 +19,7 @@ import (
 func TestStreamingThinkingIsSanitized(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{
 		Kind: api.KindThinking,
 		Text: "I should check\x1b]52;c;ZXZpbA==\x07 the file\x1b[10;5H first",
@@ -45,14 +45,14 @@ func TestStreamingThinkingIsSanitized(t *testing.T) {
 func TestSettledThinkingBlockIsSanitized(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.thinkExpanded = true
+	m.streamState.thinkExpanded = true
 
 	m.appendThinkingBlock("reasoning\x1b]0;pwned\x07 continues\x1b[2J", 3)
 
-	if len(m.thinkEntries) != 1 {
-		t.Fatalf("thinkEntries = %d, want 1", len(m.thinkEntries))
+	if len(m.streamState.thinkEntries) != 1 {
+		t.Fatalf("thinkEntries = %d, want 1", len(m.streamState.thinkEntries))
 	}
-	e := m.thinkEntries[0]
+	e := m.streamState.thinkEntries[0]
 	for _, s := range []string{e.expanded, e.collapsed} {
 		if strings.Contains(s, "\x1b]0;") {
 			t.Error("OSC title-bar sequence survived into a settled thinking block")

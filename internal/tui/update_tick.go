@@ -12,7 +12,7 @@ func (m model) updateSpinnerTick(msg spinner.TickMsg) (model, []tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 	m.sp, cmd = m.sp.Update(msg)
-	if m.streaming {
+	if m.streamState.streaming {
 		cmds = append(cmds, cmd) // always re-queue so animation resumes on scroll-back
 		// P74.12: ease the status bar's displayed token counts toward the
 		// real values every tick, independent of followBottom — cheap to
@@ -22,20 +22,20 @@ func (m model) updateSpinnerTick(msg spinner.TickMsg) (model, []tea.Cmd) {
 		// P3.7: suppress redraws when the "● thinking…" indicator is scrolled
 		// off-screen — it lives at the viewport bottom, visible only when
 		// followBottom is true.
-		if m.followBottom {
-			m.pollTick++
+		if m.streamState.followBottom {
+			m.chrome.pollTick++
 			// P74.10: reduced motion freezes animStep instead of advancing it,
 			// which freezes shimmerText/caretGlyph/thinkingPhrase (they all
 			// read it) and skips the re-render that would otherwise redraw an
 			// unchanging frame every tick.
-			if !m.reducedMotion {
-				m.animStep++
+			if !m.chrome.reducedMotion {
+				m.streamState.animStep++
 				m.updatePendingToolCards() // P21.2: keep pending cards' shimmer live
 				m.refresh()
 			}
 			// P2.5: poll sub-agent roster every 20 ticks. Keyed on pollTick
 			// rather than animStep so reduced motion doesn't also silence it.
-			if m.pollTick%20 == 0 {
+			if m.chrome.pollTick%20 == 0 {
 				cmds = append(cmds, m.fetchTeammatesQuiet())
 			}
 		}
@@ -48,8 +48,8 @@ func (m model) updateSpinnerTick(msg spinner.TickMsg) (model, []tea.Cmd) {
 // two toasts in quick succession must not let the first one's timer cut the
 // second one short.
 func (m model) updateToastExpired(msg toastExpiredMsg) model {
-	if m.activeToast == msg.t {
-		m.activeToast = nil
+	if m.overlays.activeToast == msg.t {
+		m.overlays.activeToast = nil
 	}
 	return m
 }
@@ -61,13 +61,13 @@ func (m model) updateToastExpired(msg toastExpiredMsg) model {
 // turn's usage lands. Reduced motion (P74.10) snaps straight to the true
 // number instead of animating toward it.
 func (m *model) easeStatCounters() {
-	if m.reducedMotion {
-		m.displayedInputTokens = m.inputTokens
-		m.displayedOutputTokens = m.outputTokens
+	if m.chrome.reducedMotion {
+		m.usage.displayedInputTokens = m.usage.inputTokens
+		m.usage.displayedOutputTokens = m.usage.outputTokens
 		return
 	}
-	m.displayedInputTokens = easeTowards(m.displayedInputTokens, m.inputTokens)
-	m.displayedOutputTokens = easeTowards(m.displayedOutputTokens, m.outputTokens)
+	m.usage.displayedInputTokens = easeTowards(m.usage.displayedInputTokens, m.usage.inputTokens)
+	m.usage.displayedOutputTokens = easeTowards(m.usage.displayedOutputTokens, m.usage.outputTokens)
 }
 
 // easeTowards returns displayed moved one step toward target: an eighth of

@@ -54,8 +54,8 @@ func TestRenderSidebarRespectsConfiguredSectionOrder(t *testing.T) {
 		DashboardSections: []string{"cost", "session"},
 	})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
-	m.sidebarOpen = true
-	m.costUSD = 1.23
+	m.chrome.sidebarOpen = true
+	m.usage.costUSD = 1.23
 	m.layout()
 
 	got := plainView(m)

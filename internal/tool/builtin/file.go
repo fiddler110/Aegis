@@ -333,7 +333,6 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if info, err := os.Stat(abs); err == nil && info.IsDir() {
 		return tool.Result{Content: fmt.Sprintf("%s is an existing directory, not a file", args.Path), IsError: true}, nil
 	}
-	var oldContent string
 	if t.tracker != nil {
 		if err := t.tracker.CheckWrite(abs); err != nil {
 			return tool.Result{Content: err.Error(), IsError: true}, nil
@@ -345,10 +344,13 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 		if err := t.tracker.CheckFullOverwrite(abs); err != nil {
 			return tool.Result{Content: err.Error(), IsError: true}, nil
 		}
-		// Capture prior content (empty if the file is new) for hunk attribution.
-		if data, err := os.ReadFile(abs); err == nil {
-			oldContent = string(data)
-		}
+	}
+	// Capture prior content (empty if the file is new), independent of
+	// whether a tracker is configured — P64.4 wants this for the presenter's
+	// diff payload below, not only for RecordAgentWrite's hunk attribution.
+	var oldContent string
+	if data, err := os.ReadFile(abs); err == nil {
+		oldContent = string(data)
 	}
 	// Capture pre-modification content for checkpoint/rewind, if a run is
 	// snapshotting. Safe on a nil snapshotter.
@@ -367,7 +369,36 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	}
 	result := fmt.Sprintf("wrote %d bytes to %s", len(args.Content), args.Path)
 	result = appendLSPFeedback(ctx, t.lsp, t.root, abs, args.Path, result)
-	return tool.Result{Content: result}, nil
+	return tool.Result{Content: result, Presentation: writeDiffPresentation(oldContent, args.Content)}, nil
+}
+
+// maxDiffPresentationBytes bounds writeDiffPresentation's combined old+new
+// payload (P64.4). It is not covered by roundcap.go's per-round bound, which
+// only trims tool.Result.Content, so it needs its own cap: well under
+// maxWriteContent, generous enough for the source files this actually
+// matters for, small enough that an unusually large overwrite can't balloon
+// a parallel round's total size. Skipping presentation past this falls back
+// to the pre-P64.4 behavior (an input-only, "everything added" preview) —
+// never a failure.
+const maxDiffPresentationBytes = 256 << 10 // 256 KiB
+
+// writeDiffPresentation builds write_file's P64.4 presentation payload: the
+// file's content immediately before this write, so the presenter can render
+// an accurate diff instead of write_file's call-time preview, which has only
+// the new content and must show every line as added even when overwriting an
+// unchanged file. Returns nil (falls back to the old behavior) when either
+// side is empty (nothing to diff against) or the combined size is too large.
+func writeDiffPresentation(oldContent, newContent string) json.RawMessage {
+	if oldContent == "" || oldContent == newContent || len(oldContent)+len(newContent) > maxDiffPresentationBytes {
+		return nil
+	}
+	payload, err := json.Marshal(struct {
+		Old string `json:"old"`
+	}{Old: oldContent})
+	if err != nil {
+		return nil
+	}
+	return payload
 }
 
 // --- edit ---

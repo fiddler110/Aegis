@@ -11,14 +11,14 @@ import (
 func (m model) updateFocus(msg tea.Msg) (model, tea.Cmd, bool) {
 	switch msg.(type) {
 	case tea.FocusMsg:
-		m.focused = true
+		m.attention.focused = true
 		// P33.10: regaining focus is a strong signal the user is about to type,
 		// and enough idle time may have passed for Ollama to have unloaded the
 		// model. Pre-warm now (gated on /api/ps inside the cmd) so the message
 		// they send next doesn't open with a cold reload. No-op off Ollama.
 		return m, m.maybeWarmOllamaCmd(), true
 	case tea.BlurMsg:
-		m.focused = false
+		m.attention.focused = false
 		return m, nil, true
 	case ollamaWarmedMsg:
 		// P33.10: the pre-warm finished (or was gated out). It carries no UI
@@ -31,26 +31,26 @@ func (m model) updateFocus(msg tea.Msg) (model, tea.Cmd, bool) {
 // updateWizard delegates all messages while the wizard overlay is open.
 func (m model) updateWizard(msg tea.Msg) (model, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
-		m.width, m.height = ws.Width, ws.Height
-		m.wizard.width = ws.Width
-		m.wizard.height = ws.Height
+		m.chrome.width, m.chrome.height = ws.Width, ws.Height
+		m.overlays.wizard.width = ws.Width
+		m.overlays.wizard.height = ws.Height
 		m.layout()
 		return m, nil
 	}
-	cmd := m.wizard.update(msg)
-	if m.wizard.done {
-		if m.wizard.saved {
+	cmd := m.overlays.wizard.update(msg)
+	if m.overlays.wizard.done {
+		if m.overlays.wizard.saved {
 			m.transcript.Append(
 				m.th.statusText.Render("✓ Configuration saved — restart Aegis to apply changes.") + "\n\n",
 			)
 			// P69.6: a stated VRAM budget that could not size the window leaves
 			// one thing for the user to finish, and the wizard closes too fast to
 			// say so in its own view. The transcript is where it survives.
-			if note := m.wizard.fitNote; note != "" {
+			if note := m.overlays.wizard.fitNote; note != "" {
 				m.transcript.Append(m.th.statusDim.Render(note) + "\n\n")
 			}
 		}
-		m.wizard = nil
+		m.overlays.wizard = nil
 		m.refresh()
 	}
 	return m, cmd
@@ -60,20 +60,20 @@ func (m model) updateWizard(msg tea.Msg) (model, tea.Cmd) {
 // overlay is open (P11.11).
 func (m model) updateSecurityConfig(msg tea.Msg) (model, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
-		m.width, m.height = ws.Width, ws.Height
-		m.securityConfig.width = ws.Width
-		m.securityConfig.height = ws.Height
+		m.chrome.width, m.chrome.height = ws.Width, ws.Height
+		m.overlays.securityConfig.width = ws.Width
+		m.overlays.securityConfig.height = ws.Height
 		m.layout()
 		return m, nil
 	}
-	cmd := m.securityConfig.update(msg)
-	if m.securityConfig.done {
-		if m.securityConfig.saved {
+	cmd := m.overlays.securityConfig.update(msg)
+	if m.overlays.securityConfig.done {
+		if m.overlays.securityConfig.saved {
 			m.transcript.Append(
 				m.th.statusText.Render("✓ Security config saved — restart Aegis to apply changes.") + "\n\n",
 			)
 		}
-		m.securityConfig = nil
+		m.overlays.securityConfig = nil
 		m.refresh()
 	}
 	return m, cmd
@@ -92,42 +92,42 @@ func (m model) updateSecurityConfig(msg tea.Msg) (model, tea.Cmd) {
 func (m model) updateTransientPanel(msg tea.Msg) (model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
+		m.chrome.width, m.chrome.height = msg.Width, msg.Height
 		m.layout()
-		m.transientPanel.resize(m.width, m.height)
+		m.overlays.transientPanel.resize(m.chrome.width, m.chrome.height)
 		return m, nil, true
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "esc", "enter", "q":
-			m.transientPanel = nil
+			m.overlays.transientPanel = nil
 			m.ta.Focus()
 			m.refresh()
 			return m, nil, true
 		case "up", "k":
-			m.transientPanel.scroll(-1)
+			m.overlays.transientPanel.scroll(-1)
 			return m, nil, true
 		case "down", "j":
-			m.transientPanel.scroll(1)
+			m.overlays.transientPanel.scroll(1)
 			return m, nil, true
 		// P40.2: u/d half-page mirror the transcript pane's vi vocabulary so
 		// both scrollable content surfaces navigate identically.
 		case "u", "ctrl+u":
-			m.transientPanel.scroll(-m.transientPanel.height / 2)
+			m.overlays.transientPanel.scroll(-m.overlays.transientPanel.height / 2)
 			return m, nil, true
 		case "d", "ctrl+d":
-			m.transientPanel.scroll(m.transientPanel.height / 2)
+			m.overlays.transientPanel.scroll(m.overlays.transientPanel.height / 2)
 			return m, nil, true
 		case "pgup", "b", "ctrl+b":
-			m.transientPanel.scroll(-m.transientPanel.height)
+			m.overlays.transientPanel.scroll(-m.overlays.transientPanel.height)
 			return m, nil, true
 		case "pgdown", "space", "f", "ctrl+f":
-			m.transientPanel.scroll(m.transientPanel.height)
+			m.overlays.transientPanel.scroll(m.overlays.transientPanel.height)
 			return m, nil, true
 		case "g", "home":
-			m.transientPanel.scroll(-len(m.transientPanel.lines))
+			m.overlays.transientPanel.scroll(-len(m.overlays.transientPanel.lines))
 			return m, nil, true
 		case "G", "end":
-			m.transientPanel.scroll(len(m.transientPanel.lines))
+			m.overlays.transientPanel.scroll(len(m.overlays.transientPanel.lines))
 			return m, nil, true
 		}
 		return m, nil, true // modal: swallow every other key
@@ -143,23 +143,23 @@ func (m model) updateTransientPanel(msg tea.Msg) (model, tea.Cmd, bool) {
 // quitting outright when a turn is streaming (ctrl+c / /quit / /exit) — P16.6.
 func (m model) updateQuitConfirm(msg tea.Msg) (model, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
-		m.width, m.height = ws.Width, ws.Height
+		m.chrome.width, m.chrome.height = ws.Width, ws.Height
 		m.layout()
 		return m, nil
 	}
 	if k, ok := msg.(tea.KeyMsg); ok {
 		switch k.String() {
 		case "y", "enter":
-			if m.cancel != nil {
-				m.cancel()
+			if m.streamState.cancel != nil {
+				m.streamState.cancel()
 			}
-			if m.termRun != nil {
-				m.termRun.cancel()
+			if m.splitTerm.termRun != nil {
+				m.splitTerm.termRun.cancel()
 			}
-			saveStash(m.stashPath, m.ta.Value())
+			saveStash(m.sessionMeta.stashPath, m.ta.Value())
 			return m, tea.Quit
 		case "n", "esc":
-			m.quitConfirm = false
+			m.overlays.quitConfirm = false
 		}
 	}
 	return m, nil
@@ -169,11 +169,11 @@ func (m model) updateQuitConfirm(msg tea.Msg) (model, tea.Cmd) {
 func (m model) updateHelp(msg tea.Msg) (model, tea.Cmd) {
 	if k, ok := msg.(tea.KeyMsg); ok {
 		if k.String() == "esc" || k.String() == "f1" {
-			m.helpOpen = false
+			m.overlays.helpOpen = false
 		}
 	}
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
-		m.width, m.height = ws.Width, ws.Height
+		m.chrome.width, m.chrome.height = ws.Width, ws.Height
 		m.layout()
 	}
 	return m, nil

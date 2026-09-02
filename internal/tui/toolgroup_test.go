@@ -15,8 +15,8 @@ import (
 func TestReadGroup_TwoSequentialReadsCollapse(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("look around", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	in1, _ := json.Marshal(map[string]string{"path": "a.go"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_1", ToolInput: in1})
@@ -39,8 +39,8 @@ func TestReadGroup_TwoSequentialReadsCollapse(t *testing.T) {
 func TestReadGroup_ErrorBreaksTheGroup(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("look around", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	in1, _ := json.Marshal(map[string]string{"path": "a.go"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_1", ToolInput: in1})
@@ -70,8 +70,8 @@ func TestReadGroup_ErrorBreaksTheGroup(t *testing.T) {
 func TestReadGroup_WriteBreaksTheGroup(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("look around", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	in1, _ := json.Marshal(map[string]string{"path": "a.go"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_1", ToolInput: in1})
@@ -97,8 +97,8 @@ func TestReadGroup_WriteBreaksTheGroup(t *testing.T) {
 func TestReadGroup_MixedGrepAndReadSummarize(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("look around", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	gin, _ := json.Marshal(map[string]string{"pattern": "TODO"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "grep", ToolID: "tu_1", ToolInput: gin})
@@ -127,8 +127,8 @@ func TestReadGroup_MixedGrepAndReadSummarize(t *testing.T) {
 func TestReadGroup_ParallelRoundMergesOnlyWhatHasResolved(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("read three files", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	inA, _ := json.Marshal(map[string]string{"path": "a.go"})
 	inB, _ := json.Marshal(map[string]string{"path": "b.go"})
@@ -172,9 +172,9 @@ func TestReadGroup_ParallelRoundMergesOnlyWhatHasResolved(t *testing.T) {
 func TestReadGroup_ExpandsInFullMode(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("look around", nil)
-	m.streaming = true
-	m.followBottom = true
-	m.toolCompact = false
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
+	m.toolsUI.compact = false
 
 	in1, _ := json.Marshal(map[string]string{"path": "a.go"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_1", ToolInput: in1})

@@ -24,6 +24,16 @@ import (
 type Result struct {
 	Content string // text returned to the model
 	IsError bool   // true if the tool failed in a way the model should see
+
+	// Presentation (P64.4) is an opaque, tool-private JSON payload for a
+	// renderer to use instead of Content — computed once here, persisted
+	// alongside the result, and read back unchanged on replay, since the
+	// presenter runs on both live streaming and transcript replay and must
+	// stay deterministic (no I/O at render time). Never sent to the model:
+	// only Content crosses that boundary. A tool and its own renderer agree
+	// privately on the JSON shape; the core never interprets it. Nil when a
+	// tool has nothing better than Content to offer.
+	Presentation json.RawMessage
 }
 
 // Capability classifies the kind of access a tool needs, so permission modes

@@ -30,8 +30,8 @@ func manyLines(n int) string {
 func TestToolBlockToggle_ExpandsOneCardIndependentOfSessionDefault(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("run a command", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "shell", ToolID: "tu_1", ToolInput: json.RawMessage(`{"command":"ls"}`)})
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "shell", ToolID: "tu_1", ToolResult: manyLines(20)})
@@ -47,7 +47,7 @@ func TestToolBlockToggle_ExpandsOneCardIndependentOfSessionDefault(t *testing.T)
 	if strings.Contains(expanded, "/tools full to expand") {
 		t.Fatalf("expected the toggle to expand this card in place, got:\n%s", expanded)
 	}
-	if !m.toolCompact {
+	if !m.toolsUI.compact {
 		t.Fatalf("expected the session-wide toolCompact default to stay untouched by a per-block toggle")
 	}
 
@@ -62,7 +62,7 @@ func TestToolBlockToggle_ExpandsOneCardIndependentOfSessionDefault(t *testing.T)
 	}
 
 	// Toggling again collapses the first card back.
-	m.toolState.toolBlocks[0].toggleFull(&m)
+	m.toolsUI.state.toolBlocks[0].toggleFull(&m)
 	m.refresh()
 	got = plainView(m)
 	if strings.Count(got, "/tools full to expand") != 2 {
@@ -78,9 +78,9 @@ func TestToolBlockToggle_ExpandsOneCardIndependentOfSessionDefault(t *testing.T)
 func TestToolBlockToggle_UpgradedGroupStaysAddressable(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("look around", nil)
-	m.streaming = true
-	m.followBottom = true
-	m.toolCompact = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
+	m.toolsUI.compact = true
 
 	in1, _ := json.Marshal(map[string]string{"path": "a.go"})
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "read_file", ToolID: "tu_1", ToolInput: in1})
@@ -91,11 +91,11 @@ func TestToolBlockToggle_UpgradedGroupStaysAddressable(t *testing.T) {
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "read_file", ToolID: "tu_2", ToolResult: "package b\n"})
 	m.refresh()
 
-	if len(m.toolState.toolBlocks) != 1 {
-		t.Fatalf("expected the pair to collapse into exactly one addressable block, got %d", len(m.toolState.toolBlocks))
+	if len(m.toolsUI.state.toolBlocks) != 1 {
+		t.Fatalf("expected the pair to collapse into exactly one addressable block, got %d", len(m.toolsUI.state.toolBlocks))
 	}
-	if _, isGroup := m.toolState.toolBlocks[0].(*toolGroup); !isGroup {
-		t.Fatalf("expected the addressable block to be the upgraded group, got %T", m.toolState.toolBlocks[0])
+	if _, isGroup := m.toolsUI.state.toolBlocks[0].(*toolGroup); !isGroup {
+		t.Fatalf("expected the addressable block to be the upgraded group, got %T", m.toolsUI.state.toolBlocks[0])
 	}
 
 	collapsed := plainView(m)
@@ -132,8 +132,8 @@ func visibleRowContaining(m model, needle string) int {
 func TestMouseClickTogglesToolBlock(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("run a command", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "shell", ToolID: "tu_1", ToolInput: json.RawMessage(`{"command":"ls"}`)})
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "shell", ToolID: "tu_1", ToolResult: manyLines(20)})
@@ -157,7 +157,7 @@ func TestMouseClickTogglesToolBlock(t *testing.T) {
 	if strings.Contains(got, "/tools full to expand") {
 		t.Fatalf("expected the click to expand the card in place, got:\n%s", got)
 	}
-	if len(m.toolState.toolBlocks) != 1 || !m.toolState.toolBlocks[0].(*toolCard).full {
+	if len(m.toolsUI.state.toolBlocks) != 1 || !m.toolsUI.state.toolBlocks[0].(*toolCard).full {
 		t.Fatalf("expected the clicked card's own full state to flip")
 	}
 
@@ -167,7 +167,7 @@ func TestMouseClickTogglesToolBlock(t *testing.T) {
 	// would need to (refresh() re-pins to the bottom on every call while
 	// followBottom is true, so that has to come off first, same as a real
 	// scroll-up would clear it).
-	m.followBottom = false
+	m.streamState.followBottom = false
 	m.transcript.GotoTop()
 	m.refresh()
 	row = visibleRowContaining(m, "▾")
@@ -196,8 +196,8 @@ func TestMouseClickTogglesToolBlock(t *testing.T) {
 func TestMouseClickOffIconDoesNotToggle(t *testing.T) {
 	m := followBottomTestModel(t)
 	m.appendUser("run a command", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 
 	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "shell", ToolID: "tu_1", ToolInput: json.RawMessage(`{"command":"ls"}`)})
 	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "shell", ToolID: "tu_1", ToolResult: manyLines(20)})
@@ -215,7 +215,7 @@ func TestMouseClickOffIconDoesNotToggle(t *testing.T) {
 	if strings.Count(plainView(m), "/tools full to expand") != 1 {
 		t.Fatalf("expected a click off the disclosure icon to leave the card collapsed, got:\n%s", plainView(m))
 	}
-	if m.toolState.toolBlocks[0].(*toolCard).full {
+	if m.toolsUI.state.toolBlocks[0].(*toolCard).full {
 		t.Fatalf("expected a click off the icon to not toggle the card's full state")
 	}
 }

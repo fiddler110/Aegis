@@ -17,17 +17,17 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		// P16.6: confirm before discarding an in-flight stream instead of
 		// quitting silently — /quit and /exit used to cancel and exit
 		// unconditionally even mid-response.
-		if m.streaming {
-			m.quitConfirm = true
+		if m.streamState.streaming {
+			m.overlays.quitConfirm = true
 			return m, nil
 		}
-		if m.cancel != nil {
-			m.cancel()
+		if m.streamState.cancel != nil {
+			m.streamState.cancel()
 		}
-		if m.termRun != nil {
-			m.termRun.cancel()
+		if m.splitTerm.termRun != nil {
+			m.splitTerm.termRun.cancel()
 		}
-		saveStash(m.stashPath, m.ta.Value())
+		saveStash(m.sessionMeta.stashPath, m.ta.Value())
 		return m, tea.Quit
 	}
 	if msg.Model != nil {
@@ -40,7 +40,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		// it (or moved on to another dialog) before this landed: drop it,
 		// same as the session/backtrack pickers' late-data handling.
 		if m.awaitingPicker(dialogPersonaPicker) {
-			return m, m.dialog.setItems(personaPickerItems(msg.Personas), personaPickerH(m.height, len(msg.Personas)))
+			return m, m.overlays.dialog.setItems(personaPickerItems(msg.Personas), personaPickerH(m.chrome.height, len(msg.Personas)))
 		}
 		return m, nil
 	}
@@ -49,38 +49,38 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		// came back with nothing to list (msg.Output alone) or failed
 		// (msg.IsError) — report it inside the dialog the user is already
 		// looking at instead of as a transcript line below.
-		return m, m.dialog.setNotice(msg.Output)
+		return m, m.overlays.dialog.setNotice(msg.Output)
 	}
 	if msg.Models != nil {
-		picker := newModelPicker(m.width, m.height, msg.Models, m.cfg.Model)
-		m.dialog = &picker
+		picker := newModelPicker(m.chrome.width, m.chrome.height, msg.Models, m.cfg.Model)
+		m.overlays.dialog = &picker
 		return m, nil
 	}
 	if msg.ThreatModelTarget != nil {
-		picker := newThreatModelFrameworkPicker(m.width, m.height)
-		m.dialog = &picker
-		m.pendingThreatModelTarget = *msg.ThreatModelTarget
-		m.pendingThreatModelUnattended = msg.ThreatModelUnattended
+		picker := newThreatModelFrameworkPicker(m.chrome.width, m.chrome.height)
+		m.overlays.dialog = &picker
+		m.overlays.pendingThreatModelTarget = *msg.ThreatModelTarget
+		m.overlays.pendingThreatModelUnattended = msg.ThreatModelUnattended
 		return m, nil
 	}
 	if msg.Output == "\x00wizard" {
-		wiz := newWizard(m.width, m.height, m.th)
-		m.wizard = wiz
+		wiz := newWizard(m.chrome.width, m.chrome.height, m.th)
+		m.overlays.wizard = wiz
 		return m, wiz.init()
 	}
 	if msg.SecurityConfigGlobal != nil {
-		sc := newSecurityConfigModel(m.width, m.height, m.th, *msg.SecurityConfigGlobal)
-		m.securityConfig = sc
+		sc := newSecurityConfigModel(m.chrome.width, m.chrome.height, m.th, *msg.SecurityConfigGlobal)
+		m.overlays.securityConfig = sc
 		return m, sc.init()
 	}
 	if msg.Output == "\x00timeline" { // P2.8
-		if len(m.timelineEntries) == 0 {
+		if len(m.sessionMeta.timelineEntries) == 0 {
 			t, cmd := newToastCmd("no turns in timeline yet", toastInfo)
-			m.activeToast = t
+			m.overlays.activeToast = t
 			return m, cmd
 		}
-		picker := newTimelinePicker(m.width, m.height, m.timelineEntries)
-		m.dialog = &picker
+		picker := newTimelinePicker(m.chrome.width, m.chrome.height, m.sessionMeta.timelineEntries)
+		m.overlays.dialog = &picker
 		return m, nil
 	}
 	if msg.ReloadSession {
@@ -93,7 +93,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 				level = toastError
 			}
 			t, c := newToastCmd(msg.Output, level)
-			m.activeToast = t
+			m.overlays.activeToast = t
 			cmds = append(cmds, c)
 		}
 		cmds = append(cmds, m.switchSessionCmd(m.cfg.SessionID))
@@ -111,7 +111,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 				level = toastError
 			}
 			t, c := newToastCmd(msg.Output, level)
-			m.activeToast = t
+			m.overlays.activeToast = t
 			cmds = append(cmds, c)
 		}
 		cmds = append(cmds, m.switchSessionCmd(msg.SwitchToSession))
@@ -119,36 +119,36 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.Output == "\x00clear" {
 		m.transcript.Reset()
-		m.lastAnswerBlock = nil
-		m.thinkEntries = nil
-		m.tools = m.tools[:0]
-		m.inputTokens, m.outputTokens, m.costUSD = 0, 0, 0
-		m.egressBytes = 0
-		m.displayedInputTokens, m.displayedOutputTokens = 0, 0
-		m.inputTokensKnown = false
-		m.cacheReadTokens, m.cacheCreationTokens = 0, 0
-		m.tokensEstimated = false
-		m.turnCount = 0
-		m.changedFiles = m.changedFiles[:0]
-		m.teammates = nil
-		m.timelineEntries = m.timelineEntries[:0]
-		m.toolState.toolBlocks = nil // P75.1: old entries point at transcript items /clear just dropped
-		m.transcript.Append(buildWelcomeContent(m.cfg, m.workDir, m.th))
+		m.streamState.lastAnswerBlock = nil
+		m.streamState.thinkEntries = nil
+		m.toolsUI.tools = m.toolsUI.tools[:0]
+		m.usage.inputTokens, m.usage.outputTokens, m.usage.costUSD = 0, 0, 0
+		m.usage.egressBytes = 0
+		m.usage.displayedInputTokens, m.usage.displayedOutputTokens = 0, 0
+		m.usage.inputTokensKnown = false
+		m.usage.cacheReadTokens, m.usage.cacheCreationTokens = 0, 0
+		m.usage.tokensEstimated = false
+		m.streamState.turnCount = 0
+		m.sessionMeta.changedFiles = m.sessionMeta.changedFiles[:0]
+		m.sessionMeta.teammates = nil
+		m.sessionMeta.timelineEntries = m.sessionMeta.timelineEntries[:0]
+		m.toolsUI.state.toolBlocks = nil // P75.1: old entries point at transcript items /clear just dropped
+		m.transcript.Append(buildWelcomeContent(m.cfg, m.sessionMeta.workDir, m.th))
 		m.refresh()
 		return m, nil
 	}
 	if msg.Output == "\x00tools-compact" {
-		m.toolCompact = true
+		m.toolsUI.compact = true
 		m.refresh()
 		return m, nil
 	}
 	if msg.Output == "\x00tools-full" {
-		m.toolCompact = false
+		m.toolsUI.compact = false
 		m.refresh()
 		return m, nil
 	}
 	if msg.Output == "\x00sidebar-toggle" {
-		m.sidebarOpen = !m.sidebarOpen
+		m.chrome.sidebarOpen = !m.chrome.sidebarOpen
 		m.layout()
 		m.refresh()
 		return m, nil
@@ -160,7 +160,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		return m, m.setRawScrollbackCmd(false)
 	}
 	if msg.Output == "\x00scrollback-toggle" {
-		return m, m.setRawScrollbackCmd(!m.rawScrollback)
+		return m, m.setRawScrollbackCmd(!m.chrome.rawScrollback)
 	}
 	if msg.Output == "\x00theme-show" {
 		m.transcript.Append(m.th.statusText.Render(fmt.Sprintf("Current theme: %s", m.cfg.Theme)) + "\n\n")
@@ -169,7 +169,7 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 	}
 	if strings.HasPrefix(msg.Output, "\x00theme ") {
 		// P14.8: applyTheme only rebinds the package-level col* vars —
-		// m.th and m.renderer were built from those vars at creation time
+		// m.th and m.streamState.renderer were built from those vars at creation time
 		// (lipgloss styles and the glamour renderer both capture colors
 		// once) and must be explicitly rebuilt to actually change what's
 		// on screen. Already-rendered transcript content keeps its old
@@ -179,31 +179,31 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		// P40.5: "/theme auto" re-enables background detection; any explicit
 		// name opts out so a later BackgroundColorMsg can't override it.
 		if isAutoTheme(name) {
-			m.autoTheme = true
+			m.chrome.autoTheme = true
 			m.cfg.Theme = applyTheme("dark", m.cfg.WorkDir) // provisional until the terminal replies
 			m.th = newTheme()
-			m.renderer = newGlamourRenderer(m.rendererW)
+			m.streamState.renderer = newGlamourRenderer(m.streamState.rendererW)
 			m.transcript.Append(m.th.statusText.Render("Theme set to auto — detecting terminal background. Set tui.theme: auto in config to persist.") + "\n\n")
 			m.refresh()
 			return m, tea.RequestBackgroundColor
 		}
-		m.autoTheme = false
+		m.chrome.autoTheme = false
 		name = applyTheme(name, m.cfg.WorkDir)
 		m.cfg.Theme = name
 		m.th = newTheme()
-		m.renderer = newGlamourRenderer(m.rendererW)
+		m.streamState.renderer = newGlamourRenderer(m.streamState.rendererW)
 		m.transcript.Append(m.th.statusText.Render(fmt.Sprintf("Theme switched to %s. This session only — set tui.theme: %s in config to persist.", name, name)) + "\n\n")
 		m.refresh()
 		return m, nil
 	}
 	if msg.Output == "\x00notify-show" {
-		m.transcript.Append(m.th.statusText.Render(fmt.Sprintf("Current notify mode: %s", m.notifyMode)) + "\n\n")
+		m.transcript.Append(m.th.statusText.Render(fmt.Sprintf("Current notify mode: %s", m.attention.notifyMode)) + "\n\n")
 		m.refresh()
 		return m, nil
 	}
 	if strings.HasPrefix(msg.Output, "\x00notify ") {
 		name := strings.TrimPrefix(msg.Output, "\x00notify ")
-		m.notifyMode = notify.ParseMode(name)
+		m.attention.notifyMode = notify.ParseMode(name)
 		m.transcript.Append(m.th.statusText.Render(fmt.Sprintf("Notify mode switched to %s. This session only — set tui.notifications: %s in config to persist.", name, name)) + "\n\n")
 		m.refresh()
 		return m, nil
@@ -213,22 +213,22 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		arg = strings.TrimSpace(arg)
 		var text string
 		if arg == "" {
-			text = m.lastAssistantText
+			text = m.streamState.lastAssistantText
 		} else {
 			n := 0
 			fmt.Sscanf(arg, "%d", &n)
-			blocks := extractCodeBlocks(m.lastAssistantText)
+			blocks := extractCodeBlocks(m.streamState.lastAssistantText)
 			if n >= 1 && n <= len(blocks) {
 				text = blocks[n-1]
 			} else {
 				t, cmd := newToastCmd(fmt.Sprintf("no code block #%d in last message", n), toastError)
-				m.activeToast = t
+				m.overlays.activeToast = t
 				return m, cmd
 			}
 		}
 		if text == "" {
 			t, cmd := newToastCmd("nothing to copy (no assistant message yet)", toastInfo)
-			m.activeToast = t
+			m.overlays.activeToast = t
 			return m, cmd
 		}
 		return m, copyToClipboardCmd(text)
@@ -237,20 +237,20 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		return m, pasteClipboardImageCmd()
 	}
 	if msg.Output == "\x00humor-on" {
-		m.humorMode = true
+		m.streamState.humorMode = true
 		m.transcript.Append(m.th.statusText.Render("Humor mode: on — rolling for initiative 🎲") + "\n\n")
 		m.refresh()
 		return m, nil
 	}
 	if msg.Output == "\x00humor-off" {
-		m.humorMode = false
+		m.streamState.humorMode = false
 		m.transcript.Append(m.th.statusText.Render("Humor mode: off — plain status text") + "\n\n")
 		m.refresh()
 		return m, nil
 	}
 	if msg.Output == "\x00humor-toggle" {
-		m.humorMode = !m.humorMode
-		if m.humorMode {
+		m.streamState.humorMode = !m.streamState.humorMode
+		if m.streamState.humorMode {
 			m.transcript.Append(m.th.statusText.Render("Humor mode: on — rolling for initiative 🎲") + "\n\n")
 		} else {
 			m.transcript.Append(m.th.statusText.Render("Humor mode: off — plain status text") + "\n\n")
@@ -288,8 +288,8 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		if title == "" {
 			title = "info"
 		}
-		p := newTransientPanel(title, stripDangerousSeqs(msg.Output), msg.IsError, m.width, m.height)
-		m.transientPanel = &p
+		p := newTransientPanel(title, stripDangerousSeqs(msg.Output), msg.IsError, m.chrome.width, m.chrome.height)
+		m.overlays.transientPanel = &p
 		m.ta.Blur()
 		m.refresh()
 		return m, nil
@@ -308,14 +308,14 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		// command that starts it differs from the Message branch below.
 		m.appendUser(msg.Drive.Task, nil)
 		m.beginStream()
-		m.followBottom = true
+		m.streamState.followBottom = true
 		m.refresh()
 		return m, tea.Batch(m.startDrive(*msg.Drive), m.sp.Tick)
 	}
 	if msg.Message != "" {
 		m.appendUser(msg.Message, nil)
 		m.beginStream()
-		m.followBottom = true
+		m.streamState.followBottom = true
 		m.refresh()
 		return m, tea.Batch(m.startStream(msg.Message, nil), m.sp.Tick)
 	}

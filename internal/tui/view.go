@@ -47,9 +47,9 @@ func (m model) View() tea.View {
 	content, cursor := m.render()
 	v := tea.NewView(content)
 	v.Cursor = cursor
-	v.AltScreen = !m.rawScrollback
+	v.AltScreen = !m.chrome.rawScrollback
 	v.BackgroundColor = colSurface
-	if m.rawScrollback || m.mouseOff {
+	if m.chrome.rawScrollback || m.chrome.mouseOff {
 		v.MouseMode = tea.MouseModeNone
 	} else {
 		v.MouseMode = tea.MouseModeCellMotion
@@ -64,9 +64,9 @@ func (m model) View() tea.View {
 // tab/window list alone.
 func (m model) windowTitle() string {
 	switch {
-	case m.approval != nil:
+	case m.overlays.approval != nil:
 		return "Aegis — approval needed"
-	case m.streaming:
+	case m.streamState.streaming:
 		return "Aegis — working…"
 	default:
 		return "Aegis — ready"
@@ -74,13 +74,13 @@ func (m model) windowTitle() string {
 }
 
 // notifyCmd returns a tea.Cmd that fires the P16.1 attention system for ev —
-// bell and/or OS desktop notification per m.notifyMode — or nil if the
+// bell and/or OS desktop notification per m.attention.notifyMode — or nil if the
 // terminal is known to be focused or the mode has nothing to send.
 func (m model) notifyCmd(ev notify.Event) tea.Cmd {
-	if m.focused {
+	if m.attention.focused {
 		return nil
 	}
-	seq := notify.Sequence(m.notifyMode, ev)
+	seq := notify.Sequence(m.attention.notifyMode, ev)
 	if seq == "" {
 		return nil
 	}
@@ -101,28 +101,28 @@ func (m model) notifyCmd(ev notify.Event) tea.Cmd {
 // overlay (help, quit-confirm, wizard, …) has no notion of a focused row, so
 // they leave the cursor nil.
 func (m model) render() (string, *tea.Cursor) {
-	if !m.ready {
+	if !m.chrome.ready {
 		return "initializing…", nil
 	}
 
 	base := m.renderChat()
-	if m.sidebarOpen && m.width >= sidebarMinTermW && !m.rawScrollback {
+	if m.chrome.sidebarOpen && m.chrome.width >= sidebarMinTermW && !m.chrome.rawScrollback {
 		// P74.2: the sidebar used to be joined into the layout, reflowing the
 		// transcript pane every time it opened or closed. It now composites
 		// over the live chat via renderAnchoredOverlay — the same mechanism
 		// P33.11/P33.12 established for the transient panel and wizard — so
 		// opening it never perturbs transcript geometry, and it draws as the
 		// lowest layer so every other overlay below still lands on top of it.
-		base = renderAnchoredOverlay(base, m.renderSidebar(m.height), 0, 0, m.width, m.height)
+		base = renderAnchoredOverlay(base, m.renderSidebar(m.chrome.height), 0, 0, m.chrome.width, m.chrome.height)
 	}
-	if m.wizard != nil {
-		return renderOverlay(base, m.wizard.view(), m.width, m.height), nil
+	if m.overlays.wizard != nil {
+		return renderOverlay(base, m.overlays.wizard.view(), m.chrome.width, m.chrome.height), nil
 	}
-	if m.securityConfig != nil {
-		return renderOverlay(base, m.securityConfig.view(), m.width, m.height), nil
+	if m.overlays.securityConfig != nil {
+		return renderOverlay(base, m.overlays.securityConfig.view(), m.chrome.width, m.chrome.height), nil
 	}
 
-	if m.completion.active {
+	if m.overlays.completion.active {
 		// P33.18: the completion popup used to insert into the vertical layout
 		// and shrink the transcript pane by its own height, the same reflow
 		// jump P33.6 fixed for the approval dialog. Unlike that dialog it is
@@ -131,40 +131,40 @@ func (m model) render() (string, *tea.Cursor) {
 		// renderAnchoredOverlay — no centering, no dimming — positioned just
 		// above the composer instead of the screen center.
 		popup, x, y := m.renderCompletionPopup()
-		base = renderAnchoredOverlay(base, popup, x, y, m.width, m.height)
+		base = renderAnchoredOverlay(base, popup, x, y, m.chrome.width, m.chrome.height)
 	}
 	var cur *tea.Cursor
-	if m.approval != nil {
+	if m.overlays.approval != nil {
 		// P33.6: the approval prompt used to sit between transcript and input,
 		// shrinking the pane by its own height every time the engine asked —
 		// the loudest layout jump in the normal flow. Compositing it leaves the
 		// transcript's geometry alone; modality is unchanged, since the
 		// composer was already blurred while one is pending (P25.4a).
 		fg := m.renderApprovalDialog()
-		base = renderOverlay(base, fg, m.width, m.height)
-		if x, y, ok := approvalCursorPos(fg, m.approval.feedbackMode); ok {
-			ox, oy := overlayOrigin(fg, m.width, m.height)
+		base = renderOverlay(base, fg, m.chrome.width, m.chrome.height)
+		if x, y, ok := approvalCursorPos(fg, m.overlays.approval.feedbackMode); ok {
+			ox, oy := overlayOrigin(fg, m.chrome.width, m.chrome.height)
 			cur = tea.NewCursor(ox+x, oy+y)
 		}
 	}
 	switch {
-	case m.helpOpen:
-		return renderOverlay(base, renderHelpBox(m.keys), m.width, m.height), nil
-	case m.quitConfirm:
-		return renderOverlay(base, renderQuitConfirmBox(), m.width, m.height), nil
-	case m.dialog != nil:
-		fg := m.dialog.View()
-		out := renderOverlay(base, fg, m.width, m.height)
-		if x, y, ok := m.dialog.cursorPos(); ok {
-			ox, oy := overlayOrigin(fg, m.width, m.height)
+	case m.overlays.helpOpen:
+		return renderOverlay(base, renderHelpBox(m.overlays.keys), m.chrome.width, m.chrome.height), nil
+	case m.overlays.quitConfirm:
+		return renderOverlay(base, renderQuitConfirmBox(), m.chrome.width, m.chrome.height), nil
+	case m.overlays.dialog != nil:
+		fg := m.overlays.dialog.View()
+		out := renderOverlay(base, fg, m.chrome.width, m.chrome.height)
+		if x, y, ok := m.overlays.dialog.cursorPos(); ok {
+			ox, oy := overlayOrigin(fg, m.chrome.width, m.chrome.height)
 			cur = tea.NewCursor(ox+x, oy+y)
 		}
 		return out, cur
-	case m.transientPanel != nil:
+	case m.overlays.transientPanel != nil:
 		// P33.11: the informational panel composites over the live chat (dimmed
 		// behind it) rather than replacing the frame, so dismissing it drops the
 		// user straight back where they were.
-		return renderOverlay(base, m.transientPanel.View(), m.width, m.height), nil
+		return renderOverlay(base, m.overlays.transientPanel.View(), m.chrome.width, m.chrome.height), nil
 	}
 	return base, cur
 }
@@ -190,7 +190,7 @@ func (m model) renderChat() string {
 	inputArea := m.renderInputArea()
 
 	var content string
-	if m.rawScrollback {
+	if m.chrome.rawScrollback {
 		// P22.6: no scrollbar column (nothing to indicate — the terminal owns
 		// scroll position) and no terminal pane (it assumes a fixed-height
 		// dashboard next to a bounded transcript; here the transcript's own
@@ -203,15 +203,15 @@ func (m model) renderChat() string {
 			lipgloss.NewStyle().PaddingLeft(1).Render(m.renderTranscriptContent()),
 			m.renderScrollbar(),
 		)
-		if m.termOpen {
-			content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.term.view(m.th, m.termFocused, m.keys.Diagnose.Help().Key))
+		if m.splitTerm.termOpen {
+			content = lipgloss.JoinHorizontal(lipgloss.Top, main, m.splitTerm.term.view(m.th, m.splitTerm.termFocused, m.overlays.keys.Diagnose.Help().Key))
 		} else {
 			content = main
 		}
 	}
 
 	parts := []string{content}
-	if len(m.todoItems) > 0 {
+	if len(m.toolsUI.todoItems) > 0 {
 		parts = append(parts, m.renderTodoStrip())
 	}
 	parts = append(parts, inputArea)
@@ -223,18 +223,18 @@ func (m model) renderChat() string {
 // screen position render() should composite it at (P33.18): left-aligned,
 // bottom-anchored just above the composer — above the todo strip too, when
 // one is showing, matching the popup's old position in the vertical layout
-// before it moved to compositing. Only meaningful when m.completion.active;
+// before it moved to compositing. Only meaningful when m.overlays.completion.active;
 // callers must check that first.
 func (m model) renderCompletionPopup() (popup string, x, y int) {
-	popupW := min(m.width-2, 72)
-	popup = lipgloss.NewStyle().PaddingLeft(1).Render(m.completion.view(popupW))
+	popupW := min(m.chrome.width-2, 72)
+	popup = lipgloss.NewStyle().PaddingLeft(1).Render(m.overlays.completion.view(popupW))
 
 	inputAreaH := m.ta.Height() + 2 + 1 // border(2) + belowBar(1), mirrors fixedH()
 	todoH := 0
-	if len(m.todoItems) > 0 {
+	if len(m.toolsUI.todoItems) > 0 {
 		todoH = 1
 	}
-	y = m.height - inputAreaH - todoH - lipgloss.Height(popup)
+	y = m.chrome.height - inputAreaH - todoH - lipgloss.Height(popup)
 	return popup, 0, y
 }
 
@@ -266,7 +266,7 @@ const slowToolThreshold = 15 * time.Second
 // MODE regardless of the configured section list.
 func (m model) renderSidebar(h int) string {
 	var b strings.Builder
-	w := m.sidebarW - 2 // usable text width (inner - left padding)
+	w := m.chrome.sidebarW - 2 // usable text width (inner - left padding)
 
 	add := func(s string) { b.WriteString(s + "\n") }
 	// Section headers carry a small diamond marker (Crush-style) so the panel
@@ -309,7 +309,7 @@ func (m model) renderSidebar(h int) string {
 		// an operator has to remember from a startup log line or run /status
 		// to see.
 		"sandbox": func() {
-			if m.sandboxBackend != "" {
+			if m.conn.sandboxBackend != "" {
 				section("SANDBOX")
 				add(m.renderSandboxBadge(w))
 				add("")
@@ -320,16 +320,16 @@ func (m model) renderSidebar(h int) string {
 		// SANDBOX above, so an operator sees an unrecognised or auto_approve
 		// job without running cron_list themselves.
 		"cron": func() {
-			if m.cronJobCount > 0 {
+			if m.conn.cronJobCount > 0 {
 				section("CRON")
 				add(m.renderCronBadge(w))
 				add("")
 			}
 		},
 		"tools": func() {
-			if len(m.tools) > 0 {
+			if len(m.toolsUI.tools) > 0 {
 				section("TOOLS")
-				for _, t := range m.tools {
+				for _, t := range m.toolsUI.tools {
 					tag, style := "●", m.th.tool
 					switch t.status {
 					case "ok":
@@ -350,9 +350,9 @@ func (m model) renderSidebar(h int) string {
 		},
 		// P2.4: show files edited this session.
 		"files": func() {
-			if len(m.changedFiles) > 0 {
+			if len(m.sessionMeta.changedFiles) > 0 {
 				section("FILES")
-				for _, f := range m.changedFiles {
+				for _, f := range m.sessionMeta.changedFiles {
 					add(m.th.sideValue.Render("✎ " + truncate(filepath.Base(f), w-2)))
 				}
 				add("")
@@ -361,7 +361,7 @@ func (m model) renderSidebar(h int) string {
 		// P2.5: show running sub-agents.
 		"agents": func() {
 			var runningAgents []api.Teammate
-			for _, tm := range m.teammates {
+			for _, tm := range m.sessionMeta.teammates {
 				if tm.Status == "running" {
 					runningAgents = append(runningAgents, tm)
 				}
@@ -385,7 +385,7 @@ func (m model) renderSidebar(h int) string {
 		},
 		// promptTokens approximates the last-turn prompt size: uncached input
 		// plus any cache reads/writes (Anthropic reports these separately). On
-		// the native-Ollama path m.inputTokens is prompt_eval_count, which
+		// the native-Ollama path m.usage.inputTokens is prompt_eval_count, which
 		// P35.13 live-verified (Ollama 0.30.10) as the FULL prompt/context size
 		// every turn — not a cache-hit delta — so this meter is accurate there
 		// even on a KV-cache-hit turn (P35.4/P35.7 collapse
@@ -397,39 +397,39 @@ func (m model) renderSidebar(h int) string {
 		// deltas, so this is version-dependent; consumers that need a
 		// backend-independent context size (compaction) still use an estimate.
 		"context": func() {
-			promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
+			promptTokens := m.usage.inputTokens + m.usage.cacheReadTokens + m.usage.cacheCreationTokens
 			if promptTokens > 0 {
 				section("CONTEXT")
 				add(renderContextBar(promptTokens, m.contextWindowSize(), w))
-				if m.cacheReadTokens > 0 {
-					hit := int(float64(m.cacheReadTokens)/float64(promptTokens)*100 + 0.5)
+				if m.usage.cacheReadTokens > 0 {
+					hit := int(float64(m.usage.cacheReadTokens)/float64(promptTokens)*100 + 0.5)
 					add(m.th.sideMuted.Render(fmt.Sprintf("cache %d%% hit", hit)))
 				}
 				add("")
 			}
 		},
 		"cost": func() {
-			promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
-			if promptTokens > 0 || m.costUSD > 0 {
+			promptTokens := m.usage.inputTokens + m.usage.cacheReadTokens + m.usage.cacheCreationTokens
+			if promptTokens > 0 || m.usage.costUSD > 0 {
 				section("COST")
-				if m.costUSD > 0 {
-					add(m.th.costText.Render(fmt.Sprintf("$%.4f", m.costUSD)))
+				if m.usage.costUSD > 0 {
+					add(m.th.costText.Render(fmt.Sprintf("$%.4f", m.usage.costUSD)))
 				}
 				if promptTokens > 0 {
 					add(m.th.sideMuted.Render(fmt.Sprintf("in  %d", promptTokens)))
-					add(m.th.sideMuted.Render(fmt.Sprintf("out %d", m.outputTokens)))
+					add(m.th.sideMuted.Render(fmt.Sprintf("out %d", m.usage.outputTokens)))
 				}
-				if m.egressBytes > 0 {
+				if m.usage.egressBytes > 0 {
 					// P81.8: the live counterpart to the audit sink's per-fetch
 					// record — how much web_fetch has pulled in this session,
 					// at a glance.
-					add(m.th.sideMuted.Render(fmt.Sprintf("web ↓%s", fmtBytesCompact(m.egressBytes))))
+					add(m.th.sideMuted.Render(fmt.Sprintf("web ↓%s", fmtBytesCompact(m.usage.egressBytes))))
 				}
 			}
 		},
 	}
 
-	sections := m.dashboardSections
+	sections := m.chrome.dashboardSections
 	if len(sections) == 0 {
 		sections = defaultDashboardSections
 	}
@@ -441,20 +441,20 @@ func (m model) renderSidebar(h int) string {
 		}
 		// mode is always immediately followed by the transient run-state
 		// indicator, unconditionally — see the function doc comment.
-		if strings.EqualFold(strings.TrimSpace(name), "mode") && m.streaming && !m.phase.streamStart.IsZero() {
-			if m.phase.firstTokenAt.IsZero() {
+		if strings.EqualFold(strings.TrimSpace(name), "mode") && m.streamState.streaming && !m.streamState.phase.streamStart.IsZero() {
+			if m.streamState.phase.firstTokenAt.IsZero() {
 				section("WAITING")
 			} else {
 				section("GENERATING")
 			}
-			secs := int(time.Since(m.phase.streamStart).Seconds())
+			secs := int(time.Since(m.streamState.phase.streamStart).Seconds())
 			add(m.th.elapsedDim.Render(fmt.Sprintf("%ds elapsed", secs)))
 			add("")
 		}
 	}
 
 	return lipgloss.NewStyle().
-		Width(m.sidebarW).
+		Width(m.chrome.sidebarW).
 		Height(h).
 		MaxHeight(h). // prevent overflow: lipgloss Height() pads but never truncates
 		BorderRight(true).
@@ -467,30 +467,30 @@ func (m model) renderSidebar(h int) string {
 func (m model) renderInputArea() string {
 	// Left side: streaming indicator with elapsed time, toast, or ready dot.
 	var statusLeft string
-	if m.search != nil {
+	if m.overlays.search != nil {
 		// P40.3: the search bar replaces the status line while search mode is
 		// active; the composer above stays visible (blurred) so the layout
 		// height is unchanged.
 		statusLeft = m.renderSearchStatus()
-	} else if m.approval != nil {
+	} else if m.overlays.approval != nil {
 		// P25.4a: the composer is blurred while the dialog is open (no
 		// blinking cursor down here) — spell out where input goes instead of
 		// leaving that to be inferred from the missing cursor alone.
 		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⏸ respond to the approval dialog")
-	} else if !m.streaming && m.backtrackArmed {
+	} else if !m.streamState.streaming && m.composer.backtrackArmed {
 		// P22.3: armed by a first ESC press on an already-empty input box;
 		// a second press opens the backtrack picker.
 		statusLeft = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠  ESC again to backtrack")
-	} else if m.streaming {
+	} else if m.streamState.streaming {
 		// P33.4: the transcript tail loses its hint the moment live text starts
 		// flowing, so the status bar carries the token/throughput readout for
 		// the whole run — on a local model the rate is the vital sign, and it
 		// is worth least when it disappears at the first token.
 		hint := m.th.elapsedDim.Render(formatStreamHint(m.streamStats()))
-		statusLeft = shimmerText("● "+m.status, m.animStep, colTextMuted, stallRampColor(m.stallElapsed(), m.maxTurnStall)) + hint
-	} else if m.activeToast != nil {
-		tag, fg, bg := toastTag(m.activeToast.level)
-		statusLeft = statusTag(tag, fg, bg) + " " + m.toastStyle(m.activeToast.level).Render(m.activeToast.message)
+		statusLeft = shimmerText("● "+m.status, m.streamState.animStep, colTextMuted, stallRampColor(m.stallElapsed(), m.chrome.maxTurnStall)) + hint
+	} else if m.overlays.activeToast != nil {
+		tag, fg, bg := toastTag(m.overlays.activeToast.level)
+		statusLeft = statusTag(tag, fg, bg) + " " + m.toastStyle(m.overlays.activeToast.level).Render(m.overlays.activeToast.message)
 	} else {
 		statusLeft = statusTag("READY", colBgLess, colSuccess)
 	}
@@ -504,14 +504,14 @@ func (m model) renderInputArea() string {
 	if stats := m.renderStats(); stats != "" {
 		segs = append(segs, m.th.statusDim.Render(stats))
 	}
-	if !m.sidebarOpen {
+	if !m.chrome.sidebarOpen {
 		// Fold glanceable sidebar data into the status bar when sidebar is hidden.
-		promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
+		promptTokens := m.usage.inputTokens + m.usage.cacheReadTokens + m.usage.cacheCreationTokens
 		if promptTokens > 0 {
 			segs = append(segs, renderContextBar(promptTokens, m.contextWindowSize(), 14))
 		}
 		running := 0
-		for _, tm := range m.teammates {
+		for _, tm := range m.sessionMeta.teammates {
 			if tm.Status == "running" {
 				running++
 			}
@@ -523,15 +523,15 @@ func (m model) renderInputArea() string {
 			segs = append(segs, lipgloss.NewStyle().Foreground(colWarn).Bold(true).Render(fmt.Sprintf("⏸%d", n)))
 		}
 	}
-	segs = append(segs, m.th.cwdStyle.Render(shortenPath(m.workDir)))
+	segs = append(segs, m.th.cwdStyle.Render(shortenPath(m.sessionMeta.workDir)))
 
-	budget := m.width - leftW - 3 // 2 outer spaces + 1 minimum gap
+	budget := m.chrome.width - leftW - 3 // 2 outer spaces + 1 minimum gap
 	for len(segs) > 1 && joinedWidth(segs) > budget {
 		segs = segs[:len(segs)-1]
 	}
 	right := strings.Join(segs, "  ")
 
-	pad := max(m.width-leftW-lipgloss.Width(right)-2, 0)
+	pad := max(m.chrome.width-leftW-lipgloss.Width(right)-2, 0)
 	belowBar := " " + statusLeft + strings.Repeat(" ", pad) + right + " "
 
 	return m.ta.View() + "\n" + belowBar
@@ -585,9 +585,9 @@ func (m model) toastStyle(level toastLevel) lipgloss.Style {
 // reports its configured provider reachable, red otherwise.
 func (m model) connColor() color.Color {
 	switch {
-	case !m.connKnown:
+	case !m.conn.connKnown:
 		return colTextMuted
-	case m.connReachable:
+	case m.conn.connReachable:
 		return colSuccess
 	default:
 		return colError
@@ -601,8 +601,8 @@ func (m model) connColor() color.Color {
 // mismatched-background segment on the line.
 func (m model) renderConnBadge(bg color.Color) string {
 	dot := lipgloss.NewStyle().Foreground(m.connColor()).Background(bg).Bold(true).Render("●")
-	if m.connKnown && m.connReachable && m.connLatencyMS > 0 {
-		dot += lipgloss.NewStyle().Foreground(colTextMuted).Background(bg).Render(fmt.Sprintf(" %dms", m.connLatencyMS))
+	if m.conn.connKnown && m.conn.connReachable && m.conn.connLatencyMS > 0 {
+		dot += lipgloss.NewStyle().Foreground(colTextMuted).Background(bg).Render(fmt.Sprintf(" %dms", m.conn.connLatencyMS))
 	}
 	return dot
 }
@@ -614,11 +614,11 @@ func (m model) renderConnBadge(bg color.Color) string {
 func (m model) renderConnDetail() string {
 	style := lipgloss.NewStyle().Foreground(m.connColor())
 	switch {
-	case !m.connKnown:
+	case !m.conn.connKnown:
 		return style.Render("◌ checking…")
-	case m.connReachable && m.connLatencyMS > 0:
-		return style.Render(fmt.Sprintf("● reachable · %dms", m.connLatencyMS))
-	case m.connReachable:
+	case m.conn.connReachable && m.conn.connLatencyMS > 0:
+		return style.Render(fmt.Sprintf("● reachable · %dms", m.conn.connLatencyMS))
+	case m.conn.connReachable:
 		return style.Render("● reachable")
 	default:
 		return style.Render("● unreachable")
@@ -636,10 +636,10 @@ func isUnsandboxedBackend(name string) bool { return name == "local" }
 // it's the unsandboxed local backend, muted/plain otherwise. w bounds the
 // backend name so a long custom label can't blow out the sidebar width.
 func (m model) renderSandboxBadge(w int) string {
-	if isUnsandboxedBackend(m.sandboxBackend) {
+	if isUnsandboxedBackend(m.conn.sandboxBackend) {
 		return lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚠ unconfined (local)")
 	}
-	return m.th.sideValue.Render(truncate(m.sandboxBackend, w))
+	return m.th.sideValue.Render(truncate(m.conn.sandboxBackend, w))
 }
 
 // renderCronBadge renders the sidebar's CRON line (P81.23/FIND-23): total
@@ -647,19 +647,19 @@ func (m model) renderSandboxBadge(w int) string {
 // postures that fire unattended — how many opt into auto_approve and how
 // many are still unconfirmed.
 func (m model) renderCronBadge(w int) string {
-	line := fmt.Sprintf("%d job", m.cronJobCount)
-	if m.cronJobCount != 1 {
+	line := fmt.Sprintf("%d job", m.conn.cronJobCount)
+	if m.conn.cronJobCount != 1 {
 		line += "s"
 	}
-	if m.cronAutoApproveCount == 0 && m.cronUnconfirmedCount == 0 {
+	if m.conn.cronAutoApproveCount == 0 && m.conn.cronUnconfirmedCount == 0 {
 		return m.th.sideValue.Render(truncate(line, w)) + m.renderCronJobList(w)
 	}
 	warn := lipgloss.NewStyle().Foreground(colWarning).Bold(true)
-	if m.cronAutoApproveCount > 0 {
-		line += fmt.Sprintf(", %d auto_approve", m.cronAutoApproveCount)
+	if m.conn.cronAutoApproveCount > 0 {
+		line += fmt.Sprintf(", %d auto_approve", m.conn.cronAutoApproveCount)
 	}
-	if m.cronUnconfirmedCount > 0 {
-		line += fmt.Sprintf(", %d unconfirmed", m.cronUnconfirmedCount)
+	if m.conn.cronUnconfirmedCount > 0 {
+		line += fmt.Sprintf(", %d unconfirmed", m.conn.cronUnconfirmedCount)
 	}
 	return warn.Render(truncate(line, w)) + m.renderCronJobList(w)
 }
@@ -670,15 +670,15 @@ func (m model) renderCronBadge(w int) string {
 // daemon that predates this endpoint or hasn't responded yet, so this is
 // purely additive.
 func (m model) renderCronJobList(w int) string {
-	if len(m.cronJobs) == 0 {
+	if len(m.conn.cronJobs) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	n := len(m.cronJobs)
+	n := len(m.conn.cronJobs)
 	if n > 3 {
 		n = 3
 	}
-	for _, j := range m.cronJobs[:n] {
+	for _, j := range m.conn.cronJobs[:n] {
 		label := j.Title
 		if label == "" {
 			label = j.Command
@@ -700,19 +700,19 @@ func (m model) renderModeBadge() string {
 }
 
 func (m model) renderStats() string {
-	if m.inputTokens == 0 && m.outputTokens == 0 {
+	if m.usage.inputTokens == 0 && m.usage.outputTokens == 0 {
 		return ""
 	}
 	est := ""
-	if m.tokensEstimated {
+	if m.usage.tokensEstimated {
 		est = "~"
 	}
-	s := fmt.Sprintf("%sin:%d out:%d", est, m.displayedInputTokens, m.displayedOutputTokens)
-	if m.costUSD > 0 {
-		s += fmt.Sprintf("  $%.4f", m.costUSD)
+	s := fmt.Sprintf("%sin:%d out:%d", est, m.usage.displayedInputTokens, m.usage.displayedOutputTokens)
+	if m.usage.costUSD > 0 {
+		s += fmt.Sprintf("  $%.4f", m.usage.costUSD)
 	}
-	if m.egressBytes > 0 {
-		s += "  ↓" + fmtBytesCompact(m.egressBytes)
+	if m.usage.egressBytes > 0 {
+		s += "  ↓" + fmtBytesCompact(m.usage.egressBytes)
 	}
 	return s
 }
@@ -735,7 +735,7 @@ func fmtBytesCompact(n int64) string {
 
 // toolMaxLines returns the effective per-result line cap based on compact mode.
 func (m *model) toolMaxLines() int {
-	return m.toolMaxLinesFor(!m.toolCompact)
+	return m.toolMaxLinesFor(!m.toolsUI.compact)
 }
 
 // toolMaxLinesFor returns the per-result line cap for one P75.1 block's own
@@ -752,9 +752,9 @@ func (m *model) toolMaxLinesFor(full bool) int {
 // renderTodoStrip renders a compact one-line plan progress strip (TQ7).
 // Format: ▣▣▢▢ 2/4  → refactor session store
 func (m model) renderTodoStrip() string {
-	done, inProg, total := 0, 0, len(m.todoItems)
+	done, inProg, total := 0, 0, len(m.toolsUI.todoItems)
 	var activeText string
-	for _, it := range m.todoItems {
+	for _, it := range m.toolsUI.todoItems {
 		switch it.status {
 		case "done":
 			done++
@@ -767,7 +767,7 @@ func (m model) renderTodoStrip() string {
 	}
 
 	var dots strings.Builder
-	for _, it := range m.todoItems {
+	for _, it := range m.toolsUI.todoItems {
 		switch it.status {
 		case "done":
 			dots.WriteString(m.th.sideValue.Render("▣"))
@@ -781,10 +781,10 @@ func (m model) renderTodoStrip() string {
 	counter := m.th.sideMuted.Render(fmt.Sprintf(" %d/%d ", done+inProg, total))
 	active := ""
 	if activeText != "" {
-		maxW := max(m.width-total-8, 10)
+		maxW := max(m.chrome.width-total-8, 10)
 		active = m.th.statusDim.Render("→ " + truncate(activeText, maxW))
 	}
-	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", m.width))
+	sep := lipgloss.NewStyle().Foreground(colBorder).Render(strings.Repeat("─", m.chrome.width))
 	return sep + "\n" + " " + dots.String() + counter + active
 }
 
@@ -951,29 +951,29 @@ func saveStash(path, draft string) {
 // contextualFooterHints (P40.6) returns the compact key-hint segment for the
 // status bar, scoped to whatever input surface currently has focus — the
 // terminal pane owns input when termFocused, otherwise the chat composer does.
-// Keys come from m.keys (the same single source of truth as the F1 overlay and
+// Keys come from m.overlays.keys (the same single source of truth as the F1 overlay and
 // /help) so a tui.keybindings override is reflected here too. lazygit's bottom
 // bar sets the precedent: show only the hints relevant to the focused panel
 // rather than the full static keymap.
 func (m model) contextualFooterHints() string {
 	sep := " · "
-	if m.termFocused {
+	if m.splitTerm.termFocused {
 		// Terminal pane: the actions that matter while typing shell commands.
 		return strings.Join([]string{
 			"esc chat",
-			m.keys.Diagnose.Help().Key + " diagnose",
-			m.keys.PaneNarrower.Help().Key + "/" + m.keys.PaneWider.Help().Key + " resize",
+			m.overlays.keys.Diagnose.Help().Key + " diagnose",
+			m.overlays.keys.PaneNarrower.Help().Key + "/" + m.overlays.keys.PaneWider.Help().Key + " resize",
 		}, sep)
 	}
 	// Chat composer (default): palette, help overlay, external editor — plus a
 	// resize hint when a resizable pane is showing so the binding is discoverable.
 	parts := []string{
-		m.keys.Palette.Help().Key,
-		m.keys.Help.Help().Key,
-		m.keys.Editor.Help().Key,
+		m.overlays.keys.Palette.Help().Key,
+		m.overlays.keys.Help.Help().Key,
+		m.overlays.keys.Editor.Help().Key,
 	}
-	if m.sidebarOpen && m.width >= sidebarMinTermW {
-		parts = append(parts, m.keys.PaneNarrower.Help().Key+"/"+m.keys.PaneWider.Help().Key+" resize")
+	if m.chrome.sidebarOpen && m.chrome.width >= sidebarMinTermW {
+		parts = append(parts, m.overlays.keys.PaneNarrower.Help().Key+"/"+m.overlays.keys.PaneWider.Help().Key+" resize")
 	}
 	return strings.Join(parts, sep)
 }

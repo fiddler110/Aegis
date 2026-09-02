@@ -52,7 +52,7 @@ func TestTranscriptStripsControlSequencesFromToolCalls(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 			m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-			m.streaming = true
+			m.streamState.streaming = true
 			m.applyEvent(api.Event{Kind: api.KindToolCallStart, Tool: c.tool, ToolID: "t1"})
 			m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: c.tool, ToolID: "t1", ToolInput: []byte(c.input)})
 			m.refresh()
@@ -71,7 +71,7 @@ func TestTranscriptStripsControlSequencesFromToolCalls(t *testing.T) {
 func TestTranscriptToolCallSanitizationKeepsThePreview(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{
 		Kind:      api.KindToolCall,
 		Tool:      "write_file",
@@ -105,7 +105,7 @@ func TestTranscriptStripsControlSequencesFromGuardAndError(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 			m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-			m.streaming = true
+			m.streamState.streaming = true
 			m.applyEvent(c.ev)
 			m.refresh()
 			noSmuggledESC(t, c.name, m.renderContent())

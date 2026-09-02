@@ -41,7 +41,7 @@ func TestTUIGuardRetryWithdrawsAnswer(t *testing.T) {
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 
 	m.appendUser("fix the bug", nil)
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{Kind: api.KindText, Text: "PASS. The fix is confirmed working."})
 	m.applyEvent(api.Event{Kind: api.KindTurnDone})
 	m.refresh()
@@ -83,7 +83,7 @@ func TestTUIFullTurn_NoPTY(t *testing.T) {
 
 	// Initial layout, as bubbletea sends on startup.
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	if !m.ready {
+	if !m.chrome.ready {
 		t.Fatal("expected model to be ready after WindowSizeMsg")
 	}
 	if got := plainView(m); !strings.Contains(got, "Aegis") {
@@ -92,7 +92,7 @@ func TestTUIFullTurn_NoPTY(t *testing.T) {
 
 	// Send a user message (mirrors the "enter" key path in Update).
 	m.appendUser("what does this function do?", nil)
-	m.streaming = true
+	m.streamState.streaming = true
 	m.refresh()
 	if got := plainView(m); !strings.Contains(got, "what does this function do?") {
 		t.Fatalf("expected the user's message in the transcript, got:\n%s", got)
@@ -139,7 +139,7 @@ func TestTUIFullTurn_NoPTY(t *testing.T) {
 	// End of stream, mirroring streamClosedMsg's handling.
 	m.flushThinking()
 	m.flushLiveText()
-	m.streaming = false
+	m.streamState.streaming = false
 	m.refresh()
 
 	// Resize mid-conversation must not panic or lose content — each block
@@ -166,9 +166,9 @@ func TestTUIQueuedMessageDrain_NoPTY(t *testing.T) {
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 
 	m.appendUser("first question", nil)
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{Kind: api.KindText, Text: "answering…"})
-	m.queued = append(m.queued, "follow-up question")
+	m.composer.queued = append(m.composer.queued, "follow-up question")
 	m.refresh()
 
 	if got := plainView(m); !strings.Contains(got, "queued ▸ follow-up question") {
@@ -177,10 +177,10 @@ func TestTUIQueuedMessageDrain_NoPTY(t *testing.T) {
 
 	// Stream closes → the queued message becomes the next user turn.
 	m = driveUpdate(t, m, streamClosedMsg{})
-	if len(m.queued) != 0 {
-		t.Fatalf("expected queue drained, got %d", len(m.queued))
+	if len(m.composer.queued) != 0 {
+		t.Fatalf("expected queue drained, got %d", len(m.composer.queued))
 	}
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Fatal("expected a new stream to have started for the queued message")
 	}
 	if got := plainView(m); !strings.Contains(got, "follow-up question") {
@@ -188,9 +188,9 @@ func TestTUIQueuedMessageDrain_NoPTY(t *testing.T) {
 	}
 
 	// An error discards any remaining queue rather than auto-sending into it.
-	m.queued = append(m.queued, "never sent")
+	m.composer.queued = append(m.composer.queued, "never sent")
 	m = driveUpdate(t, m, errMsg{err: context.DeadlineExceeded})
-	if len(m.queued) != 0 {
+	if len(m.composer.queued) != 0 {
 		t.Fatal("expected queue cleared after a stream error")
 	}
 }
@@ -210,10 +210,10 @@ func TestTUITimelineSeek_NoPTY(t *testing.T) {
 	m.applyEvent(api.Event{Kind: api.KindTurnDone})
 	m.refresh()
 
-	if len(m.timelineEntries) != 2 {
-		t.Fatalf("expected 2 timeline entries, got %d", len(m.timelineEntries))
+	if len(m.sessionMeta.timelineEntries) != 2 {
+		t.Fatalf("expected 2 timeline entries, got %d", len(m.sessionMeta.timelineEntries))
 	}
-	first := m.timelineEntries[0]
+	first := m.sessionMeta.timelineEntries[0]
 	if first.blockIndex < 0 || first.blockIndex > m.transcript.Len() {
 		t.Fatalf("first entry's blockIndex %d out of range [0, %d]", first.blockIndex, m.transcript.Len())
 	}
@@ -249,8 +249,8 @@ func TestFollowBottomStaysPinnedDuringEventStream_NoPTY(t *testing.T) {
 	m := followBottomTestModel(t)
 
 	m.appendUser("please write a long answer", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 	m.refresh()
 	if !m.transcript.AtBottom() {
 		t.Fatal("expected a freshly sent turn to start pinned to the bottom")
@@ -261,7 +261,7 @@ func TestFollowBottomStaysPinnedDuringEventStream_NoPTY(t *testing.T) {
 			Kind: api.KindText,
 			Text: fmt.Sprintf("streamed line %d of the reply\n", i),
 		}))
-		if !m.followBottom {
+		if !m.streamState.followBottom {
 			t.Fatalf("token %d: followBottom unexpectedly cleared mid-stream", i)
 		}
 		if !m.transcript.AtBottom() {
@@ -276,7 +276,7 @@ func TestFollowBottomStaysPinnedDuringEventStream_NoPTY(t *testing.T) {
 // TestFollowBottomResumesOnNextEvent_NoPTY (P18.3b) covers the fix's exact
 // mechanism: the eventMsg case in Update always returns early, so before
 // this fix it never reached the second switch's catch-all
-// `m.followBottom = m.transcript.AtBottom()` re-derivation (tui.go, after
+// `m.streamState.followBottom = m.transcript.AtBottom()` re-derivation (tui.go, after
 // the tea.KeyMsg/MouseWheelMsg cases) — only a spinner tick or another
 // key/mouse message could resync followBottom. This reproduces the instant
 // right after a user scrolls back down to the bottom mid-stream: the scroll
@@ -287,8 +287,8 @@ func TestFollowBottomResumesOnNextEvent_NoPTY(t *testing.T) {
 	m := followBottomTestModel(t)
 
 	m.appendUser("please write a long answer", nil)
-	m.streaming = true
-	m.followBottom = true
+	m.streamState.streaming = true
+	m.streamState.followBottom = true
 	for i := 0; i < 20; i++ {
 		m.applyEvent(api.Event{Kind: api.KindText, Text: fmt.Sprintf("streamed line %d of the reply\n", i)})
 	}
@@ -299,7 +299,7 @@ func TestFollowBottomResumesOnNextEvent_NoPTY(t *testing.T) {
 
 	// The user scrolls up mid-stream. Scroll directly at the pane level and
 	// mirror the model's own catch-all re-derivation (the second switch's
-	// `m.followBottom = m.transcript.AtBottom()` in Update) rather than
+	// `m.streamState.followBottom = m.transcript.AtBottom()` in Update) rather than
 	// driving a real tea.KeyMsg through model.Update: with streaming active,
 	// every keystroke also runs syncCompletion(), which calls out to the
 	// (here, nil) daemon client for custom commands — an unrelated
@@ -308,8 +308,8 @@ func TestFollowBottomResumesOnNextEvent_NoPTY(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		m.transcript.HandleKey(tea.KeyPressMsg{Code: tea.KeyUp})
 	}
-	m.followBottom = m.transcript.AtBottom()
-	if m.followBottom {
+	m.streamState.followBottom = m.transcript.AtBottom()
+	if m.streamState.followBottom {
 		t.Fatal("expected followBottom to clear once the user scrolls away from the bottom")
 	}
 	if m.transcript.AtBottom() {
@@ -322,14 +322,14 @@ func TestFollowBottomResumesOnNextEvent_NoPTY(t *testing.T) {
 	// path, which would otherwise resync followBottom itself and mask the
 	// very thing under test here).
 	m.transcript.GotoBottom()
-	m.followBottom = false
+	m.streamState.followBottom = false
 	if !m.transcript.AtBottom() {
 		t.Fatal("setup error: expected GotoBottom to land exactly at the bottom")
 	}
 
 	m = driveUpdate(t, m, eventMsg(api.Event{Kind: api.KindText, Text: "one more streamed token\n"}))
 
-	if !m.followBottom {
+	if !m.streamState.followBottom {
 		t.Fatal("expected the next eventMsg to resync followBottom to true from the pre-event scroll position")
 	}
 	if !m.transcript.AtBottom() {
@@ -341,12 +341,12 @@ func TestFollowBottomResumesOnNextEvent_NoPTY(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		m.transcript.HandleKey(tea.KeyPressMsg{Code: tea.KeyUp})
 	}
-	m.followBottom = m.transcript.AtBottom()
-	if m.followBottom || m.transcript.AtBottom() {
+	m.streamState.followBottom = m.transcript.AtBottom()
+	if m.streamState.followBottom || m.transcript.AtBottom() {
 		t.Fatal("setup error: expected scrolling up again to leave the bottom")
 	}
 	m = driveUpdate(t, m, eventMsg(api.Event{Kind: api.KindText, Text: "yet another token\n"}))
-	if m.followBottom {
+	if m.streamState.followBottom {
 		t.Fatal("expected a token arriving while scrolled away from the bottom to leave followBottom false")
 	}
 }

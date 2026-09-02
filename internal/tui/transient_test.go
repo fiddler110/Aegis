@@ -22,7 +22,7 @@ func TestTransientResultOpensPanelNotTranscript(t *testing.T) {
 		Output:         "Daemon: ok\nProvider: ollama · Model: test",
 	})
 
-	if m.transientPanel == nil {
+	if m.overlays.transientPanel == nil {
 		t.Fatal("expected a transient panel to open")
 	}
 	if got := m.transcript.Len(); got != before {
@@ -39,7 +39,7 @@ func TestTransientResultOpensPanelNotTranscript(t *testing.T) {
 	// esc dismisses it and restores the composer, leaving the transcript
 	// untouched.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if m.transientPanel != nil {
+	if m.overlays.transientPanel != nil {
 		t.Error("expected esc to dismiss the transient panel")
 	}
 	if got := m.transcript.Len(); got != before {
@@ -56,7 +56,7 @@ func TestNonTransientResultStaysInTranscript(t *testing.T) {
 
 	m = driveUpdate(t, m, slashResultMsg{Output: "Switched to build mode."})
 
-	if m.transientPanel != nil {
+	if m.overlays.transientPanel != nil {
 		t.Error("a non-transient result must not open a panel")
 	}
 	if got := m.transcript.Len(); got <= before {
@@ -75,37 +75,37 @@ func TestTransientPanelScrollsTallOutput(t *testing.T) {
 		fmt.Fprintf(&b, "line %d\n", i)
 	}
 	m = driveUpdate(t, m, slashResultMsg{Transient: true, TransientTitle: "/help", Output: b.String()})
-	if m.transientPanel == nil {
+	if m.overlays.transientPanel == nil {
 		t.Fatal("expected a panel")
 	}
-	if !m.transientPanel.scrollable() {
+	if !m.overlays.transientPanel.scrollable() {
 		t.Fatal("expected 200 lines to overflow the window and be scrollable")
 	}
-	if m.transientPanel.offset != 0 {
-		t.Fatalf("expected to open scrolled to the top, got offset %d", m.transientPanel.offset)
+	if m.overlays.transientPanel.offset != 0 {
+		t.Fatalf("expected to open scrolled to the top, got offset %d", m.overlays.transientPanel.offset)
 	}
 
 	// Scrolling up at the top is a clamped no-op.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'k'})
-	if m.transientPanel.offset != 0 {
-		t.Errorf("scroll-up at the top should clamp to 0, got %d", m.transientPanel.offset)
+	if m.overlays.transientPanel.offset != 0 {
+		t.Errorf("scroll-up at the top should clamp to 0, got %d", m.overlays.transientPanel.offset)
 	}
 
 	// Down advances the window.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'j'})
-	if m.transientPanel.offset != 1 {
-		t.Errorf("one line down should move to offset 1, got %d", m.transientPanel.offset)
+	if m.overlays.transientPanel.offset != 1 {
+		t.Errorf("one line down should move to offset 1, got %d", m.overlays.transientPanel.offset)
 	}
 
 	// End jumps to (and clamps at) the bottom.
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnd})
-	max := m.transientPanel.maxOffset()
-	if m.transientPanel.offset != max {
-		t.Errorf("end should jump to maxOffset %d, got %d", max, m.transientPanel.offset)
+	max := m.overlays.transientPanel.maxOffset()
+	if m.overlays.transientPanel.offset != max {
+		t.Errorf("end should jump to maxOffset %d, got %d", max, m.overlays.transientPanel.offset)
 	}
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'j'})
-	if m.transientPanel.offset != max {
-		t.Errorf("scroll-down at the bottom should clamp to %d, got %d", max, m.transientPanel.offset)
+	if m.overlays.transientPanel.offset != max {
+		t.Errorf("scroll-down at the bottom should clamp to %d, got %d", max, m.overlays.transientPanel.offset)
 	}
 }
 
@@ -117,13 +117,13 @@ func TestTransientPanelScrollsTallOutput(t *testing.T) {
 func TestDialogBlockLetsStreamEventsThrough(t *testing.T) {
 	m := idleModel(t)
 	d := newListDialog(dialogPalette, 40, 10, "Commands", false, nil)
-	m.dialog = &d
-	m.streaming = true
+	m.overlays.dialog = &d
+	m.streamState.streaming = true
 
 	// A stream close arriving while the dialog is open must run the real
 	// teardown, not be eaten by the dialog block.
 	m = driveUpdate(t, m, batchEventMsg{closed: true})
-	if m.streaming {
+	if m.streamState.streaming {
 		t.Error("streamClosedMsg was swallowed by the open-dialog block; stream never ended (P33.20)")
 	}
 

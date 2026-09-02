@@ -90,15 +90,15 @@ func Run(cfg Config) error {
 		return err
 	}
 	m := newModel(cfg)
-	m.autoTheme = auto
+	m.chrome.autoTheme = auto
 	p := tea.NewProgram(m)
 	_, err := p.Run()
 
 	// The daemon client's job ends with the TUI: this is the last consumer
 	// of the bearer token before the CLI process exits, so scrub it here
 	// (FIND-33/P24.21). Every quit path in this package cancels both the
-	// in-flight request's context (m.cancel) and any running interactive-
-	// terminal command's context (m.termRun.cancel, P76.2) before triggering
+	// in-flight request's context (m.streamState.cancel) and any running interactive-
+	// terminal command's context (m.splitTerm.termRun.cancel, P76.2) before triggering
 	// tea.Quit, so by the
 	// time p.Run() returns no goroutine should still be reading the token —
 	// but bubbletea does not guarantee a dispatched Cmd goroutine has fully
@@ -112,7 +112,7 @@ func Run(cfg Config) error {
 const (
 	// Sidebar geometry. sidebarInnerW is the default content width passed to
 	// lipgloss Width(); the rendered block is sidebarInnerW+1 wide (right border
-	// char). P40.1 makes the live width per-model (m.sidebarW), adjustable with
+	// char). P40.1 makes the live width per-model (m.chrome.sidebarW), adjustable with
 	// ctrl+left/ctrl+right; sidebarInnerW is only the starting value.
 	sidebarInnerW   = 21
 	sidebarTotalW   = 22 // sidebarInnerW + 1 border
@@ -207,95 +207,22 @@ type toolState struct {
 	toolBlocks []toolBlock
 }
 
-type model struct {
-	cfg        Config
-	ta         textarea.Model
-	sp         spinner.Model
-	transcript *transcriptPane
-	liveText   *strings.Builder // pointer: strings.Builder panics if copied by value after first write
-	live       *liveBlock       // actively-streaming block; pointer for the same reason as liveText
-	thinkText  *strings.Builder // accumulates extended-thinking text for the current turn
-	renderer   *glamour.TermRenderer
-	rendererW  int // tracks viewport width to know when to recreate renderer
-	slash      *SlashDispatcher
-	streaming  bool
-	events     <-chan api.Event
-	cancel     context.CancelFunc
-	width      int
-	height     int
-	ready      bool
-	status     string
-	th         theme
-	wizard     *wizardModel
-	workDir    string
-	imageProto imageProtocol // inline image thumbnail capability (P16.9)
-	// autoTheme (P40.5) is true when the theme is "auto" (the default): the
-	// scheme starts at a provisional dark and is corrected to light/dark once
-	// the terminal reports its background color via tea.BackgroundColorMsg.
-	// Cleared the moment the user picks an explicit theme with /theme.
-	autoTheme bool
-	// sidebarW (P40.1) is the sidebar's live inner content width, adjustable
-	// with ctrl+left/ctrl+right when the sidebar has focus; starts at
-	// sidebarInnerW. The terminal pane's adjustable width lives on m.term.
-	sidebarW int
-
-	toolCompact  bool // when true, tool results are capped at toolMaxLinesCompact lines
-	tools        []toolEntry
-	inputTokens  int // uncached input tokens (last turn)
-	outputTokens int
-	// inputTokensKnown is false from beginStream() until KindTurnDone reports
-	// the current turn's usage. inputTokens itself keeps the previous turn's
-	// number across that gap (it feeds the idle sidebar/status readouts, which
-	// are fine showing a "last known" figure) but streamStats() must not pass
-	// it off as the in-flight turn's prompt size — P33.17: an absent number
-	// beats a wrong one, and the live hint has nowhere honest to source a
-	// mid-stream prompt size from until the model reports it.
-	inputTokensKnown bool
-	// displayedInputTokens/displayedOutputTokens (P74.12) ease toward
-	// inputTokens/outputTokens one animStep frame at a time instead of
-	// snapping, so the status bar's counter climbs smoothly rather than
-	// jumping in chunk-sized steps each time a turn's usage lands. See
-	// easeStatCounters in update_tick.go.
-	displayedInputTokens  int
-	displayedOutputTokens int
-	cacheReadTokens       int  // prompt-cache hits (last turn)
-	cacheCreationTokens   int  // prompt-cache writes (last turn)
-	tokensEstimated       bool // true when token counts are derived from heuristic
-	costUSD               float64
-	egressBytes           int64  // P81.8: cumulative web_fetch bytes this session, server-reported
-	srvCtxWin             int    // effective context window from daemon /status; 0 = unknown (fall back to name-based guess)
-	srvCtxWinSrc          string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default", "ollama:compat-default"
-
-	// Connection/model-health indicator (P28.7): last known daemon /status
-	// result, refreshed periodically (see statusTickMsg) rather than only at
-	// startup/after a run, so "is the model reachable" is answerable at a
-	// glance without spending a prompt on it.
-	connKnown     bool  // false until the first /status round trip completes
-	connReachable bool  // provider reachable per Server.probeProviderReachability
-	connLatencyMS int64 // last measured latency in ms; 0 when unmeasured (cloud provider)
-
-	// sandboxBackend is the effective command-execution sandbox backend from
-	// the daemon's /status (P81.22/FIND-22): "container:docker", "os:bwrap",
-	// "local", … — empty until the first /status round trip completes, same
-	// as connKnown above. Surfaced continuously in the sidebar (not only as a
-	// one-off fallback warning) so "commands run unconfined" stays visible
-	// for the life of the session, not just at the moment it happened.
-	sandboxBackend string
-
-	// cronJobCount/cronAutoApproveCount/cronUnconfirmedCount mirror the
-	// daemon's /status cron summary (P81.23/FIND-23): total registered jobs,
-	// how many fire unattended (auto_approve), and how many are still
-	// waiting on cron_confirm. 0 until the first /status round trip
-	// completes, same as sandboxBackend above.
-	cronJobCount         int
-	cronAutoApproveCount int
-	cronUnconfirmedCount int
-
-	// cronJobs is the live job listing (P<dashboard>), polled the same
-	// cadence as the /status cron summary above via ListCronJobs — nil until
-	// the first successful poll, or against a daemon that predates the
-	// endpoint, in which case the sidebar just shows the aggregate counts.
-	cronJobs []api.CronJobInfo
+// streamState (QUAL-05) groups the current run's live-streaming and
+// last-turn state: the in-flight text/thinking buffers, the renderer that
+// draws them, the run's cancellation plumbing, and the small set of
+// last-completed-turn fields (lastAssistantText, lastAnswerBlock,
+// thinkEntries) that outlive the run they were produced by. Continues the
+// streamPhase/toolState precedent (P77.2) rather than inventing a new one;
+// streamPhase itself folds in here as streamState.phase.
+type streamState struct {
+	liveText  *strings.Builder // pointer: strings.Builder panics if copied by value after first write
+	live      *liveBlock       // actively-streaming block; pointer for the same reason as liveText
+	thinkText *strings.Builder // accumulates extended-thinking text for the current turn
+	renderer  *glamour.TermRenderer
+	rendererW int // tracks viewport width to know when to recreate renderer
+	streaming bool
+	events    <-chan api.Event
+	cancel    context.CancelFunc
 
 	thinkStart time.Time // when extended thinking began this turn; zero when idle
 	turnCount  int       // conversation turns sent; guards turn separator logic
@@ -311,53 +238,105 @@ type model struct {
 	// they scroll up, so streaming output never yanks them back down mid-read.
 	followBottom bool
 
-	// backtrackArmed is true after a first ESC press arms a double-tap action; a
-	// second ESC confirms it. Any non-ESC key clears this state. Only the
-	// not-streaming path arms it, and only once the input box is already empty
-	// (so a plain "clear the input" ESC doesn't arm it): a second ESC there
-	// opens the P22.3 backtrack picker. While streaming, ESC interrupts on the
-	// first press (P33.5) and never arms.
-	backtrackArmed bool
+	// lastAssistantText holds the most recent complete assistant message for /copy.
+	lastAssistantText string
 
-	// warmPinged guards the P33.10 first-keystroke pre-warm so the async warm
-	// request fires at most once per empty→typing transition, not on every
-	// keystroke. Reset when the composer goes empty again (message sent or
-	// cleared); a fresh idle period can then re-warm if the model has unloaded.
-	warmPinged bool
+	// lastAnswerBlock is the transcript item holding the most recently flushed
+	// assistant answer, kept so a guard-retry event (P25.3) can withdraw the
+	// failed answer in place instead of leaving it above its replacement.
+	// Nil whenever no withdrawable answer is on screen (run finished, session
+	// switched, transcript reset).
+	lastAnswerBlock *transcriptItem
 
-	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
-	history    []string
-	histIdx    int
-	draftInput string
+	// Collapsible thinking blocks (TQ9): each flushed thinking block keeps
+	// both a one-line collapsed and a full expanded rendering; ctrl+o swaps
+	// every block between the two in place.
+	thinkEntries  []thinkEntry
+	thinkExpanded bool
+}
 
-	// queued holds messages typed with enter during streaming (TQ8); they
-	// render as dimmed pending blocks and auto-send one at a time when the
-	// current stream closes. An explicit cancel discards the queue.
-	queued []string
+// toolsUI (QUAL-05) groups tool-call display state: the compact/expanded
+// result-length preference, the flat per-turn tool entry log, the todo strip
+// fed by todo_add/todo_update/todo_list, and the existing toolState (P77.2)
+// in-flight/resolved tracking, folded in here as toolsUI.state.
+type toolsUI struct {
+	compact bool // when true, tool results are capped at toolMaxLinesCompact lines
+	tools   []toolEntry
 
-	// pendingSteers holds steers posted during the current run that the daemon
-	// hasn't reported back on yet (P33.2); they render as dimmed pending blocks
-	// until the matching KindSteer (injected) or KindSteerUnconsumed (never
-	// reached a tool round) event resolves them. Each entry carries an origin
-	// (P33.15 #3) so an unconsumed system-authored steer (denial feedback,
-	// approval.go) can be told apart from a user-typed one when it comes back
-	// unconsumed — only the latter is safe to requeue as the next user turn.
-	pendingSteers []pendingSteerEntry
+	// todo strip — populated from todo_add/todo_update/todo_list tool events.
+	todoItems       []todoStripItem
+	pendingTodoText string // captured from todo_add call input, matched to result
 
-	// interrupted is true from an explicit cancel until the next stream starts.
-	// A steer the daemon hands back unconsumed after one is surfaced as a note
-	// rather than requeued, for the same reason an interrupt discards m.queued.
-	interrupted bool
+	// state (P77.2) groups the in-flight/resolved tool-call tracking state —
+	// see toolState's own doc comment.
+	state toolState
+}
 
-	// Lazily-built workspace file index for @file mention completion.
-	fileIndex      []string
-	fileIndexBuilt bool
+// overlays (QUAL-05) groups modal/overlay state: at most a few of these are
+// ever non-zero at once (the picker/dialog family, the wizard, an approval
+// prompt, a transient panel), but each is independently toggled by its own
+// slash command or keybinding, so they stay separate fields rather than a
+// tagged union.
+type overlays struct {
+	keys keyMap
+	// dialog is the single active filterable-list overlay (command palette,
+	// persona/session/timeline/model picker) — P16.6 collapsed four
+	// near-identical dialog types into one, tagged by dialog.kind.
+	dialog         *listDialog
+	securityConfig *securityConfigModel
+	wizard         *wizardModel
+	// transientPanel is the dismissable, scrollable overlay for informational
+	// slash-command output (/status, /help, /memory …) — P33.11. It renders
+	// over the live chat and never enters the transcript, so housekeeping
+	// commands don't leave stale blocks behind.
+	transientPanel *transientPanel
+	// pendingThreatModelTarget carries the already-parsed /threat-model
+	// target text (scope, "" for the whole project) from the moment the
+	// framework picker opens through to the follow-up dispatch once a
+	// framework is chosen.
+	pendingThreatModelTarget string
+	// pendingThreatModelUnattended carries the P52.12 `unattended` flag across
+	// the same gap. Without it the flag is parsed, then thrown away the moment
+	// the picker opens, and "/threat-model unattended" — the no-framework form,
+	// which is the common one — silently runs interactively instead.
+	pendingThreatModelUnattended bool
+	helpOpen                     bool
+	quitConfirm                  bool // P16.6: confirm before quitting while a turn is streaming
+	activeToast                  *toast
+	completion                   completionState
+	approval                     *approvalState // non-nil while engine is blocked waiting for user approval
+	// approvalQueue holds calls from the same parallel round still waiting
+	// behind approval (P81.33/FIND-33): a round can have more than one call
+	// pending approval at once, and queuing rather than clobbering approval
+	// is what turns that into "N more waiting, reviewable in turn" instead of
+	// one dialog silently replacing another while the first call's Approve()
+	// goroutine hangs until the run ends.
+	approvalQueue []*approvalState
+	// search (P40.3) is non-nil while the incremental transcript-search overlay
+	// is active: it captures keyboard input, greps the transcript's rendered
+	// content, and drives match navigation. See search.go.
+	search *searchState
+}
 
-	// Cached command-entry list (built-ins + custom), rebuilt only when the
-	// custom-command count changes rather than on every keystroke.
-	cmdEntriesCache []cmdEntry
-	cmdEntriesLen   int
+// chrome (QUAL-05) groups terminal-geometry and display-preference state:
+// the current size, whether the first WindowSizeMsg has landed, and the
+// per-session toggles (sidebar, scrollback, mouse, motion, dashboard layout)
+// that shape how the frame is drawn rather than what's in it.
+type chrome struct {
+	width  int
+	height int
+	ready  bool
 
+	imageProto imageProtocol // inline image thumbnail capability (P16.9)
+	// autoTheme (P40.5) is true when the theme is "auto" (the default): the
+	// scheme starts at a provisional dark and is corrected to light/dark once
+	// the terminal reports its background color via tea.BackgroundColorMsg.
+	// Cleared the moment the user picks an explicit theme with /theme.
+	autoTheme bool
+	// sidebarW (P40.1) is the sidebar's live inner content width, adjustable
+	// with ctrl+left/ctrl+right when the sidebar has focus; starts at
+	// sidebarInnerW. The terminal pane's adjustable width lives on m.splitTerm.term.
+	sidebarW int
 	// Sidebar visibility (Ctrl+B / /sidebar to toggle, default off).
 	sidebarOpen bool
 
@@ -399,39 +378,135 @@ type model struct {
 	// means defaultDashboardSections — validateDashboardSections has already
 	// rejected any unknown name by the time newModel runs.
 	dashboardSections []string
+}
 
-	// lastAssistantText holds the most recent complete assistant message for /copy.
-	lastAssistantText string
+// usage (QUAL-05) groups token/cost accounting for the sidebar and status
+// line: last-turn counts, the eased display values that animate toward them,
+// and cumulative cost/egress for the session.
+type usage struct {
+	inputTokens  int // uncached input tokens (last turn)
+	outputTokens int
+	// inputTokensKnown is false from beginStream() until KindTurnDone reports
+	// the current turn's usage. inputTokens itself keeps the previous turn's
+	// number across that gap (it feeds the idle sidebar/status readouts, which
+	// are fine showing a "last known" figure) but streamStats() must not pass
+	// it off as the in-flight turn's prompt size — P33.17: an absent number
+	// beats a wrong one, and the live hint has nowhere honest to source a
+	// mid-stream prompt size from until the model reports it.
+	inputTokensKnown bool
+	// displayedInputTokens/displayedOutputTokens (P74.12) ease toward
+	// inputTokens/outputTokens one animStep frame at a time instead of
+	// snapping, so the status bar's counter climbs smoothly rather than
+	// jumping in chunk-sized steps each time a turn's usage lands. See
+	// easeStatCounters in update_tick.go.
+	displayedInputTokens  int
+	displayedOutputTokens int
+	cacheReadTokens       int  // prompt-cache hits (last turn)
+	cacheCreationTokens   int  // prompt-cache writes (last turn)
+	tokensEstimated       bool // true when token counts are derived from heuristic
+	costUSD               float64
+	egressBytes           int64  // P81.8: cumulative web_fetch bytes this session, server-reported
+	srvCtxWin             int    // effective context window from daemon /status; 0 = unknown (fall back to name-based guess)
+	srvCtxWinSrc          string // provenance: "config", "ollama:loaded", "ollama:modelfile", "ollama:default", "ollama:compat-default"
+}
 
-	// lastAnswerBlock is the transcript item holding the most recently flushed
-	// assistant answer, kept so a guard-retry event (P25.3) can withdraw the
-	// failed answer in place instead of leaving it above its replacement.
-	// Nil whenever no withdrawable answer is on screen (run finished, session
-	// switched, transcript reset).
-	lastAnswerBlock *transcriptItem
+// conn (QUAL-05) groups the daemon/model connection-health readout plus the
+// cron and sandbox status it's polled alongside — all mirrors of the
+// daemon's periodic /status response (see statusTickMsg), not local state.
+type conn struct {
+	// Connection/model-health indicator (P28.7): last known daemon /status
+	// result, refreshed periodically (see statusTickMsg) rather than only at
+	// startup/after a run, so "is the model reachable" is answerable at a
+	// glance without spending a prompt on it.
+	connKnown     bool  // false until the first /status round trip completes
+	connReachable bool  // provider reachable per Server.probeProviderReachability
+	connLatencyMS int64 // last measured latency in ms; 0 when unmeasured (cloud provider)
 
-	// todo strip — populated from todo_add/todo_update/todo_list tool events.
-	todoItems       []todoStripItem
-	pendingTodoText string // captured from todo_add call input, matched to result
+	// sandboxBackend is the effective command-execution sandbox backend from
+	// the daemon's /status (P81.22/FIND-22): "container:docker", "os:bwrap",
+	// "local", … — empty until the first /status round trip completes, same
+	// as connKnown above. Surfaced continuously in the sidebar (not only as a
+	// one-off fallback warning) so "commands run unconfined" stays visible
+	// for the life of the session, not just at the moment it happened.
+	sandboxBackend string
 
-	// toolState (P77.2) groups the in-flight/resolved tool-call tracking
-	// state — see toolState's own doc comment.
-	toolState toolState
+	// cronJobCount/cronAutoApproveCount/cronUnconfirmedCount mirror the
+	// daemon's /status cron summary (P81.23/FIND-23): total registered jobs,
+	// how many fire unattended (auto_approve), and how many are still
+	// waiting on cron_confirm. 0 until the first /status round trip
+	// completes, same as sandboxBackend above.
+	cronJobCount         int
+	cronAutoApproveCount int
+	cronUnconfirmedCount int
 
-	// Collapsible thinking blocks (TQ9): each flushed thinking block keeps
-	// both a one-line collapsed and a full expanded rendering; ctrl+o swaps
-	// every block between the two in place.
-	thinkEntries  []thinkEntry
-	thinkExpanded bool
+	// cronJobs is the live job listing (P<dashboard>), polled the same
+	// cadence as the /status cron summary above via ListCronJobs — nil until
+	// the first successful poll, or against a daemon that predates the
+	// endpoint, in which case the sidebar just shows the aggregate counts.
+	cronJobs []api.CronJobInfo
+}
+
+// composer (QUAL-05) groups input-box bookkeeping that isn't the Bubbles
+// textarea component itself (that stays top-level as model.ta): history
+// navigation, the queue of messages typed mid-stream, unconsumed steers, and
+// the lazily-built completion caches.
+type composer struct {
+	// backtrackArmed is true after a first ESC press arms a double-tap action; a
+	// second ESC confirms it. Any non-ESC key clears this state. Only the
+	// not-streaming path arms it, and only once the input box is already empty
+	// (so a plain "clear the input" ESC doesn't arm it): a second ESC there
+	// opens the P22.3 backtrack picker. While streaming, ESC interrupts on the
+	// first press (P33.5) and never arms.
+	backtrackArmed bool
+
+	// warmPinged guards the P33.10 first-keystroke pre-warm so the async warm
+	// request fires at most once per empty→typing transition, not on every
+	// keystroke. Reset when the composer goes empty again (message sent or
+	// cleared); a fresh idle period can then re-warm if the model has unloaded.
+	warmPinged bool
+
+	// input history: sent messages oldest-first; histIdx is -1 when not navigating.
+	history    []string
+	histIdx    int
+	draftInput string
+
+	// queued holds messages typed with enter during streaming (TQ8); they
+	// render as dimmed pending blocks and auto-send one at a time when the
+	// current stream closes. An explicit cancel discards the queue.
+	queued []string
+
+	// pendingSteers holds steers posted during the current run that the daemon
+	// hasn't reported back on yet (P33.2); they render as dimmed pending blocks
+	// until the matching KindSteer (injected) or KindSteerUnconsumed (never
+	// reached a tool round) event resolves them. Each entry carries an origin
+	// (P33.15 #3) so an unconsumed system-authored steer (denial feedback,
+	// approval.go) can be told apart from a user-typed one when it comes back
+	// unconsumed — only the latter is safe to requeue as the next user turn.
+	pendingSteers []pendingSteerEntry
+
+	// interrupted is true from an explicit cancel until the next stream starts.
+	// A steer the daemon hands back unconsumed after one is surfaced as a note
+	// rather than requeued, for the same reason an interrupt discards queued.
+	interrupted bool
+
+	// Lazily-built workspace file index for @file mention completion.
+	fileIndex      []string
+	fileIndexBuilt bool
+
+	// Cached command-entry list (built-ins + custom), rebuilt only when the
+	// custom-command count changes rather than on every keystroke.
+	cmdEntriesCache []cmdEntry
+	cmdEntriesLen   int
+}
+
+// sessionMeta (QUAL-05) groups session-scoped bookkeeping that isn't part of
+// the live conversation state: the workspace root, draft persistence, and
+// the sidebar's file/agent/timeline listings.
+type sessionMeta struct {
+	workDir string
 
 	// stashPath is the .aegis/stash.json path for draft persistence (P5.6).
 	stashPath string
-
-	// Terminal split pane (Ctrl+X to toggle).
-	termOpen    bool
-	termFocused bool
-	term        termPane
-	termRun     *termRun // non-nil while a command is running in the terminal
 
 	// lastFailure is the most recent failed command run outside the model's
 	// automatic view — the embedded terminal pane or a ! bang command — kept
@@ -451,51 +526,54 @@ type model struct {
 
 	// Conversation timeline entries for /timeline picker (P2.8).
 	timelineEntries []timelineEntry
+}
 
-	// overlay / modals
-	keys keyMap
-	// dialog is the single active filterable-list overlay (command palette,
-	// persona/session/timeline/model picker) — P16.6 collapsed four
-	// near-identical dialog types into one, tagged by dialog.kind.
-	dialog         *listDialog
-	securityConfig *securityConfigModel
-	// transientPanel is the dismissable, scrollable overlay for informational
-	// slash-command output (/status, /help, /memory …) — P33.11. It renders
-	// over the live chat and never enters the transcript, so housekeeping
-	// commands don't leave stale blocks behind.
-	transientPanel *transientPanel
-	// pendingThreatModelTarget carries the already-parsed /threat-model
-	// target text (scope, "" for the whole project) from the moment the
-	// framework picker opens through to the follow-up dispatch once a
-	// framework is chosen.
-	pendingThreatModelTarget string
-	// pendingThreatModelUnattended carries the P52.12 `unattended` flag across
-	// the same gap. Without it the flag is parsed, then thrown away the moment
-	// the picker opens, and "/threat-model unattended" — the no-framework form,
-	// which is the common one — silently runs interactively instead.
-	pendingThreatModelUnattended bool
-	helpOpen                     bool
-	quitConfirm                  bool // P16.6: confirm before quitting while a turn is streaming
-	activeToast                  *toast
-	completion                   completionState
-	approval                     *approvalState // non-nil while engine is blocked waiting for user approval
-	// approvalQueue holds calls from the same parallel round still waiting
-	// behind m.approval (P81.33/FIND-33): a round can have more than one call
-	// pending approval at once, and queuing rather than clobbering m.approval
-	// is what turns that into "N more waiting, reviewable in turn" instead of
-	// one dialog silently replacing another while the first call's Approve()
-	// goroutine hangs until the run ends.
-	approvalQueue []*approvalState
+// splitTerm (QUAL-05) groups the embedded terminal split-pane state
+// (Ctrl+X to toggle). Named splitTerm rather than term to avoid colliding
+// with its own term termPane field.
+type splitTerm struct {
+	termOpen    bool
+	termFocused bool
+	term        termPane
+	termRun     *termRun // non-nil while a command is running in the terminal
+}
 
-	// P16.1 attention system: notifyMode is parsed once from config/session
-	// state; focused tracks terminal focus (via tea.FocusMsg/BlurMsg) so
-	// notifications are suppressed while the user is already looking. Focus
-	// reporting isn't supported by every terminal (see tea.BlurMsg docs), so
-	// focused defaults to false ("not known to be focused") — when in doubt,
-	// notify rather than silently suppress.
+// attention (P16.1, QUAL-05) groups notification state: notifyMode is
+// parsed once from config/session state; focused tracks terminal focus (via
+// tea.FocusMsg/BlurMsg) so notifications are suppressed while the user is
+// already looking. Focus reporting isn't supported by every terminal (see
+// tea.BlurMsg docs), so focused defaults to false ("not known to be
+// focused") — when in doubt, notify rather than silently suppress.
+type attention struct {
 	notifyMode    notify.Mode
 	focused       bool
 	pendingNotify *notify.Event // set by applyEvent, consumed by the eventMsg handler
+}
+
+type model struct {
+	cfg         Config
+	ta          textarea.Model
+	sp          spinner.Model
+	transcript  *transcriptPane
+	slash       *SlashDispatcher
+	streamState streamState
+	chrome      chrome
+	status      string
+	th          theme
+
+	toolsUI     toolsUI
+	usage       usage
+	conn        conn
+	composer    composer
+	sessionMeta sessionMeta
+	splitTerm   splitTerm
+
+	// overlay / modals
+	overlays overlays
+
+	// attention (P16.1) groups notification state. Named attention rather
+	// than notify to avoid colliding with the imported notify package.
+	attention attention
 
 	// P16.5 mouse selection & click-to-focus: sel is documented on the
 	// selection type; focusedIdx is the transcript segment index most
@@ -503,11 +581,6 @@ type model struct {
 	// in renderTranscriptContent — purely a visual affordance, gates nothing.
 	sel        selection
 	focusedIdx int
-
-	// search (P40.3) is non-nil while the incremental transcript-search overlay
-	// is active: it captures keyboard input, greps the transcript's rendered
-	// content, and drives match navigation. See search.go.
-	search *searchState
 }
 
 // approvalState holds the details of a pending tool-execution approval request
@@ -540,7 +613,7 @@ type todoStripItem struct {
 func (m *model) maybeWarmOllamaCmd() tea.Cmd {
 	base := m.cfg.OllamaBaseURL
 	model := m.cfg.Model
-	if base == "" || model == "" || model == "auto" || m.streaming {
+	if base == "" || model == "" || model == "auto" || m.streamState.streaming {
 		return nil
 	}
 	return func() tea.Msg {
@@ -618,31 +691,34 @@ func newModel(cfg Config) model {
 		th:         th,
 		status:     "ready",
 		slash:      NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model, cfg.WorkDir),
-		histIdx:    -1,
+		composer:   composer{histIdx: -1},
 		focusedIdx: -1,
-		workDir:    workDir,
-		sidebarW:   sidebarInnerW, // P40.1: adjustable at runtime
 
-		transcript:        newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
-		liveText:          &strings.Builder{},
-		live:              &liveBlock{},
-		thinkText:         &strings.Builder{},
-		renderer:          newGlamourRenderer(80), // initial width; recreated on first resize
-		keys:              mustKeyMap(cfg.Keybindings),
-		followBottom:      true,
-		toolCompact:       true,
-		humorMode:         cfg.HumorMode,
-		term:              newTermPane(workDir, 10), // height recalculated on first resize
-		stashPath:         stashPath,
-		notifyMode:        notify.ParseMode(cfg.Notifications),
-		imageProto:        imageProtoFor(cfg.ImageRendering),
-		mouseOff:          strings.EqualFold(strings.TrimSpace(cfg.Mouse), "off"),
-		reducedMotion:     cfg.ReducedMotion,
-		maxTurnStall:      cfg.MaxTurnStall,
-		dashboardSections: cfg.DashboardSections,
+		transcript: newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
+		streamState: streamState{
+			liveText:     &strings.Builder{},
+			live:         &liveBlock{},
+			thinkText:    &strings.Builder{},
+			renderer:     newGlamourRenderer(80), // initial width; recreated on first resize
+			followBottom: true,
+			humorMode:    cfg.HumorMode,
+		},
+		overlays: overlays{keys: mustKeyMap(cfg.Keybindings)},
+		toolsUI:  toolsUI{compact: true},
+		chrome: chrome{
+			sidebarW:          sidebarInnerW, // P40.1: adjustable at runtime
+			imageProto:        imageProtoFor(cfg.ImageRendering),
+			mouseOff:          strings.EqualFold(strings.TrimSpace(cfg.Mouse), "off"),
+			reducedMotion:     cfg.ReducedMotion,
+			maxTurnStall:      cfg.MaxTurnStall,
+			dashboardSections: cfg.DashboardSections,
+		},
+		splitTerm:   splitTerm{term: newTermPane(workDir, 10)}, // height recalculated on first resize
+		sessionMeta: sessionMeta{workDir: workDir, stashPath: stashPath},
+		attention:   attention{notifyMode: notify.ParseMode(cfg.Notifications)},
 	}
 	// P13.3.5: keep /help's shortcut list in sync with any keybinding remap.
-	m.slash.keys = m.keys
+	m.slash.keys = m.overlays.keys
 	// P5.6: restore an unsent draft if one was saved from the previous session.
 	if draft := loadStash(stashPath); draft != "" {
 		m.ta.SetValue(draft)
@@ -655,7 +731,7 @@ func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, m.sp.Tick, m.fetchStatusInfo(), statusTickCmd()}
 	// P40.5: with an "auto" theme, ask the terminal for its background color so
 	// Update can pick light vs. dark; the reply arrives as tea.BackgroundColorMsg.
-	if m.autoTheme {
+	if m.chrome.autoTheme {
 		cmds = append(cmds, tea.RequestBackgroundColor)
 	}
 	return tea.Batch(cmds...)
@@ -728,7 +804,7 @@ func (m model) fetchCronJobsQuiet() tea.Cmd {
 
 // execBangCmd runs a ! shell command and returns its output (P2.2).
 func (m model) execBangCmd(cmd string) tea.Cmd {
-	workDir := m.workDir
+	workDir := m.sessionMeta.workDir
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -750,12 +826,12 @@ func (m model) execBangCmd(cmd string) tea.Cmd {
 
 // recordChangedFile adds path to changedFiles if not already present (P2.4).
 func (m *model) recordChangedFile(path string) {
-	for _, f := range m.changedFiles {
+	for _, f := range m.sessionMeta.changedFiles {
 		if f == path {
 			return
 		}
 	}
-	m.changedFiles = append(m.changedFiles, path)
+	m.sessionMeta.changedFiles = append(m.sessionMeta.changedFiles, path)
 }
 
 // awaitingPicker reports whether kind's dialog — opened on the keypress with a
@@ -764,7 +840,7 @@ func (m *model) recordChangedFile(path string) {
 // esc or moved on to another dialog: late data must fill in what's open, never
 // re-open or hijack what isn't.
 func (m model) awaitingPicker(kind dialogKind) bool {
-	return m.dialog != nil && m.dialog.kind == kind
+	return m.overlays.dialog != nil && m.overlays.dialog.kind == kind
 }
 
 func (m *model) setQueueMode(on bool) {
@@ -804,8 +880,8 @@ func (m *model) dispatchSlash(parsed *commands.ParsedCommand) tea.Cmd {
 	if parsed.Name != "persona" || len(parsed.Args) != 0 {
 		return cmd
 	}
-	picker := newPersonaPicker(m.width, m.height, m.sp.View())
-	m.dialog = &picker
+	picker := newPersonaPicker(m.chrome.width, m.chrome.height, m.sp.View())
+	m.overlays.dialog = &picker
 	return tea.Batch(cmd, m.sp.Tick)
 }
 
@@ -843,15 +919,15 @@ func (m *model) cycleModeCmd() tea.Cmd {
 // anchored-overlay compositing, which is also how the sidebar composites
 // (P74.2) — it no longer reserves layout width the way it did here.
 func (m *model) layout() {
-	vpW := m.width - 1 // -1 for PaddingLeft on the main panel
-	if m.rawScrollback {
+	vpW := m.chrome.width - 1 // -1 for PaddingLeft on the main panel
+	if m.chrome.rawScrollback {
 		// P22.6: raw scrollback mode suppresses the terminal pane and
 		// scrollbar column (renderChat/renderScrollbar) — none of that
 		// dashboard-column width is reserved, so the plain transcript text
 		// gets the full body width instead.
 	} else {
-		if m.termOpen {
-			vpW -= m.term.totalW()
+		if m.splitTerm.termOpen {
+			vpW -= m.splitTerm.term.totalW()
 		}
 		vpW -= 1 // scrollbar column (P16.5), rendered to the right of the transcript
 	}
@@ -861,16 +937,16 @@ func (m *model) layout() {
 	// SetSize's width must be applied before applyViewportHeight: with
 	// DynamicHeight it triggers recalculateHeight, which changes ta.Height()
 	// and therefore fixedH().
-	m.ta.SetWidth(m.width)
+	m.ta.SetWidth(m.chrome.width)
 	m.applyViewportHeight()
 
-	if m.termOpen {
-		m.term.resize(max(m.height-m.fixedH(), 3))
+	if m.splitTerm.termOpen {
+		m.splitTerm.term.resize(max(m.chrome.height-m.fixedH(), 3))
 	}
 
-	if vpW != m.rendererW {
-		m.rendererW = vpW
-		m.renderer = newGlamourRenderer(vpW)
+	if vpW != m.streamState.rendererW {
+		m.streamState.rendererW = vpW
+		m.streamState.renderer = newGlamourRenderer(vpW)
 	}
 }
 
@@ -884,16 +960,16 @@ const paneResizeStep = 2
 // whether anything actually changed (so callers only redraw on a real resize).
 func (m *model) resizePane(delta int) bool {
 	switch {
-	case m.termFocused && m.termOpen:
-		if !m.term.setWidth(m.term.width + delta) {
+	case m.splitTerm.termFocused && m.splitTerm.termOpen:
+		if !m.splitTerm.term.setWidth(m.splitTerm.term.width + delta) {
 			return false
 		}
-	case m.sidebarOpen && m.width >= sidebarMinTermW:
-		w := max(sidebarMinW, min(m.sidebarW+delta, sidebarMaxW))
-		if w == m.sidebarW {
+	case m.chrome.sidebarOpen && m.chrome.width >= sidebarMinTermW:
+		w := max(sidebarMinW, min(m.chrome.sidebarW+delta, sidebarMaxW))
+		if w == m.chrome.sidebarW {
 			return false
 		}
-		m.sidebarW = w
+		m.chrome.sidebarW = w
 	default:
 		return false
 	}
@@ -909,7 +985,7 @@ func (m *model) resizePane(delta int) bool {
 // anchored-overlay compositing.
 func (m *model) fixedH() int {
 	h := m.ta.Height() + 2 + 1
-	if len(m.todoItems) > 0 {
+	if len(m.toolsUI.todoItems) > 0 {
 		h += 1 // todo strip: one line
 	}
 	return h
@@ -924,15 +1000,15 @@ func (m *model) fixedH() int {
 // which is what lets bubbletea's non-alt-screen renderer scroll old lines
 // through the terminal's real history (see View()'s doc comment on model).
 func (m *model) applyViewportHeight() {
-	if m.rawScrollback {
+	if m.chrome.rawScrollback {
 		m.transcript.SetSize(m.transcript.Width(), m.transcript.TotalHeight())
 	} else {
-		m.transcript.SetSize(m.transcript.Width(), max(m.height-m.fixedH(), 3))
+		m.transcript.SetSize(m.transcript.Width(), max(m.chrome.height-m.fixedH(), 3))
 	}
 	// P21.7: a height change moves the bottom edge out from under the pinned
 	// offset. While following, re-pin immediately so a pane shrink (approval
 	// dialog, textarea wrap) never leaves the newest content below the fold.
-	if m.followBottom {
+	if m.streamState.followBottom {
 		m.transcript.GotoBottom()
 	}
 }
@@ -941,11 +1017,11 @@ func (m *model) applyViewportHeight() {
 // it only when the custom-command count changes.
 func (m *model) commandEntries() []cmdEntry {
 	customs := m.slash.Customs()
-	if m.cmdEntriesCache == nil || len(customs) != m.cmdEntriesLen {
-		m.cmdEntriesCache = allCommandEntries(customs)
-		m.cmdEntriesLen = len(customs)
+	if m.composer.cmdEntriesCache == nil || len(customs) != m.composer.cmdEntriesLen {
+		m.composer.cmdEntriesCache = allCommandEntries(customs)
+		m.composer.cmdEntriesLen = len(customs)
 	}
-	return m.cmdEntriesCache
+	return m.composer.cmdEntriesCache
 }
 
 // syncCompletion recomputes the inline completion popup from the textarea
@@ -953,36 +1029,36 @@ func (m *model) commandEntries() []cmdEntry {
 // resizing the viewport, so opening/closing it no longer perturbs the
 // transcript pane.
 func (m *model) syncCompletion() {
-	prev := m.completion.active
+	prev := m.overlays.completion.active
 	val := m.ta.Value()
 	// Build the workspace file index lazily the first time an @mention appears.
-	if !m.fileIndexBuilt && atTokenStart(val) >= 0 {
-		m.fileIndex = buildFileIndex(m.workDir)
-		m.fileIndexBuilt = true
+	if !m.composer.fileIndexBuilt && atTokenStart(val) >= 0 {
+		m.composer.fileIndex = buildFileIndex(m.sessionMeta.workDir)
+		m.composer.fileIndexBuilt = true
 	}
 	// P2.3: sort file index by frecency so recently-used files appear first.
-	files := m.fileIndex
-	if len(m.fileFrecency) > 0 {
+	files := m.composer.fileIndex
+	if len(m.sessionMeta.fileFrecency) > 0 {
 		sorted := make([]string, len(files))
 		copy(sorted, files)
 		sort.SliceStable(sorted, func(i, j int) bool {
-			return m.fileFrecency[sorted[i]] > m.fileFrecency[sorted[j]]
+			return m.sessionMeta.fileFrecency[sorted[i]] > m.sessionMeta.fileFrecency[sorted[j]]
 		})
 		files = sorted
 	}
-	m.completion = computeCompletion(val, m.commandEntries(), files)
-	if m.completion.active != prev {
+	m.overlays.completion = computeCompletion(val, m.commandEntries(), files)
+	if m.overlays.completion.active != prev {
 		m.refresh()
 	}
 }
 
 // setRawScrollbackCmd applies the P22.6 raw-scrollback toggle: flips
-// m.rawScrollback, re-runs layout (View()'s AltScreen/MouseMode and
+// m.chrome.rawScrollback, re-runs layout (View()'s AltScreen/MouseMode and
 // applyViewportHeight's clipped-vs-unclipped transcript height both key off
 // it) and refresh, and reports the new state as a transcript status line
 // (the same "\x00foo-on/off" -> status-line pattern /humor and /theme use).
 func (m *model) setRawScrollbackCmd(on bool) tea.Cmd {
-	m.rawScrollback = on
+	m.chrome.rawScrollback = on
 	m.layout()
 	var msg string
 	if on {
@@ -999,15 +1075,15 @@ func (m *model) setRawScrollbackCmd(on bool) tea.Cmd {
 // is true and the typed name already equals the highlighted command, it runs
 // the command immediately (Enter behaviour); otherwise it completes the name.
 func (m *model) acceptCompletion(run bool) tea.Cmd {
-	e, ok := m.completion.current()
+	e, ok := m.overlays.completion.current()
 	if !ok {
 		return nil
 	}
 
 	// @file mention / @ref: splice the choice in place of the typed @token.
-	if m.completion.kind == compFile {
+	if m.overlays.completion.kind == compFile {
 		val := m.ta.Value()
-		start := m.completion.tokenStart
+		start := m.overlays.completion.tokenStart
 		if start < 0 || start > len(val) {
 			start = len(val)
 		}
@@ -1018,7 +1094,7 @@ func (m *model) acceptCompletion(run bool) tea.Cmd {
 			sep = ""
 		}
 		m.ta.SetValue(val[:start] + "@" + e.name + sep)
-		m.completion = completionState{}
+		m.overlays.completion = completionState{}
 		m.applyViewportHeight()
 		m.refresh()
 		return nil
@@ -1027,9 +1103,9 @@ func (m *model) acceptCompletion(run bool) tea.Cmd {
 	typed := strings.ToLower(strings.TrimPrefix(m.ta.Value(), "/"))
 	if run && typed == e.name {
 		m.ta.Reset()
-		m.completion = completionState{}
-		m.histIdx = -1
-		m.draftInput = ""
+		m.overlays.completion = completionState{}
+		m.composer.histIdx = -1
+		m.composer.draftInput = ""
 		m.applyViewportHeight()
 		m.refresh()
 		return m.dispatchSlash(&commands.ParsedCommand{Name: e.name, Raw: "/" + e.name})
@@ -1060,7 +1136,7 @@ func (m *model) refresh() {
 	// and is sanitized before it reaches the terminal (P24.20, FIND-17) — the
 	// dim styling here is lipgloss, not glamour, so nothing else on this path
 	// would strip an embedded control sequence.
-	if think := m.thinkText.String(); think != "" {
+	if think := m.streamState.thinkText.String(); think != "" {
 		think = stripControlSeqs(think)
 		tail.WriteString(wrap(m.th.thinking.Render("✻ thinking")+"\n"+m.th.thinkingDim.Render(think)+"\n", w))
 	}
@@ -1069,10 +1145,10 @@ func (m *model) refresh() {
 	// a long streaming reply stays O(tail) per token instead of O(n). Text is
 	// styled through glamour as it streams (TQ3) so there is no end-of-turn
 	// restyle pop.
-	if live := m.liveText.String(); live != "" {
-		m.live.setText(live)
-		rendered := m.live.render(w, m.mdRender)
-		if m.streaming {
+	if live := m.streamState.liveText.String(); live != "" {
+		m.streamState.live.setText(live)
+		rendered := m.streamState.live.render(w, m.mdRender)
+		if m.streamState.streaming {
 			// P21.3: a blinking caret at the true write-head, so streaming
 			// reads as "alive" rather than "redrawing". mdRender/glamour
 			// normalize their output to end in exactly one trailing "\n";
@@ -1085,53 +1161,53 @@ func (m *model) refresh() {
 			rendered = strings.TrimRight(rendered, "\n") + m.caretGlyph() + "\n"
 		}
 		tail.WriteString(rendered)
-	} else if m.streaming {
+	} else if m.streamState.streaming {
 		// P33.4: a flavor phrase describes what the model is doing, which is
 		// only knowable once it has started doing it. Before the first output
 		// the honest line is the wait itself and how long it has run.
 		var phrase, hint string
 		switch {
-		case m.phase.firstTokenAt.IsZero():
+		case m.streamState.phase.firstTokenAt.IsZero():
 			phrase = statusWaiting
 			hint = formatStreamHint(m.streamStats())
-		case !m.phase.modelWaitAt.IsZero():
+		case !m.streamState.phase.modelWaitAt.IsZero():
 			// P33.19: post-tool-round wait — the round's tools have returned and
 			// the model is re-evaluating the enlarged prompt, no output yet. Like
 			// the first-token wait this is honest dead air, not a flavor phrase;
 			// its clock runs from the last tool result (modelWaitAt), so it times
 			// this wait rather than the whole turn.
 			phrase = statusReeval
-			if secs := int(time.Since(m.phase.modelWaitAt).Seconds()); secs > 0 {
+			if secs := int(time.Since(m.streamState.phase.modelWaitAt).Seconds()); secs > 0 {
 				hint = fmt.Sprintf(" · %ds", secs)
 			}
 		default:
 			cat := catThinking
-			if n := len(m.tools); n > 0 && m.tools[n-1].status == "pending" {
-				cat = categoryFor(m.tools[n-1].name)
+			if n := len(m.toolsUI.tools); n > 0 && m.toolsUI.tools[n-1].status == "pending" {
+				cat = categoryFor(m.toolsUI.tools[n-1].name)
 			}
-			phrase = thinkingPhrase(m.animStep, m.humorMode, cat)
+			phrase = thinkingPhrase(m.streamState.animStep, m.streamState.humorMode, cat)
 			hint = formatStreamHint(m.streamStats())
 		}
-		work := shimmerText("● "+phrase, m.animStep, colTextMuted, stallRampColor(m.stallElapsed(), m.maxTurnStall))
+		work := shimmerText("● "+phrase, m.streamState.animStep, colTextMuted, stallRampColor(m.stallElapsed(), m.chrome.maxTurnStall))
 		tail.WriteString(wrap(work+m.th.elapsedDim.Render(hint), w))
 	}
 
 	// P33.2: a steer is echoed the moment it's sent, so the typed text is
 	// visible while the daemon decides whether it lands mid-run or comes back
 	// unconsumed — the same dimmed pending treatment TQ8 gives queued messages.
-	for _, st := range m.pendingSteers {
+	for _, st := range m.composer.pendingSteers {
 		line := m.th.statusDim.Render("⇢ steer ▸ " + truncate(oneLine(st.text), max(w-12, 16)))
 		tail.WriteString("\n" + wrap(line, w))
 	}
 
 	// TQ8: queued messages render as dimmed pending blocks below the live tail.
-	for _, q := range m.queued {
+	for _, q := range m.composer.queued {
 		line := m.th.statusDim.Render("⏳ queued ▸ " + truncate(oneLine(q), max(w-12, 16)))
 		tail.WriteString("\n" + wrap(line, w))
 	}
 
 	m.transcript.SetTail(tail.String())
-	if m.rawScrollback {
+	if m.chrome.rawScrollback {
 		// P22.6: refresh() runs after nearly every transcript mutation
 		// (append, tool-result update, tail rebuild) — re-sync the pane
 		// height to the content's own total here too, not just on resize
@@ -1139,7 +1215,7 @@ func (m *model) refresh() {
 		// newly appended content and clips it.
 		m.transcript.SetSize(m.transcript.Width(), m.transcript.TotalHeight())
 	}
-	if m.followBottom {
+	if m.streamState.followBottom {
 		m.transcript.GotoBottom()
 	}
 }
@@ -1161,7 +1237,7 @@ const caretChar = "█"
 // caretGlyph returns the styled caret glyph for the current animation frame,
 // or "" on the "off" half of the blink cycle.
 func (m *model) caretGlyph() string {
-	if m.animStep%caretBlinkPeriod < caretBlinkPeriod/2 {
+	if m.streamState.animStep%caretBlinkPeriod < caretBlinkPeriod/2 {
 		return m.th.caret.Render(caretChar)
 	}
 	return ""
@@ -1180,16 +1256,16 @@ type thinkEntry struct {
 // header by default, expandable to the full text with ctrl+o. Called when the
 // answer or a tool call begins, or at turn end.
 func (m *model) flushThinking() {
-	if m.thinkText.Len() == 0 {
+	if m.streamState.thinkText.Len() == 0 {
 		return
 	}
-	raw := strings.TrimSpace(m.thinkText.String())
-	m.thinkText.Reset()
+	raw := strings.TrimSpace(m.streamState.thinkText.String())
+	m.streamState.thinkText.Reset()
 	secs := 0
-	if !m.thinkStart.IsZero() {
-		secs = int(time.Since(m.thinkStart).Seconds() + 0.5)
+	if !m.streamState.thinkStart.IsZero() {
+		secs = int(time.Since(m.streamState.thinkStart).Seconds() + 0.5)
 	}
-	m.thinkStart = time.Time{}
+	m.streamState.thinkStart = time.Time{}
 	if raw == "" {
 		return
 	}
@@ -1215,12 +1291,12 @@ func (m *model) appendThinkingBlock(raw string, secs int) {
 	collapsed := m.th.thinking.Render(header) + m.th.thinkingDim.Render("  (ctrl+o to expand)") + "\n\n"
 	expanded := m.th.thinking.Render(header) + "\n" + m.th.thinkingDim.Render(raw) + "\n\n"
 	use := collapsed
-	if m.thinkExpanded {
+	if m.streamState.thinkExpanded {
 		use = expanded
 	}
 	blk := m.transcript.AppendBlock(use)
 	if blk != nil {
-		m.thinkEntries = append(m.thinkEntries, thinkEntry{blk: blk, collapsed: collapsed, expanded: expanded})
+		m.streamState.thinkEntries = append(m.streamState.thinkEntries, thinkEntry{blk: blk, collapsed: collapsed, expanded: expanded})
 	}
 }
 
@@ -1228,27 +1304,27 @@ func (m *model) appendThinkingBlock(raw string, secs int) {
 // form in place (TQ9, ctrl+o). Entries whose block has been trimmed out of the
 // transcript are dropped.
 func (m *model) toggleThinking() {
-	if len(m.thinkEntries) == 0 {
+	if len(m.streamState.thinkEntries) == 0 {
 		return
 	}
-	m.thinkExpanded = !m.thinkExpanded
+	m.streamState.thinkExpanded = !m.streamState.thinkExpanded
 	present := make(map[*transcriptItem]bool, m.transcript.Len())
 	for _, b := range m.transcript.items {
 		present[b] = true
 	}
-	kept := m.thinkEntries[:0]
-	for _, e := range m.thinkEntries {
+	kept := m.streamState.thinkEntries[:0]
+	for _, e := range m.streamState.thinkEntries {
 		if !present[e.blk] {
 			continue
 		}
 		raw := e.collapsed
-		if m.thinkExpanded {
+		if m.streamState.thinkExpanded {
 			raw = e.expanded
 		}
 		m.transcript.SetItemRaw(e.blk, raw)
 		kept = append(kept, e)
 	}
-	m.thinkEntries = kept
+	m.streamState.thinkEntries = kept
 	m.refresh()
 }
 
@@ -1258,10 +1334,10 @@ func (m *model) toggleThinking() {
 // block and of the session-wide /tools full|compact default new results
 // start from. A no-op when nothing has resolved yet.
 func (m *model) toggleLastToolBlock() {
-	if len(m.toolState.toolBlocks) == 0 {
+	if len(m.toolsUI.state.toolBlocks) == 0 {
 		return
 	}
-	m.toolState.toolBlocks[len(m.toolState.toolBlocks)-1].toggleFull(m)
+	m.toolsUI.state.toolBlocks[len(m.toolsUI.state.toolBlocks)-1].toggleFull(m)
 }
 
 // trackToolBlock registers b as a P75.1 keyboard-addressable tool block,
@@ -1271,13 +1347,13 @@ func (m *model) toggleLastToolBlock() {
 // over addressing it rather than sit behind a now-stale card entry.
 func (m *model) trackToolBlock(b toolBlock) {
 	blk := b.blkItem()
-	for i, existing := range m.toolState.toolBlocks {
+	for i, existing := range m.toolsUI.state.toolBlocks {
 		if existing.blkItem() == blk {
-			m.toolState.toolBlocks[i] = b
+			m.toolsUI.state.toolBlocks[i] = b
 			return
 		}
 	}
-	m.toolState.toolBlocks = append(m.toolState.toolBlocks, b)
+	m.toolsUI.state.toolBlocks = append(m.toolsUI.state.toolBlocks, b)
 }
 
 // mdRender renders markdown through glamour with trailing newlines normalized
@@ -1296,8 +1372,8 @@ func (m *model) mdRender(s string) string {
 	s = stripControlSeqs(s)
 	s = renderMathUnicode(s)   // P40.8: LaTeX math → Unicode before glamour sees it
 	s = renderMermaidBlocks(s) // P40.9: ```mermaid fences → inline ASCII diagrams
-	if m.renderer != nil {
-		if rendered, err := m.renderer.Render(s); err == nil {
+	if m.streamState.renderer != nil {
+		if rendered, err := m.streamState.renderer.Render(s); err == nil {
 			return strings.TrimRight(rendered, "\n") + "\n"
 		}
 	}
@@ -1309,22 +1385,22 @@ func (m *model) mdRender(s string) string {
 // Pressing ctrl+x while the terminal is open but chat is focused re-focuses
 // the terminal; pressing ctrl+x while terminal is focused closes the pane.
 func (m *model) toggleTerminal() {
-	if !m.termOpen {
-		m.termOpen = true
-		m.termFocused = true
+	if !m.splitTerm.termOpen {
+		m.splitTerm.termOpen = true
+		m.splitTerm.termFocused = true
 		m.ta.Blur()
 		m.layout()
 		m.refresh()
-	} else if m.termFocused {
+	} else if m.splitTerm.termFocused {
 		// Close the pane and return focus to chat.
-		m.termOpen = false
-		m.termFocused = false
+		m.splitTerm.termOpen = false
+		m.splitTerm.termFocused = false
 		m.ta.Focus()
 		m.layout()
 		m.refresh()
 	} else {
 		// Pane is open but chat is focused: focus the terminal.
-		m.termFocused = true
+		m.splitTerm.termFocused = true
 		m.ta.Blur()
 		m.refresh()
 	}
@@ -1336,7 +1412,7 @@ func (m *model) toggleTerminal() {
 // than surfaced as an error — the existing "(N images attached)" text notice
 // already covers that case.
 func (m *model) renderImageThumbnails(images []api.ImageInput) []string {
-	if m.imageProto == protocolNone || len(images) == 0 {
+	if m.chrome.imageProto == protocolNone || len(images) == 0 {
 		return nil
 	}
 	var out []string
@@ -1345,7 +1421,7 @@ func (m *model) renderImageThumbnails(images []api.ImageInput) []string {
 		if err != nil {
 			continue
 		}
-		if raw := renderImageThumbnail(data, m.imageProto); raw != "" {
+		if raw := renderImageThumbnail(data, m.chrome.imageProto); raw != "" {
 			out = append(out, raw)
 		}
 	}
@@ -1356,7 +1432,7 @@ func (m *model) renderImageThumbnails(images []api.ImageInput) []string {
 // session history (loadHistory), where images arrive as base64-encoded
 // provider.ImageBlock content rather than local file paths.
 func (m *model) renderImageThumbnailsFromBlocks(blocks []provider.ImageBlock) []string {
-	if m.imageProto == protocolNone || len(blocks) == 0 {
+	if m.chrome.imageProto == protocolNone || len(blocks) == 0 {
 		return nil
 	}
 	var out []string
@@ -1365,7 +1441,7 @@ func (m *model) renderImageThumbnailsFromBlocks(blocks []provider.ImageBlock) []
 		if err != nil {
 			continue
 		}
-		if raw := renderImageThumbnail(data, m.imageProto); raw != "" {
+		if raw := renderImageThumbnail(data, m.chrome.imageProto); raw != "" {
 			out = append(out, raw)
 		}
 	}
@@ -1378,20 +1454,20 @@ func (m *model) renderImageThumbnailsFromBlocks(blocks []provider.ImageBlock) []
 // reply.
 func (m *model) appendUser(text string, thumbnails []string) {
 	// P2.8: record this turn in the timeline before writing anything.
-	m.timelineEntries = append(m.timelineEntries, timelineEntry{
+	m.sessionMeta.timelineEntries = append(m.sessionMeta.timelineEntries, timelineEntry{
 		text:       oneLine(text),
 		ts:         time.Now(),
 		blockIndex: m.transcript.Len(),
 	})
 
-	if m.turnCount > 0 {
+	if m.streamState.turnCount > 0 {
 		sepW := m.transcript.Width() - 2
 		if sepW < 10 {
 			sepW = 60
 		}
 		m.transcript.Append(m.th.turnSep.Render(strings.Repeat("─", sepW)) + "\n")
 	}
-	m.turnCount++
+	m.streamState.turnCount++
 	m.transcript.Append(barLabel("You", colUserFg) + "\n" + text + "\n\n")
 	for _, thumb := range thumbnails {
 		m.transcript.AppendRaw(thumb)
@@ -1423,7 +1499,7 @@ func (m *model) renderTeammates(msg teammatesMsg) {
 		// appears; the tag keeps its status colour so failures still stand out.
 		idStyle := lipgloss.NewStyle().Foreground(agentColor(tm.AgentID))
 		rest := fmt.Sprintf(" [%s] %s", tm.Status, oneLine(tm.Summary))
-		line := "  " + tagStyle.Render(tag) + " " + idStyle.Render(tm.AgentID) + m.th.tool.Render(truncate(rest, m.width-1))
+		line := "  " + tagStyle.Render(tag) + " " + idStyle.Render(tm.AgentID) + m.th.tool.Render(truncate(rest, m.chrome.width-1))
 		b.WriteString(line + "\n")
 	}
 	b.WriteString("\n")
@@ -1487,8 +1563,8 @@ func newGlamourRenderer(width int) *glamour.TermRenderer {
 // serving 4k, making the bar read 3% at the moment the prompt starts silently
 // truncating.
 func (m model) contextWindowSize() int {
-	if m.srvCtxWin > 0 {
-		return m.srvCtxWin
+	if m.usage.srvCtxWin > 0 {
+		return m.usage.srvCtxWin
 	}
 	return contextWindowFor(m.cfg.Model)
 }

@@ -17,9 +17,10 @@ type wireBlockJSON struct {
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
 	// tool_result
-	ToolUseID string `json:"tool_use_id,omitempty"`
-	Content   string `json:"content,omitempty"`
-	IsError   bool   `json:"is_error,omitempty"`
+	ToolUseID    string          `json:"tool_use_id,omitempty"`
+	Content      string          `json:"content,omitempty"`
+	IsError      bool            `json:"is_error,omitempty"`
+	Presentation json.RawMessage `json:"presentation,omitempty"` // P64.4, storage/replay only — see ToolResultBlock's doc
 	// thinking
 	Signature string `json:"signature,omitempty"`
 	// image
@@ -39,7 +40,7 @@ func encodeBlock(b Block) (wireBlockJSON, error) {
 	case ToolUseBlock:
 		return wireBlockJSON{Type: "tool_use", ID: v.ID, Name: v.Name, Input: v.Input}, nil
 	case ToolResultBlock:
-		return wireBlockJSON{Type: "tool_result", ToolUseID: v.ToolUseID, Content: v.Content, IsError: v.IsError}, nil
+		return wireBlockJSON{Type: "tool_result", ToolUseID: v.ToolUseID, Content: v.Content, IsError: v.IsError, Presentation: v.Presentation}, nil
 	case ThinkingBlock:
 		return wireBlockJSON{Type: "thinking", Text: v.Text, Signature: v.Signature}, nil
 	case ImageBlock:
@@ -56,7 +57,7 @@ func decodeBlock(w wireBlockJSON) (Block, error) {
 	case "tool_use":
 		return ToolUseBlock{ID: w.ID, Name: w.Name, Input: w.Input}, nil
 	case "tool_result":
-		return ToolResultBlock{ToolUseID: w.ToolUseID, Content: w.Content, IsError: w.IsError}, nil
+		return ToolResultBlock{ToolUseID: w.ToolUseID, Content: w.Content, IsError: w.IsError, Presentation: w.Presentation}, nil
 	case "thinking":
 		return ThinkingBlock{Text: w.Text, Signature: w.Signature}, nil
 	case "image":

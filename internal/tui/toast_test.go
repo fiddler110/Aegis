@@ -9,19 +9,19 @@ func TestStaleToastExpiryDoesNotRetireNewerToast(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 
 	first, _ := newToastCmd("first", toastInfo)
-	m.activeToast = first
+	m.overlays.activeToast = first
 	firstExpiry := toastExpiredMsg{t: first}
 
 	second, _ := newToastCmd("second", toastInfo)
-	m.activeToast = second
+	m.overlays.activeToast = second
 
 	m = m.updateToastExpired(firstExpiry)
-	if m.activeToast != second {
-		t.Fatalf("expected the newer toast to survive the stale expiry, got %#v", m.activeToast)
+	if m.overlays.activeToast != second {
+		t.Fatalf("expected the newer toast to survive the stale expiry, got %#v", m.overlays.activeToast)
 	}
 
 	m = m.updateToastExpired(toastExpiredMsg{t: second})
-	if m.activeToast != nil {
-		t.Fatalf("expected the current toast's own expiry to clear it, got %#v", m.activeToast)
+	if m.overlays.activeToast != nil {
+		t.Fatalf("expected the current toast's own expiry to clear it, got %#v", m.overlays.activeToast)
 	}
 }

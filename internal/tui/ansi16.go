@@ -23,6 +23,14 @@ var sgrSeq = regexp.MustCompile("\x1b\\[([0-9;]*)m")
 // This is Aegis's port of Crush's common.RemapANSI16; it uses a regex rather
 // than the x/ansi low-level parser so it is independent of that package's
 // version, which is sufficient for the standard sequences shell tools emit.
+//
+// Each match is rewritten in place and independently — this never merges or
+// drops a sequence relative to its neighbors, so it doesn't (yet) have to
+// choose between transition and state semantics. See internal/termsafe's
+// package doc (P67.14) before adding any pass here that would dedupe or diff
+// a run of SGR sequences: this function's inputs are exactly the transition
+// sequences that rule warns about (each carries its own reset relative to
+// whatever came before), not freely-collapsible absolute state.
 func remapANSI16(s string, palette [16]color.Color) string {
 	if !strings.ContainsRune(s, 0x1b) {
 		return s

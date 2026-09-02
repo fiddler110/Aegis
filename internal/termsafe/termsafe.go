@@ -3,6 +3,29 @@
 // surface: the TUI (internal/tui) and the plain CLI renderer
 // (internal/cli/chat_render.go) both write model-generated prose and raw tool
 // output to a real terminal, and both need exactly these two policies.
+//
+// # State versus transition (P67.14)
+//
+// Anywhere Aegis hand-composes or rewrites escape sequences — this package's
+// stripping/classification, internal/tui/ansi16.go's remapANSI16 SGR rewrite,
+// internal/tui/imagerender.go's kitty graphics framing — keep this
+// distinction in mind before ever deduping or diffing a run of sequences:
+//
+//   - Transition sequences (an SGR run computed as a diff from the previous
+//     style) may be concatenated, but an earlier one must never be dropped as
+//     "redundant" with a later one: its reset codes are not guaranteed to be a
+//     subset of the later sequence's, and a dropped background reset leaks
+//     into the next erase via background-colour erase.
+//   - State sequences (an absolute cursor position, an explicit colour set
+//     with no dependency on what came before) can be collapsed to the last
+//     one freely — only the final state matters.
+//
+// Nothing in this package currently dedupes across sequences, so the
+// distinction has no live bug behind it today. It matters the moment a
+// frame-diff or output-batching layer is added anywhere in this call graph,
+// since an optimization correct for one class silently corrupts the other —
+// on one terminal, months later. Write any such optimization against this
+// rule rather than rediscovering it.
 package termsafe
 
 import (

@@ -242,7 +242,7 @@ func TestMarkToolStartedSkipsGateRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+	if _, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 		ID: "tu_denied", Name: "ok", Input: json.RawMessage(`{}`),
 	}); !isErr {
 		t.Fatal("expected the gate to refuse the call")
@@ -252,7 +252,7 @@ func TestMarkToolStartedSkipsGateRefusals(t *testing.T) {
 	}
 
 	// An unknown tool never reaches a gate at all — same reasoning, other branch.
-	if _, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+	if _, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 		ID: "tu_unknown", Name: "nope", Input: json.RawMessage(`{}`),
 	}); !isErr {
 		t.Fatal("expected an unknown tool to error")

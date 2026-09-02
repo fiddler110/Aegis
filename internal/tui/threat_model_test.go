@@ -146,13 +146,13 @@ func TestThreatModelPickerFlow(t *testing.T) {
 
 	target := "the auth service"
 	m = driveUpdate(t, m, slashResultMsg{ThreatModelTarget: &target})
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected ThreatModelTarget to open a dialog")
 	}
-	if m.dialog.kind != dialogThreatModelPicker {
-		t.Fatalf("expected dialogThreatModelPicker, got %v", m.dialog.kind)
+	if m.overlays.dialog.kind != dialogThreatModelPicker {
+		t.Fatalf("expected dialogThreatModelPicker, got %v", m.overlays.dialog.kind)
 	}
-	items := m.dialog.list.Items()
+	items := m.overlays.dialog.list.Items()
 	if len(items) != len(threatModelFrameworks) {
 		t.Fatalf("expected %d framework items, got %d", len(threatModelFrameworks), len(items))
 	}
@@ -164,10 +164,10 @@ func TestThreatModelPickerFlow(t *testing.T) {
 	}
 
 	m = driveUpdate(t, m, dialogSelectedMsg{kind: dialogThreatModelPicker, item: frameworkItem{name: "NIST 800-154"}})
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Error("expected dialog to close after selection")
 	}
-	if m.pendingThreatModelTarget != "" {
+	if m.overlays.pendingThreatModelTarget != "" {
 		t.Error("expected pendingThreatModelTarget to be cleared after selection")
 	}
 }

@@ -107,7 +107,7 @@ func TestPaneOriginAndToPaneCoord(t *testing.T) {
 		t.Fatalf("expected (0,0), over the left padding column, to fall outside the pane")
 	}
 
-	m.sidebarOpen = true
+	m.chrome.sidebarOpen = true
 	if col, row := m.paneOrigin(); col != 1 || row != 0 {
 		t.Fatalf("expected the sidebar overlay to leave the pane origin unmoved, got (%d,%d)", col, row)
 	}

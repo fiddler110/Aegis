@@ -26,7 +26,7 @@ func (m *model) applyStreamBatch(evs []api.Event) tea.Cmd {
 	// textarea growing a line — all of which shrink the pane and briefly
 	// falsify AtBottom) can no longer silently kill auto-follow.
 	if m.transcript.AtBottom() {
-		m.followBottom = true
+		m.streamState.followBottom = true
 	}
 	sawDone := false
 	for _, ev := range evs {
@@ -37,13 +37,13 @@ func (m *model) applyStreamBatch(evs []api.Event) tea.Cmd {
 	}
 	m.refresh()
 	var cmds []tea.Cmd
-	if m.pendingNotify != nil {
-		cmds = append(cmds, m.notifyCmd(*m.pendingNotify))
-		m.pendingNotify = nil
+	if m.attention.pendingNotify != nil {
+		cmds = append(cmds, m.notifyCmd(*m.attention.pendingNotify))
+		m.attention.pendingNotify = nil
 	}
 	// A finished run may have improved the daemon's context-window detection
 	// (first run loads the model into Ollama); re-fetch until authoritative.
-	if sawDone && m.srvCtxWinSrc != "config" && m.srvCtxWinSrc != "ollama:loaded" {
+	if sawDone && m.usage.srvCtxWinSrc != "config" && m.usage.srvCtxWinSrc != "ollama:loaded" {
 		cmds = append(cmds, m.fetchStatusInfo())
 	}
 	if len(cmds) == 0 {
@@ -77,17 +77,17 @@ func (m *model) applyEvent(ev api.Event) {
 		// Buffer extended-thinking text; flushed as a collapsible block when
 		// the answer (or a tool call) begins. The first token starts the
 		// "thought for Ns" clock.
-		if m.thinkText.Len() == 0 {
-			m.thinkStart = time.Now()
+		if m.streamState.thinkText.Len() == 0 {
+			m.streamState.thinkStart = time.Now()
 		}
 		m.markModelOutput(len(ev.Text))
-		m.thinkText.WriteString(ev.Text)
+		m.streamState.thinkText.WriteString(ev.Text)
 
 	case api.KindText:
 		m.flushThinking() // reasoning is done once the answer starts
 		// Buffer text in liveText; flushed through glamour at turn end.
 		m.markModelOutput(len(ev.Text))
-		m.liveText.WriteString(ev.Text)
+		m.streamState.liveText.WriteString(ev.Text)
 
 	case api.KindToolCallStart:
 		// P33.3: the model has named the tool but is still generating its
@@ -100,7 +100,7 @@ func (m *model) applyEvent(ev api.Event) {
 		if ev.Tool == "" {
 			break
 		}
-		if c := m.toolState.pendingTools[ev.ToolID]; ev.ToolID != "" && c != nil {
+		if c := m.toolsUI.state.pendingTools[ev.ToolID]; ev.ToolID != "" && c != nil {
 			break
 		}
 		m.markModelOutput(0)
@@ -108,7 +108,7 @@ func (m *model) applyEvent(ev api.Event) {
 		m.flushLiveText() // render any preceding prose before the tool line
 		key := m.toolCardKey(ev.ToolID)
 		call := "\n" + renderToolCardStartCall(m.th, ev.Tool)
-		if blk := m.transcript.AppendBlock(renderToolCardStart(m.th, call, m.animStep)); blk != nil {
+		if blk := m.transcript.AppendBlock(renderToolCardStart(m.th, call, m.streamState.animStep)); blk != nil {
 			m.trackPendingTool(key, &toolCard{blk: blk, name: ev.Tool, call: call, awaitingCall: true})
 		}
 
@@ -129,20 +129,24 @@ func (m *model) applyEvent(ev api.Event) {
 		key, reconciled := m.reconcileStartedToolCard(ev, call)
 		if !reconciled {
 			key = m.toolCardKey(ev.ToolID)
-			if blk := m.transcript.AppendBlock(renderToolCardPending(m.th, call, m.animStep)); blk != nil {
-				m.trackPendingTool(key, &toolCard{blk: blk, name: ev.Tool, call: call})
+			if blk := m.transcript.AppendBlock(renderToolCardPending(m.th, call, m.streamState.animStep)); blk != nil {
+				card := &toolCard{blk: blk, name: ev.Tool, call: call}
+				if ev.Tool == "write_file" {
+					card.writeInput = ev.ToolInput
+				}
+				m.trackPendingTool(key, card)
 			}
 		}
 		// P74.4: capture the grouping target descriptor now — ev.ToolInput
 		// is only ever populated on KindToolCall/KindToolCallStart, not on
 		// the KindToolResult that later decides whether this call folds
 		// into a group.
-		if c := m.toolState.pendingTools[key]; c != nil && isGroupableTool(ev.Tool) {
+		if c := m.toolsUI.state.pendingTools[key]; c != nil && isGroupableTool(ev.Tool) {
 			c.groupLabel = groupEntryLabel(ev.Tool, ev.ToolInput)
 		}
-		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending", startedAt: time.Now()})
-		if len(m.tools) > maxToolHistory {
-			m.tools = m.tools[1:]
+		m.toolsUI.tools = append(m.toolsUI.tools, toolEntry{name: ev.Tool, status: "pending", startedAt: time.Now()})
+		if len(m.toolsUI.tools) > maxToolHistory {
+			m.toolsUI.tools = m.toolsUI.tools[1:]
 		}
 		// P2.3 + P2.4: track file access frecency and changed-file list.
 		switch ev.Tool {
@@ -151,19 +155,19 @@ func (m *model) applyEvent(ev api.Event) {
 				Path string `json:"path"`
 			}
 			if json.Unmarshal(ev.ToolInput, &inp) == nil && inp.Path != "" {
-				if m.fileFrecency == nil {
-					m.fileFrecency = make(map[string]int)
+				if m.sessionMeta.fileFrecency == nil {
+					m.sessionMeta.fileFrecency = make(map[string]int)
 				}
-				m.fileFrecency[inp.Path]++
+				m.sessionMeta.fileFrecency[inp.Path]++
 				if ev.Tool == "read_file" {
 					// Keyed by the same card key as pendingTools above (P21.2)
 					// rather than a same-name FIFO queue, so concurrent
 					// read_file calls can't cross-attribute paths if their
 					// results arrive out of call order.
-					if m.toolState.pendingReadPaths == nil {
-						m.toolState.pendingReadPaths = make(map[string]string)
+					if m.toolsUI.state.pendingReadPaths == nil {
+						m.toolsUI.state.pendingReadPaths = make(map[string]string)
 					}
-					m.toolState.pendingReadPaths[key] = inp.Path
+					m.toolsUI.state.pendingReadPaths[key] = inp.Path
 				} else {
 					m.recordChangedFile(inp.Path)
 				}
@@ -174,7 +178,7 @@ func (m *model) applyEvent(ev api.Event) {
 				Text string `json:"text"`
 			}
 			if json.Unmarshal(ev.ToolInput, &inp) == nil {
-				m.pendingTodoText = inp.Text
+				m.toolsUI.pendingTodoText = inp.Text
 			}
 		}
 
@@ -182,19 +186,31 @@ func (m *model) applyEvent(ev api.Event) {
 		card, key := m.resolveToolCard(ev)
 		path := ""
 		if key != "" {
-			if p, ok := m.toolState.pendingReadPaths[key]; ok {
+			if p, ok := m.toolsUI.state.pendingReadPaths[key]; ok {
 				path = p
-				delete(m.toolState.pendingReadPaths, key)
+				delete(m.toolsUI.state.pendingReadPaths, key)
 			}
 		}
 		if card != nil {
 			if !m.foldIntoReadGroup(card, ev) {
+				// P64.4: a write_file result carrying a Presentation payload
+				// knows the file's actual prior content, which card.call's
+				// call-time preview never could — replace it with the
+				// accurate diff before this final render, rather than
+				// leaving the "everything added" preview on screen forever.
+				if ev.Tool == "write_file" && len(card.writeInput) > 0 {
+					if old, ok := writePresentationOld(ev.ToolPresentation); ok {
+						if s, ok := renderWriteDiffAgainst(m.th, ev.Tool, card.writeInput, old, m.transcript.Width()); ok {
+							card.call = s
+						}
+					}
+				}
 				// P75.1: stash the result and this card's own expand state
 				// (starting from the session default) so a later keyboard
 				// toggle can re-render it without the raw result the card
 				// would otherwise lose the moment pendingTools drops it.
 				card.result, card.resultIsErr, card.resultPath, card.hasResult = ev.ToolResult, ev.ToolIsError, path, true
-				card.full = !m.toolCompact
+				card.full = !m.toolsUI.compact
 				m.transcript.SetItemRaw(card.blk, renderToolCardDone(m.th, card.call, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLinesFor(card.full), path))
 				m.trackToolBlock(card)
 			}
@@ -203,15 +219,15 @@ func (m *model) applyEvent(ev api.Event) {
 			// synthesized without a preceding KindToolCall in this session) —
 			// fall back to appending it as its own item rather than
 			// silently dropping the result.
-			m.toolState.soloReadCard = nil
+			m.toolsUI.state.soloReadCard = nil
 			m.transcript.Append(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path) + "\n")
 		}
-		for i := len(m.tools) - 1; i >= 0; i-- {
-			if m.tools[i].name == ev.Tool && (m.tools[i].status == "pending" || m.tools[i].status == "awaiting_approval") {
+		for i := len(m.toolsUI.tools) - 1; i >= 0; i-- {
+			if m.toolsUI.tools[i].name == ev.Tool && (m.toolsUI.tools[i].status == "pending" || m.toolsUI.tools[i].status == "awaiting_approval") {
 				if ev.ToolIsError {
-					m.tools[i].status = "err"
+					m.toolsUI.tools[i].status = "err"
 				} else {
-					m.tools[i].status = "ok"
+					m.toolsUI.tools[i].status = "ok"
 				}
 				break
 			}
@@ -223,8 +239,8 @@ func (m *model) applyEvent(ev api.Event) {
 				var id int
 				fmt.Sscanf(ev.ToolResult, "added todo #%d", &id)
 				if id > 0 {
-					m.todoItems = append(m.todoItems, todoStripItem{id: id, text: m.pendingTodoText, status: "pending"})
-					m.pendingTodoText = ""
+					m.toolsUI.todoItems = append(m.toolsUI.todoItems, todoStripItem{id: id, text: m.toolsUI.pendingTodoText, status: "pending"})
+					m.toolsUI.pendingTodoText = ""
 				}
 			case "todo_update":
 				var id int
@@ -234,15 +250,15 @@ func (m *model) applyEvent(ev api.Event) {
 					status = strings.TrimSpace(parts[1])
 				}
 				if id > 0 && status != "" {
-					for i := range m.todoItems {
-						if m.todoItems[i].id == id {
-							m.todoItems[i].status = status
+					for i := range m.toolsUI.todoItems {
+						if m.toolsUI.todoItems[i].id == id {
+							m.toolsUI.todoItems[i].status = status
 							break
 						}
 					}
 				}
 			case "todo_list":
-				m.todoItems = parseTodoList(ev.ToolResult)
+				m.toolsUI.todoItems = parseTodoList(ev.ToolResult)
 			}
 		}
 		// P33.19: with this result the round's last tool has returned (nothing
@@ -252,8 +268,8 @@ func (m *model) applyEvent(ev api.Event) {
 		// next model output calls markModelOutput. Gated on pendingTools being
 		// empty so a result that still leaves concurrent tools running (they are
 		// not a model wait) doesn't start the clock early.
-		if m.streaming && len(m.toolState.pendingTools) == 0 {
-			m.phase.modelWaitAt = time.Now()
+		if m.streamState.streaming && len(m.toolsUI.state.pendingTools) == 0 {
+			m.streamState.phase.modelWaitAt = time.Now()
 			m.status = statusReeval
 		}
 
@@ -264,26 +280,26 @@ func (m *model) applyEvent(ev api.Event) {
 		// happens, thinkText has content but liveText is empty. Promote the
 		// thinking text to the response buffer so it renders with normal styling
 		// rather than disappearing as dim unreachable text.
-		if m.liveText.Len() == 0 && m.thinkText.Len() > 0 {
-			m.liveText.WriteString(m.thinkText.String())
-			m.thinkText.Reset()
-			m.thinkStart = time.Time{}
+		if m.streamState.liveText.Len() == 0 && m.streamState.thinkText.Len() > 0 {
+			m.streamState.liveText.WriteString(m.streamState.thinkText.String())
+			m.streamState.thinkText.Reset()
+			m.streamState.thinkStart = time.Time{}
 		}
 		m.flushThinking()
 		m.flushLiveText() // render final prose through glamour
 		// P81.8: EgressBytes is a per-turn delta (unlike CostUSD's cumulative
 		// convention), so it accumulates unconditionally rather than gated on
 		// the usage-known check below.
-		m.egressBytes += ev.EgressBytes
+		m.usage.egressBytes += ev.EgressBytes
 		if ev.OutputTokens > 0 || ev.TokensEstimated {
-			m.inputTokens = ev.InputTokens
-			m.inputTokensKnown = true
-			m.outputTokens = ev.OutputTokens
-			m.cacheReadTokens = ev.CacheReadTokens
-			m.cacheCreationTokens = ev.CacheCreationTokens
-			m.tokensEstimated = ev.TokensEstimated
+			m.usage.inputTokens = ev.InputTokens
+			m.usage.inputTokensKnown = true
+			m.usage.outputTokens = ev.OutputTokens
+			m.usage.cacheReadTokens = ev.CacheReadTokens
+			m.usage.cacheCreationTokens = ev.CacheCreationTokens
+			m.usage.tokensEstimated = ev.TokensEstimated
 			if !ev.TokensEstimated {
-				m.costUSD += ev.CostUSD
+				m.usage.costUSD += ev.CostUSD
 			}
 		}
 
@@ -321,11 +337,11 @@ func (m *model) applyEvent(ev api.Event) {
 				id:       it.ID,
 				pattern:  suggestRulePattern(input),
 			}
-			if m.approval == nil {
-				m.approval = st
+			if m.overlays.approval == nil {
+				m.overlays.approval = st
 				toolName = tn
 			} else {
-				m.approvalQueue = append(m.approvalQueue, st)
+				m.overlays.approvalQueue = append(m.overlays.approvalQueue, st)
 			}
 			// P<dashboard>: flag the sidebar's matching activity entry as
 			// awaiting approval rather than leaving it looking like an
@@ -341,7 +357,7 @@ func (m *model) applyEvent(ev api.Event) {
 		// input focus target until it's answered.
 		m.ta.Blur()
 		if toolName != "" {
-			m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + toolName}
+			m.attention.pendingNotify = &notify.Event{Title: "Aegis", Body: "Approval needed: " + toolName}
 		}
 
 	case api.KindSteer:
@@ -373,10 +389,10 @@ func (m *model) applyEvent(ev api.Event) {
 			// retry (P25.3): withdraw the failed answer in place so the retry
 			// renders as *the* answer, not as a second one below it.
 			note := m.th.elapsedDim.Render("⚠ output guard: answer withdrawn ("+ev.Text+") — retrying…") + "\n\n"
-			if m.lastAnswerBlock != nil {
-				m.transcript.SetItemRaw(m.lastAnswerBlock, note)
-				m.lastAnswerBlock = nil
-				m.lastAssistantText = ""
+			if m.streamState.lastAnswerBlock != nil {
+				m.transcript.SetItemRaw(m.streamState.lastAnswerBlock, note)
+				m.streamState.lastAnswerBlock = nil
+				m.streamState.lastAssistantText = ""
 			} else {
 				m.transcript.Append(note)
 			}
@@ -405,20 +421,20 @@ func (m *model) applyEvent(ev api.Event) {
 		// If the last action was a tool call with no follow-up text, this ensures
 		// the transcript is fully rendered before the run is marked complete.
 		m.flushLiveText()
-		m.lastAnswerBlock = nil // the surfaced answer is final; nothing left to withdraw
+		m.streamState.lastAnswerBlock = nil // the surfaced answer is final; nothing left to withdraw
 
 	case api.KindError:
 		m.flushThinking()
 		m.flushLiveText()
-		m.lastAnswerBlock = nil
-		if m.approval != nil { // clear any pending approval if the run aborts
-			m.approval = nil
-			if !m.termFocused {
+		m.streamState.lastAnswerBlock = nil
+		if m.overlays.approval != nil { // clear any pending approval if the run aborts
+			m.overlays.approval = nil
+			if !m.splitTerm.termFocused {
 				m.ta.Focus()
 			}
 		}
 		m.transcript.Append("\n" + m.th.errLine.Render("error: "+ev.Error) + "\n")
-		m.pendingNotify = &notify.Event{Title: "Aegis", Body: "Error: " + truncate(ev.Error, 100)}
+		m.attention.pendingNotify = &notify.Event{Title: "Aegis", Body: "Error: " + truncate(ev.Error, 100)}
 		// P21.2: a turn that errors mid-round can leave a concurrently-run
 		// tool's card stuck pending (its own KindToolResult may simply never
 		// arrive — see runTools/runToolsSequential, which stop emitting
@@ -441,14 +457,14 @@ func (m *model) applyEvent(ev api.Event) {
 // matches.
 func (m *model) resolveToolCard(ev api.Event) (*toolCard, string) {
 	if ev.ToolID != "" {
-		if c, ok := m.toolState.pendingTools[ev.ToolID]; ok {
+		if c, ok := m.toolsUI.state.pendingTools[ev.ToolID]; ok {
 			m.removePendingTool(ev.ToolID)
 			return c, ev.ToolID
 		}
 		return nil, ""
 	}
-	for _, k := range m.toolState.pendingToolOrder {
-		if c := m.toolState.pendingTools[k]; c != nil && c.name == ev.Tool {
+	for _, k := range m.toolsUI.state.pendingToolOrder {
+		if c := m.toolsUI.state.pendingTools[k]; c != nil && c.name == ev.Tool {
 			m.removePendingTool(k)
 			return c, k
 		}
@@ -456,14 +472,14 @@ func (m *model) resolveToolCard(ev api.Event) (*toolCard, string) {
 	return nil, ""
 }
 
-// markToolAwaitingApproval flags the most recent still-pending m.tools entry
+// markToolAwaitingApproval flags the most recent still-pending m.toolsUI.tools entry
 // named tool as awaiting approval, so the sidebar can render it distinctly
 // from an ordinary running call. A no-op if nothing matches (e.g. the entry
 // already resolved or aged out of maxToolHistory).
 func (m *model) markToolAwaitingApproval(tool string) {
-	for i := len(m.tools) - 1; i >= 0; i-- {
-		if m.tools[i].name == tool && m.tools[i].status == "pending" {
-			m.tools[i].status = "awaiting_approval"
+	for i := len(m.toolsUI.tools) - 1; i >= 0; i-- {
+		if m.toolsUI.tools[i].name == tool && m.toolsUI.tools[i].status == "pending" {
+			m.toolsUI.tools[i].status = "awaiting_approval"
 			return
 		}
 	}
@@ -475,17 +491,17 @@ func (m *model) toolCardKey(toolID string) string {
 	if toolID != "" {
 		return toolID
 	}
-	m.toolState.pendingToolSeq++
-	return fmt.Sprintf("#%d", m.toolState.pendingToolSeq)
+	m.toolsUI.state.pendingToolSeq++
+	return fmt.Sprintf("#%d", m.toolsUI.state.pendingToolSeq)
 }
 
 // trackPendingTool registers a freshly-appended card under key.
 func (m *model) trackPendingTool(key string, c *toolCard) {
-	if m.toolState.pendingTools == nil {
-		m.toolState.pendingTools = make(map[string]*toolCard)
+	if m.toolsUI.state.pendingTools == nil {
+		m.toolsUI.state.pendingTools = make(map[string]*toolCard)
 	}
-	m.toolState.pendingTools[key] = c
-	m.toolState.pendingToolOrder = append(m.toolState.pendingToolOrder, key)
+	m.toolsUI.state.pendingTools[key] = c
+	m.toolsUI.state.pendingToolOrder = append(m.toolsUI.state.pendingToolOrder, key)
 }
 
 // reconcileStartedToolCard folds a KindToolCall's rendered arguments into the
@@ -510,7 +526,10 @@ func (m *model) reconcileStartedToolCard(ev api.Event, call string) (string, boo
 	}
 	card.call = call
 	card.awaitingCall = false
-	m.transcript.SetItemRaw(card.blk, renderToolCardPending(m.th, card.call, m.animStep))
+	if ev.Tool == "write_file" {
+		card.writeInput = ev.ToolInput
+	}
+	m.transcript.SetItemRaw(card.blk, renderToolCardPending(m.th, card.call, m.streamState.animStep))
 	if ev.ToolID != "" && ev.ToolID != key {
 		m.rekeyPendingTool(key, ev.ToolID)
 		key = ev.ToolID
@@ -521,11 +540,11 @@ func (m *model) reconcileStartedToolCard(ev api.Event, call string) (string, boo
 // startedToolCard finds the still-provisional card belonging to ev and the
 // key it is registered under, or (nil, "").
 func (m *model) startedToolCard(ev api.Event) (*toolCard, string) {
-	if c := m.toolState.pendingTools[ev.ToolID]; ev.ToolID != "" && c != nil && c.awaitingCall {
+	if c := m.toolsUI.state.pendingTools[ev.ToolID]; ev.ToolID != "" && c != nil && c.awaitingCall {
 		return c, ev.ToolID
 	}
-	for _, k := range m.toolState.pendingToolOrder {
-		if c := m.toolState.pendingTools[k]; c != nil && c.awaitingCall && c.name == ev.Tool {
+	for _, k := range m.toolsUI.state.pendingToolOrder {
+		if c := m.toolsUI.state.pendingTools[k]; c != nil && c.awaitingCall && c.name == ev.Tool {
 			return c, k
 		}
 	}
@@ -539,15 +558,15 @@ func (m *model) startedToolCard(ev api.Event) (*toolCard, string) {
 // — while the KindToolResult that eventually arrives looks it up by the real
 // ID (P33.3).
 func (m *model) rekeyPendingTool(oldKey, newKey string) {
-	c := m.toolState.pendingTools[oldKey]
+	c := m.toolsUI.state.pendingTools[oldKey]
 	if c == nil {
 		return
 	}
-	delete(m.toolState.pendingTools, oldKey)
-	m.toolState.pendingTools[newKey] = c
-	for i, k := range m.toolState.pendingToolOrder {
+	delete(m.toolsUI.state.pendingTools, oldKey)
+	m.toolsUI.state.pendingTools[newKey] = c
+	for i, k := range m.toolsUI.state.pendingToolOrder {
 		if k == oldKey {
-			m.toolState.pendingToolOrder[i] = newKey
+			m.toolsUI.state.pendingToolOrder[i] = newKey
 			break
 		}
 	}
@@ -557,10 +576,10 @@ func (m *model) rekeyPendingTool(oldKey, newKey string) {
 // The order slice is small (bounded by maxParallelTools concurrent calls in
 // one round), so a linear scan to remove it is cheap.
 func (m *model) removePendingTool(key string) {
-	delete(m.toolState.pendingTools, key)
-	for i, k := range m.toolState.pendingToolOrder {
+	delete(m.toolsUI.state.pendingTools, key)
+	for i, k := range m.toolsUI.state.pendingToolOrder {
 		if k == key {
-			m.toolState.pendingToolOrder = append(m.toolState.pendingToolOrder[:i], m.toolState.pendingToolOrder[i+1:]...)
+			m.toolsUI.state.pendingToolOrder = append(m.toolsUI.state.pendingToolOrder[:i], m.toolsUI.state.pendingToolOrder[i+1:]...)
 			break
 		}
 	}
@@ -578,11 +597,11 @@ func (m *model) removePendingTool(key string) {
 // later unrelated success can't mistakenly chain onto whatever was pending
 // before the break.
 //
-// A successful groupable call extends m.toolState.activeReadGroup only if card.blk's
+// A successful groupable call extends m.toolsUI.state.activeReadGroup only if card.blk's
 // positional predecessor (transcript.ItemBefore, which already skips
 // members previously folded away) is that group's own item — i.e. nothing
 // else was appended between them. Failing that, it can still start a new
-// two-member group with m.toolState.soloReadCard under the same adjacency test.
+// two-member group with m.toolsUI.state.soloReadCard under the same adjacency test.
 // Neither path ever merges a call whose own result hasn't arrived yet: a
 // still-pending sibling from the same parallel round is simply not
 // considered, so a genuinely out-of-order round result never gets counted
@@ -591,13 +610,13 @@ func (m *model) removePendingTool(key string) {
 // whichever call resolves next.
 func (m *model) foldIntoReadGroup(card *toolCard, ev api.Event) bool {
 	if !isGroupableTool(ev.Tool) || ev.ToolIsError {
-		m.toolState.soloReadCard = nil
+		m.toolsUI.state.soloReadCard = nil
 		return false
 	}
 	prev := m.transcript.ItemBefore(card.blk)
 	entry := groupEntry{tool: ev.Tool, label: card.groupLabel}
 
-	if g := m.toolState.activeReadGroup; g != nil && prev == g.blk {
+	if g := m.toolsUI.state.activeReadGroup; g != nil && prev == g.blk {
 		g.entries = append(g.entries, entry)
 		m.transcript.HideItem(card.blk)
 		// P75.1: an already-open group keeps whatever expand state a
@@ -605,10 +624,10 @@ func (m *model) foldIntoReadGroup(card *toolCard, ev api.Event) bool {
 		m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, g.full))
 		return true
 	}
-	if m.toolState.soloReadCard != nil && prev == m.toolState.soloReadCard {
-		g := &toolGroup{blk: m.toolState.soloReadCard, entries: []groupEntry{m.toolState.soloReadEntry, entry}, full: !m.toolCompact}
-		m.toolState.activeReadGroup = g
-		m.toolState.soloReadCard = nil
+	if m.toolsUI.state.soloReadCard != nil && prev == m.toolsUI.state.soloReadCard {
+		g := &toolGroup{blk: m.toolsUI.state.soloReadCard, entries: []groupEntry{m.toolsUI.state.soloReadEntry, entry}, full: !m.toolsUI.compact}
+		m.toolsUI.state.activeReadGroup = g
+		m.toolsUI.state.soloReadCard = nil
 		m.transcript.HideItem(card.blk)
 		m.transcript.SetItemRaw(g.blk, renderToolGroup(m.th, g.entries, g.full))
 		// P75.1: the group takes over addressing this transcript item from
@@ -616,8 +635,8 @@ func (m *model) foldIntoReadGroup(card *toolCard, ev api.Event) bool {
 		m.trackToolBlock(g)
 		return true
 	}
-	m.toolState.soloReadCard = card.blk
-	m.toolState.soloReadEntry = entry
+	m.toolsUI.state.soloReadCard = card.blk
+	m.toolsUI.state.soloReadEntry = entry
 	return false
 }
 
@@ -630,17 +649,17 @@ func (m *model) foldIntoReadGroup(card *toolCard, ev api.Event) bool {
 // engine.ErrInterrupted's callers, which return before emitting anything).
 // A no-op when nothing is pending.
 func (m *model) resolveStuckToolCards() {
-	if len(m.toolState.pendingTools) == 0 {
+	if len(m.toolsUI.state.pendingTools) == 0 {
 		return
 	}
-	for _, k := range m.toolState.pendingToolOrder {
-		if c := m.toolState.pendingTools[k]; c != nil {
+	for _, k := range m.toolsUI.state.pendingToolOrder {
+		if c := m.toolsUI.state.pendingTools[k]; c != nil {
 			m.transcript.SetItemRaw(c.blk, renderToolCardStuck(m.th, c.call))
 		}
-		delete(m.toolState.pendingReadPaths, k)
+		delete(m.toolsUI.state.pendingReadPaths, k)
 	}
-	m.toolState.pendingTools = nil
-	m.toolState.pendingToolOrder = nil
+	m.toolsUI.state.pendingTools = nil
+	m.toolsUI.state.pendingToolOrder = nil
 }
 
 // updatePendingToolCards refreshes every still-pending tool card's shimmer
@@ -649,11 +668,11 @@ func (m *model) resolveStuckToolCards() {
 // write-head caret (P21.3) — so a long-running tool call visibly keeps
 // working instead of sitting static. A no-op when nothing is pending.
 func (m *model) updatePendingToolCards() {
-	for _, c := range m.toolState.pendingTools {
+	for _, c := range m.toolsUI.state.pendingTools {
 		if c.awaitingCall {
-			m.transcript.SetItemRaw(c.blk, renderToolCardStart(m.th, c.call, m.animStep))
+			m.transcript.SetItemRaw(c.blk, renderToolCardStart(m.th, c.call, m.streamState.animStep))
 			continue
 		}
-		m.transcript.SetItemRaw(c.blk, renderToolCardPending(m.th, c.call, m.animStep))
+		m.transcript.SetItemRaw(c.blk, renderToolCardPending(m.th, c.call, m.streamState.animStep))
 	}
 }

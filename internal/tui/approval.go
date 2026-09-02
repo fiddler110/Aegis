@@ -141,7 +141,7 @@ func dirGlob(p string) string {
 // input line; unmatched keys fall through to viewport scrolling so the user
 // can still review context behind the dialog.
 func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	a := m.approval
+	a := m.overlays.approval
 
 	if a.feedbackMode {
 		switch msg.String() {
@@ -203,19 +203,19 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// actually scrolled (P21.7 — a non-scroll key must not re-derive follow
 	// from geometry the approval dialog itself just perturbed).
 	if m.transcript.HandleKey(msg) {
-		m.followBottom = m.transcript.AtBottom()
+		m.streamState.followBottom = m.transcript.AtBottom()
 	}
 	return m, nil
 }
 
 // approvalByID reports whether a call with this id is already known —
-// showing (m.approval) or queued (m.approvalQueue) — so a repeated
+// showing (m.overlays.approval) or queued (m.overlays.approvalQueue) — so a repeated
 // ApprovalBatch listing (P81.33) doesn't duplicate an entry.
 func (m model) approvalByID(id string) *approvalState {
-	if m.approval != nil && m.approval.id == id {
-		return m.approval
+	if m.overlays.approval != nil && m.overlays.approval.id == id {
+		return m.overlays.approval
 	}
-	for _, a := range m.approvalQueue {
+	for _, a := range m.overlays.approvalQueue {
 		if a.id == id {
 			return a
 		}
@@ -228,8 +228,8 @@ func (m model) approvalByID(id string) *approvalState {
 // for the sidebar/footer's passive indicator, which must stay accurate
 // whether or not the approval dialog itself is open.
 func (m model) pendingApprovalCount() int {
-	n := len(m.approvalQueue)
-	if m.approval != nil {
+	n := len(m.overlays.approvalQueue)
+	if m.overlays.approval != nil {
 		n++
 	}
 	return n
@@ -281,7 +281,7 @@ func buildApproveRequest(a *approvalState, opt int) api.ApproveRequest {
 // injects the reason as a steering message so the model learns why it was
 // refused instead of just seeing a bare denial.
 func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
-	a := m.approval
+	a := m.overlays.approval
 	req := buildApproveRequest(a, opt)
 	var steerText string
 	if feedback != "" {
@@ -289,13 +289,13 @@ func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
 	}
 	// Advance to the next queued call, if this round left any behind
 	// (P81.33/FIND-33), rather than always returning focus to the composer.
-	if len(m.approvalQueue) > 0 {
-		m.approval = m.approvalQueue[0]
-		m.approvalQueue = m.approvalQueue[1:]
+	if len(m.overlays.approvalQueue) > 0 {
+		m.overlays.approval = m.overlays.approvalQueue[0]
+		m.overlays.approvalQueue = m.overlays.approvalQueue[1:]
 	} else {
-		m.approval = nil
+		m.overlays.approval = nil
 		m.status = m.phaseStatus()
-		if !m.termFocused {
+		if !m.splitTerm.termFocused {
 			m.ta.Focus()
 		}
 	}
@@ -304,7 +304,7 @@ func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
 		// text, not something the user typed, so if it ever comes back as
 		// KindSteerUnconsumed it must not be requeued as the next user turn
 		// the way a plain steer would be — see requeueSteer.
-		m.pendingSteers = append(m.pendingSteers, pendingSteerEntry{text: steerText, origin: steerOriginDenialFeedback})
+		m.composer.pendingSteers = append(m.composer.pendingSteers, pendingSteerEntry{text: steerText, origin: steerOriginDenialFeedback})
 	}
 
 	cl, sessionID := m.cfg.Client, m.cfg.SessionID
@@ -332,7 +332,7 @@ func (m model) answerApproval(opt int, feedback string) (tea.Model, tea.Cmd) {
 // the list pickers' own frames (newSessionPicker et al.) so the dialog family
 // keeps one silhouette.
 func (m model) approvalDialogW() int {
-	return max(min(m.width-6, 74), 20)
+	return max(min(m.chrome.width-6, 74), 20)
 }
 
 // renderApprovalDialog renders the option-list approval prompt (TQ6),
@@ -343,7 +343,7 @@ func (m model) approvalDialogW() int {
 // renderOverlay rather than inserting it into the vertical stack, which used
 // to shrink the transcript by the dialog's whole height mid-run.
 func (m model) renderApprovalDialog() string {
-	a := m.approval
+	a := m.overlays.approval
 	w := m.approvalDialogW()
 
 	header := " " + lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("⚡ "+a.toolName) +
@@ -386,7 +386,7 @@ func (m model) renderApprovalDialog() string {
 			style.Render(truncate(labels[i], max(w-8, 16))) + key + "\n")
 	}
 	b.WriteString(" " + lipgloss.NewStyle().Foreground(colTextMuted).Render("↑/↓ select · enter confirm"))
-	if summary := approvalQueueSummary(m.approvalQueue); summary != "" {
+	if summary := approvalQueueSummary(m.overlays.approvalQueue); summary != "" {
 		b.WriteString("\n " + lipgloss.NewStyle().Foreground(colTextMuted).Render(truncate(summary, max(w-2, 16))))
 	}
 	return dialogFrame(b.String())
@@ -422,11 +422,21 @@ func ruleLabel(tool, pattern string) string {
 // block, TQ2); everything else falls back to the compact one-line preview.
 // The result always ends with a newline.
 func (m model) renderApprovalBody(w int) string {
-	a := m.approval
+	a := m.overlays.approval
 	switch a.toolName {
 	case "edit_file", "multi_edit", "write_file", "shell":
 		body := renderToolCall(m.th, a.toolName, json.RawMessage(a.input), w-2)
-		return " " + capLines(body, approvalPreviewMaxLines, m.th) + "\n"
+		body = " " + capLines(body, approvalPreviewMaxLines, m.th)
+		// P81.33/FIND-33 residual: a shell call's confinement is the one thing
+		// its rendered command text can't show — show the effective sandbox
+		// backend (already known session-wide, P81.22/FIND-22) right in the
+		// prompt so "what is being approved" includes what runs it unconfined,
+		// not just what it runs, without waiting for the operator to check the
+		// sidebar or /status separately.
+		if a.toolName == "shell" && m.conn.sandboxBackend != "" {
+			body += "\n " + m.th.sideMuted.Render("sandbox: ") + m.renderSandboxBadge(w-2)
+		}
+		return body + "\n"
 	}
 	return renderApprovalPreview(m.th, a.toolName, a.input, w) + "\n"
 }

@@ -340,82 +340,82 @@ func (m *model) handleTerminalKey(msg tea.KeyMsg) tea.Cmd {
 	k := msg.String()
 
 	// When a command is running, only ctrl+c (interrupt) is active.
-	if m.term.running {
-		if k == "ctrl+c" && m.termRun != nil {
-			m.termRun.cancel()
+	if m.splitTerm.term.running {
+		if k == "ctrl+c" && m.splitTerm.termRun != nil {
+			m.splitTerm.termRun.cancel()
 		}
 		m.refresh()
 		return nil
 	}
 
 	// P13.3.1: diagnose the terminal pane's last failed command, if any.
-	if m.term.lastFailed && key.Matches(msg, m.keys.Diagnose) {
+	if m.splitTerm.term.lastFailed && key.Matches(msg, m.overlays.keys.Diagnose) {
 		return m.diagnoseLastFailureCmd()
 	}
 
 	// P40.1: resize the terminal pane while it has focus.
-	if key.Matches(msg, m.keys.PaneNarrower) {
+	if key.Matches(msg, m.overlays.keys.PaneNarrower) {
 		m.resizePane(-paneResizeStep)
 		return nil
 	}
-	if key.Matches(msg, m.keys.PaneWider) {
+	if key.Matches(msg, m.overlays.keys.PaneWider) {
 		m.resizePane(paneResizeStep)
 		return nil
 	}
 
 	switch k {
 	case "esc":
-		m.termFocused = false
+		m.splitTerm.termFocused = false
 		m.ta.Focus()
 
 	case "ctrl+c":
-		m.term.input = ""
+		m.splitTerm.term.input = ""
 
 	case "enter":
-		cmd := strings.TrimSpace(m.term.input)
+		cmd := strings.TrimSpace(m.splitTerm.term.input)
 		if cmd == "" {
 			break
 		}
-		m.term.history = append(m.term.history, cmd)
-		m.term.histIdx = -1
-		m.term.draft = ""
-		m.term.input = ""
-		m.term.appendText("❯ " + cmd + "\n")
-		if m.term.handleCD(cmd) {
+		m.splitTerm.term.history = append(m.splitTerm.term.history, cmd)
+		m.splitTerm.term.histIdx = -1
+		m.splitTerm.term.draft = ""
+		m.splitTerm.term.input = ""
+		m.splitTerm.term.appendText("❯ " + cmd + "\n")
+		if m.splitTerm.term.handleCD(cmd) {
 			break
 		}
-		m.term.beginRun(cmd)
-		run, execCmd := execTermCmd(m.term.workDir, cmd)
-		m.termRun = run
+		m.splitTerm.term.beginRun(cmd)
+		run, execCmd := execTermCmd(m.splitTerm.term.workDir, cmd)
+		m.splitTerm.termRun = run
 		m.refresh()
 		return execCmd
 
 	case "up":
-		m.term.historyPrev()
+		m.splitTerm.term.historyPrev()
 
 	case "down":
-		m.term.historyNext()
+		m.splitTerm.term.historyNext()
 
 	case "backspace":
-		r := []rune(m.term.input)
+		r := []rune(m.splitTerm.term.input)
 		if len(r) > 0 {
-			m.term.input = string(r[:len(r)-1])
+			m.splitTerm.term.input = string(r[:len(r)-1])
 		}
 
 	case "ctrl+u":
-		m.term.input = ""
+		m.splitTerm.term.input = ""
 
 	case "ctrl+l":
-		m.term.buf.Reset()
-		m.term.refreshVP()
+		m.splitTerm.term.buf.Reset()
+		m.splitTerm.term.refreshVP()
 
 	case "pgup", "pgdown":
-		m.term.vp, _ = m.term.vp.Update(msg)
+		m.splitTerm.term.vp, _ = m.splitTerm.term.vp.Update(msg)
 
 	default:
 		// Append any single printable rune to the command line.
 		if runes := []rune(k); len(runes) == 1 {
-			m.term.input += k
+			m.splitTerm.term.input += k
 		}
 	}
 

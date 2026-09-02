@@ -11,11 +11,11 @@ import (
 func (m model) updateClipboardResult(msg clipboardResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		t, cmd := newToastCmd("copy: "+msg.err.Error(), toastError)
-		m.activeToast = t
+		m.overlays.activeToast = t
 		return m, cmd
 	}
 	t, cmd := newToastCmd("copied to clipboard", toastInfo)
-	m.activeToast = t
+	m.overlays.activeToast = t
 	return m, cmd
 }
 
@@ -23,17 +23,17 @@ func (m model) updateClipboardResult(msg clipboardResultMsg) (tea.Model, tea.Cmd
 func (m model) updatePasteImageResult(msg pasteImageResultMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		t, cmd := newToastCmd("paste image: "+msg.err.Error(), toastError)
-		m.activeToast = t
+		m.overlays.activeToast = t
 		return m, cmd
 	}
 	if !msg.ok {
 		t, cmd := newToastCmd("clipboard has no image", toastInfo)
-		m.activeToast = t
+		m.overlays.activeToast = t
 		return m, cmd
 	}
 	m.ta.InsertString(attachTokenFor(msg.path))
 	t, cmd := newToastCmd("image attached: "+filepath.Base(msg.path), toastInfo)
-	m.activeToast = t
+	m.overlays.activeToast = t
 	return m, cmd
 }
 
@@ -43,7 +43,7 @@ func (m model) updateEditorDone(msg editorDoneMsg) (model, tea.Cmd, bool) {
 	m.ta.Focus()
 	if msg.err != nil {
 		t, cmd := newToastCmd("editor: "+msg.err.Error(), toastError)
-		m.activeToast = t
+		m.overlays.activeToast = t
 		return m, cmd, true
 	}
 	if strings.TrimSpace(msg.content) != "" {
@@ -60,7 +60,7 @@ func (m model) updateEditorDone(msg editorDoneMsg) (model, tea.Cmd, bool) {
 // open (P25.4a), same as it does for tea.KeyMsg, so a paste can't land silently
 // in the composer.
 func (m model) updatePaste(msg tea.PasteMsg) (model, tea.Cmd, bool) {
-	if !m.termFocused && m.approval == nil {
+	if !m.splitTerm.termFocused && m.overlays.approval == nil {
 		p := strings.TrimSpace(msg.Content)
 		// Windows "Copy as path" and shell copies often quote the path.
 		if len(p) >= 2 && ((p[0] == '"' && p[len(p)-1] == '"') || (p[0] == '\'' && p[len(p)-1] == '\'')) {
@@ -69,7 +69,7 @@ func (m model) updatePaste(msg tea.PasteMsg) (model, tea.Cmd, bool) {
 		if looksLikeImagePath(p) {
 			m.ta.InsertString(attachTokenFor(p))
 			t, cmd := newToastCmd("image attached: "+filepath.Base(p), toastInfo)
-			m.activeToast = t
+			m.overlays.activeToast = t
 			return m, cmd, true
 		}
 	}

@@ -12,16 +12,16 @@ import (
 func TestCtrlR_OpensHistorySearch(t *testing.T) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.history = []string{"first message", "second message", "third message"}
+	m.composer.history = []string{"first message", "second message", "third message"}
 
 	m = driveUpdate(t, m, ctrlKeyMsg('r'))
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected ctrl+r to open a dialog")
 	}
-	if m.dialog.kind != dialogHistoryPicker {
-		t.Fatalf("expected dialogHistoryPicker, got %v", m.dialog.kind)
+	if m.overlays.dialog.kind != dialogHistoryPicker {
+		t.Fatalf("expected dialogHistoryPicker, got %v", m.overlays.dialog.kind)
 	}
-	items := m.dialog.list.Items()
+	items := m.overlays.dialog.list.Items()
 	if len(items) != 3 {
 		t.Fatalf("expected 3 history items, got %d", len(items))
 	}
@@ -37,7 +37,7 @@ func TestCtrlR_NoHistoryShowsToast(t *testing.T) {
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 
 	m = driveUpdate(t, m, ctrlKeyMsg('r'))
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("expected no dialog to open with empty history")
 	}
 }
@@ -48,15 +48,15 @@ func TestCtrlR_NoHistoryShowsToast(t *testing.T) {
 func TestHistoryPickerSelection_RecallsOntoInput(t *testing.T) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.history = []string{"old draft", "recall me"}
+	m.composer.history = []string{"old draft", "recall me"}
 
 	m = driveUpdate(t, m, ctrlKeyMsg('r'))
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected dialog to open")
 	}
 
 	m = driveUpdate(t, m, dialogSelectedMsg{kind: dialogHistoryPicker, item: historyItem{text: "recall me"}})
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Error("expected dialog to close after selection")
 	}
 	if m.ta.Value() != "recall me" {

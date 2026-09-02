@@ -194,7 +194,7 @@ func TestCompletionPopupLeavesTranscriptGeometryAlone(t *testing.T) {
 
 	m.ta.SetValue("/")
 	m.syncCompletion()
-	if !m.completion.active {
+	if !m.overlays.completion.active {
 		t.Fatal("expected the completion popup to be active after typing '/'")
 	}
 
@@ -232,8 +232,8 @@ func TestCompletionPopupAnchorsAboveComposer(t *testing.T) {
 		t.Errorf("expected the popup left-anchored at x=0, got x=%d", x)
 	}
 	inputAreaH := m.ta.Height() + 2 + 1
-	wantY := m.height - inputAreaH - completionBoxH
-	if len(m.todoItems) > 0 {
+	wantY := m.chrome.height - inputAreaH - completionBoxH
+	if len(m.toolsUI.todoItems) > 0 {
 		wantY -= 1
 	}
 	if y != wantY {
@@ -241,7 +241,7 @@ func TestCompletionPopupAnchorsAboveComposer(t *testing.T) {
 	}
 	// The popup must not be centered like a modal overlay: a 40-row terminal
 	// centers around y=~17, well above the composer.
-	if y < m.height/2 {
-		t.Errorf("expected popup anchored in the lower half of the screen, got y=%d height=%d", y, m.height)
+	if y < m.chrome.height/2 {
+		t.Errorf("expected popup anchored in the lower half of the screen, got y=%d height=%d", y, m.chrome.height)
 	}
 }

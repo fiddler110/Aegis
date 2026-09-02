@@ -136,7 +136,7 @@ func TestFailedReadIsNotRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, isErr := eng.executeTool(context.Background(), provider.ToolUseBlock{
+	if _, isErr, _ := eng.executeTool(context.Background(), provider.ToolUseBlock{
 		ID: "x", Name: "bad_read", Input: json.RawMessage(`{"path":"missing.txt"}`),
 	}); !isErr {
 		t.Fatal("expected the read to fail")

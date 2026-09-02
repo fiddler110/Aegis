@@ -24,8 +24,8 @@ func steerModel(t *testing.T, draft string) model {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 	m.appendUser("first question", nil)
-	m.streaming = true
-	m.cancel = func() {}
+	m.streamState.streaming = true
+	m.streamState.cancel = func() {}
 	m.applyEvent(api.Event{Kind: api.KindText, Text: "answering…"})
 	m.ta.SetValue(draft)
 	return m
@@ -38,21 +38,21 @@ func TestEnterWhileStreamingQueues(t *testing.T) {
 	m := steerModel(t, "and update the README afterwards")
 
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if len(m.pendingSteers) != 0 {
-		t.Fatalf("pendingSteers = %v, want Enter to queue rather than steer", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 0 {
+		t.Fatalf("pendingSteers = %v, want Enter to queue rather than steer", m.composer.pendingSteers)
 	}
-	if len(m.queued) != 1 || m.queued[0] != "and update the README afterwards" {
-		t.Fatalf("queued = %v, want the draft Enter just queued", m.queued)
+	if len(m.composer.queued) != 1 || m.composer.queued[0] != "and update the README afterwards" {
+		t.Fatalf("queued = %v, want the draft Enter just queued", m.composer.queued)
 	}
 	if got := plainView(m); !strings.Contains(got, "queued ▸ and update the README afterwards") {
 		t.Fatalf("expected the draft rendered as a queued block, got:\n%s", got)
 	}
 
 	m = driveUpdate(t, m, streamClosedMsg{})
-	if len(m.queued) != 0 {
-		t.Fatalf("queued = %v, want drained into the next turn", m.queued)
+	if len(m.composer.queued) != 0 {
+		t.Fatalf("queued = %v, want drained into the next turn", m.composer.queued)
 	}
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Fatal("expected a new stream to have started for the queued message")
 	}
 	if got := plainView(m); !strings.Contains(got, "and update the README afterwards") {
@@ -91,11 +91,11 @@ func TestSteerEchoedThenResolvedOnInjection(t *testing.T) {
 	m := steerModel(t, "use the other file")
 
 	m = driveUpdate(t, m, altEnterKeyMsg())
-	if len(m.pendingSteers) != 1 || m.pendingSteers[0].text != "use the other file" {
-		t.Fatalf("pendingSteers = %v, want the steer just sent", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 1 || m.composer.pendingSteers[0].text != "use the other file" {
+		t.Fatalf("pendingSteers = %v, want the steer just sent", m.composer.pendingSteers)
 	}
-	if m.pendingSteers[0].origin != steerOriginUser {
-		t.Errorf("pendingSteers[0].origin = %v, want steerOriginUser", m.pendingSteers[0].origin)
+	if m.composer.pendingSteers[0].origin != steerOriginUser {
+		t.Errorf("pendingSteers[0].origin = %v, want steerOriginUser", m.composer.pendingSteers[0].origin)
 	}
 	if got := plainView(m); !strings.Contains(got, "steer ▸ use the other file") {
 		t.Fatalf("expected the steer echoed as a pending block, got:\n%s", got)
@@ -103,8 +103,8 @@ func TestSteerEchoedThenResolvedOnInjection(t *testing.T) {
 
 	m.applyEvent(api.Event{Kind: api.KindSteer, Text: "use the other file"})
 	m.refresh()
-	if len(m.pendingSteers) != 0 {
-		t.Errorf("pendingSteers = %v, want empty once the steer was injected", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 0 {
+		t.Errorf("pendingSteers = %v, want empty once the steer was injected", m.composer.pendingSteers)
 	}
 	got := plainView(m)
 	if strings.Contains(got, "steer ▸") {
@@ -124,21 +124,21 @@ func TestSteerUnconsumedRequeues(t *testing.T) {
 
 	m.applyEvent(api.Event{Kind: api.KindSteerUnconsumed, Text: "actually, stop and explain"})
 	m.refresh()
-	if len(m.pendingSteers) != 0 {
-		t.Errorf("pendingSteers = %v, want empty once the daemon reported back", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 0 {
+		t.Errorf("pendingSteers = %v, want empty once the daemon reported back", m.composer.pendingSteers)
 	}
-	if len(m.queued) != 1 || m.queued[0] != "actually, stop and explain" {
-		t.Fatalf("queued = %v, want the unconsumed steer", m.queued)
+	if len(m.composer.queued) != 1 || m.composer.queued[0] != "actually, stop and explain" {
+		t.Fatalf("queued = %v, want the unconsumed steer", m.composer.queued)
 	}
 	if got := plainView(m); !strings.Contains(got, "queued ▸ actually, stop and explain") {
 		t.Fatalf("expected the requeued steer rendered as a pending block, got:\n%s", got)
 	}
 
 	m = driveUpdate(t, m, streamClosedMsg{})
-	if len(m.queued) != 0 {
-		t.Fatalf("queued = %v, want drained into the next turn", m.queued)
+	if len(m.composer.queued) != 0 {
+		t.Fatalf("queued = %v, want drained into the next turn", m.composer.queued)
 	}
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Fatal("expected a new stream to have started for the requeued steer")
 	}
 	if got := plainView(m); !strings.Contains(got, "actually, stop and explain") {
@@ -154,14 +154,14 @@ func TestSteerUnconsumedAfterInterruptIsNoted(t *testing.T) {
 	m := steerModel(t, "actually, stop and explain")
 	m = driveUpdate(t, m, altEnterKeyMsg())
 	m = driveUpdate(t, m, escKeyMsg())
-	if !m.interrupted {
+	if !m.composer.interrupted {
 		t.Fatal("expected Esc while streaming to mark the run interrupted")
 	}
 
 	m.applyEvent(api.Event{Kind: api.KindSteerUnconsumed, Text: "actually, stop and explain"})
 	m.refresh()
-	if len(m.queued) != 0 {
-		t.Errorf("queued = %v, want empty after an interrupt", m.queued)
+	if len(m.composer.queued) != 0 {
+		t.Errorf("queued = %v, want empty after an interrupt", m.composer.queued)
 	}
 	got := plainView(m)
 	if !strings.Contains(got, "steer not delivered (interrupted)") {
@@ -181,10 +181,10 @@ func TestSteerWithoutVerdictRequeuedOnStreamClose(t *testing.T) {
 	m = driveUpdate(t, m, altEnterKeyMsg())
 
 	m = driveUpdate(t, m, streamClosedMsg{})
-	if len(m.pendingSteers) != 0 {
-		t.Errorf("pendingSteers = %v, want cleared when the stream closed", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 0 {
+		t.Errorf("pendingSteers = %v, want cleared when the stream closed", m.composer.pendingSteers)
 	}
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Fatal("expected the leftover steer to be sent as the next turn")
 	}
 	if got := plainView(m); !strings.Contains(got, "one more thing") {
@@ -200,8 +200,8 @@ func TestSteerWithoutVerdictRequeuedOnStreamClose(t *testing.T) {
 func TestSteerFailed404DoesNotTearDownRunAndRequeues(t *testing.T) {
 	m := steerModel(t, "actually, stop and explain")
 	m = driveUpdate(t, m, altEnterKeyMsg())
-	if len(m.pendingSteers) != 1 {
-		t.Fatalf("pendingSteers = %v, want the steer just sent", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 1 {
+		t.Fatalf("pendingSteers = %v, want the steer just sent", m.composer.pendingSteers)
 	}
 
 	m = driveUpdate(t, m, steerFailedMsg{
@@ -210,14 +210,14 @@ func TestSteerFailed404DoesNotTearDownRunAndRequeues(t *testing.T) {
 		err:    fmt.Errorf("steer: %w", &client.StatusError{Code: http.StatusNotFound, Msg: "no active run for session"}),
 	})
 
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Error("expected streaming to stay true — the main stream never ended, only the steer POST failed")
 	}
-	if len(m.pendingSteers) != 0 {
-		t.Errorf("pendingSteers = %v, want the failed steer resolved", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 0 {
+		t.Errorf("pendingSteers = %v, want the failed steer resolved", m.composer.pendingSteers)
 	}
-	if len(m.queued) != 1 || m.queued[0] != "actually, stop and explain" {
-		t.Fatalf("queued = %v, want the 404'd steer requeued as the next turn", m.queued)
+	if len(m.composer.queued) != 1 || m.composer.queued[0] != "actually, stop and explain" {
+		t.Fatalf("queued = %v, want the 404'd steer requeued as the next turn", m.composer.queued)
 	}
 	got := plainView(m)
 	if strings.Contains(got, "error:") {
@@ -239,16 +239,16 @@ func TestSteerFailed429IsRetryableAndDoesNotTearDown(t *testing.T) {
 		err:    fmt.Errorf("steer: %w", &client.StatusError{Code: http.StatusTooManyRequests, Msg: "steer buffer full"}),
 	})
 
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Error("expected streaming to stay true after a retryable steer failure")
 	}
-	if len(m.pendingSteers) != 0 {
-		t.Errorf("pendingSteers = %v, want the failed steer resolved", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 0 {
+		t.Errorf("pendingSteers = %v, want the failed steer resolved", m.composer.pendingSteers)
 	}
 	// Unlike the 404 case, a 429 is not requeued as a fresh turn — it's the
 	// same instruction still worth trying again as a steer, not a new message.
-	if len(m.queued) != 0 {
-		t.Errorf("queued = %v, want a 429 NOT requeued as a new user turn", m.queued)
+	if len(m.composer.queued) != 0 {
+		t.Errorf("queued = %v, want a 429 NOT requeued as a new user turn", m.composer.queued)
 	}
 	got := plainView(m)
 	if !strings.Contains(got, "try again") {
@@ -257,15 +257,15 @@ func TestSteerFailed429IsRetryableAndDoesNotTearDown(t *testing.T) {
 }
 
 // TestSteerFailedLeavesOtherPendingSteersAlone checks the "other in-flight
-// m.pendingSteers alone" half of P33.15 #2: when two steers are in flight and
+// m.composer.pendingSteers alone" half of P33.15 #2: when two steers are in flight and
 // only one fails, the other's pending echo must survive untouched.
 func TestSteerFailedLeavesOtherPendingSteersAlone(t *testing.T) {
 	m := steerModel(t, "first steer")
 	m = driveUpdate(t, m, altEnterKeyMsg())
 	m.ta.SetValue("second steer")
 	m = driveUpdate(t, m, altEnterKeyMsg())
-	if len(m.pendingSteers) != 2 {
-		t.Fatalf("pendingSteers = %v, want both in flight", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 2 {
+		t.Fatalf("pendingSteers = %v, want both in flight", m.composer.pendingSteers)
 	}
 
 	m = driveUpdate(t, m, steerFailedMsg{
@@ -274,10 +274,10 @@ func TestSteerFailedLeavesOtherPendingSteersAlone(t *testing.T) {
 		err:    fmt.Errorf("steer: %w", &client.StatusError{Code: http.StatusTooManyRequests}),
 	})
 
-	if len(m.pendingSteers) != 1 || m.pendingSteers[0].text != "second steer" {
-		t.Fatalf("pendingSteers = %v, want only the failed one removed", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 1 || m.composer.pendingSteers[0].text != "second steer" {
+		t.Fatalf("pendingSteers = %v, want only the failed one removed", m.composer.pendingSteers)
 	}
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Error("expected streaming to stay true")
 	}
 }
@@ -295,8 +295,8 @@ func TestSteerFailedAlreadyResolvedIsANoOp(t *testing.T) {
 	// response (steerFailedMsg) arrives.
 	m.applyEvent(api.Event{Kind: api.KindSteer, Text: "already handled"})
 	m.refresh()
-	if len(m.pendingSteers) != 0 {
-		t.Fatalf("pendingSteers = %v, want resolved by KindSteer", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 0 {
+		t.Fatalf("pendingSteers = %v, want resolved by KindSteer", m.composer.pendingSteers)
 	}
 
 	m = driveUpdate(t, m, steerFailedMsg{
@@ -304,10 +304,10 @@ func TestSteerFailedAlreadyResolvedIsANoOp(t *testing.T) {
 		origin: steerOriginUser,
 		err:    fmt.Errorf("steer: %w", &client.StatusError{Code: http.StatusNotFound}),
 	})
-	if len(m.queued) != 0 {
-		t.Errorf("queued = %v, want no duplicate requeue for an already-resolved steer", m.queued)
+	if len(m.composer.queued) != 0 {
+		t.Errorf("queued = %v, want no duplicate requeue for an already-resolved steer", m.composer.queued)
 	}
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Error("expected streaming to stay true")
 	}
 }
@@ -321,7 +321,7 @@ func TestSteerFailedAlreadyResolvedIsANoOp(t *testing.T) {
 func TestDenialFeedbackSteerTaggedAndNotRequeuedAsUserTurn(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.streaming = true
+	m.streamState.streaming = true
 	m.applyEvent(api.Event{
 		Kind:           api.KindApprovalRequest,
 		Tool:           "shell",
@@ -336,13 +336,13 @@ func TestDenialFeedbackSteerTaggedAndNotRequeuedAsUserTurn(t *testing.T) {
 	}
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	if len(m.pendingSteers) != 1 {
-		t.Fatalf("pendingSteers = %v, want the denial-feedback steer registered", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 1 {
+		t.Fatalf("pendingSteers = %v, want the denial-feedback steer registered", m.composer.pendingSteers)
 	}
-	if m.pendingSteers[0].origin != steerOriginDenialFeedback {
-		t.Errorf("origin = %v, want steerOriginDenialFeedback", m.pendingSteers[0].origin)
+	if m.composer.pendingSteers[0].origin != steerOriginDenialFeedback {
+		t.Errorf("origin = %v, want steerOriginDenialFeedback", m.composer.pendingSteers[0].origin)
 	}
-	steerText := m.pendingSteers[0].text
+	steerText := m.composer.pendingSteers[0].text
 	if !strings.Contains(steerText, "The user denied the shell call. Feedback: not needed") {
 		t.Fatalf("unexpected steer text: %q", steerText)
 	}
@@ -351,11 +351,11 @@ func TestDenialFeedbackSteerTaggedAndNotRequeuedAsUserTurn(t *testing.T) {
 	m.applyEvent(api.Event{Kind: api.KindSteerUnconsumed, Text: steerText})
 	m.refresh()
 
-	if len(m.pendingSteers) != 0 {
-		t.Errorf("pendingSteers = %v, want resolved", m.pendingSteers)
+	if len(m.composer.pendingSteers) != 0 {
+		t.Errorf("pendingSteers = %v, want resolved", m.composer.pendingSteers)
 	}
-	if len(m.queued) != 0 {
-		t.Errorf("queued = %v, want the denial-feedback text NOT requeued as a user turn", m.queued)
+	if len(m.composer.queued) != 0 {
+		t.Errorf("queued = %v, want the denial-feedback text NOT requeued as a user turn", m.composer.queued)
 	}
 	if got := plainView(m); !strings.Contains(got, "feedback not delivered") {
 		t.Errorf("expected a not-delivered note instead, got:\n%s", got)

@@ -92,21 +92,21 @@ func TestTermPaneCanceledRunIsNotAFailure(t *testing.T) {
 
 func TestDiagnoseLastFailureSendsPromptAndClearsState(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
-	m.lastFailure = &shellFailure{source: "terminal", command: "go build ./...", output: "undefined: foo", code: 2}
-	m.termFocused = true
+	m.sessionMeta.lastFailure = &shellFailure{source: "terminal", command: "go build ./...", output: "undefined: foo", code: 2}
+	m.splitTerm.termFocused = true
 
 	before := m.transcript.Len()
 	cmd := m.diagnoseLastFailureCmd()
 	if cmd == nil {
 		t.Fatal("expected a non-nil tea.Cmd to start the diagnostic turn")
 	}
-	if m.lastFailure != nil {
+	if m.sessionMeta.lastFailure != nil {
 		t.Error("expected lastFailure to be cleared after triggering diagnose")
 	}
-	if m.termFocused {
+	if m.splitTerm.termFocused {
 		t.Error("expected diagnose to return focus to the chat input")
 	}
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Error("expected diagnose to start a streaming turn")
 	}
 	if m.transcript.Len() <= before {
@@ -128,19 +128,19 @@ func TestDiagnoseLastFailureNoopWithoutFailure(t *testing.T) {
 func TestDiagnoseKeybindingRoutesThroughTerminalPane(t *testing.T) {
 	m := newModel(Config{SessionID: "s", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.termFocused = true
-	m.term.lastFailed = true
-	m.term.lastCmd = "npm test"
-	m.term.lastOutput = "1 failing"
-	m.term.lastExitCode = 1
-	m.lastFailure = &shellFailure{source: "terminal", command: "npm test", output: "1 failing", code: 1}
+	m.splitTerm.termFocused = true
+	m.splitTerm.term.lastFailed = true
+	m.splitTerm.term.lastCmd = "npm test"
+	m.splitTerm.term.lastOutput = "1 failing"
+	m.splitTerm.term.lastExitCode = 1
+	m.sessionMeta.lastFailure = &shellFailure{source: "terminal", command: "npm test", output: "1 failing", code: 1}
 
 	m = driveUpdate(t, m, ctrlKeyMsg('g'))
 
-	if m.termFocused {
+	if m.splitTerm.termFocused {
 		t.Error("expected ctrl+g to return focus to chat after diagnosing")
 	}
-	if m.lastFailure != nil {
+	if m.sessionMeta.lastFailure != nil {
 		t.Error("expected lastFailure cleared after ctrl+g")
 	}
 	got := m.transcript.View()
@@ -157,7 +157,7 @@ func TestDiagnoseKeybindingIgnoredWhenNoFailure(t *testing.T) {
 
 	m = driveUpdate(t, m, ctrlKeyMsg('g'))
 
-	if m.streaming {
+	if m.streamState.streaming {
 		t.Error("ctrl+g with no pending failure should not start a turn")
 	}
 	if m.transcript.Len() != before {
@@ -172,11 +172,11 @@ func TestBangMsgFailureIsDiagnosable(t *testing.T) {
 
 	m = driveUpdate(t, m, bangMsg{cmd: "go build ./bad", output: "syntax error", code: 2})
 
-	if m.lastFailure == nil {
+	if m.sessionMeta.lastFailure == nil {
 		t.Fatal("expected a ! command failure to be recorded for diagnosis")
 	}
-	if m.lastFailure.command != "go build ./bad" || m.lastFailure.code != 2 {
-		t.Errorf("lastFailure = %+v, want command=%q code=2", m.lastFailure, "go build ./bad")
+	if m.sessionMeta.lastFailure.command != "go build ./bad" || m.sessionMeta.lastFailure.code != 2 {
+		t.Errorf("lastFailure = %+v, want command=%q code=2", m.sessionMeta.lastFailure, "go build ./bad")
 	}
 	got := m.transcript.View()
 	if !strings.Contains(got, "diagnose") {
@@ -184,10 +184,10 @@ func TestBangMsgFailureIsDiagnosable(t *testing.T) {
 	}
 
 	m = driveUpdate(t, m, ctrlKeyMsg('g'))
-	if m.lastFailure != nil {
+	if m.sessionMeta.lastFailure != nil {
 		t.Error("expected lastFailure cleared after ctrl+g diagnoses the ! command failure")
 	}
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Error("expected ctrl+g to start a diagnostic turn for the ! command failure")
 	}
 }
@@ -198,7 +198,7 @@ func TestBangMsgSuccessLeavesNoFailureToDiagnose(t *testing.T) {
 
 	m = driveUpdate(t, m, bangMsg{cmd: "echo hi", output: "hi", code: 0})
 
-	if m.lastFailure != nil {
+	if m.sessionMeta.lastFailure != nil {
 		t.Error("a successful ! command should not set lastFailure")
 	}
 }

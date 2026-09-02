@@ -118,16 +118,16 @@ func TestThreatModelPickerPreservesUnattended(t *testing.T) {
 
 	target := ""
 	m = driveUpdate(t, m, slashResultMsg{ThreatModelTarget: &target, ThreatModelUnattended: true})
-	if m.dialog == nil || m.dialog.kind != dialogThreatModelPicker {
+	if m.overlays.dialog == nil || m.overlays.dialog.kind != dialogThreatModelPicker {
 		t.Fatal("expected the framework picker to open")
 	}
-	if !m.pendingThreatModelUnattended {
+	if !m.overlays.pendingThreatModelUnattended {
 		t.Fatal("expected the unattended flag to be held while the picker is open")
 	}
 
 	next, cmd := m.Update(dialogSelectedMsg{kind: dialogThreatModelPicker, item: frameworkItem{name: "STRIDE"}})
 	m = next.(model)
-	if m.pendingThreatModelUnattended {
+	if m.overlays.pendingThreatModelUnattended {
 		t.Error("expected the pending flag to be cleared after selection")
 	}
 	if cmd == nil {
@@ -154,7 +154,7 @@ func TestThreatModelPickerCancelClearsUnattended(t *testing.T) {
 	target := ""
 	m = driveUpdate(t, m, slashResultMsg{ThreatModelTarget: &target, ThreatModelUnattended: true})
 	m = driveUpdate(t, m, dialogCancelMsg{kind: dialogThreatModelPicker})
-	if m.pendingThreatModelUnattended {
+	if m.overlays.pendingThreatModelUnattended {
 		t.Error("expected the unattended flag to be cleared when the picker is dismissed")
 	}
 }
@@ -169,7 +169,7 @@ func TestDriveResultStartsStream(t *testing.T) {
 
 	next, cmd := m.Update(slashResultMsg{Drive: &driveReq})
 	m = next.(model)
-	if !m.streaming {
+	if !m.streamState.streaming {
 		t.Error("expected a drive to put the TUI into its streaming state")
 	}
 	if cmd == nil {

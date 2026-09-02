@@ -123,6 +123,10 @@ type Event struct {
 	ToolID      string
 	ToolResult  string // KindToolResult
 	ToolIsError bool   // KindToolResult
+	// ToolPresentation (P64.4) mirrors tool.Result.Presentation on
+	// KindToolResult — an opaque, tool-private JSON payload a renderer may use
+	// instead of ToolResult. See tool.Result's own doc.
+	ToolPresentation json.RawMessage
 	// Usage carries per-turn counts on KindTurnDone and the run-cumulative
 	// total (IsEstimated set if any contributing turn lacked real
 	// provider-reported usage) on the terminal KindDone (P25.5).

@@ -20,7 +20,7 @@ import (
 func openSessionPicker(t *testing.T, m model) model {
 	t.Helper()
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected ctrl+y to open the session picker immediately")
 	}
 	return m
@@ -39,11 +39,11 @@ func idleModel(t *testing.T) model {
 func TestSessionPickerOpensBeforeDataLands(t *testing.T) {
 	m := openSessionPicker(t, idleModel(t))
 
-	if !m.dialog.loading {
+	if !m.overlays.dialog.loading {
 		t.Error("expected the picker to open in its loading state")
 	}
-	if m.dialog.kind != dialogSessionPicker {
-		t.Errorf("expected a session picker, got kind %v", m.dialog.kind)
+	if m.overlays.dialog.kind != dialogSessionPicker {
+		t.Errorf("expected a session picker, got kind %v", m.overlays.dialog.kind)
 	}
 	view := plainView(m)
 	if !strings.Contains(view, "loading…") {
@@ -58,17 +58,17 @@ func TestSessionPickerOpensBeforeDataLands(t *testing.T) {
 		{ID: "aaaaaaaa1", Title: "first", Mode: "build", UpdatedAt: time.Now()},
 		{ID: "bbbbbbbb2", Title: "second", Mode: "plan", UpdatedAt: time.Now()},
 	}})
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected the picker to still be open once its data landed")
 	}
-	if m.dialog.loading {
+	if m.overlays.dialog.loading {
 		t.Error("expected the loading state to clear once the data landed")
 	}
-	if n := len(m.dialog.list.Items()); n != 2 {
+	if n := len(m.overlays.dialog.list.Items()); n != 2 {
 		t.Fatalf("expected 2 session rows, got %d", n)
 	}
-	if _, ok := m.dialog.list.Items()[0].(sessionItem); !ok {
-		t.Errorf("expected sessionItem rows, got %#v", m.dialog.list.Items()[0])
+	if _, ok := m.overlays.dialog.list.Items()[0].(sessionItem); !ok {
+		t.Errorf("expected sessionItem rows, got %#v", m.overlays.dialog.list.Items()[0])
 	}
 	view = plainView(m)
 	if strings.Contains(view, "loading…") {
@@ -87,7 +87,7 @@ func TestSessionPickerOpensBeforeDataLands(t *testing.T) {
 // list's own width across both states (listDialog.fixedW).
 func TestSessionPickerFrameWidthSurvivesPopulation(t *testing.T) {
 	m := openSessionPicker(t, idleModel(t))
-	loadingW := lipgloss.Width(m.dialog.View())
+	loadingW := lipgloss.Width(m.overlays.dialog.View())
 
 	items := []api.SessionMeta{
 		{ID: "aaaaaaaa1", Title: "s", Mode: "build", UpdatedAt: time.Now()},
@@ -95,17 +95,17 @@ func TestSessionPickerFrameWidthSurvivesPopulation(t *testing.T) {
 	}
 	m = driveUpdate(t, m, sessionsLoadedMsg{items: items})
 
-	if got := lipgloss.Width(m.dialog.View()); got != loadingW {
+	if got := lipgloss.Width(m.overlays.dialog.View()); got != loadingW {
 		t.Errorf("picker frame width jumped when the data landed: %d -> %d", loadingW, got)
 	}
-	if got, want := m.dialog.list.Height(), sessionPickerH(40, len(items)); got != want {
+	if got, want := m.overlays.dialog.list.Height(), sessionPickerH(40, len(items)); got != want {
 		t.Errorf("populated picker height = %d, want the item-count height %d", got, want)
 	}
 
 	// A notice is the same frame too — an error must not resize the box either.
 	m2 := openSessionPicker(t, idleModel(t))
 	m2 = driveUpdate(t, m2, sessionsLoadedMsg{err: errors.New("x")})
-	if got := lipgloss.Width(m2.dialog.View()); got != loadingW {
+	if got := lipgloss.Width(m2.overlays.dialog.View()); got != loadingW {
 		t.Errorf("picker frame width jumped on the error notice: %d -> %d", loadingW, got)
 	}
 }
@@ -117,10 +117,10 @@ func TestSessionPickerFetchErrorShowsInDialog(t *testing.T) {
 	m := openSessionPicker(t, idleModel(t))
 	m = driveUpdate(t, m, sessionsLoadedMsg{err: errors.New("daemon unreachable")})
 
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected the dialog to stay open to carry the error")
 	}
-	if m.dialog.loading {
+	if m.overlays.dialog.loading {
 		t.Error("expected the loading state to clear on error")
 	}
 	view := plainView(m)
@@ -130,7 +130,7 @@ func TestSessionPickerFetchErrorShowsInDialog(t *testing.T) {
 
 	// The error row is not a choice: enter must not emit a selection the
 	// caller would type-assert into a sessionItem.
-	_, cmd := m.dialog.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := m.overlays.dialog.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Errorf("expected enter on a notice row to be swallowed, got msg %#v", cmd())
 	}
@@ -142,7 +142,7 @@ func TestSessionPickerEmptyResultShowsInDialog(t *testing.T) {
 	m := openSessionPicker(t, idleModel(t))
 	m = driveUpdate(t, m, sessionsLoadedMsg{})
 
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected the dialog to stay open to carry the empty-result notice")
 	}
 	if view := plainView(m); !strings.Contains(view, "no sessions to switch to") {
@@ -162,25 +162,25 @@ func TestSessionPickerDismissedBeforeDataArrives(t *testing.T) {
 		t.Fatal("expected esc to emit a cancel cmd")
 	}
 	m = driveUpdate(t, m, cmd())
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("expected esc to close the loading picker")
 	}
 
 	m = driveUpdate(t, m, sessionsLoadedMsg{items: []api.SessionMeta{
 		{ID: "aaaaaaaa1", Title: "first", Mode: "build", UpdatedAt: time.Now()},
 	}})
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("late session data re-opened a dismissed picker")
 	}
 
 	// An error for a dismissed picker still has somewhere to go: the toast it
 	// used before the dialog existed.
 	m = driveUpdate(t, m, sessionsLoadedMsg{err: errors.New("boom")})
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("late session error re-opened a dismissed picker")
 	}
-	if m.activeToast == nil || !strings.Contains(m.activeToast.message, "boom") {
-		t.Errorf("expected the toast fallback for a dismissed picker, got %#v", m.activeToast)
+	if m.overlays.activeToast == nil || !strings.Contains(m.overlays.activeToast.message, "boom") {
+		t.Errorf("expected the toast fallback for a dismissed picker, got %#v", m.overlays.activeToast)
 	}
 }
 
@@ -190,13 +190,13 @@ func TestSessionPickerDismissedBeforeDataArrives(t *testing.T) {
 // whatever took its place.
 func TestSessionPickerDataDoesNotHijackAnotherDialog(t *testing.T) {
 	m := openSessionPicker(t, idleModel(t))
-	pal := newPalette(m.width, m.height, allCommandEntries(nil))
-	m.dialog = &pal
+	pal := newPalette(m.chrome.width, m.chrome.height, allCommandEntries(nil))
+	m.overlays.dialog = &pal
 
 	m = driveUpdate(t, m, sessionsLoadedMsg{items: []api.SessionMeta{
 		{ID: "aaaaaaaa1", Title: "first", Mode: "build", UpdatedAt: time.Now()},
 	}})
-	if m.dialog == nil || m.dialog.kind != dialogPalette {
+	if m.overlays.dialog == nil || m.overlays.dialog.kind != dialogPalette {
 		t.Fatal("expected the palette to still own the screen")
 	}
 	if view := plainView(m); strings.Contains(view, "first") {
@@ -210,7 +210,7 @@ func TestSessionPickerDataDoesNotHijackAnotherDialog(t *testing.T) {
 // turns instead of sitting on one frozen frame.
 func TestLoadingSpinnerAnimatesWhileFetching(t *testing.T) {
 	m := openSessionPicker(t, idleModel(t))
-	first := m.dialog.list.Items()[0].(noticeItem).text
+	first := m.overlays.dialog.list.Items()[0].(noticeItem).text
 
 	var frames []string
 	for i := 0; i < 6; i++ {
@@ -219,7 +219,7 @@ func TestLoadingSpinnerAnimatesWhileFetching(t *testing.T) {
 		if cmd == nil {
 			t.Fatal("expected the spinner tick to be re-queued while loading")
 		}
-		frames = append(frames, m.dialog.list.Items()[0].(noticeItem).text)
+		frames = append(frames, m.overlays.dialog.list.Items()[0].(noticeItem).text)
 	}
 	advanced := false
 	for _, f := range frames {
@@ -238,7 +238,7 @@ func TestLoadingSpinnerAnimatesWhileFetching(t *testing.T) {
 	}})
 	next, _ := m.Update(spinner.TickMsg{Time: time.Now(), ID: m.sp.ID()})
 	m = next.(model)
-	if _, ok := m.dialog.list.Items()[0].(noticeItem); ok {
+	if _, ok := m.overlays.dialog.list.Items()[0].(noticeItem); ok {
 		t.Error("expected a spinner tick after loading to leave the real rows alone")
 	}
 }
@@ -250,7 +250,7 @@ func TestEscEscOpensBacktrackPickerImmediately(t *testing.T) {
 	m := idleModel(t)
 
 	m = driveUpdate(t, m, escKeyMsg())
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("the first (arming) Esc must not open anything")
 	}
 	next, cmd := m.Update(escKeyMsg())
@@ -258,10 +258,10 @@ func TestEscEscOpensBacktrackPickerImmediately(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected the second Esc to fire the backtrack fetch")
 	}
-	if m.dialog == nil || m.dialog.kind != dialogBacktrackPicker {
+	if m.overlays.dialog == nil || m.overlays.dialog.kind != dialogBacktrackPicker {
 		t.Fatal("expected the second Esc to open the backtrack picker immediately")
 	}
-	if !m.dialog.loading {
+	if !m.overlays.dialog.loading {
 		t.Error("expected the backtrack picker to open in its loading state")
 	}
 	if view := plainView(m); !strings.Contains(view, "loading…") {
@@ -273,13 +273,13 @@ func TestEscEscOpensBacktrackPickerImmediately(t *testing.T) {
 		{cpID: "cp2", text: "add a test", createdAt: time.Now()},
 	}
 	m = driveUpdate(t, m, backtrackTargetsMsg{items: items})
-	if m.dialog == nil || m.dialog.loading {
+	if m.overlays.dialog == nil || m.overlays.dialog.loading {
 		t.Fatal("expected the backtrack picker populated in place")
 	}
-	if n := len(m.dialog.list.Items()); n != 2 {
+	if n := len(m.overlays.dialog.list.Items()); n != 2 {
 		t.Fatalf("expected 2 backtrack rows, got %d", n)
 	}
-	if got, want := m.dialog.list.Height(), backtrackPickerH(40, len(items)); got != want {
+	if got, want := m.overlays.dialog.list.Height(), backtrackPickerH(40, len(items)); got != want {
 		t.Errorf("populated picker height = %d, want %d", got, want)
 	}
 	if view := ansi.Strip(m.renderContent()); !strings.Contains(view, "fix the bug") {
@@ -295,7 +295,7 @@ func TestBacktrackPickerEmptyResultShowsInDialog(t *testing.T) {
 	m = driveUpdate(t, m, escKeyMsg())
 
 	m = driveUpdate(t, m, backtrackTargetsMsg{})
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected the dialog to stay open to carry the notice")
 	}
 	if view := plainView(m); !strings.Contains(view, "no checkpoints yet") {
@@ -310,7 +310,7 @@ func TestBacktrackPickerDismissedBeforeDataArrives(t *testing.T) {
 	m := idleModel(t)
 	m = driveUpdate(t, m, escKeyMsg())
 	m = driveUpdate(t, m, escKeyMsg())
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected the backtrack picker open after the second Esc")
 	}
 
@@ -320,12 +320,12 @@ func TestBacktrackPickerDismissedBeforeDataArrives(t *testing.T) {
 		t.Fatal("expected esc to emit a cancel cmd")
 	}
 	m = driveUpdate(t, m, cmd())
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("expected esc to close the loading picker")
 	}
 
 	m = driveUpdate(t, m, backtrackTargetsMsg{items: []backtrackItem{{cpID: "cp1", text: "fix the bug"}}})
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("late backtrack data re-opened a dismissed picker")
 	}
 }
@@ -339,7 +339,7 @@ func openPersonaPicker(t *testing.T, m model) model {
 	t.Helper()
 	m.ta.SetValue("/persona")
 	m = driveUpdate(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected \"/persona\" to open the picker immediately")
 	}
 	return m
@@ -352,11 +352,11 @@ func openPersonaPicker(t *testing.T, m model) model {
 func TestPersonaPickerOpensBeforeDataLands(t *testing.T) {
 	m := openPersonaPicker(t, idleModel(t))
 
-	if !m.dialog.loading {
+	if !m.overlays.dialog.loading {
 		t.Error("expected the picker to open in its loading state")
 	}
-	if m.dialog.kind != dialogPersonaPicker {
-		t.Errorf("expected a persona picker, got kind %v", m.dialog.kind)
+	if m.overlays.dialog.kind != dialogPersonaPicker {
+		t.Errorf("expected a persona picker, got kind %v", m.overlays.dialog.kind)
 	}
 	view := plainView(m)
 	if !strings.Contains(view, "loading…") {
@@ -372,17 +372,17 @@ func TestPersonaPickerOpensBeforeDataLands(t *testing.T) {
 		{Name: "general", Description: "General-purpose"},
 		{Name: "security", Description: "Security review"},
 	}})
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected the picker to still be open once its data landed")
 	}
-	if m.dialog.loading {
+	if m.overlays.dialog.loading {
 		t.Error("expected the loading state to clear once the data landed")
 	}
-	if n := len(m.dialog.list.Items()); n != 2 {
+	if n := len(m.overlays.dialog.list.Items()); n != 2 {
 		t.Fatalf("expected 2 persona rows, got %d", n)
 	}
-	if _, ok := m.dialog.list.Items()[0].(personaItem); !ok {
-		t.Errorf("expected personaItem rows, got %#v", m.dialog.list.Items()[0])
+	if _, ok := m.overlays.dialog.list.Items()[0].(personaItem); !ok {
+		t.Errorf("expected personaItem rows, got %#v", m.overlays.dialog.list.Items()[0])
 	}
 	view = plainView(m)
 	if strings.Contains(view, "loading…") {
@@ -399,7 +399,7 @@ func TestPersonaPickerOpensBeforeDataLands(t *testing.T) {
 // a different width the instant real rows (or a notice) arrived.
 func TestPersonaPickerFrameWidthSurvivesPopulation(t *testing.T) {
 	m := openPersonaPicker(t, idleModel(t))
-	loadingW := lipgloss.Width(m.dialog.View())
+	loadingW := lipgloss.Width(m.overlays.dialog.View())
 
 	items := []api.PersonaInfo{
 		{Name: "general", Description: "s"},
@@ -407,17 +407,17 @@ func TestPersonaPickerFrameWidthSurvivesPopulation(t *testing.T) {
 	}
 	m = driveUpdate(t, m, slashResultMsg{Personas: items})
 
-	if got := lipgloss.Width(m.dialog.View()); got != loadingW {
+	if got := lipgloss.Width(m.overlays.dialog.View()); got != loadingW {
 		t.Errorf("picker frame width jumped when the data landed: %d -> %d", loadingW, got)
 	}
-	if got, want := m.dialog.list.Height(), personaPickerH(40, len(items)); got != want {
+	if got, want := m.overlays.dialog.list.Height(), personaPickerH(40, len(items)); got != want {
 		t.Errorf("populated picker height = %d, want the item-count height %d", got, want)
 	}
 
 	// A notice is the same frame too — an error must not resize the box either.
 	m2 := openPersonaPicker(t, idleModel(t))
 	m2 = driveUpdate(t, m2, slashResultMsg{Output: "Failed to list personas: x", IsError: true})
-	if got := lipgloss.Width(m2.dialog.View()); got != loadingW {
+	if got := lipgloss.Width(m2.overlays.dialog.View()); got != loadingW {
 		t.Errorf("picker frame width jumped on the error notice: %d -> %d", loadingW, got)
 	}
 }
@@ -429,10 +429,10 @@ func TestPersonaPickerFetchErrorShowsInDialog(t *testing.T) {
 	m := openPersonaPicker(t, idleModel(t))
 	m = driveUpdate(t, m, slashResultMsg{Output: "Failed to list personas: daemon unreachable", IsError: true})
 
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected the dialog to stay open to carry the error")
 	}
-	if m.dialog.loading {
+	if m.overlays.dialog.loading {
 		t.Error("expected the loading state to clear on error")
 	}
 	view := plainView(m)
@@ -442,7 +442,7 @@ func TestPersonaPickerFetchErrorShowsInDialog(t *testing.T) {
 
 	// The error row is not a choice: enter must not emit a selection the
 	// caller would type-assert into a personaItem.
-	_, cmd := m.dialog.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, cmd := m.overlays.dialog.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Errorf("expected enter on a notice row to be swallowed, got msg %#v", cmd())
 	}
@@ -455,7 +455,7 @@ func TestPersonaPickerEmptyResultShowsInDialog(t *testing.T) {
 	m := openPersonaPicker(t, idleModel(t))
 	m = driveUpdate(t, m, slashResultMsg{Output: "No personas available."})
 
-	if m.dialog == nil {
+	if m.overlays.dialog == nil {
 		t.Fatal("expected the dialog to stay open to carry the empty-result notice")
 	}
 	if view := plainView(m); !strings.Contains(view, "No personas available.") {
@@ -476,17 +476,17 @@ func TestPersonaPickerDismissedBeforeDataArrives(t *testing.T) {
 		t.Fatal("expected esc to emit a cancel cmd")
 	}
 	m = driveUpdate(t, m, cmd())
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("expected esc to close the loading picker")
 	}
 
 	m = driveUpdate(t, m, slashResultMsg{Personas: []api.PersonaInfo{{Name: "general"}}})
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("late persona data re-opened a dismissed picker")
 	}
 
 	m = driveUpdate(t, m, slashResultMsg{Output: "Failed to list personas: boom", IsError: true})
-	if m.dialog != nil {
+	if m.overlays.dialog != nil {
 		t.Fatal("late persona error re-opened a dismissed picker")
 	}
 }
@@ -497,11 +497,11 @@ func TestPersonaPickerDismissedBeforeDataArrives(t *testing.T) {
 // dropped, not poured into whatever took its place.
 func TestPersonaPickerDataDoesNotHijackAnotherDialog(t *testing.T) {
 	m := openPersonaPicker(t, idleModel(t))
-	pal := newPalette(m.width, m.height, allCommandEntries(nil))
-	m.dialog = &pal
+	pal := newPalette(m.chrome.width, m.chrome.height, allCommandEntries(nil))
+	m.overlays.dialog = &pal
 
 	m = driveUpdate(t, m, slashResultMsg{Personas: []api.PersonaInfo{{Name: "general"}}})
-	if m.dialog == nil || m.dialog.kind != dialogPalette {
+	if m.overlays.dialog == nil || m.overlays.dialog.kind != dialogPalette {
 		t.Fatal("expected the palette to still own the screen")
 	}
 	if view := plainView(m); strings.Contains(view, "general") {

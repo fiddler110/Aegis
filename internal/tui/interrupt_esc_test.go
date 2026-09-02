@@ -14,9 +14,9 @@ func streamingModel(t *testing.T) (model, *bool) {
 	m := newModel(Config{SessionID: "test-session", Mode: "build", WorkDir: t.TempDir()})
 	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
 	canceled := false
-	m.streaming = true
-	m.cancel = func() { canceled = true }
-	m.queued = []string{"next message"}
+	m.streamState.streaming = true
+	m.streamState.cancel = func() { canceled = true }
+	m.composer.queued = []string{"next message"}
 	return m, &canceled
 }
 
@@ -29,11 +29,11 @@ func TestEsc_Streaming_SinglePressInterrupts(t *testing.T) {
 	if !*canceled {
 		t.Error("expected a single Esc while streaming to cancel the run")
 	}
-	if m.backtrackArmed {
+	if m.composer.backtrackArmed {
 		t.Error("the streaming interrupt should not arm backtrackArmed")
 	}
-	if m.queued != nil {
-		t.Errorf("expected the interrupt to discard the queue, got %v", m.queued)
+	if m.composer.queued != nil {
+		t.Errorf("expected the interrupt to discard the queue, got %v", m.composer.queued)
 	}
 }
 
@@ -51,7 +51,7 @@ func TestEsc_StreamingWithDraft_ClearsThenInterrupts(t *testing.T) {
 	if *canceled {
 		t.Fatal("the clearing Esc should not have canceled the run")
 	}
-	if m.queued == nil {
+	if m.composer.queued == nil {
 		t.Error("the clearing Esc should not have discarded the queue")
 	}
 
@@ -59,8 +59,8 @@ func TestEsc_StreamingWithDraft_ClearsThenInterrupts(t *testing.T) {
 	if !*canceled {
 		t.Error("expected the second Esc to cancel the run")
 	}
-	if m.queued != nil {
-		t.Errorf("expected the interrupt to discard the queue, got %v", m.queued)
+	if m.composer.queued != nil {
+		t.Errorf("expected the interrupt to discard the queue, got %v", m.composer.queued)
 	}
 }
 
@@ -78,7 +78,7 @@ func TestAltEsc_StreamingWithDraft_ClearsAndInterrupts(t *testing.T) {
 	if !*canceled {
 		t.Error("expected alt+esc (same-frame double-tap) to also cancel the run")
 	}
-	if m.queued != nil {
-		t.Errorf("expected the interrupt to discard the queue, got %v", m.queued)
+	if m.composer.queued != nil {
+		t.Errorf("expected the interrupt to discard the queue, got %v", m.composer.queued)
 	}
 }

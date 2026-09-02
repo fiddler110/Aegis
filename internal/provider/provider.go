@@ -62,6 +62,15 @@ type ToolResultBlock struct {
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 	IsError   bool   `json:"is_error"`
+
+	// Presentation (P64.4) mirrors tool.Result.Presentation: an opaque,
+	// tool-private JSON payload for the TUI/web presenter, round-tripped
+	// through session storage by this Message's own MarshalJSON/UnmarshalJSON
+	// (see codec.go) so a replayed transcript sees the same thing a live one
+	// did. Provider adapters build their own request bodies from the fields
+	// they read explicitly and do not reference this one, so it is never sent
+	// to the model — only Content is.
+	Presentation json.RawMessage `json:"-"`
 }
 
 func (ToolResultBlock) blockType() string { return "tool_result" }

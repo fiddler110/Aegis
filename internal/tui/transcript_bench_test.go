@@ -128,7 +128,7 @@ func BenchmarkScrollTick_DuringStreaming(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				// A streamed token growing the live tail by a few bytes —
 				// changes tailRaw every call, exactly like refresh() does
-				// while m.liveText is growing.
+				// while m.streamState.liveText is growing.
 				p.SetTail(fmt.Sprintf("● thinking… (%d bytes streamed so far, this is the live tail text growing token by token)\n", i))
 				if i%2 == 0 {
 					p.HandleMouseWheel(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
