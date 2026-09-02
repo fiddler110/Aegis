@@ -144,19 +144,20 @@ Use "aegis <command> --help" for details on any command below.`,
 			// guarantee hold whether or not tui.Run is reached is the point
 			// of putting it there (CLN-4).
 			runErr := tui.Run(tui.Config{
-				Client:         cl,
-				SessionID:      sessionID,
-				Mode:           resolvedMode,
-				Model:          cfg.Provider.Model,
-				WorkDir:        cwd,
-				HumorMode:      cfg.TUI.HumorMode,
-				Theme:          cfg.TUI.Theme,
-				Notifications:  cfg.TUI.Notifications,
-				ImageRendering: cfg.TUI.ImageRendering,
-				Keybindings:    cfg.TUI.Keybindings,
-				Mouse:          cfg.TUI.Mouse,
-				ReducedMotion:  cfg.TUI.ReducedMotion,
-				MaxTurnStall:   cfg.Cost.MaxTurnStall(),
+				Client:            cl,
+				SessionID:         sessionID,
+				Mode:              resolvedMode,
+				Model:             cfg.Provider.Model,
+				WorkDir:           cwd,
+				HumorMode:         cfg.TUI.HumorMode,
+				Theme:             cfg.TUI.Theme,
+				Notifications:     cfg.TUI.Notifications,
+				ImageRendering:    cfg.TUI.ImageRendering,
+				Keybindings:       cfg.TUI.Keybindings,
+				Mouse:             cfg.TUI.Mouse,
+				ReducedMotion:     cfg.TUI.ReducedMotion,
+				DashboardSections: cfg.TUI.Dashboard.Sections,
+				MaxTurnStall:      cfg.Cost.MaxTurnStall(),
 				// P33.10 pre-warm: "" off Ollama, disabling the warm ping. Only
 				// the native adapter can be pre-warmed, but the ping is a raw
 				// /api/generate call that works against any Ollama base — so this

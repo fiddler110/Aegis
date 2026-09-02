@@ -39,7 +39,8 @@ func buildWelcomeContent(cfg Config, workDir string, th theme) string {
 	b.WriteString(th.welcomeKey.Render("  ") +
 		th.welcomeName.Render("/help") + th.welcomeKey.Render(" commands · ") +
 		th.welcomeName.Render("ctrl+k") + th.welcomeKey.Render(" palette · ") +
-		th.welcomeName.Render("shift+tab") + th.welcomeKey.Render(" mode"))
+		th.welcomeName.Render("shift+tab") + th.welcomeKey.Render(" mode · ") +
+		th.welcomeName.Render("esc esc") + th.welcomeKey.Render(" undo"))
 	b.WriteString("\n\n")
 	return b.String()
 }

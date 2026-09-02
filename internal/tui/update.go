@@ -137,6 +137,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case teammatesUpdateMsg: // P2.5: silent sub-agent poll
 		return m.updateTeammatesUpdate(msg)
 
+	case cronJobsUpdateMsg: // silent ListCronJobs poll
+		return m.updateCronJobs(msg)
+
 	case teammatesMsg:
 		return m.updateTeammates(msg)
 

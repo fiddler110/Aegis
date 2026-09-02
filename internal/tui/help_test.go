@@ -41,6 +41,23 @@ func TestSlashCommandsHaveDetailedHelp(t *testing.T) {
 	}
 }
 
+// TestRewindAndRollbackHelpMentionUndo guards the discoverability fix: a
+// first-time user is far more likely to type /rewind or /rollback bare, or
+// stumble on the Esc-Esc backtrack picker, than to connect the two — both
+// detailed-help entries must call out that this is Aegis's undo and
+// cross-reference the other path to the same checkpoints.
+func TestRewindAndRollbackHelpMentionUndo(t *testing.T) {
+	for _, name := range []string{"rewind", "rollback"} {
+		got := builtinHelp(name)
+		if !strings.Contains(got, "undo") {
+			t.Errorf("/help %s should mention it is Aegis's undo, got:\n%s", name, got)
+		}
+		if !strings.Contains(got, "Esc twice") {
+			t.Errorf("/help %s should cross-reference the Esc-Esc backtrack picker, got:\n%s", name, got)
+		}
+	}
+}
+
 // TestHelpListsKeyboardShortcuts guards P14.9: several features (terminal
 // pane, sub-agent list, session switcher, thinking expand/collapse) are
 // keybind-only with no slash-command equivalent, so /help's general listing

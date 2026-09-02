@@ -17,6 +17,27 @@ func TestAgentColorStableAndDistinct(t *testing.T) {
 	}
 }
 
+// TestApplySchemeWiresDeniedAndBusy guards against colDenied/colBusy being
+// declared but never assigned in applyScheme — both roles existed on
+// colorScheme (and every scheme populated them) before either had a
+// package-level var reading from it, so a caller checking colDenied/colBusy
+// would have silently always seen a zero color.Color.
+func TestApplySchemeWiresDeniedAndBusy(t *testing.T) {
+	applyScheme(darkScheme())
+	if colDenied == nil {
+		t.Fatal("colDenied is nil after applyScheme(darkScheme())")
+	}
+	if colBusy == nil {
+		t.Fatal("colBusy is nil after applyScheme(darkScheme())")
+	}
+	if colDenied == colWarn {
+		t.Error("colDenied should be distinct from colWarn, got the same value")
+	}
+	if colBusy == colAccent {
+		t.Error("colBusy should be distinct from colAccent, got the same value")
+	}
+}
+
 func TestIsAutoTheme(t *testing.T) {
 	auto := []string{"", "auto", "AUTO", "  Auto  "}
 	explicit := []string{"dark", "light", "dracula", "gruvbox"}

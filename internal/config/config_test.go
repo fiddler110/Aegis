@@ -113,6 +113,24 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+// TestLoadDashboardSectionsDefaultEmpty guards tui.dashboard.sections: an
+// unset key must decode to an empty/nil list, not an error and not some
+// implicit default ordering baked into config — internal/tui's
+// defaultDashboardSections is the single source of truth for what "empty"
+// means, so config only needs to prove it doesn't invent a value here.
+func TestLoadDashboardSectionsDefaultEmpty(t *testing.T) {
+	redirectConfigDir(t)
+	clearEnv(t, "AEGIS_TUI_DASHBOARD_SECTIONS")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.TUI.Dashboard.Sections) != 0 {
+		t.Errorf("tui.dashboard.sections default = %v, want empty", cfg.TUI.Dashboard.Sections)
+	}
+}
+
 // TestMCPServerConfigScanOutputEnabledDefaultsTrue is the P27.13/FIND-12
 // regression for the per-server MCP scan_output toggle: unlike top-level
 // scalar keys, defaults() has no mechanism to apply a default to elements of

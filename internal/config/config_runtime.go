@@ -54,6 +54,20 @@ type TUIConfig struct {
 	// (it skips the per-tick transcript re-render on a machine that may be
 	// simultaneously running local inference).
 	ReducedMotion bool `koanf:"reduced_motion"`
+	// Dashboard configures the sidebar's section set/order.
+	Dashboard DashboardConfig `koanf:"dashboard"`
+}
+
+// DashboardConfig controls which sections the TUI sidebar shows and in what
+// order (P<dashboard>), mirroring Keybindings above: named identifiers,
+// validated at TUI startup rather than silently ignored when misspelled.
+type DashboardConfig struct {
+	// Sections lists sidebar section identifiers in display order, e.g.
+	// ["session", "mode", "cost"]. Empty (default) keeps the built-in fixed
+	// order and full section set. Valid identifiers are documented alongside
+	// internal/tui's validateDashboardSections; an unrecognized one is
+	// rejected at startup, not silently dropped.
+	Sections []string `koanf:"sections"`
 }
 
 // CleanupConfig controls automatic pruning of old sessions.

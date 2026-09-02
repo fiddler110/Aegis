@@ -53,7 +53,15 @@ func (m model) updateStatusInfo(msg statusInfoMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateCronJobs applies a silent ListCronJobs poll result to the sidebar's
+// live job listing (P<dashboard>), mirroring updateTeammatesUpdate above.
+func (m model) updateCronJobs(msg cronJobsUpdateMsg) (tea.Model, tea.Cmd) {
+	m.cronJobs = msg.items
+	m.refresh()
+	return m, nil
+}
+
 // updateStatusTick re-arms the periodic /status poll.
 func (m model) updateStatusTick(msg statusTickMsg) (tea.Model, tea.Cmd) {
-	return m, tea.Batch(m.fetchStatusInfo(), statusTickCmd())
+	return m, tea.Batch(m.fetchStatusInfo(), m.fetchCronJobsQuiet(), statusTickCmd())
 }

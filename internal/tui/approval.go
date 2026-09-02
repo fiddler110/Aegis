@@ -169,6 +169,11 @@ func (m model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	// shift+tab here is the dialog's own "move selection up" binding, and
+	// takes precedence over the global CycleMode binding because the
+	// approval dialog gets first refusal on every message (see update.go's
+	// modal-overlay dispatch order). This is intended — do not "fix" it into
+	// falling through to mode-cycling while a dialog is open.
 	case "up", "shift+tab":
 		a.selected = (a.selected + apprOptionCount - 1) % apprOptionCount
 		return m, nil
@@ -216,6 +221,18 @@ func (m model) approvalByID(id string) *approvalState {
 		}
 	}
 	return nil
+}
+
+// pendingApprovalCount reports how many calls are currently blocked on an
+// answer — the showing dialog (if any) plus everything queued behind it —
+// for the sidebar/footer's passive indicator, which must stay accurate
+// whether or not the approval dialog itself is open.
+func (m model) pendingApprovalCount() int {
+	n := len(m.approvalQueue)
+	if m.approval != nil {
+		n++
+	}
+	return n
 }
 
 // approvalQueueSummary renders the "+N more pending" line shown under the

@@ -49,6 +49,38 @@ func TestToolCard_PendingUpdatesInPlaceToOK(t *testing.T) {
 	}
 }
 
+// TestToolEntry_ApprovalRequestMarksAwaitingApproval verifies the sidebar
+// activity entry for a pending call is flagged "awaiting_approval" when a
+// KindApprovalRequest names it, and that the eventual KindToolResult still
+// resolves it to ok/err — the same last-matching-pending-by-name correlation
+// KindToolResult already uses, now widened to also match the transient
+// awaiting_approval sub-state (there is no tool_use ID on ApprovalItem to
+// correlate against more precisely).
+func TestToolEntry_ApprovalRequestMarksAwaitingApproval(t *testing.T) {
+	m := followBottomTestModel(t)
+	m.appendUser("write a file", nil)
+	m.streaming = true
+
+	toolInput, _ := json.Marshal(map[string]string{"path": "out.txt"})
+	m.applyEvent(api.Event{Kind: api.KindToolCall, Tool: "write_file", ToolID: "tu_1", ToolInput: toolInput})
+	if len(m.tools) != 1 || m.tools[0].status != "pending" {
+		t.Fatalf("expected one pending tool entry, got %+v", m.tools)
+	}
+	if m.tools[0].startedAt.IsZero() {
+		t.Fatal("expected startedAt to be set when the entry is created")
+	}
+
+	m.applyEvent(api.Event{Kind: api.KindApprovalRequest, Tool: "write_file", ApprovalID: "ap_1", ToolInput: toolInput})
+	if m.tools[0].status != "awaiting_approval" {
+		t.Fatalf("expected status awaiting_approval after the approval request, got %q", m.tools[0].status)
+	}
+
+	m.applyEvent(api.Event{Kind: api.KindToolResult, Tool: "write_file", ToolID: "tu_1", ToolResult: "wrote 3 bytes"})
+	if m.tools[0].status != "ok" {
+		t.Fatalf("expected the result to resolve the awaiting_approval entry to ok, got %q", m.tools[0].status)
+	}
+}
+
 // TestToolCard_PendingUpdatesInPlaceToErr mirrors the OK case for a failed
 // tool call: the card must flip to its error rendering in place, with no
 // extra transcript item appended.

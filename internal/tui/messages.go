@@ -119,6 +119,10 @@ type shellFailure struct {
 // teammatesUpdateMsg is a silent subagent poll result (P2.5).
 type teammatesUpdateMsg struct{ items []api.Teammate }
 
+// cronJobsUpdateMsg is a silent ListCronJobs poll result (P<dashboard>),
+// mirroring teammatesUpdateMsg's shape.
+type cronJobsUpdateMsg struct{ items []api.CronJobInfo }
+
 type teammatesMsg struct {
 	items []api.Teammate
 	err   error

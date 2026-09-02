@@ -40,18 +40,26 @@ type keyMap struct {
 
 func defaultKeyMap() keyMap {
 	return keyMap{
-		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send / queue next message (while streaming)")),
-		Steer:         key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "steer the running model (while streaming)")),
-		Newline:       key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("shift+enter", "insert newline (ctrl+j fallback)")),
-		Thinking:      key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand/collapse thinking")),
-		Complete:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "command completion")),
-		Help:          key.NewBinding(key.WithKeys("f1"), key.WithHelp("f1", "toggle help")),
-		Palette:       key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "command palette")),
-		Cancel:        key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel / quit")),
-		Interrupt:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt run / clear input (×2 when idle: backtrack)")),
-		Clear:         key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "clear transcript")),
-		Editor:        key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "open in $EDITOR")),
-		CycleMode:     key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "cycle mode")),
+		Send:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send / queue next message (while streaming)")),
+		Steer:     key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "steer the running model (while streaming)")),
+		Newline:   key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("shift+enter", "insert newline (ctrl+j fallback)")),
+		Thinking:  key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand/collapse thinking")),
+		Complete:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "command completion")),
+		Help:      key.NewBinding(key.WithKeys("f1"), key.WithHelp("f1", "toggle help")),
+		Palette:   key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "command palette")),
+		Cancel:    key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel / quit")),
+		Interrupt: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt run / clear input (×2 when idle: backtrack)")),
+		Clear:     key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "clear transcript")),
+		Editor:    key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "open in $EDITOR")),
+		// ctrl+tab is a silent alternate: Bubble Tea v2 always requests basic
+		// Kitty/modifyOtherKeys key disambiguation (cursed_renderer.go's
+		// keyboardEnhancementsFlags starts from flags=1 unconditionally), so a
+		// terminal that supports either protocol (Kitty, WezTerm, foot, ...)
+		// can already deliver ctrl+tab as distinct from tab/shift+tab — Aegis
+		// just never bound it. Many terminals/multiplexers/OSes intercept
+		// ctrl+tab before it reaches the app at all (tab-switching), so
+		// shift+tab remains the one guaranteed, documented binding.
+		CycleMode:     key.NewBinding(key.WithKeys("shift+tab", "ctrl+tab"), key.WithHelp("shift+tab", "cycle mode")),
 		HistUp:        key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history prev")),
 		HistDown:      key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "history next")),
 		Teammates:     key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "list sub-agents")),

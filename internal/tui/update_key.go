@@ -104,6 +104,17 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 
+	// Sidebar toggle: was a hardcoded "ctrl+b" case in the switch below,
+	// which meant a tui.keybindings override for sidebartoggle silently did
+	// nothing — the same class of bug applyKeybindings' fail-fast validation
+	// exists to prevent for the keys checked via key.Matches above.
+	if key.Matches(msg, m.keys.SidebarToggle) {
+		m.sidebarOpen = !m.sidebarOpen
+		m.layout()
+		m.refresh()
+		return m, nil, true
+	}
+
 	switch msg.String() {
 	case "esc", "alt+esc":
 		if m.streaming {
@@ -171,11 +182,6 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		saveStash(m.stashPath, m.ta.Value())
 		return m, tea.Quit, true
-	case "ctrl+b":
-		m.sidebarOpen = !m.sidebarOpen
-		m.layout()
-		m.refresh()
-		return m, nil, true
 	case "ctrl+o":
 		// TQ9: expand/collapse all thinking blocks in the transcript.
 		m.toggleThinking()
@@ -223,7 +229,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		}
 	case "ctrl+v":
 		return m, pasteClipboardImageCmd(), true
-	case "shift+tab":
+	case "shift+tab", "ctrl+tab":
 		if !m.streaming {
 			return m, m.cycleModeCmd(), true
 		}

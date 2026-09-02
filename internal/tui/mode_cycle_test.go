@@ -31,6 +31,20 @@ func TestShiftTabCyclesModeOptimistically(t *testing.T) {
 	}
 }
 
+// ctrl+tab is the silent alternate for CycleMode (P<dashboard>): terminals
+// that support Kitty/modifyOtherKeys key disambiguation can deliver it as
+// distinct from tab/shift+tab, so it must drive the same optimistic cycle.
+func TestCtrlTabCyclesMode(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "plan", Model: "m", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	ctrlTab := tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModCtrl}
+	m = driveUpdate(t, m, ctrlTab)
+	if m.slash.mode != "build" {
+		t.Fatalf("after ctrl+tab: m.slash.mode = %q, want build", m.slash.mode)
+	}
+}
+
 // While streaming, shift+tab must not change the mode (mode is locked for the
 // duration of a run) — the handler only cycles when !m.streaming.
 func TestShiftTabIgnoredWhileStreaming(t *testing.T) {

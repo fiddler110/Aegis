@@ -1,9 +1,16 @@
 package tui
 
-// toolEntry tracks one tool call for the sidebar activity panel.
+import "time"
+
+// toolEntry tracks one tool call for the sidebar activity panel. status
+// "awaiting_approval" is a transient sub-state of "pending" (set when a
+// KindApprovalRequest correlates to this entry, cleared back to "ok"/"err"
+// by the same KindToolResult match that resolves an ordinary pending entry —
+// see stream.go). startedAt backs the sidebar's slow-running color cue.
 type toolEntry struct {
-	name   string
-	status string // "pending" | "ok" | "err"
+	name      string
+	status    string // "pending" | "ok" | "err" | "awaiting_approval"
+	startedAt time.Time
 }
 
 // toolCard is the in-place-updating transcript item for one tool call

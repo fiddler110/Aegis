@@ -134,7 +134,7 @@ func (m *model) applyEvent(ev api.Event) {
 		if c := m.toolState.pendingTools[key]; c != nil && isGroupableTool(ev.Tool) {
 			c.groupLabel = groupEntryLabel(ev.Tool, ev.ToolInput)
 		}
-		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending"})
+		m.tools = append(m.tools, toolEntry{name: ev.Tool, status: "pending", startedAt: time.Now()})
 		if len(m.tools) > maxToolHistory {
 			m.tools = m.tools[1:]
 		}
@@ -201,7 +201,7 @@ func (m *model) applyEvent(ev api.Event) {
 			m.transcript.Append(renderToolResult(m.th, ev.Tool, ev.ToolResult, ev.ToolIsError, m.transcript.Width(), m.toolMaxLines(), path) + "\n")
 		}
 		for i := len(m.tools) - 1; i >= 0; i-- {
-			if m.tools[i].name == ev.Tool && m.tools[i].status == "pending" {
+			if m.tools[i].name == ev.Tool && (m.tools[i].status == "pending" || m.tools[i].status == "awaiting_approval") {
 				if ev.ToolIsError {
 					m.tools[i].status = "err"
 				} else {
@@ -321,6 +321,13 @@ func (m *model) applyEvent(ev api.Event) {
 			} else {
 				m.approvalQueue = append(m.approvalQueue, st)
 			}
+			// P<dashboard>: flag the sidebar's matching activity entry as
+			// awaiting approval rather than leaving it looking like an
+			// ordinary still-running call. There's no tool_use ID on
+			// ApprovalItem to correlate against pendingTools' keys, so this
+			// uses the same last-matching-pending-entry-by-name heuristic
+			// KindToolResult already relies on below.
+			m.markToolAwaitingApproval(tn)
 		}
 		m.status = "approval required"
 		// Blur the composer so its cursor stops implying it's the thing
@@ -441,6 +448,19 @@ func (m *model) resolveToolCard(ev api.Event) (*toolCard, string) {
 		}
 	}
 	return nil, ""
+}
+
+// markToolAwaitingApproval flags the most recent still-pending m.tools entry
+// named tool as awaiting approval, so the sidebar can render it distinctly
+// from an ordinary running call. A no-op if nothing matches (e.g. the entry
+// already resolved or aged out of maxToolHistory).
+func (m *model) markToolAwaitingApproval(tool string) {
+	for i := len(m.tools) - 1; i >= 0; i-- {
+		if m.tools[i].name == tool && m.tools[i].status == "pending" {
+			m.tools[i].status = "awaiting_approval"
+			return
+		}
+	}
 }
 
 // toolCardKey returns the pendingTools key for a tool event: its real

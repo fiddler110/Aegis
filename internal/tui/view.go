@@ -248,6 +248,22 @@ func (m model) renderBrandSegment() string {
 	return renderBrandMark() + m.renderConnBadge(colSurface) + " " + m.cfg.Model
 }
 
+// slowToolThreshold is the sidebar's local heuristic for tinting a
+// still-running tool call as "busy" rather than plain "pending" — a per-call
+// signal, independent of engine.MaxTurnStall which bounds an entire turn, not
+// one call.
+const slowToolThreshold = 15 * time.Second
+
+// renderSidebar composites the sidebar as a data-driven sequence of named
+// section closures (P<dashboard>), so tui.dashboard.sections can pick a
+// subset/order without touching each section's render logic. Every closure
+// body below is verbatim what used to be an unconditional block in a fixed
+// top-to-bottom function — see defaultDashboardSections in dashboard.go for
+// the order used when config leaves this empty, which reproduces today's
+// original layout exactly. The one exception is the streaming
+// WAITING/GENERATING indicator: it's transient run state, not a section
+// identity a user would configure away, so it always renders right after
+// MODE regardless of the configured section list.
 func (m model) renderSidebar(h int) string {
 	var b strings.Builder
 	w := m.sidebarW - 2 // usable text width (inner - left padding)
@@ -259,134 +275,181 @@ func (m model) renderSidebar(h int) string {
 		add(m.th.sideSection.Render("◇ " + title))
 	}
 
-	add("")
-	section("SESSION")
-	add(m.th.sideValue.Render(short(m.cfg.SessionID)))
-	add("")
-
-	section("MODE")
-	add(m.renderModeBadge())
-	add("")
-
-	section("MODEL")
-	add(m.th.sideMuted.Render(truncate(m.cfg.Model, w)))
-	add(m.renderConnDetail()) // P28.7: reachable/unreachable + latency at a glance
-	add("")
-
-	// P81.22/FIND-22: the effective sandbox backend, so "this session runs
-	// commands unconfined" is a standing sidebar fact rather than something an
-	// operator has to remember from a startup log line or run /status to see.
-	if m.sandboxBackend != "" {
-		section("SANDBOX")
-		add(m.renderSandboxBadge(w))
-		add("")
-	}
-
-	// P81.23/FIND-23: cron is a persistence mechanism — present the registered
-	// job set as a standing sidebar fact, the same reasoning as SANDBOX above,
-	// so an operator sees an unrecognised or auto_approve job without running
-	// cron_list themselves.
-	if m.cronJobCount > 0 {
-		section("CRON")
-		add(m.renderCronBadge(w))
-		add("")
-	}
-
-	if m.streaming && !m.phase.streamStart.IsZero() {
-		if m.phase.firstTokenAt.IsZero() {
-			section("WAITING")
-		} else {
-			section("GENERATING")
-		}
-		secs := int(time.Since(m.phase.streamStart).Seconds())
-		add(m.th.elapsedDim.Render(fmt.Sprintf("%ds elapsed", secs)))
-		add("")
-	}
-
-	if len(m.tools) > 0 {
-		section("TOOLS")
-		for _, t := range m.tools {
-			tag, style := "●", m.th.tool
-			switch t.status {
-			case "ok":
-				tag, style = "✓", m.th.sideValue
-			case "err":
-				tag, style = "×", m.th.toolErr
+	renderers := map[string]func(){
+		"session": func() {
+			section("SESSION")
+			add(m.th.sideValue.Render(short(m.cfg.SessionID)))
+			add("")
+		},
+		"mode": func() {
+			section("MODE")
+			add(m.renderModeBadge())
+			add("")
+		},
+		// Passive approval indicator: queued/blocking approvals are
+		// time-sensitive and actionable, so the default order sits this near
+		// the top rather than letting it be scrolled past — the only other
+		// cue otherwise is the input area's warning line, visible only while
+		// the sidebar is closed.
+		"approvals": func() {
+			if n := m.pendingApprovalCount(); n > 0 {
+				section("APPROVALS")
+				add(lipgloss.NewStyle().Foreground(colWarn).Bold(true).Render(fmt.Sprintf("⏸ %d pending", n)))
+				add("")
 			}
-			add(style.Render(tag + " " + truncate(t.name, w-2)))
-		}
-		add("")
-	}
-
-	// P2.4: show files edited this session.
-	if len(m.changedFiles) > 0 {
-		section("FILES")
-		for _, f := range m.changedFiles {
-			add(m.th.sideValue.Render("✎ " + truncate(filepath.Base(f), w-2)))
-		}
-		add("")
-	}
-
-	// P2.5: show running sub-agents.
-	var runningAgents []api.Teammate
-	for _, tm := range m.teammates {
-		if tm.Status == "running" {
-			runningAgents = append(runningAgents, tm)
-		}
-	}
-	if len(runningAgents) > 0 {
-		section("AGENTS")
-		for _, tm := range runningAgents {
-			id := tm.AgentID
-			if len(id) > 8 {
-				id = id[:8]
+		},
+		"model": func() {
+			section("MODEL")
+			add(m.th.sideMuted.Render(truncate(m.cfg.Model, w)))
+			add(m.renderConnDetail()) // P28.7: reachable/unreachable + latency at a glance
+			add("")
+		},
+		// P81.22/FIND-22: the effective sandbox backend, so "this session runs
+		// commands unconfined" is a standing sidebar fact rather than something
+		// an operator has to remember from a startup log line or run /status
+		// to see.
+		"sandbox": func() {
+			if m.sandboxBackend != "" {
+				section("SANDBOX")
+				add(m.renderSandboxBadge(w))
+				add("")
 			}
-			label := "⚇ " + id
-			if tm.Summary != "" {
-				label += ": " + oneLine(tm.Summary)
+		},
+		// P81.23/FIND-23: cron is a persistence mechanism — present the
+		// registered job set as a standing sidebar fact, the same reasoning as
+		// SANDBOX above, so an operator sees an unrecognised or auto_approve
+		// job without running cron_list themselves.
+		"cron": func() {
+			if m.cronJobCount > 0 {
+				section("CRON")
+				add(m.renderCronBadge(w))
+				add("")
 			}
-			style := lipgloss.NewStyle().Foreground(agentColor(tm.AgentID))
-			add(style.Render(truncate(label, w)))
-		}
-		add("")
+		},
+		"tools": func() {
+			if len(m.tools) > 0 {
+				section("TOOLS")
+				for _, t := range m.tools {
+					tag, style := "●", m.th.tool
+					switch t.status {
+					case "ok":
+						tag, style = "✓", m.th.sideValue
+					case "err":
+						tag, style = "×", m.th.toolErr
+					case "awaiting_approval":
+						tag, style = "⏸", lipgloss.NewStyle().Foreground(colWarn)
+					case "pending":
+						if !t.startedAt.IsZero() && time.Since(t.startedAt) > slowToolThreshold {
+							tag, style = "●", lipgloss.NewStyle().Foreground(colBusy)
+						}
+					}
+					add(style.Render(tag + " " + truncate(t.name, w-2)))
+				}
+				add("")
+			}
+		},
+		// P2.4: show files edited this session.
+		"files": func() {
+			if len(m.changedFiles) > 0 {
+				section("FILES")
+				for _, f := range m.changedFiles {
+					add(m.th.sideValue.Render("✎ " + truncate(filepath.Base(f), w-2)))
+				}
+				add("")
+			}
+		},
+		// P2.5: show running sub-agents.
+		"agents": func() {
+			var runningAgents []api.Teammate
+			for _, tm := range m.teammates {
+				if tm.Status == "running" {
+					runningAgents = append(runningAgents, tm)
+				}
+			}
+			if len(runningAgents) > 0 {
+				section("AGENTS")
+				for _, tm := range runningAgents {
+					id := tm.AgentID
+					if len(id) > 8 {
+						id = id[:8]
+					}
+					label := "⚇ " + id
+					if tm.Summary != "" {
+						label += ": " + oneLine(tm.Summary)
+					}
+					style := lipgloss.NewStyle().Foreground(agentColor(tm.AgentID))
+					add(style.Render(truncate(label, w)))
+				}
+				add("")
+			}
+		},
+		// promptTokens approximates the last-turn prompt size: uncached input
+		// plus any cache reads/writes (Anthropic reports these separately). On
+		// the native-Ollama path m.inputTokens is prompt_eval_count, which
+		// P35.13 live-verified (Ollama 0.30.10) as the FULL prompt/context size
+		// every turn — not a cache-hit delta — so this meter is accurate there
+		// even on a KV-cache-hit turn (P35.4/P35.7 collapse
+		// prompt_eval_duration, not the count). P35.10's earlier claim that it
+		// understates fullness was the misread P35.13 corrected; the
+		// remediation P35.10 proposed (feeding the bar an estimated-context
+		// number instead) must NOT be applied — it would replace a correct
+		// number with an estimate. Older Ollama builds may have reported
+		// deltas, so this is version-dependent; consumers that need a
+		// backend-independent context size (compaction) still use an estimate.
+		"context": func() {
+			promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
+			if promptTokens > 0 {
+				section("CONTEXT")
+				add(renderContextBar(promptTokens, m.contextWindowSize(), w))
+				if m.cacheReadTokens > 0 {
+					hit := int(float64(m.cacheReadTokens)/float64(promptTokens)*100 + 0.5)
+					add(m.th.sideMuted.Render(fmt.Sprintf("cache %d%% hit", hit)))
+				}
+				add("")
+			}
+		},
+		"cost": func() {
+			promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
+			if promptTokens > 0 || m.costUSD > 0 {
+				section("COST")
+				if m.costUSD > 0 {
+					add(m.th.costText.Render(fmt.Sprintf("$%.4f", m.costUSD)))
+				}
+				if promptTokens > 0 {
+					add(m.th.sideMuted.Render(fmt.Sprintf("in  %d", promptTokens)))
+					add(m.th.sideMuted.Render(fmt.Sprintf("out %d", m.outputTokens)))
+				}
+				if m.egressBytes > 0 {
+					// P81.8: the live counterpart to the audit sink's per-fetch
+					// record — how much web_fetch has pulled in this session,
+					// at a glance.
+					add(m.th.sideMuted.Render(fmt.Sprintf("web ↓%s", fmtBytesCompact(m.egressBytes))))
+				}
+			}
+		},
 	}
 
-	// promptTokens approximates the last-turn prompt size: uncached input plus
-	// any cache reads/writes (Anthropic reports these separately). On the
-	// native-Ollama path m.inputTokens is prompt_eval_count, which P35.13
-	// live-verified (Ollama 0.30.10) as the FULL prompt/context size every
-	// turn — not a cache-hit delta — so this meter is accurate there even on a
-	// KV-cache-hit turn (P35.4/P35.7 collapse prompt_eval_duration, not the
-	// count). P35.10's earlier claim that it understates fullness was the
-	// misread P35.13 corrected; the remediation P35.10 proposed (feeding the
-	// bar an estimated-context number instead) must NOT be applied — it would
-	// replace a correct number with an estimate. Older Ollama builds may have
-	// reported deltas, so this is version-dependent; consumers that need a
-	// backend-independent context size (compaction) still use an estimate.
-	promptTokens := m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens
-	if promptTokens > 0 {
-		section("CONTEXT")
-		add(renderContextBar(promptTokens, m.contextWindowSize(), w))
-		if m.cacheReadTokens > 0 {
-			hit := int(float64(m.cacheReadTokens)/float64(promptTokens)*100 + 0.5)
-			add(m.th.sideMuted.Render(fmt.Sprintf("cache %d%% hit", hit)))
-		}
-		add("")
+	sections := m.dashboardSections
+	if len(sections) == 0 {
+		sections = defaultDashboardSections
 	}
 
-	if promptTokens > 0 || m.costUSD > 0 {
-		section("COST")
-		if m.costUSD > 0 {
-			add(m.th.costText.Render(fmt.Sprintf("$%.4f", m.costUSD)))
+	add("")
+	for _, name := range sections {
+		if r, ok := renderers[strings.ToLower(strings.TrimSpace(name))]; ok {
+			r()
 		}
-		if promptTokens > 0 {
-			add(m.th.sideMuted.Render(fmt.Sprintf("in  %d", promptTokens)))
-			add(m.th.sideMuted.Render(fmt.Sprintf("out %d", m.outputTokens)))
-		}
-		if m.egressBytes > 0 {
-			// P81.8: the live counterpart to the audit sink's per-fetch record —
-			// how much web_fetch has pulled in this session, at a glance.
-			add(m.th.sideMuted.Render(fmt.Sprintf("web ↓%s", fmtBytesCompact(m.egressBytes))))
+		// mode is always immediately followed by the transient run-state
+		// indicator, unconditionally — see the function doc comment.
+		if strings.EqualFold(strings.TrimSpace(name), "mode") && m.streaming && !m.phase.streamStart.IsZero() {
+			if m.phase.firstTokenAt.IsZero() {
+				section("WAITING")
+			} else {
+				section("GENERATING")
+			}
+			secs := int(time.Since(m.phase.streamStart).Seconds())
+			add(m.th.elapsedDim.Render(fmt.Sprintf("%ds elapsed", secs)))
+			add("")
 		}
 	}
 
@@ -455,6 +518,9 @@ func (m model) renderInputArea() string {
 		}
 		if running > 0 {
 			segs = append(segs, m.th.tool.Render(fmt.Sprintf("⚇%d", running)))
+		}
+		if n := m.pendingApprovalCount(); n > 0 {
+			segs = append(segs, lipgloss.NewStyle().Foreground(colWarn).Bold(true).Render(fmt.Sprintf("⏸%d", n)))
 		}
 	}
 	segs = append(segs, m.th.cwdStyle.Render(shortenPath(m.workDir)))
@@ -586,7 +652,7 @@ func (m model) renderCronBadge(w int) string {
 		line += "s"
 	}
 	if m.cronAutoApproveCount == 0 && m.cronUnconfirmedCount == 0 {
-		return m.th.sideValue.Render(truncate(line, w))
+		return m.th.sideValue.Render(truncate(line, w)) + m.renderCronJobList(w)
 	}
 	warn := lipgloss.NewStyle().Foreground(colWarning).Bold(true)
 	if m.cronAutoApproveCount > 0 {
@@ -595,7 +661,31 @@ func (m model) renderCronBadge(w int) string {
 	if m.cronUnconfirmedCount > 0 {
 		line += fmt.Sprintf(", %d unconfirmed", m.cronUnconfirmedCount)
 	}
-	return warn.Render(truncate(line, w))
+	return warn.Render(truncate(line, w)) + m.renderCronJobList(w)
+}
+
+// renderCronJobList lists up to 3 registered job titles/schedules under the
+// aggregate CRON badge, when the daemon has answered ListCronJobs (P<dashboard>).
+// Falls back to nothing extra — the aggregate-only line above — for an older
+// daemon that predates this endpoint or hasn't responded yet, so this is
+// purely additive.
+func (m model) renderCronJobList(w int) string {
+	if len(m.cronJobs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	n := len(m.cronJobs)
+	if n > 3 {
+		n = 3
+	}
+	for _, j := range m.cronJobs[:n] {
+		label := j.Title
+		if label == "" {
+			label = j.Command
+		}
+		b.WriteString("\n" + m.th.sideMuted.Render(truncate(fmt.Sprintf("· %s (%s)", label, j.Schedule), w)))
+	}
+	return b.String()
 }
 
 func (m model) renderModeBadge() string {

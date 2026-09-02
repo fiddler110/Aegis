@@ -45,6 +45,12 @@ type Config struct {
 	Keybindings    map[string][]string // P13.3.5: action name -> key sequence overrides
 	Mouse          string              // mouse capture (P74.19): "on" (default) or "off"
 	ReducedMotion  bool                // disable shimmer/caret-blink/card animation (P74.10)
+	// DashboardSections lists sidebar section identifiers in display order
+	// (tui.dashboard.sections). Empty (default) keeps the built-in fixed
+	// order/set — see defaultDashboardSections in dashboard.go. Validated by
+	// validateDashboardSections in Run, before newModel, the same fail-fast
+	// posture as Keybindings above.
+	DashboardSections []string
 	// MaxTurnStall is cost.max_turn_stall (P39.17) — the same bound the engine
 	// aborts a run against. The TUI never enforces it; it only reads it to ramp
 	// the P74.11 stall shimmer toward colWarning as a wait approaches it. Zero
@@ -75,6 +81,12 @@ func Run(cfg Config) error {
 	// Validate keybinding overrides up front so a typo in config fails fast
 	// with a clear error instead of silently doing nothing (P13.3.5).
 	if _, err := buildKeyMap(cfg.Keybindings); err != nil {
+		return err
+	}
+	// Same fail-fast posture for tui.dashboard.sections: an unknown section
+	// name errors here, before any model/program is constructed, rather than
+	// being silently dropped by renderSidebar.
+	if err := validateDashboardSections(cfg.DashboardSections); err != nil {
 		return err
 	}
 	m := newModel(cfg)
@@ -279,6 +291,12 @@ type model struct {
 	cronAutoApproveCount int
 	cronUnconfirmedCount int
 
+	// cronJobs is the live job listing (P<dashboard>), polled the same
+	// cadence as the /status cron summary above via ListCronJobs — nil until
+	// the first successful poll, or against a daemon that predates the
+	// endpoint, in which case the sidebar just shows the aggregate counts.
+	cronJobs []api.CronJobInfo
+
 	thinkStart time.Time // when extended thinking began this turn; zero when idle
 	turnCount  int       // conversation turns sent; guards turn separator logic
 	animStep   int       // frame counter for the streaming "working" shimmer
@@ -375,6 +393,12 @@ type model struct {
 	// MaxTurnStall abort bound — so the stall shimmer can ramp toward
 	// colWarning as the current wait approaches it. Zero disables the ramp.
 	maxTurnStall time.Duration
+
+	// dashboardSections mirrors Config.DashboardSections (P<dashboard>):
+	// which sidebar sections renderSidebar shows and in what order. Empty
+	// means defaultDashboardSections — validateDashboardSections has already
+	// rejected any unknown name by the time newModel runs.
+	dashboardSections []string
 
 	// lastAssistantText holds the most recent complete assistant message for /copy.
 	lastAssistantText string
@@ -599,22 +623,23 @@ func newModel(cfg Config) model {
 		workDir:    workDir,
 		sidebarW:   sidebarInnerW, // P40.1: adjustable at runtime
 
-		transcript:    newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
-		liveText:      &strings.Builder{},
-		live:          &liveBlock{},
-		thinkText:     &strings.Builder{},
-		renderer:      newGlamourRenderer(80), // initial width; recreated on first resize
-		keys:          mustKeyMap(cfg.Keybindings),
-		followBottom:  true,
-		toolCompact:   true,
-		humorMode:     cfg.HumorMode,
-		term:          newTermPane(workDir, 10), // height recalculated on first resize
-		stashPath:     stashPath,
-		notifyMode:    notify.ParseMode(cfg.Notifications),
-		imageProto:    imageProtoFor(cfg.ImageRendering),
-		mouseOff:      strings.EqualFold(strings.TrimSpace(cfg.Mouse), "off"),
-		reducedMotion: cfg.ReducedMotion,
-		maxTurnStall:  cfg.MaxTurnStall,
+		transcript:        newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
+		liveText:          &strings.Builder{},
+		live:              &liveBlock{},
+		thinkText:         &strings.Builder{},
+		renderer:          newGlamourRenderer(80), // initial width; recreated on first resize
+		keys:              mustKeyMap(cfg.Keybindings),
+		followBottom:      true,
+		toolCompact:       true,
+		humorMode:         cfg.HumorMode,
+		term:              newTermPane(workDir, 10), // height recalculated on first resize
+		stashPath:         stashPath,
+		notifyMode:        notify.ParseMode(cfg.Notifications),
+		imageProto:        imageProtoFor(cfg.ImageRendering),
+		mouseOff:          strings.EqualFold(strings.TrimSpace(cfg.Mouse), "off"),
+		reducedMotion:     cfg.ReducedMotion,
+		maxTurnStall:      cfg.MaxTurnStall,
+		dashboardSections: cfg.DashboardSections,
 	}
 	// P13.3.5: keep /help's shortcut list in sync with any keybinding remap.
 	m.slash.keys = m.keys
@@ -685,6 +710,19 @@ func (m model) fetchTeammatesQuiet() tea.Cmd {
 			return nil
 		}
 		return teammatesUpdateMsg{items: items}
+	})
+}
+
+// fetchCronJobsQuiet polls the registered cron job list silently, the same
+// shape as fetchTeammatesQuiet above, so the sidebar's CRON section can list
+// job titles/schedules rather than only the aggregate /status counts.
+func (m model) fetchCronJobsQuiet() tea.Cmd {
+	cl := m.cfg.Client
+	return fetchCmd(3*time.Second, cl.ListCronJobs, func(items []api.CronJobInfo, err error) tea.Msg {
+		if err != nil {
+			return nil
+		}
+		return cronJobsUpdateMsg{items: items}
 	})
 }
 

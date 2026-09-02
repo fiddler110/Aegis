@@ -6,6 +6,7 @@ import (
 
 	"charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/fiddler110/aegis/internal/api"
 )
 
 // P74.2: the sidebar composites over the finished frame instead of being
@@ -33,6 +34,67 @@ func TestSidebarOverlayDoesNotChangeTranscriptGeometry(t *testing.T) {
 	m.layout()
 	if w, h := m.transcript.Width(), m.transcript.Height(); w != closedW || h != closedH {
 		t.Fatalf("sidebar closed again: transcript geometry = (%d,%d), want unchanged (%d,%d)", w, h, closedW, closedH)
+	}
+}
+
+// TestSidebarToggleRespectsKeybindingOverride is the regression guard for the
+// dead-binding bug: update_key.go used to hardcode a literal "ctrl+b" case
+// instead of consulting m.keys.SidebarToggle, so a tui.keybindings override
+// for sidebartoggle silently did nothing. It must now flip m.sidebarOpen on
+// the configured key and no longer on the old default.
+func TestSidebarToggleRespectsKeybindingOverride(t *testing.T) {
+	m := newModel(Config{
+		SessionID:   "s",
+		Mode:        "build",
+		Model:       "m",
+		WorkDir:     t.TempDir(),
+		Keybindings: map[string][]string{"sidebartoggle": {"ctrl+p"}},
+	})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Pre-seed the custom-command cache: with the override in place, ctrl+b no
+	// longer matches SidebarToggle and falls through to the composer, whose
+	// completion sync would otherwise hit the nil test client (see
+	// TestShiftTabIgnoredWhileStreaming for the same precaution).
+	m.slash.customs = []api.CommandInfo{}
+
+	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
+	if m.sidebarOpen {
+		t.Fatal("expected the old default ctrl+b to no longer toggle the sidebar once overridden")
+	}
+
+	m = driveUpdate(t, m, tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl})
+	if !m.sidebarOpen {
+		t.Fatal("expected the configured override ctrl+p to toggle the sidebar")
+	}
+}
+
+// TestSidebarShowsApprovalsSectionWhenPending asserts the passive APPROVALS
+// indicator only appears while something is actually blocked on an answer
+// (m.approval and/or m.approvalQueue), and renders before MODEL/SANDBOX in
+// the default section order (approvals are time-sensitive, so they sit near
+// the top rather than being scrolled past).
+func TestSidebarShowsApprovalsSectionWhenPending(t *testing.T) {
+	m := newModel(Config{SessionID: "s", Mode: "build", Model: "m", WorkDir: t.TempDir()})
+	m = driveUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m.sidebarOpen = true
+	m.layout()
+
+	if got := plainView(m); strings.Contains(got, "◇ APPROVALS") {
+		t.Fatalf("expected no APPROVALS section with nothing pending, got:\n%s", got)
+	}
+
+	m.approval = &approvalState{toolName: "shell", id: "ap_1"}
+	m.approvalQueue = []*approvalState{{toolName: "write_file", id: "ap_2"}}
+	m.refresh()
+	got := plainView(m)
+	if !strings.Contains(got, "◇ APPROVALS") {
+		t.Fatalf("expected APPROVALS section once approvals are pending, got:\n%s", got)
+	}
+	if !strings.Contains(got, "2 pending") {
+		t.Fatalf("expected the count to include both the shown dialog and the queue, got:\n%s", got)
+	}
+	if idx, modelIdx := strings.Index(got, "◇ APPROVALS"), strings.Index(got, "◇ MODEL"); idx == -1 || modelIdx == -1 || idx > modelIdx {
+		t.Fatalf("expected APPROVALS to render before MODEL in the default order, got:\n%s", got)
 	}
 }
 

@@ -254,6 +254,8 @@ var (
 	colError       color.Color
 	colWarn        color.Color
 	colWarnSubtle  color.Color
+	colDenied      color.Color
+	colBusy        color.Color
 	colInfo        color.Color
 	colSuccessRole color.Color
 	colSuccessMore color.Color
@@ -356,6 +358,7 @@ func applyScheme(s colorScheme) {
 
 	colDestructive, colError = s.destructive, s.errorC
 	colWarn, colWarnSubtle = s.warn, s.warnSubtle
+	colDenied, colBusy = s.denied, s.busy
 	colInfo = s.info
 	colSuccessRole, colSuccessMore, colSuccessMost = s.successRole, s.successMore, s.successMost
 
