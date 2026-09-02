@@ -577,7 +577,39 @@ type Engine struct {
 	// doesn't opt in, in which case they cost a nil check.
 	onToolStarted  func(toolUseID, toolName string, input json.RawMessage)
 	onToolFinished func(toolUseID string)
+
+	// inFlight records the tool+input of every call currently between
+	// executeTool's markToolStarted and its result being produced (P67.10) —
+	// unlike startedTools above, an entry here is removed the instant the call
+	// finishes, so it answers "what is running *right now*", which is what
+	// RequestStop's soft path needs to consult tool.EffectivePreferFinish
+	// against. Reset at the start of each Run, same as startedTools.
+	inFlightMu sync.Mutex
+	inFlight   map[string]inFlightCall
+
+	// gracefulStopMu guards the soft-stop state RequestStop and the per-turn
+	// loop both touch (P67.10): gracefulStopRequested is consumed once, at the
+	// next safe point (the end of a completed tool round), and
+	// gracefulStopTimer is the grace-period safety net that forces a hard
+	// cancel if that safe point is never reached — armed by RequestStop,
+	// stopped by whichever of the two fires first.
+	gracefulStopMu        sync.Mutex
+	gracefulStopRequested bool
+	gracefulStopTimer     *time.Timer
 }
+
+// inFlightCall is what RequestStop's soft path needs to know about a call
+// that is currently running, to ask tool.EffectivePreferFinish about it.
+type inFlightCall struct {
+	name  string
+	input json.RawMessage
+}
+
+// gracefulStopGrace bounds how long a soft RequestStop waits for the current
+// tool round to finish on its own before falling back to a hard cancel — well
+// under MaxTurnStall, so a soft stop can never itself become the reason a run
+// hangs.
+const gracefulStopGrace = 5 * time.Second
 
 // ErrInterrupted is returned when the run is cancelled via context.
 var ErrInterrupted = errors.New("engine: interrupted")
@@ -945,6 +977,18 @@ func (e *Engine) setupGuards(ctx context.Context, conv *Conversation, emit EmitF
 	e.startedToolsMu.Lock()
 	e.startedTools = make(map[string]struct{})
 	e.startedToolsMu.Unlock()
+
+	e.inFlightMu.Lock()
+	e.inFlight = make(map[string]inFlightCall)
+	e.inFlightMu.Unlock()
+
+	e.gracefulStopMu.Lock()
+	e.gracefulStopRequested = false
+	if e.gracefulStopTimer != nil {
+		e.gracefulStopTimer.Stop()
+		e.gracefulStopTimer = nil
+	}
+	e.gracefulStopMu.Unlock()
 
 	e.readFilesMu.Lock()
 	e.readFiles, e.readFileSet = nil, make(map[string]struct{})
@@ -1511,6 +1555,18 @@ func (e *Engine) runIteration(ctx context.Context, rl *runLoopState, iter int) (
 		}
 	}
 	emitRoundTrace()
+	// P67.10: the one safe point a soft RequestStop is honored — the round
+	// that was in flight when it was requested has finished and its results
+	// are already appended above, so ending the run here never discards
+	// anything the model or the client has not seen. Reported as
+	// ErrInterrupted, the same sentinel a hard cancel produces, since this is
+	// still fundamentally a requested interruption, just deferred to a safe
+	// point.
+	if e.consumeGracefulStop() {
+		err := fmt.Errorf("%w: stop requested", ErrInterrupted)
+		rl.emit(Event{Kind: KindError, Err: err})
+		return false, err
+	}
 	return true, nil
 }
 
@@ -1924,6 +1980,21 @@ func (e *Engine) signatureTransparent(tu provider.ToolUseBlock) bool {
 		return false
 	}
 	return tool.IsSignatureTransparent(t, tu.Input)
+}
+
+// equivalenceKey reports a single tool call's loop-signature equivalence key,
+// if its tool declares one (P67.10). Unknown tools and a nil registry answer
+// ("", false), which falls back to canonicalizeToolInput exactly as before —
+// the same safe default pollExempt/signatureTransparent take.
+func (e *Engine) equivalenceKey(tu provider.ToolUseBlock) (string, bool) {
+	if e.tools == nil {
+		return "", false
+	}
+	t, ok := e.tools.Get(tu.Name)
+	if !ok {
+		return "", false
+	}
+	return tool.EffectiveEquivalenceKey(t, tu.Input)
 }
 
 // resultsHadError reports whether any tool result in a completed round was an

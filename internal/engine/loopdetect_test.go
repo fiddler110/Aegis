@@ -336,11 +336,11 @@ func TestTurnSignatureExcludesPollExemptCalls(t *testing.T) {
 		{Name: "poll", Input: json.RawMessage(`{"id":"j1"}`)},
 		{Name: "read", Input: json.RawMessage(`{"p":"a"}`)},
 	}
-	sig, rec := turnSignatureExcludingPolls(mixed, exempt, nil)
+	sig, rec := turnSignatureExcludingPolls(mixed, exempt, nil, nil)
 	if !rec {
 		t.Fatal("a turn with a non-exempt call must still be recorded")
 	}
-	want, _ := turnSignatureExcludingPolls([]provider.ToolUseBlock{{Name: "read", Input: json.RawMessage(`{"p":"a"}`)}}, exempt, nil)
+	want, _ := turnSignatureExcludingPolls([]provider.ToolUseBlock{{Name: "read", Input: json.RawMessage(`{"p":"a"}`)}}, exempt, nil, nil)
 	if sig != want {
 		t.Errorf("poll-exempt calls must not appear in the signature: %q vs %q", sig, want)
 	}
@@ -352,12 +352,12 @@ func TestTurnSignatureExcludesPollExemptCalls(t *testing.T) {
 		{Name: "poll", Input: json.RawMessage(`{"id":"j1"}`)},
 		{Name: "poll", Input: json.RawMessage(`{"id":"j2"}`)},
 	}
-	if _, rec := turnSignatureExcludingPolls(allPolls, exempt, nil); rec {
+	if _, rec := turnSignatureExcludingPolls(allPolls, exempt, nil, nil); rec {
 		t.Error("a turn consisting entirely of polls must not be recorded")
 	}
 
 	// A nil exemption function reproduces the pre-P53.2 signature exactly.
-	plain, rec := turnSignatureExcludingPolls(mixed, nil, nil)
+	plain, rec := turnSignatureExcludingPolls(mixed, nil, nil, nil)
 	if !rec || plain != turnSignature(mixed) {
 		t.Error("nil pollExempt must reproduce the original signature")
 	}

@@ -45,8 +45,8 @@ func TestTurnSignatureDropsTransparentArgumentsButKeepsTheName(t *testing.T) {
 		}
 	}
 
-	a, recA := turnSignatureExcludingPolls(turn(`{"note":"step 1 of 9"}`), nil, transparent)
-	b, recB := turnSignatureExcludingPolls(turn(`{"note":"step 2 of 9"}`), nil, transparent)
+	a, recA := turnSignatureExcludingPolls(turn(`{"note":"step 1 of 9"}`), nil, transparent, nil)
+	b, recB := turnSignatureExcludingPolls(turn(`{"note":"step 2 of 9"}`), nil, transparent, nil)
 	if !recA || !recB {
 		t.Fatal("a turn with a transparent call must still be recorded")
 	}
@@ -66,7 +66,7 @@ func TestTurnSignatureDropsTransparentArgumentsButKeepsTheName(t *testing.T) {
 		{Name: "grep", Input: json.RawMessage(`{"pattern":"Y"}`)},
 		{Name: "todo_write", Input: json.RawMessage(`{"note":"step 1 of 9"}`)},
 	}
-	if c, _ := turnSignatureExcludingPolls(other, nil, transparent); c == a {
+	if c, _ := turnSignatureExcludingPolls(other, nil, transparent, nil); c == a {
 		t.Error("a genuinely different accompanying call must still change the signature")
 	}
 
@@ -74,7 +74,7 @@ func TestTurnSignatureDropsTransparentArgumentsButKeepsTheName(t *testing.T) {
 	// the concrete difference from exemption: five turns of pure bookkeeping is
 	// a stuck agent, and exemption would have let it run to the iteration cap.
 	only := []provider.ToolUseBlock{{Name: "todo_write", Input: json.RawMessage(`{"note":"again"}`)}}
-	if sig, rec := turnSignatureExcludingPolls(only, nil, transparent); !rec || sig == "" {
+	if sig, rec := turnSignatureExcludingPolls(only, nil, transparent, nil); !rec || sig == "" {
 		t.Errorf("an all-transparent turn must still be recorded, got rec=%v sig=%q", rec, sig)
 	}
 }

@@ -145,14 +145,18 @@ func TestRunRegistryStopSession(t *testing.T) {
 		t.Fatal("stopSession should report false before a cancel is registered")
 	}
 
-	cancelled := false
-	r.setCancel("run-1", func() { cancelled = true })
+	var gotHard bool
+	called := false
+	r.setCancel("run-1", func(hard bool) { called = true; gotHard = hard })
 
 	if !r.stopSession("sess-1") {
 		t.Fatal("stopSession should report true once a cancel is registered")
 	}
-	if !cancelled {
+	if !called {
 		t.Fatal("stopSession did not invoke the registered cancel func")
+	}
+	if gotHard {
+		t.Error("stopSession should call the soft (hard=false) path, giving the engine a chance to let an in-flight call finish")
 	}
 	if r.stopSession("no-such-session") {
 		t.Fatal("stopSession should report false for an unknown session")

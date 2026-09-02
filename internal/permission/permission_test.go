@@ -41,6 +41,17 @@ func (f fakeOverrideTool) CapabilityFor(context.Context, json.RawMessage) tool.C
 	return f.overrideCap
 }
 
+// fakeDestroyTool implements tool.Destroyer on top of fakeTool, for
+// exercising the P67.10 destructive-escalation seam.
+type fakeDestroyTool struct {
+	fakeTool
+	destructive bool
+}
+
+func (f fakeDestroyTool) Destructive(context.Context, json.RawMessage) bool {
+	return f.destructive
+}
+
 func TestPolicyDecide(t *testing.T) {
 	tests := []struct {
 		mode Mode
@@ -217,6 +228,65 @@ func TestGateWithoutAnObserverStillDecides(t *testing.T) {
 	}
 	if allowed, reason := g.Check(context.Background(), downgraded, nil); !allowed {
 		t.Fatalf("allowed = false (%s), want true", reason)
+	}
+}
+
+// TestGateEscalatesDestructiveWritesToAsk is the P67.10 unit: a write that
+// would otherwise be silently Allow-ed in build mode is escalated to Ask when
+// the tool declares the specific call destructive, and left alone when it
+// doesn't. Auto mode is exempt — its contract is no approval at all.
+func TestGateEscalatesDestructiveWritesToAsk(t *testing.T) {
+	ctx := context.Background()
+	destructiveWrite := fakeDestroyTool{fakeTool: fakeTool{name: "write_file", cap: tool.CapWrite}, destructive: true}
+	plainWrite := fakeDestroyTool{fakeTool: fakeTool{name: "write_file", cap: tool.CapWrite}, destructive: false}
+
+	if ok, _ := New(ModeBuild, AutoDeny{}).Check(ctx, destructiveWrite, nil); ok {
+		t.Error("a destructive write in build mode must require approval, AutoDeny should block it")
+	}
+	approver := &recordingApprover{approve: true}
+	if ok, _ := New(ModeBuild, approver).Check(ctx, destructiveWrite, nil); !ok {
+		t.Fatal("expected approval")
+	}
+	if !strings.Contains(approver.reason, "irreversible") {
+		t.Errorf("expected the reason to flag irreversibility, got %q", approver.reason)
+	}
+
+	if ok, _ := New(ModeBuild, AutoDeny{}).Check(ctx, plainWrite, nil); !ok {
+		t.Error("a non-destructive write must still be allowed outright in build mode")
+	}
+
+	// Auto mode is exempt: no approval regardless of destructiveness.
+	if ok, _ := New(ModeAuto, AutoDeny{}).Check(ctx, destructiveWrite, nil); !ok {
+		t.Error("auto mode must allow a destructive write without approval")
+	}
+}
+
+// TestGateRecordsDestructiveEscalation mirrors
+// TestGateRecordsCapabilityDowngrades for the new rule: the escalation must
+// be observable, and an ordinary non-destructive call must not add noise.
+func TestGateRecordsDestructiveEscalation(t *testing.T) {
+	var got []ContextualDecision
+	g := New(ModeBuild, AutoApprove{})
+	g.OnDecision = func(d ContextualDecision) { got = append(got, d) }
+
+	destructiveWrite := fakeDestroyTool{fakeTool: fakeTool{name: "write_file", cap: tool.CapWrite}, destructive: true}
+	if allowed, reason := g.Check(context.Background(), destructiveWrite, nil); !allowed {
+		t.Fatalf("expected approval: %s", reason)
+	}
+	if len(got) != 1 {
+		t.Fatalf("decisions recorded = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].Rule != DestructiveEscalationRule || got[0].Decision != Ask {
+		t.Errorf("record does not describe the escalation: %+v", got[0])
+	}
+
+	got = nil
+	plainWrite := fakeDestroyTool{fakeTool: fakeTool{name: "write_file", cap: tool.CapWrite}, destructive: false}
+	if allowed, _ := g.Check(context.Background(), plainWrite, nil); !allowed {
+		t.Fatal("a non-destructive write must be allowed")
+	}
+	if len(got) != 0 {
+		t.Errorf("a non-destructive call recorded %+v, want nothing", got)
 	}
 }
 

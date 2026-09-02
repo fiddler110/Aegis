@@ -335,7 +335,11 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 		baseRunCtx, stopCancel = context.WithCancel(baseRunCtx)
 		defer stopCancel()
 		if s.runs != nil {
-			s.runs.setCancel(runID, stopCancel)
+			// P67.10: stopSession asks softly first — RequestStop lets an
+			// in-flight tool.InterruptPreference call finish naturally,
+			// falling back to stopCancel itself when that isn't safe (nothing
+			// in flight, a non-preferring call, or the grace period elapses).
+			s.runs.setCancel(runID, func(hard bool) { eng.RequestStop(hard, stopCancel) })
 		}
 	}
 	runCtx := swarm.WithParentMode(baseRunCtx, sess.Mode)

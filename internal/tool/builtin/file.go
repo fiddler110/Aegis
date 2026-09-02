@@ -293,6 +293,19 @@ type writeTool struct {
 
 func (t *writeTool) Name() string                { return "write_file" }
 func (t *writeTool) Capability() tool.Capability { return tool.CapWrite }
+
+// write_file deliberately does NOT implement tool.Destroyer (P67.10), despite
+// "overwrite" being the seam's own motivating example. Tried it — resolving
+// the path and checking os.Stat, exactly the shape CapabilityOverrider's
+// per-call classifiers use — and it escalated build mode's silent Allow to an
+// unanswered Ask on TestCheckpointRewind's very first write, which hung the
+// whole package's test run for the entire 10-minute suite timeout. That is
+// the honest signal, not just a test to patch around: overwriting an existing
+// file is the single most common action in ordinary agentic editing, and it
+// is already recoverable via /rewind (internal/checkpoint). Escalating it
+// would trade real approval fatigue for protection a checkpoint already
+// provides. git_pr below is the seam's real demonstrator — a genuinely rare,
+// irreversible, non-checkpoint-recoverable action.
 func (t *writeTool) Description() string {
 	return "Create or overwrite a file in the workspace with the given content. Creates parent directories as needed."
 }

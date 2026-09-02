@@ -141,7 +141,11 @@ func DeferredToolsBlock(reg *tool.Registry) string {
 	sb.WriteString("<deferred_tools>\n")
 	sb.WriteString("These tools are not loaded yet. When a task needs one, call `tool_search` with keywords to load it before use.\n")
 	for _, d := range deferred {
-		fmt.Fprintf(&sb, "- %s: %s\n", d.Name, d.Summary)
+		line := fmt.Sprintf("- %s: %s", d.Name, d.Summary)
+		if d.Keywords != "" {
+			line += " [" + d.Keywords + "]"
+		}
+		sb.WriteString(line + "\n")
 	}
 	sb.WriteString("</deferred_tools>")
 	return sb.String()

@@ -334,6 +334,89 @@ func IsSignatureTransparent(t Tool, input json.RawMessage) bool {
 	return false
 }
 
+// EquivalenceClassifier is an optional Tool extension letting a tool supply
+// its own "are these two calls the same" comparison key, in place of
+// canonicalizeToolInput's generic structural comparison, for a call whose
+// inputs can be equivalent in ways the generic normalizer cannot see (P67.10).
+// It is the third member of the per-call loop-signature family alongside
+// PollExempter and SignatureTransparent: PollExempter hides a call entirely,
+// SignatureTransparent hides only its arguments, and this hides the raw
+// arguments behind a tool-chosen comparison key instead.
+type EquivalenceClassifier interface {
+	// EquivalenceKey returns a comparison key for input, and true — or
+	// ("", false) to fall back to the default canonicalization.
+	EquivalenceKey(input json.RawMessage) (string, bool)
+}
+
+// EffectiveEquivalenceKey returns t's equivalence key for input: ("", false)
+// unless t implements EquivalenceClassifier and reports otherwise. Mirrors
+// IsPollExempt/IsSignatureTransparent's safe-default shape.
+func EffectiveEquivalenceKey(t Tool, input json.RawMessage) (string, bool) {
+	if e, ok := t.(EquivalenceClassifier); ok {
+		return e.EquivalenceKey(input)
+	}
+	return "", false
+}
+
+// Destroyer is an optional Tool extension for a call whose effect is
+// irreversible — an overwrite, a delete, or something sent where it cannot be
+// recalled — distinct from Capability's read/write/execute axis, which does
+// not separate a reversible write from one that isn't (P67.10). ctx mirrors
+// CapabilityOverrider: a tool that needs to check the actual target (an
+// overwrite depends on whether the file already exists) must classify against
+// the context the call will run under, not a construction-time root.
+type Destroyer interface {
+	Destructive(ctx context.Context, input json.RawMessage) bool
+}
+
+// EffectiveDestructive reports whether a specific call is destructive: false
+// unless t implements Destroyer and claims this input.
+func EffectiveDestructive(ctx context.Context, t Tool, input json.RawMessage) bool {
+	if d, ok := t.(Destroyer); ok {
+		return d.Destructive(ctx, input)
+	}
+	return false
+}
+
+// InterruptPreference is an optional Tool extension for a call cheap or fast
+// enough that a stop request should let it finish naturally rather than
+// cancelling it immediately (P67.10). Unknown tools and any tool not
+// implementing this default to "cancel immediately" — the only behavior
+// before this existed.
+type InterruptPreference interface {
+	PreferFinish(input json.RawMessage) bool
+}
+
+// EffectivePreferFinish reports whether a specific call prefers to be let
+// finish rather than cancelled immediately: false unless t implements
+// InterruptPreference and claims this input.
+func EffectivePreferFinish(t Tool, input json.RawMessage) bool {
+	if p, ok := t.(InterruptPreference); ok {
+		return p.PreferFinish(input)
+	}
+	return false
+}
+
+// SearchHinter is an optional Tool extension supplying a short keyword line
+// for the deferred-tools prompt block, separate from Summarize's one-line
+// advertisement, so a model can recognize a deferred tool's capability by
+// keyword rather than only by reading its summary sentence (P67.10). Keep it
+// to a handful of words, not a sentence — this is printed for every deferred
+// tool on every turn, and SearchDeferred already matches the full
+// Description, so nothing is lost to discovery by keeping it short.
+type SearchHinter interface {
+	SearchHint() string
+}
+
+// searchHint returns t's search hint, or "" if it doesn't implement
+// SearchHinter. Mirrors Summarize's fallback shape.
+func searchHint(t Tool) string {
+	if s, ok := t.(SearchHinter); ok {
+		return strings.TrimSpace(s.SearchHint())
+	}
+	return ""
+}
+
 // toolTable is the registration table shared by a registry and every clone
 // taken from it. It carries its own mutex, which is the whole point (P66.4/
 // ARCH-01): Clone used to copy the map header by reference while handing the
@@ -560,6 +643,9 @@ type Info struct {
 	Name        string
 	Description string
 	Summary     string
+	// Keywords is a SearchHinter's short discovery cue, or "" when the tool
+	// doesn't implement it (P67.10).
+	Keywords string
 }
 
 // ShortDescriber is an optional Tool extension supplying the one-line
@@ -788,7 +874,7 @@ func (r *Registry) Deferred() []Info {
 	var out []Info
 	r.rangeToolsLocked(func(name string, t Tool) {
 		if r.isDeferredLocked(name) && !r.isExposedLocked(name) {
-			out = append(out, Info{Name: t.Name(), Description: t.Description(), Summary: Summarize(t)})
+			out = append(out, Info{Name: t.Name(), Description: t.Description(), Summary: Summarize(t), Keywords: searchHint(t)})
 		}
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

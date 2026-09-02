@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"sort"
 	"sync"
 	"time"
@@ -30,7 +29,14 @@ type runState struct {
 	// runs (P28.5) — a normal run is instead stopped by the client tearing
 	// down its HTTP request, which cancels the context the engine already
 	// runs on, so it needs no separate cancel func here.
-	cancel context.CancelFunc
+	//
+	// P67.10: a soft-stop function rather than a raw context.CancelFunc — it
+	// still always *can* cancel immediately (that's its fallback), but first
+	// gives the engine the chance to let an in-flight tool.InterruptPreference
+	// call finish naturally. hard mirrors the same distinction ESC/Ctrl+C
+	// (hard) and Enter (soft, via queueing) already give an interactive TUI
+	// user; this is what gives the same choice to a non-interactive stop.
+	cancel func(hard bool)
 }
 
 func newRunRegistry() *runRegistry {
@@ -63,9 +69,10 @@ func (r *runRegistry) finish(runID string) {
 	r.mu.Unlock()
 }
 
-// setCancel attaches the out-of-band cancel func for a resumable run (P28.5).
-// A no-op if the run has already finished by the time the caller gets here.
-func (r *runRegistry) setCancel(runID string, cancel context.CancelFunc) {
+// setCancel attaches the out-of-band soft-stop func for a resumable run
+// (P28.5). A no-op if the run has already finished by the time the caller
+// gets here.
+func (r *runRegistry) setCancel(runID string, cancel func(hard bool)) {
 	r.mu.Lock()
 	if st := r.runs[runID]; st != nil {
 		st.cancel = cancel
@@ -73,9 +80,12 @@ func (r *runRegistry) setCancel(runID string, cancel context.CancelFunc) {
 	r.mu.Unlock()
 }
 
-// stopSession cancels the active resumable run for a session, if any. Returns
-// false when no run is active for the session or the active run isn't
-// resumable (no cancel registered) — e.g. a plain TUI/CLI run, which is
+// stopSession stops the active resumable run for a session, if any, softly
+// (P67.10) — letting an in-flight tool.InterruptPreference call finish
+// naturally rather than cancelling it immediately; the engine falls back to
+// an immediate cancel itself if that isn't safe (see Engine.RequestStop).
+// Returns false when no run is active for the session or the active run
+// isn't resumable (no cancel registered) — e.g. a plain TUI/CLI run, which is
 // stopped by the client disconnecting instead. Sessions serialize their own
 // runs to at most one at a time, so "the" run for a session is unambiguous.
 func (r *runRegistry) stopSession(sessionID string) bool {
@@ -83,7 +93,7 @@ func (r *runRegistry) stopSession(sessionID string) bool {
 	defer r.mu.Unlock()
 	for _, st := range r.runs {
 		if st.sessionID == sessionID && st.cancel != nil {
-			st.cancel()
+			st.cancel(false)
 			return true
 		}
 	}

@@ -29,6 +29,13 @@ func (t *securityScanTool) Description() string {
 func (t *securityScanTool) ShortDescription() string {
 	return "Scan the workspace or a container image for SAST, secret, dependency-CVE, IaC and container findings, deduped across scanners."
 }
+
+// SearchHint (P67.10) names the scanners ShortDescription omits, so a task
+// mentioning one by name still finds this tool via the deferred-tools prompt
+// block, not only via tool_search's full-Description match.
+func (t *securityScanTool) SearchHint() string {
+	return "opengrep, trivy, gitleaks, trufflehog, grype, SAST, secrets, CVE, SBOM"
+}
 func (t *securityScanTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"path":{"type":"string","description":"workspace-relative subdirectory to scan (optional, defaults to the whole workspace)"},"image":{"type":"string","description":"container image reference to scan instead of the workspace (e.g. \"alpine:3.20\"); mutually exclusive with path"},"sbom":{"type":"boolean","description":"generate a CycloneDX SBOM via syft instead of scanning for findings; persists to .aegis/sbom.cdx.json under path. Mutually exclusive with image."},"scanners":{"type":"array","items":{"type":"string"},"description":"run only these scanner names and/or category aliases (e.g. \"trufflehog\", \"secrets\", \"sast\") instead of every enabled scanner; force-enabled for this run regardless of config. Omit to run every enabled scanner plus auto-detected language-specific engines. Mutually exclusive with image/sbom."}}}`)
 }

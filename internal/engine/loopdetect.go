@@ -167,6 +167,7 @@ type loopGuard struct {
 	detector    *loopDetector
 	pollExempt  func(provider.ToolUseBlock) bool
 	transparent func(provider.ToolUseBlock) bool
+	equivKey    func(provider.ToolUseBlock) (string, bool)
 }
 
 // newLoopGuard builds the guard for a run, or returns nil when loop detection is
@@ -180,6 +181,7 @@ func (e *Engine) newLoopGuard() *loopGuard {
 		detector:    newLoopDetector(e.loopThreshold),
 		pollExempt:  e.pollExempt,
 		transparent: e.signatureTransparent,
+		equivKey:    e.equivalenceKey,
 	}
 }
 
@@ -228,7 +230,7 @@ func (g *loopGuard) check(toolUses []provider.ToolUseBlock, nudgesSpent int) loo
 	if g == nil {
 		return loopVerdict{}
 	}
-	sig, shouldRecord := turnSignatureExcludingPolls(toolUses, g.pollExempt, g.transparent)
+	sig, shouldRecord := turnSignatureExcludingPolls(toolUses, g.pollExempt, g.transparent, g.equivKey)
 	if !shouldRecord {
 		return loopVerdict{}
 	}
@@ -276,12 +278,12 @@ func isRepeatingCycle(window []string, period int) bool {
 // canonicalized inputs, in request order). Two turns with the same signature
 // requested the exact same work — the hallmark of a loop.
 func turnSignature(toolUses []provider.ToolUseBlock) string {
-	sig, _ := turnSignatureExcludingPolls(toolUses, nil, nil)
+	sig, _ := turnSignatureExcludingPolls(toolUses, nil, nil, nil)
 	return sig
 }
 
 // turnSignatureExcludingPolls builds the loop signature for a turn, applying the
-// two per-call filters a tool can ask for, and reports whether the turn should
+// per-call filters a tool can ask for, and reports whether the turn should
 // be recorded at all.
 //
 // pollExempt (P53.2) drops the call entirely: name, arguments and all. record is
@@ -300,12 +302,19 @@ func turnSignature(toolUses []provider.ToolUseBlock) string {
 // would have bought the first behaviour at the cost of the second, and at the
 // cost of the blast radius PollExempter's own doc comment warns about.
 //
-// Either function may be nil; both nil reproduces the pre-P53.2 signature
+// equivKey (P67.10) is consulted for a call that survives both filters above:
+// when it returns a key, that key stands in for canonicalizeToolInput's
+// generic structural comparison, for a tool whose inputs can be equivalent in
+// ways the generic normalizer cannot see. A ("", false) answer, or a nil
+// equivKey, falls back to canonicalizeToolInput exactly as before P67.10.
+//
+// Any of the three may be nil; all nil reproduces the pre-P53.2 signature
 // exactly.
 func turnSignatureExcludingPolls(
 	toolUses []provider.ToolUseBlock,
 	pollExempt func(provider.ToolUseBlock) bool,
 	transparent func(provider.ToolUseBlock) bool,
+	equivKey func(provider.ToolUseBlock) (string, bool),
 ) (string, bool) {
 	var b strings.Builder
 	kept := 0
@@ -316,7 +325,16 @@ func turnSignatureExcludingPolls(
 		kept++
 		b.WriteString(tu.Name)
 		b.WriteByte('\x00')
-		if transparent == nil || !transparent(tu) {
+		switch {
+		case transparent != nil && transparent(tu):
+			// arguments dropped entirely; name alone still counts.
+		case equivKey != nil:
+			if k, ok := equivKey(tu); ok {
+				b.WriteString(k)
+			} else {
+				b.Write(canonicalizeToolInput(tu.Input))
+			}
+		default:
 			b.Write(canonicalizeToolInput(tu.Input))
 		}
 		b.WriteByte('\n')

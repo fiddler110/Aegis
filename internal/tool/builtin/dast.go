@@ -37,6 +37,12 @@ func (t *dastScanTool) Description() string {
 func (t *dastScanTool) ShortDescription() string {
 	return "Attack a running application over HTTP with OWASP ZAP (passive baseline by default) to find exploitable vulnerabilities."
 }
+
+// SearchHint (P67.10) names ZAP and the attack classes ShortDescription
+// summarizes, for a task that names one directly.
+func (t *dastScanTool) SearchHint() string {
+	return "OWASP ZAP, DAST, XSS, injection, penetration test, pentest"
+}
 func (t *dastScanTool) InputSchema() json.RawMessage {
 	return schema(`{"type":"object","properties":{"target":{"type":"string","description":"http(s) URL of the running application to scan"},"mode":{"type":"string","enum":["baseline","active","api"],"description":"baseline (default): passive spider + passive scan only. active: + real attack payloads. api: OpenAPI-defined endpoints + active scan."},"api_definition":{"type":"string","description":"OpenAPI spec URL or path; required when mode is \"api\""}},"required":["target"]}`)
 }

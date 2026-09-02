@@ -187,6 +187,13 @@ type Gate struct {
 // and the Decision field says which tier that basis landed in.
 const CapabilityDowngradeRule = "capability_override"
 
+// DestructiveEscalationRule is the Rule name on the record Gate.Check emits
+// when a call that would otherwise be silently allowed is escalated to Ask
+// because the tool declares it destructive (P67.10) — an overwrite, a
+// delete, or an irreversible send. Auto mode is exempt: its whole contract
+// is "no approval, trusted context," and this stays consistent with that.
+const DestructiveEscalationRule = "destructive_escalation"
+
 // New builds a Gate for the given mode and approver. A nil approver defaults
 // to AutoDeny.
 func New(mode Mode, approver Approver) Gate {
@@ -215,11 +222,30 @@ func (g Gate) Check(ctx context.Context, t tool.Tool, input json.RawMessage) (bo
 				cap, static),
 		})
 	}
+	// P67.10: a call the policy would otherwise allow silently still gets
+	// asked about when the tool declares it destructive — an overwrite, a
+	// delete, or an irreversible send. Auto mode is exempt: Decide already
+	// short-circuits every capability to Allow there, and this stays
+	// consistent with auto mode's "no approval, trusted context" contract.
+	destructive := decision == Allow && g.Policy.Mode != ModeAuto && tool.EffectiveDestructive(ctx, t, input)
+	if destructive {
+		if g.OnDecision != nil {
+			g.OnDecision(ContextualDecision{
+				Tool: t.Name(), Cap: string(cap), Rule: DestructiveEscalationRule,
+				Decision: Ask,
+				Reason:   fmt.Sprintf("%s is irreversible, asking despite %s normally being allowed", t.Name(), cap),
+			})
+		}
+		decision = Ask
+	}
 	switch decision {
 	case Allow:
 		return true, ""
 	case Ask:
 		reason := fmt.Sprintf("%s requires %s access", t.Name(), cap)
+		if destructive {
+			reason += " (irreversible)"
+		}
 		// P81.22/FIND-22: an execute-capability approval is the moment an
 		// unconfined command is about to run — say so here, not only in a
 		// startup log the operator has likely scrolled past.

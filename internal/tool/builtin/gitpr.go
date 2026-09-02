@@ -23,6 +23,12 @@ type gitPRTool struct{ root string }
 
 func (t *gitPRTool) Name() string                { return "git_pr" }
 func (t *gitPRTool) Capability() tool.Capability { return tool.CapNetwork }
+
+// Destructive (P67.10) is unconditionally true: this call always pushes the
+// current branch to the remote and opens a pull request, an irreversible
+// "send" visible to others — CapNetwork alone is silently allowed in build
+// mode, which let this run with no approval at all.
+func (t *gitPRTool) Destructive(context.Context, json.RawMessage) bool { return true }
 func (t *gitPRTool) Description() string {
 	return "Push the current branch to the remote and open a pull request. Uses the gh CLI when available, otherwise pushes and returns a URL to open the PR. Provide a title and body; optionally a base branch (default: repo default) and draft flag."
 }

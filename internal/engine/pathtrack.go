@@ -136,6 +136,45 @@ func (e *Engine) startedToolSet() map[string]struct{} {
 	return out
 }
 
+// markInFlight and clearInFlight (P67.10) track exactly the calls currently
+// between Execute's start and its result, for RequestStop's soft path to
+// consult tool.EffectivePreferFinish against. Unlike startedTools, an entry
+// here is removed the instant the call finishes — it answers "what is
+// running right now", not "what has ever started this run".
+func (e *Engine) markInFlight(id, name string, input json.RawMessage) {
+	if id == "" {
+		return
+	}
+	e.inFlightMu.Lock()
+	defer e.inFlightMu.Unlock()
+	if e.inFlight == nil {
+		e.inFlight = make(map[string]inFlightCall)
+	}
+	e.inFlight[id] = inFlightCall{name: name, input: input}
+}
+
+func (e *Engine) clearInFlight(id string) {
+	if id == "" {
+		return
+	}
+	e.inFlightMu.Lock()
+	delete(e.inFlight, id)
+	e.inFlightMu.Unlock()
+}
+
+// snapshotInFlight copies the calls currently in flight, for the same reason
+// startedToolSet copies rather than hands out the live map: a concurrent
+// tool round mutates it from other goroutines.
+func (e *Engine) snapshotInFlight() []inFlightCall {
+	e.inFlightMu.Lock()
+	defer e.inFlightMu.Unlock()
+	out := make([]inFlightCall, 0, len(e.inFlight))
+	for _, c := range e.inFlight {
+		out = append(out, c)
+	}
+	return out
+}
+
 // maxGuardFiles caps how many written files are read back for guard
 // validation, so a task that touches dozens of files doesn't balloon the
 // validator prompt or issue that many extra reads.

@@ -514,6 +514,7 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	// only orphaned if the whole round is discarded by a cancel, which is the
 	// case this is trying to describe accurately.
 	e.markToolStarted(tu.ID)
+	e.markInFlight(tu.ID, tu.Name, tu.Input)
 	if e.onToolStarted != nil {
 		e.onToolStarted(tu.ID, tu.Name, tu.Input)
 	}
@@ -525,6 +526,10 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 	if e.onToolFinished != nil {
 		e.onToolFinished(tu.ID)
 	}
+	// P67.10: cleared the instant the call is no longer running, same instant
+	// as onToolFinished above — RequestStop's soft path must never see a call
+	// that has already returned as still in flight.
+	e.clearInFlight(tu.ID)
 	content, isErr, presentation := res.Content, res.IsError, res.Presentation
 	if err != nil {
 		e.logger.Warn("tool execution error", "tool", tu.Name, "err", err)
