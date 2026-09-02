@@ -57,11 +57,27 @@ const (
 	// These five are the ones a resumed run cannot reconstruct from the tail:
 	// what the run is trying to do, what it must not do, where it got to, and
 	// what is next. Anything derivable from the surviving messages was left out.
+	//
+	// P84.4: measured live against qwen3.5-9B, ## Progress/## Key Decisions/##
+	// Next Steps came back byte-identical across every compaction of a run and
+	// factually wrong — the model reported the task's *opening* instruction
+	// ("in progress reading data_01.txt") instead of its current state, even
+	// though the transcript below the instructions plainly showed four files
+	// already read. ## Goal/## Constraints, which are close restatements of
+	// that same opening instruction, came out fine — only the three headings
+	// that require synthesizing *where the transcript has since gotten to*
+	// failed, consistent with the model anchoring on the task description
+	// instead of reading past it. The added sentence below and
+	// fileListPreamble's added instruction both name that failure mode
+	// directly rather than trusting "summarize the conversation" to imply it.
 	summarizeSystemPrompt = "You compress conversation history. Fill in this exact skeleton, keeping every heading " +
 		"and omitting nothing the run would need to continue:\n" +
 		"## Goal\n## Constraints\n## Progress\n(use Done / In Progress / Blocked)\n## Key Decisions\n## Next Steps\n" +
 		"Under each heading use terse bullet points. Preserve decisions made, facts established, " +
 		"file paths and identifiers, tool results that matter, and any open or unresolved questions. " +
+		"Progress, Key Decisions and Next Steps describe where things stand now — base them on the tool " +
+		"calls and results below, not on the task's opening instructions; a step already attempted below " +
+		"is not \"not yet started\". " +
 		"Do not add headings that are not listed, and do not write an introduction or a conclusion."
 	summarizePreamble = "Summarize this conversation so far:\n\n"
 
@@ -69,8 +85,13 @@ const (
 	// summarization request (P65.2). It tells the summarizer the lists are
 	// context rather than transcript, and that it must not restate them — they
 	// are re-emitted verbatim by the code, so a model repeating them would spend
-	// its bounded reply on bytes it did not have to produce.
-	fileListPreamble = "Files this session has already touched (do NOT repeat these in your summary; they are recorded separately):\n"
+	// its bounded reply on bytes it did not have to produce. P84.4 added the
+	// second sentence: measured live, a model given this list still wrote a
+	// Progress section contradicting it, so the list is now named explicitly as
+	// the ground truth Progress must agree with, not just text to avoid
+	// repeating.
+	fileListPreamble = "Files this session has already touched (do NOT repeat these in your summary; they are recorded separately). " +
+		"Treat this list as ground truth for ## Progress: a file listed here has already been handled, not \"in progress\" or \"not started\":\n"
 
 	// toolResultRuneLimit is the long-standing per-tool-result cap applied when
 	// rendering a transcript, independent of any fit-driven shrinking.

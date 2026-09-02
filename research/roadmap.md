@@ -302,14 +302,16 @@ instead, regardless of how large or urgent the underlying question is.
 
 ## Up next
 
-**Last updated: 2026-09-01.** The P81 threat-model batch is down to its last parked slice:
-**P81.12**'s release-artifact half. Everything else in the batch — all of Tier 1 and Tier 2 including
-**P81.33** (both halves, the second shipping 2026-09-01), and all of Tier 3 including the last two build
-items, **P81.10** and **P81.23** — shipped across four sittings on 2026-08-31 and five more on
-2026-09-01, run mostly as parallel disjoint-package sub-agents. Full narrative and per-item detail for
-everything that shipped is in [releases.md](releases.md); this table carries only what's still open.
-**P82** and **P83** (model-selection ranking and a KV-cache sizing fix) were filed and shipped from an
-operator report without ever entering this table — see
+**Last updated: 2026-09-02** (P65.2 closed by live evidence, negative result; follow-up filed and fixed
+same day as **P84.4** — see [its record](#p844--the-compaction-skeletons-dynamic-headings-echo-the-opening-instruction-instead-of-the-transcripts-current-state)).
+The P81 threat-model batch is down to its last parked slice: **P81.12**'s release-artifact half.
+Everything else in the batch — all of Tier 1 and Tier 2 including **P81.33** (both halves, the second
+shipping 2026-09-01), and all of Tier 3 including the last two build items, **P81.10** and **P81.23** —
+shipped across four sittings on 2026-08-31 and five more on 2026-09-01, run mostly as parallel
+disjoint-package sub-agents. Full narrative and per-item detail for everything that shipped is in
+[releases.md](releases.md); this table carries only what's still open. **P82** and **P83**
+(model-selection ranking and a KV-cache sizing fix) were filed and shipped from an operator report
+without ever entering this table — see
 [their record](releases/releases-01.md#p82-and-p83-shipped-2026-08-31).
 
 **Next, cheapest and most independent first:**
@@ -317,7 +319,12 @@ operator report without ever entering this table — see
 | #   | Item                                                                                              | Tier / size          | Why now                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | --- | ------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | **P81.12**'s release-artifact half — checksums/signatures/provenance on release archives            | Tier 3 — parked       | Parked behind a product decision about whether this project resumes publishing releases, not behind a trigger. Its `codeql.yml`-pinning half already shipped alongside **P81.17**. Do not build speculatively. |
-| 2   | **The live-tier remainder** (P38.1, P65.2, P80.4) — _parked by choice, 2026-08-16; narrowed 2026-09-01_ | Verification | **P62.9 closed 2026-09-01** (6-per-arm `SecurityTriage` comparison: no correctness cost, local profile faster) and **P66.22 closed the same day** (LLM-03/LLM-10 read from a kept session trace via P68.1; ARCH-04 closed by a new live harness test, `TestLiveWorkflowFanOutChainsTheStallBeat`, passing clean on the first run) — both dropped off this row. **P65.2** is still open, but not for the reason its own text says: the mechanical blocker it names (`"summarizer returned empty output"`) is already fixed on `main` as **P79.3**, which this row's stale branch simply predated by 29 commits; the item's real remaining question — does a local model fill the structured skeleton, now that the summarizer can produce real output — needs one run against `main`. **P38.1** still needs permission to launch an unattended auto-approving agent, and **P80.4** is unchanged. |
+| 2   | **The live-tier remainder** (P38.1, P80.4) — _parked by choice, 2026-08-16; narrowed 2026-09-02_ | Verification | **P62.9 closed 2026-09-01** (6-per-arm `SecurityTriage` comparison: no correctness cost, local profile faster) and **P66.22 closed the same day** (LLM-03/LLM-10 read from a kept session trace via P68.1; ARCH-04 closed by a new live harness test, `TestLiveWorkflowFanOutChainsTheStallBeat`, passing clean on the first run) — both dropped off this row. **P65.2 closed 2026-09-02**: ran `TestLiveWorkflowCompactionPrefixCacheGate` against `qwen3.5-9B:latest` on `main` — P79.3's fix holds (no empty summaries across 6 compactions), but the skeleton's `## Progress`/`## Key Decisions`/`## Next Steps` headings came back byte-identical across every compaction and factually wrong (claiming the read-chain hadn't started when 4 files were already read), a negative result rather than the hoped-for close — follow-up filed as **P84.4**, fixed and verified live the same day (two prompt edits in
+`internal/compaction/compaction.go`; the test's chain-completion check went from FAIL at 4/14 reads to
+PASS at 11/14, every compaction's Progress table now correctly evolving instead of one repeated wrong
+one — record and one residual side effect noted [below](#p844--the-compaction-skeletons-dynamic-headings-echo-the-opening-instruction-instead-of-the-transcripts-current-state)).
+**P38.1** still needs permission to launch an unattended auto-approving agent, and
+**P80.4** is unchanged. |
 
 **One item is deliberately off this list, Tier 4 with no fired trigger.** **P74.21** (filed
 2026-08-21) is the half of P74.17's own roadmap entry that did not ship with it — see
@@ -608,8 +615,11 @@ is small enough to fold into whatever next touches that renderer rather than hol
 
 ## Open Work — Tier 3
 
-**Status: 1 open**, updated 2026-09-01: **P81.12**'s release-artifact half only (parked behind a
-product decision, not a trigger — its `codeql.yml`-pinning half shipped 2026-09-01). Every other P81
+**Status: 1 open**, updated 2026-09-02: only **P81.12**'s release-artifact half (parked behind a
+product decision, not a trigger — its `codeql.yml`-pinning half shipped 2026-09-01). **P84.4** (filed
+and closed the same day — the compaction skeleton's dynamic headings echoed the task's opening
+instruction instead of the transcript's current state; fixed and verified live, see its record below)
+dropped off this count. Every other P81
 Tier 3 item — **P81.1**, **P81.8**, **P81.5**, **P81.2**, **P81.3**, **P81.4**, **P81.10**, **P81.14**,
 **P81.20**, **P81.22**, **P81.23**, **P81.26**, **P81.27** and **P81.30** — is shipped (**P81.10** and
 **P81.23** the last two, 2026-09-01 — full record
@@ -674,6 +684,96 @@ decision about whether this project resumes publishing releases, not behind a tr
 speculatively.
 
 Priority: Tier 3 — parked behind a product decision about releases, not behind a trigger.
+
+### P84.4 — The compaction skeleton's dynamic headings echo the opening instruction instead of the transcript's current state
+
+**Filed 2026-09-02**, from [P65.2's closing live run](#p652--compaction-summaries-are-free-prose-and-nothing-carries-the-file-set-forward-prompt-half).
+Against `qwen3.5-9B:latest`, all 6 compactions observed across 3 independent
+`TestLiveWorkflowCompactionPrefixCacheGate` invocations produced byte-identical `## Progress`/`## Key
+Decisions`/`## Next Steps` text claiming the file-reading chain had not started ("In Progress: Reading
+`data_01.txt`... None yet; awaiting content of `data_01.txt`"), directly contradicted by the correct,
+code-generated `<read-files>` tag a few lines below listing four files already read. `## Goal` and `##
+Constraints` — the two headings that are close restatements of the static system prompt — came out
+fine every time; only the three headings requiring the model to read its own transcript and report
+*where it actually is* failed, and failed identically across compactions, consistent with the model
+echoing the prompt's instruction shape rather than the transcript's content.
+
+**Why this matters beyond one model.** `internal/compaction/compaction.go`'s `summarizeSystemPrompt`/
+skeleton template asks for exactly this synthesis, and a wrong "Progress" section is actively
+misleading — a later turn reading it back believes the chain is at step 1 when it is at step 5, which
+is worse than the free-form terse-bullet prompt this skeleton was meant to replace (P65.2), since a
+wrong structured claim reads as more authoritative than a vague bullet would have.
+
+**What to try.** Two directions, either checkable without new code: (1) hand the model the deterministic
+`<read-files>`/`<modified-files>` list *before* asking it to write `## Progress`, so it has to reconcile
+its prose against ground truth already in view rather than infer state from a transcript it may not
+track well; (2) drop `## Progress`/`## Key Decisions`/`## Next Steps` back to free-form under a smaller,
+targeted instruction ("say specifically what has already happened, not what the task asks for") and
+re-measure — P38.x's finding that local models hold up on completion but degrade on generation may not
+generalize to a completion task shaped like "restate what you just did," which is closer to
+summarization (a generation task) than to filling a form from fixed inputs.
+
+**Promote when:** the live tier is next free — this needs the same harness as P38.1's re-run, so it
+costs one more setup rather than a new one, and per **P68.1** the summary text is now readable from a
+kept session trace without further harness changes.
+
+Priority: Tier 3 — real defect with reproducible live evidence, but the fix needs at least one more
+live-tier iteration to validate before it can ship; not a one-line change.
+
+**2026-09-02: fixed and verified live — direction (1) above, applied narrowly.** Two prompt-only edits
+in `internal/compaction/compaction.go`: `summarizeSystemPrompt` now tells the model that `## Progress`/
+`## Key Decisions`/`## Next Steps` must be based on the tool calls and results in the transcript below,
+not the task's opening instructions, and that a step already attempted there is not "not yet started";
+`fileListPreamble` now tells the model to treat the carried `<read-files>`/`<modified-files>` list as
+ground truth for `## Progress`, not just text to avoid repeating. Both fit inside the existing
+200-token skeleton ceiling (`TestSummarySkeletonCostIsBounded`): 128 → 183 tokens. `go test ./...`
+stayed green.
+
+Re-ran `TestLiveWorkflowCompactionPrefixCacheGate` against `qwen3.5-9B:latest` on the same fixture.
+Baseline (this item's filing evidence): 3 runs, 6 compactions, every one byte-identical and wrong;
+chain stuck at exactly 4/14 reads every time; test **FAIL** (the instrument check requires at least
+`compactionChainLen/2` = 7 reads). Post-fix: **PASS** (2400.49s) — `gate-on` session
+`d242385e-c84d-483d-9589-dc4bb3c4d53f`, `gate-off` session `24ea0032-9557-4e59-b807-4d486c0b8e06`, both
+read back via `aegis sessions trace`. Both arms reached **11/14 reads** (up from 4) before the fixture's
+fixed 20-minute per-arm timeout cut them off (`"context canceled"`, not a model stall — the chain kept
+growing, so this is a pacing limit of the fixture's timeout, not a recurrence of the defect). Every one
+of the 7 compactions in each arm now produced **distinct, correctly evolving** summary text instead of
+one repeated wrong one — turn 11's `## Progress` in the gate-on arm:
+
+```
+## Progress
+- **data_01.txt**: Done (Read; contains link to next file)
+- **data_09.txt**: Done (Read; contains link to next file)
+- **data_04.txt**: Done (Read; contains link to next file)
+- **data_12.txt**: Done (Re-read; confirmed link to `data_05.txt`; stale content dropped)
+- **data_07.txt**: Done (Read; previously identified as target of data_01.txt; points to `data_11.txt`)
+- **data_02.txt**: Done (Re-read due to stale content; now confirmed to point to `data_03.txt`)
+- **data_14.txt**: Done (Re-read after being referenced by data_04.txt; stale content dropped)
+- **data_05.txt**: Done (Re-read later in conversation; stale content dropped)
+- **data_11.txt**: Done (Re-read; stale content dropped)
+- **data_03.txt**: In Progress (Target of `data_02.txt`; needs verification for next link or END)
+```
+
+— matching the `<read-files>` tag exactly, Done/In Progress tracked correctly turn over turn, in both
+arms independently. This is the defect this item was filed for: fixed and confirmed live, not just
+unit-tested.
+
+**One residual side effect, reported plainly rather than folded into the "fixed" claim above.** Several
+entries above claim a file was "re-read due to stale content" (`data_09.txt`, `data_12.txt`,
+`data_05.txt`, `data_14.txt`, `data_11.txt`) — but the harness's own tool-call log for both arms shows
+each of those filenames read exactly **once**, never twice. The model is fabricating a re-read
+narrative that did not happen. It does not corrupt the two things that matter most — the Done/In
+Progress state per file stays accurate, and the code-generated `<read-files>` tag is unaffected because
+it is never model-authored — but it is a new inaccuracy in `## Key Decisions` that was not present
+(or not visible) in the baseline's stuck-at-4 runs, and is not evaluated by anything closure-condition
+here checked for. Worth watching if a future item touches this prompt again; not severe enough on its
+own to hold this item open.
+
+Priority: closed — the filed defect (stale, wrong, non-varying skeleton fill) is fixed and verified
+live on `main`. The fix is currently **uncommitted**; the chain-completion assertion now passes but only
+because 11/14 beat the test's 7-read threshold before its timeout, not because the full chain
+completed — raising that per-arm timeout to get a full 14/14 run is a separate, optional follow-up, not
+a blocker on this item.
 
 ---
 
@@ -1592,7 +1692,11 @@ P65.2) turned out not to be observable there at all — they needed **P68.1** fi
 2026-08-22 (a session id that survives the test, plus `aegis sessions trace <id>` now printing the
 compaction summary text, the calibration sample count and each turn's stop reason). Those four are
 now observable whenever the next live sitting runs; nobody has judged them against real evidence yet.
-P38.1 needs a permission rather than a schedule slot, and P62.9 needs a better task rather than more
+**Update 2026-09-02: all four now have.** LLM-03/LLM-10/ARCH-04 closed 2026-09-01 (see P66.22) and
+**P65.2 closed 2026-09-02** with a negative verdict — the skeleton's dynamic headings echoed the task's
+opening instruction instead of the transcript's state; follow-up filed **and fixed the same day** as
+P84.4 (Tier 3, closed — chain-completion assertion went from FAIL at 4/14 reads to PASS at 11/14). P38.1 needs a
+permission rather than a schedule slot, and P62.9 needs a better task rather than more
 runs. **This whole track is parked at the one remaining row of [Up next](#up-next) by choice**;
 what is written below each item is what the run established, so a future sitting starts from evidence
 rather than from the pre-run plan.
@@ -2089,6 +2193,66 @@ judge the skeleton fill directly against what free-form prose used to keep.
 Priority: Verification — the mechanical blocker is shipped and verified (P79.3). What remains is the
 item's original question, unblocked for the first time and needing one run against `main` with a real
 summary to judge, not a defect to fix first.
+
+**2026-09-02: run against `main`, and the skeleton's free-text fields do not track state — closing
+this item with a negative verdict.** Ran `TestLiveWorkflowCompactionPrefixCacheGate` against
+`qwen3.5-9B:latest` (24,576-token pinned window) with `AEGIS_EVAL_KEEP_DATA_DIR=1`. First attempt used
+Go's default 10-minute test timeout, which is too short for two 20-minute-budget arms and killed the
+process mid-second-arm — a harness-invocation mistake, not a finding; its gate-on arm happened to finish
+cleanly first (session `2fc565eb-8695-47f2-a477-9e1b0cf451bf`) and its data agrees with the clean rerun
+below. Rerun with `-timeout=45m` completed both arms: `gate-on` session
+`d38660af-1e79-4a50-899d-fce1377c3adf`, `gate-off` session `a9e30674-0ed8-4589-a768-1ca8064af2f4`, both
+read back with `aegis sessions trace <id>` (per **P68.1**) against a real `aegis serve` pointed at each
+kept `AEGIS_DATA_DIR`.
+
+P79.3 holds: zero `"summarizer returned empty output"` across the 4 compactions observed (2 per arm,
+plus the earlier partial run's 2 — 6 total, all non-empty).
+
+The original question gets a clear, reproducible **no** for three of the skeleton's five headings. All
+6 compactions across three independent test invocations produced **byte-identical** summary text,
+including:
+
+```
+## Progress
+- **In Progress**: Reading `data_01.txt` (current step).
+- Files already touched in session (not repeated here): `data_01.txt`, `data_09.txt`, `data_04.txt`, `data_12.txt`.
+
+## Key Decisions
+- None yet; awaiting content of `data_01.txt` to determine the next file in the chain.
+```
+
+— above the deterministic, code-generated `<read-files>` tag (this item's own already-shipped half,
+appended after `## Next Steps`) correctly listing all four files as read. The model's own prose claims
+the chain has not started while the tag further down, generated by code from the same transcript, says
+four files are done. `## Goal` and `## Constraints` are fine every time — they are close restatements
+of the static system prompt and need no synthesis. `## Progress`, `## Key Decisions` and `## Next
+Steps` are the headings that require reading the transcript's *current* state, and on this model they
+instead echo the transcript's *opening* instruction. That the second compaction in each arm reproduces
+the first verbatim is the expected consequence once the first is wrong (it resummarizes a prefix whose
+only new content since the first compaction was an empty-answer nudge), not a second, independent
+failure.
+
+Separately, and worth recording even though it does not explain the above: both arms failed the test's
+own instrument assertion for an unrelated reason — the model abandoned the 14-file chain after 4 reads
+and gave a final answer without continuing, in gate-on and gate-off, in both the interrupted and the
+clean run (4 of 4 sightings). `TestLiveWorkflowCompactionPrefixCacheGate` is **FAIL** on `main` against
+`qwen3.5-9B:latest` for this reason; mechanism is confirmed (compaction fires, no empty output) but the
+chain-completion assertion never passes on this model. A wrong "Progress" section claiming the chain is
+*earlier* than it is would predict more reading, not less, so treat the early abandonment as a separate
+open question rather than assume the bad summary explains it.
+
+**Verdict.** The prompt half fills reliably and without empty output (P79.3), but the sections that
+most need to be right — what has been done, what was decided, what's next — degrade into a copy of the
+task's opening instructions on this model, which is actively worse than the free-form prompt it was
+meant to replace: a wrong structured claim reads as more authoritative than a vague bullet would have,
+and it directly contradicts the correct file-list tag sitting a few lines below it in the same message.
+The P38.x-line assumption ("local models degrade on generation, hold up on completion") does not hold
+for this specific completion task on this model — reporting current progress from a transcript is
+closer to summarization (generation) than to filling a form from fixed inputs. Follow-up filed as
+**P84.4**.
+
+Priority: closed — answered by live evidence 2026-09-02, negative result. Do not promote this skeleton
+prompt to replace the terse-bullet free-form prompt without P84.4's follow-up.
 
 ### P62.8 — The prefix-cache gate's large-window regime has never been measured
 
