@@ -16,6 +16,8 @@ import (
 	"github.com/fiddler110/aegis/internal/provider/anthropic"
 	"github.com/fiddler110/aegis/internal/provider/ollama"
 	"github.com/fiddler110/aegis/internal/provider/openai"
+	"github.com/fiddler110/aegis/internal/sysprompt"
+	"github.com/fiddler110/aegis/internal/tokenest"
 )
 
 // defaultOllamaKeepAlive is the native-adapter keep_alive substituted when the
@@ -63,6 +65,10 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 	var o options
 	for _, fn := range opts {
 		fn(&o)
+	}
+
+	if err := validateModelHarness(cfg); err != nil {
+		return nil, err
 	}
 
 	primaryBase, err := buildOne(buildOneConfig{
@@ -149,6 +155,29 @@ func Decorate(base provider.Adapter, cfg *config.Config, logger *slog.Logger) pr
 // applies it to the primary adapter and to every fallback target, and Decorate
 // exposes it for tests — three callers, one spelling, so a decorator added here
 // reaches all of them.
+// validateModelHarness rejects a config.Provider.ModelHarness that P74.21's
+// runtime invariants can't let through: a per-model prompt suffix too large
+// for the local prompt profile's budget, or a DeferredTools entry naming a
+// profile.RequiredExposedTools tool. Both are checked once here, at Build
+// time, rather than left to fail — or worse, silently degrade — on whichever
+// request first resolves the offending model's Harness.
+func validateModelHarness(cfg *config.Config) error {
+	if err := profile.ValidateOverrides(cfg.Provider.ModelHarness); err != nil {
+		return err
+	}
+	local := cfg.Provider.LocalPromptProfile()
+	for model, o := range cfg.Provider.ModelHarness {
+		if o.PromptSuffix == nil {
+			continue
+		}
+		if !sysprompt.FitsLocalBudget(*o.PromptSuffix, local) {
+			return fmt.Errorf("model_harness[%q].prompt_suffix: %d estimated tokens exceeds the %d-token local-profile budget (sysprompt.LocalPromptSuffixMaxTokens)",
+				model, tokenest.Estimate(*o.PromptSuffix), sysprompt.LocalPromptSuffixMaxTokens)
+		}
+	}
+	return nil
+}
+
 func decorate(base provider.Adapter, cfg *config.Config, providerName, baseURL string, logger *slog.Logger) provider.Adapter {
 	policy := provider.DefaultRetryPolicy()
 	policy.MaxRetries = cfg.Provider.MaxRetries

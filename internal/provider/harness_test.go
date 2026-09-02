@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/profile"
@@ -81,3 +82,88 @@ func TestWithHarness_NilResolveReturnsBaseUnchanged(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func strPtr(s string) *string { return &s }
+
+// TestWithHarness_PromptSuffixAppendedPerModel confirms PromptSuffix (P74.21)
+// is appended only to a request for the model it's configured against, and
+// leaves an unrelated model's system prompt untouched.
+func TestWithHarness_PromptSuffixAppendedPerModel(t *testing.T) {
+	resolve := profile.NewResolver(false, map[string]profile.Override{
+		"quirky-model": {PromptSuffix: strPtr("This model expects snake_case tool arguments.")},
+	})
+	base := &recordingAdapter{}
+	a := WithHarness(base, resolve)
+
+	drainStream(t, a, Request{Model: "quirky-model", System: "base system"})
+	if want := "base system\n\nThis model expects snake_case tool arguments."; base.last.System != want {
+		t.Errorf("quirky-model System = %q, want %q", base.last.System, want)
+	}
+
+	drainStream(t, a, Request{Model: "other-model", System: "base system"})
+	if base.last.System != "base system" {
+		t.Errorf("other-model System = %q, want unchanged", base.last.System)
+	}
+}
+
+// TestWithHarness_ToolDescriptionOverride confirms ToolDescriptionOverrides
+// (P74.21) rewrites only the named tool's Description in the outgoing
+// request, leaving every other tool schema, and the registry-side tool the
+// request was built from, untouched.
+func TestWithHarness_ToolDescriptionOverride(t *testing.T) {
+	resolve := profile.NewResolver(false, map[string]profile.Override{
+		"quirky-model": {ToolDescriptionOverrides: map[string]string{"read_file": "loads a file's bytes"}},
+	})
+	base := &recordingAdapter{}
+	a := WithHarness(base, resolve)
+
+	tools := []ToolSchema{
+		{Name: "read_file", Description: "read a file"},
+		{Name: "write_file", Description: "write a file"},
+	}
+	drainStream(t, a, Request{Model: "quirky-model", Tools: tools})
+
+	got := base.last.Tools
+	if len(got) != 2 || got[0].Description != "loads a file's bytes" {
+		t.Errorf("read_file Description = %+v, want overridden", got)
+	}
+	if got[1].Description != "write a file" {
+		t.Errorf("write_file Description = %q, want unchanged", got[1].Description)
+	}
+	// The caller's slice must not be mutated — another model sharing it must
+	// still see the original description.
+	if tools[0].Description != "read a file" {
+		t.Errorf("caller's Tools slice was mutated: %+v", tools)
+	}
+}
+
+// TestWithHarness_DeferredToolsStrippedWithNote confirms DeferredTools
+// (P74.21) removes the named tool from Request.Tools and folds its
+// name+description into an appended system-prompt note instead.
+func TestWithHarness_DeferredToolsStrippedWithNote(t *testing.T) {
+	resolve := profile.NewResolver(false, map[string]profile.Override{
+		"quirky-model": {DeferredTools: []string{"write_file"}},
+	})
+	base := &recordingAdapter{}
+	a := WithHarness(base, resolve)
+
+	tools := []ToolSchema{
+		{Name: "read_file", Description: "read a file"},
+		{Name: "write_file", Description: "write a file"},
+	}
+	drainStream(t, a, Request{Model: "quirky-model", System: "base system", Tools: tools})
+
+	got := base.last.Tools
+	if len(got) != 1 || got[0].Name != "read_file" {
+		t.Errorf("Tools = %+v, want only read_file", got)
+	}
+	if !strings.Contains(base.last.System, "write_file: write a file") {
+		t.Errorf("System = %q, want a note naming the deferred tool", base.last.System)
+	}
+
+	// A model with no override still gets the full tool list.
+	drainStream(t, a, Request{Model: "other-model", Tools: tools})
+	if len(base.last.Tools) != 2 {
+		t.Errorf("other-model Tools = %+v, want unchanged", base.last.Tools)
+	}
+}

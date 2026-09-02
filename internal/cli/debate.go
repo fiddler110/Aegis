@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/providerfactory"
+	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
 	"github.com/spf13/cobra"
@@ -91,7 +93,26 @@ func newDebateCmd() *cobra.Command {
 			// a role that needs it loads it by name.
 			// LocalProfile and the rest of the config-derived option set are decided
 			// by enginecfg.BuiltinOptions (P62.10/P66.13) rather than re-listed here.
-			if err := builtin.Register(reg, enginecfg.BuiltinOptions(cfg, cwd)); err != nil {
+			regOpts := enginecfg.BuiltinOptions(cfg, cwd)
+			// P84.1: without this overlay, opts.Sandbox stays nil and every
+			// debate role's shell/test-runner tools fall back to
+			// sandbox.NewLocalBackend() — direct host exec regardless of
+			// sandbox.backend/strict, the same gap worker.go's P10.2 comment
+			// closed for the subprocess swarm path. Non-fatal, matching
+			// worker.go: a debate run falls back to unsandboxed rather than
+			// refusing to start.
+			debateSandbox, _, fallbackReason, sbErr := server.SelectSandbox(cfg.Sandbox, cwd, slog.Default())
+			if sbErr != nil {
+				slog.Default().Warn("debate: sandbox selection failed, running unsandboxed", "err", sbErr)
+				debateSandbox = nil
+			} else if fallbackReason != "" {
+				slog.Default().Warn("debate: sandbox fallback", "reason", fallbackReason)
+			}
+			if debateSandbox != nil {
+				defer debateSandbox.Close()
+			}
+			regOpts.Sandbox = debateSandbox
+			if err := builtin.Register(reg, regOpts); err != nil {
 				return err
 			}
 

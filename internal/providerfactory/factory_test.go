@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/profile"
 	"github.com/fiddler110/aegis/internal/provider"
 )
 
@@ -92,6 +93,62 @@ func TestBuild_CloudToLocalFallbackNeverGated(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "skipping") {
 		t.Fatalf("cloud->local fallback must never be gated, got log: %s", buf.String())
+	}
+}
+
+// TestBuild_RejectsModelHarnessDeferringToolSearch is P74.21's runtime
+// invariant: a config.Provider.ModelHarness entry that would strand
+// tool_search must fail fast at Build time, not at whichever request first
+// resolves that model's Harness.
+func TestBuild_RejectsModelHarnessDeferringToolSearch(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", APIKey: "fake-key", MaxRetries: 2,
+		ModelHarness: map[string]profile.Override{
+			"some-model": {DeferredTools: []string{"tool_search"}},
+		},
+	}}
+	_, err := Build(cfg, nil)
+	if err == nil {
+		t.Fatal("expected an error deferring tool_search")
+	}
+	if !strings.Contains(err.Error(), "tool_search") {
+		t.Errorf("error should name tool_search, got: %v", err)
+	}
+}
+
+// TestBuild_RejectsOversizedPromptSuffixUnderLocalProfile confirms a
+// per-model PromptSuffix is measured against sysprompt's local-profile
+// budget for that model — not accepted just because *some* model's suffix
+// would have fit.
+func TestBuild_RejectsOversizedPromptSuffixUnderLocalProfile(t *testing.T) {
+	huge := strings.Repeat("word ", 1000)
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "ollama", PromptProfile: "local", BaseURL: "http://localhost:11434",
+		ModelHarness: map[string]profile.Override{
+			"some-model": {PromptSuffix: &huge},
+		},
+	}}
+	_, err := Build(cfg, nil)
+	if err == nil {
+		t.Fatal("expected an error for an oversized prompt_suffix under the local profile")
+	}
+	if !strings.Contains(err.Error(), "prompt_suffix") {
+		t.Errorf("error should name prompt_suffix, got: %v", err)
+	}
+}
+
+// TestBuild_AllowsShortPromptSuffixUnderLocalProfile confirms a short suffix
+// — the quirk-note cargo this item was filed for — is not rejected.
+func TestBuild_AllowsShortPromptSuffixUnderLocalProfile(t *testing.T) {
+	suffix := "This model expects snake_case tool arguments."
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "ollama", PromptProfile: "local", BaseURL: "http://localhost:11434",
+		ModelHarness: map[string]profile.Override{
+			"some-model": {PromptSuffix: &suffix},
+		},
+	}}
+	if _, err := Build(cfg, nil); err != nil {
+		t.Errorf("Build: unexpected error for a short prompt_suffix: %v", err)
 	}
 }
 

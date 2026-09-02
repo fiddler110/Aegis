@@ -64,6 +64,12 @@ func (m *model) applyEvent(ev api.Event) {
 		ev.Text = stripControlSeqs(ev.Text)
 	case api.KindError:
 		ev.Error = stripControlSeqs(ev.Error)
+	case api.KindSteer:
+		// P84.3: steer text originates from a plain HTTP endpoint
+		// (handleSteer) and, unlike normal assistant prose, is appended to
+		// the transcript directly rather than through mdRender — it is the
+		// one text-bearing event kind that bypassed this sanitization pass.
+		ev.Text = stripControlSeqs(ev.Text)
 	}
 
 	switch ev.Kind {

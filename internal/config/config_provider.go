@@ -211,9 +211,23 @@ type ProviderConfig struct {
 	//       "gpt-oss:20b":
 	//         prose_tool_call_salvage: false # this model's tool calls are already
 	//                                         # structured; skip the text scan
+	//       "mythos-sec:24b":
+	//         prompt_suffix: "This model's tool calls use snake_case argument names."
+	//         tool_description_overrides:
+	//           read_file: "loads a file's bytes"   # renamed to match trained vocabulary
+	//         deferred_tools: ["security_scan"]      # never sent to this model at all
+	//                                                 # (not tool_search-loadable — see
+	//                                                 # profile.Harness.DeferredTools)
 	//
 	// Unset fields declare nothing and leave the provider-level default in
-	// charge, mirroring ModelCapabilities' pointer-field convention.
+	// charge, mirroring ModelCapabilities' pointer-field convention. Unlike the
+	// two repair bools, prompt_suffix/tool_description_overrides/deferred_tools
+	// (P74.21) have no provider-level default to inherit — every model starts
+	// at none of them. prompt_suffix is checked against
+	// sysprompt.LocalPromptSuffixMaxTokens under the local profile, and
+	// deferred_tools may never name a profile.RequiredExposedTools entry
+	// (tool_search); providerfactory.Build rejects the config outright if
+	// either is violated, for every model, before anything is built.
 	ModelHarness map[string]profile.Override `koanf:"model_harness"`
 	// ToolCallShim opts a session into the non-native tool-calling fallback
 	// (P53.6, internal/toolshim): tool schemas are serialized into the system

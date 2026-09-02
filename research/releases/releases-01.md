@@ -8,7 +8,43 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-01 (thirty-fourth record) — **P71.6 and P71.11 shipped**, out of the Tier 4
+**Last updated:** 2026-09-02 (thirty-sixth record) — **P74.21 shipped: the local-model harness can now
+touch a prompt or a tool description, built speculatively at direct request with no concrete cargo
+behind it yet.** `profile.Harness` gained `PromptSuffix`, `ToolDescriptionOverrides` and
+`DeferredTools`, layered additively by `profile.NewResolver` exactly as the two existing repair bools
+already are. All three are applied per request in `provider.WithHarness` — never at registration time —
+so none of them touch `internal/tool.Registry`'s exposure/clone machinery: `PromptSuffix` is appended to
+`Request.System`, `ToolDescriptionOverrides` rewrites matching `Request.Tools[i].Description`, and
+`DeferredTools` strips a named schema from `Request.Tools` and folds its name+description into a system-
+prompt note instead — deliberately *not* the registry's loadable-via-`tool_search` deferral, since that
+tool remains permanently absent from that model's requests for the life of the session; the doc comment
+says so to head off the obvious confusion with `builtin.Options.LocalProfile`. `profile.RequiredExposedTools`
+(`tool_search` today) and `profile.ValidateOverrides` enforce the item's own "required scaffolding must
+not be excludable" constraint at `providerfactory.Build` time, and a per-model `PromptSuffix` is checked
+against a new `sysprompt.LocalPromptSuffixMaxTokens` (200) budget there too — both fail the whole `Build`
+call rather than degrading silently on whichever request first resolves the offending model. Full record:
+[P74.21, 2026-09-02](#p7421-2026-09-02).
+
+**Last updated (previous):** 2026-09-01 (thirty-fifth record) — **P84.1, P84.2 and P84.3 shipped: the whole Tier 1
+list, filed and closed same-day.** All three were found by **P80.2**'s read-only pass and re-verified
+line-by-line before being filed. **P84.1** gives `aegis chat` and `aegis debate` the same sandbox overlay
+`worker.go` already had for the subprocess swarm path (P10.2): both now call `server.SelectSandbox(cfg.Sandbox,
+cwd, logger)` and set `regOpts.Sandbox` before `builtin.Register`, so a configured `sandbox.backend` of
+`container`/`os`/`strict` is actually honored by these two local entry points instead of every shell/test-runner
+call silently falling back to direct host exec via `sandbox.NewLocalBackend()`. Sandbox selection failure is
+non-fatal at both sites, matching `worker.go`: the run falls back to unsandboxed with a logged warning rather
+than refusing to start (whether the daemon-only SEC-09 auto-approve-vs-unsandboxed startup refusal should also
+reach these two CLI paths was left as a deliberate open question, not folded into this fix). **P84.2** routes
+`sessionpicker.go`'s model-generated session title through `stripDangerousSeqs` in `sessionPickerItems`,
+closing the one title-render path in `internal/tui` that skipped the sanitization every other path
+(`/session`, `/session list`, `/runs`) already applied. **P84.3** adds `api.KindSteer` to `applyEvent`'s
+existing `stripControlSeqs` switch (alongside `KindGuard` and `KindError`), closing the one text-bearing event
+kind that reached the transcript raw — steer text originates from a plain HTTP endpoint (`handleSteer`) and,
+unlike normal assistant prose, is appended directly rather than passing through `mdRender`. `go build ./...`
+is clean and `go test ./internal/cli/... ./internal/tui/...` is green. Full record:
+[P84.1, P84.2 and P84.3, 2026-09-01](#p841-p842-and-p843-2026-09-01).
+
+**Last updated (previous):** 2026-09-01 (thirty-fourth record) — **P71.6 and P71.11 shipped**, out of the Tier 4
 validation pass this same day: in-session web_fetch/web_search memoization (a new `internal/webcache`
 package, session-scoped and freed on session delete) and a deep-research round/source budget derived
 from the run's resolved context window instead of a flat cloud-sized prose number. Both were parked —
@@ -668,6 +704,126 @@ likewise left for the rotation decision that already covers it.
 Every change was run against its package's test suite (`go test ./internal/server/...`,
 `./internal/security/...`, `./internal/sandbox/...`, `./internal/tui/...`, `./internal/config/...`,
 `./internal/cli/...`) plus a full `go build ./...`; new regression tests were added at each layer.
+
+### P74.21, 2026-09-02
+
+**Filed 2026-08-21 the day P74.17 shipped without it, parked in Tier 4 with an explicit "do not build
+speculatively" — no concrete model quirk needed a prompt suffix or tool-description override. Asked for
+directly on 2026-09-02 with no such need cited**, which the roadmap's own precedent (P71.6/P71.11,
+2026-09-01) treats as the trigger the parking condition was written for: a direct request is not
+speculation on the roadmap's own terms, even without cargo. The gap this fills: `internal/profile.Harness`
+carried only the two P74.17 repair bools, and `builtin.Options.LocalProfile` — the mechanism that already
+defers tools and caps prompt blocks — decides identically for every local model, with no per-model seam.
+
+**What shipped.** `profile.Harness` gained three fields, all zero-value by default so a model with no
+`config.Provider.model_harness` entry is unaffected:
+
+- `PromptSuffix string` — appended to `Request.System`.
+- `ToolDescriptionOverrides map[string]string` — rewrites a matching `Request.Tools[i].Description`.
+- `DeferredTools []string` — strips a named tool from `Request.Tools`.
+
+`profile.Override` grew matching fields (`prompt_suffix`, `tool_description_overrides`, `deferred_tools`),
+layered onto the base `Harness` by `profile.NewResolver` the same way the two existing bool fields already
+layer — additive per model, so naming one field for a model does not reset the others to zero.
+
+**Applied at the request layer, not the registry.** All three are applied in
+`provider.harnessAdapter.Stream` (`internal/provider/harness.go`), which already resolves a fresh
+`Harness` per `Request.Model` for the two repair behaviors — a natural, already-existing seam this item
+reuses rather than adding a second one. `applyPromptAndToolHarness` builds a new `Request.Tools` slice
+(never mutates the caller's) and appends to `Request.System`. This choice is deliberate and is the one
+place this record's shape differs from the roadmap entry's sketch: the entry imagined the fuller
+generalization reaching `builtin.Options.LocalProfile` and `internal/tool.Registry` themselves — schema
+caching, clone overlays, the `<deferred_tools>` block. None of that machinery is touched. The trade-off
+this makes concrete: `DeferredTools` here is a strictly weaker deferral than `LocalProfile`'s. A tool
+`LocalProfile` defers is still registered and `tool_search`-loadable mid-conversation; a tool named in a
+model's `Harness.DeferredTools` is stripped from that model's `Request.Tools` on every turn for the life
+of the session, with no recovery path — the registry never learns the tool was "deferred" for this model,
+so there is nothing for `tool_search` to load back. The stripped tool's name and description are folded
+into a system-prompt note instead (`"The following tools exist in this workspace but are not available to
+you in this session"`), so the model at least knows it exists — but the doc comment on
+`Harness.DeferredTools` says explicitly not to reach for this when a tool should be loadable on demand;
+that's what `LocalProfile`'s own mechanism is for.
+
+**The two runtime invariants the filed entry named are both enforced, at `providerfactory.Build` time —
+not per-request, and not silently:**
+
+- **Required scaffolding must not be excludable.** `profile.RequiredExposedTools` (`tool_search` — the
+  only mechanism for loading anything `LocalProfile` deferred) may never appear in a `DeferredTools` list;
+  `profile.ValidateOverrides` checks every configured model and `providerfactory.Build` calls it before
+  attempting to build anything, returning an error that names the offending model and tool rather than
+  stranding a session mid-conversation.
+- **The prompt budget is measured per model, not once.** A new `sysprompt.LocalPromptSuffixMaxTokens`
+  (200 — a quirk-note paragraph, not a persona rewrite) and `sysprompt.FitsLocalBudget(suffix, local)`
+  reuse `tokenest.Estimate` the same way `TestEffectiveSystem_localProfileBudget` does; `providerfactory.
+  Build` checks every configured model's `PromptSuffix` against it under the local profile and fails the
+  whole `Build` call if one is oversized, rather than degrading silently on whichever request first
+  resolves that model's `Harness`. The default (non-local) profile has no such budget and always accepts.
+
+**What was deliberately not built**, matching P74.17's own precedent of leaving `builtin.Options.
+LocalProfile` alone rather than generalizing it in the same sitting the cargo arrived: no per-model
+control over which tool families get registered, no interaction with `tool.Registry`'s clone/exposure
+overlay, and `DeferredTools`' one-way strip (documented above) rather than a genuine per-model exposure
+state. Promoting `DeferredTools` to a real loadable deferral would mean threading a per-model view through
+`tool.Registry` itself — the clone/overlay machinery `internal/tool/tool.go`'s doc comments already flag
+as delicate — and nothing filed here needed that; it is a real gap if a future need wants the tool back
+mid-conversation rather than never.
+
+**Tests:** `internal/profile/profile_test.go` (`TestNewResolver_PromptSuffixAndToolFieldsHaveNoDefault`,
+`_PromptSuffixAndToolFieldsLayerAdditively`, `TestValidateOverrides_RejectsDeferringToolSearch`,
+`_AllowsDeferringOtherTools`, `_NilAndEmptyAreFine`); `internal/provider/harness_test.go`
+(`TestWithHarness_PromptSuffixAppendedPerModel`, `_ToolDescriptionOverride`,
+`_DeferredToolsStrippedWithNote`); `internal/sysprompt/budget_test.go`
+(`TestFitsLocalBudget_DefaultProfileAlwaysFits`, `_EmptySuffixAlwaysFits`,
+`_LocalProfileRejectsOversizedSuffix`, `_LocalProfileAcceptsShortSuffix`);
+`internal/providerfactory/factory_test.go` (`TestBuild_RejectsModelHarnessDeferringToolSearch`,
+`_RejectsOversizedPromptSuffixUnderLocalProfile`, `_AllowsShortPromptSuffixUnderLocalProfile`). `go build
+./...` and the full `go test ./...` are green.
+
+### P84.1, P84.2 and P84.3, 2026-09-01
+
+All three were filed and closed the same day: found by **P80.2**'s read-only pass over
+`internal/cli`/`internal/tui` (the packages the original comprehensive audit never reached), re-verified
+line-by-line against the tree before filing rather than taken on the reviewing sub-agent's word, and
+each small enough to ship without a dependency. See [roadmap.md](../roadmap.md#p841--aegis-chat-and-aegis-debate-never-wire-a-sandbox-backend-fail-open-on-the-two-unaudited-local-entry-points)
+for each item's original finding.
+
+**P84.1 — `aegis chat` and `aegis debate` never wired a sandbox backend.** Both built their tool
+registry via `builtin.Register(reg, enginecfg.BuiltinOptions(cfg, cwd))` and stopped there, so
+`builtin.Options.Sandbox` stayed nil and `internal/tool/builtin/shell.go`'s nil-`t.sb` fallback
+(`sandbox.NewLocalBackend()`) ran every shell/test-runner call directly on the host regardless of
+`sandbox.backend`/`sandbox.strict` — the daemon and the subprocess swarm worker (`worker.go`, citing its
+own **P10.2** fix) both already overlaid `regOpts.Sandbox` from `server.SelectSandbox`; these two local
+entry points did not. Both now call `server.SelectSandbox(cfg.Sandbox, cwd, logger)` right before
+`builtin.Register` and set `regOpts.Sandbox` from the result, closing (or `defer`-closing, for a
+persistent container) the same backend the daemon and the worker use. Selection failure is non-fatal at
+both sites, matching `worker.go`'s own posture: a warning is logged and the run falls back to
+unsandboxed rather than refusing to start — an interactive one-shot command has no daemon startup gate
+to refuse *at*. Whether the daemon-only SEC-09 auto-approve-vs-unsandboxed startup refusal
+(`internal/server/sandboxselect.go`) should also cover these two CLI paths was left as a deliberate open
+question rather than folded into this fix — the finding's "what to do" section raised it explicitly as a
+separate design call.
+
+**P84.2 — a model-generated session title reached the picker unsanitized.** `sessionPickerItems`
+(`internal/tui/sessionpicker.go`) put `s.Title` straight into a `sessionItem` with no `termsafe` call,
+the one title-render path in the package that skipped it — `/session`, `/session list` and `/runs` all
+route through `SlashResult.Output`, which already pipes through `stripDangerousSeqs`. The title comes
+from `generateTitle` (`internal/server/sessions.go`), which asks a small model to summarize the user's
+first message; its `cleanTitle` only strips `<think>` tags and collapses whitespace, so ANSI/OSC control
+bytes pass through untouched into a poisoned title. `sessionPickerItems` now wraps `s.Title` in the
+package's existing `stripDangerousSeqs` wrapper before it reaches `list.Item`, matching every other
+title path.
+
+**P84.3 — `KindSteer` transcript text bypassed `termsafe` sanitization.** `applyEvent`
+(`internal/tui/stream.go`) already had a normalization switch for `KindGuard`'s and `KindError`'s text
+(judge-model prose and provider/subprocess error strings — text the harness didn't author, rendered
+through lipgloss which styles but never strips) but never covered `KindSteer`. Unlike normal assistant
+prose, which is buffered and only reaches the screen through `mdRender` (which does strip), steer text
+is appended to the transcript directly and raw; its origin is a plain HTTP endpoint
+(`handleSteer`, `POST /sessions/{id}/steer`) reachable by any other attached client or a script, so it
+was the one text-bearing event kind that let arbitrary control bytes land unsanitized. `KindSteer` now
+runs `ev.Text` through the same `stripControlSeqs` call the other two branches use.
+
+`go build ./...` is clean; `go test ./internal/cli/... ./internal/tui/...` is green (20.9s / 33.9s).
 
 ### P71.6 and P71.11, 2026-09-01
 

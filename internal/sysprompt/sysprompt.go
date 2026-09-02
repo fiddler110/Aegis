@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/tokenest"
 	"github.com/fiddler110/aegis/internal/tool"
 )
 
@@ -86,6 +87,32 @@ func RepoMapFits(repoMap string, local bool) bool {
 		return false
 	}
 	return !local || len(repoMap) <= LocalRepoMapMaxBytes
+}
+
+// LocalPromptSuffixMaxTokens caps a per-model profile.Harness.PromptSuffix
+// (P74.21) under the local prompt profile. It exists for the same reason
+// LocalRepoMapMaxBytes and LocalContextFilesMaxBytes do: an always-injected
+// block with no bound at all is how the most carefully budgeted prompt in the
+// project gets blown, and unlike those two this one is authored by an
+// operator in config.Provider.ModelHarness rather than generated, so there is
+// no natural degrade-gracefully behavior to fall back on if it's oversized —
+// providerfactory rejects the config outright instead (see FitsLocalBudget).
+//
+// 200 tokens is a paragraph, not a document: the cargo this item was filed
+// for is a one- or two-line quirk note ("this model's tool calls use snake_
+// case argument names"), not a persona rewrite — a suffix that needs more
+// room than that belongs in a persona file, which already has its own budget
+// story, not bolted onto every request through the harness.
+const LocalPromptSuffixMaxTokens = 200
+
+// FitsLocalBudget reports whether suffix is small enough to inject on every
+// request under the local prompt profile. The default profile has no prompt
+// budget to protect, so it always fits there.
+func FitsLocalBudget(suffix string, local bool) bool {
+	if !local || suffix == "" {
+		return true
+	}
+	return tokenest.Estimate(suffix) <= LocalPromptSuffixMaxTokens
 }
 
 // DeferredToolsBlock advertises tools that are registered but not exposed by

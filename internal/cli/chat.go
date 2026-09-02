@@ -21,6 +21,7 @@ import (
 	"github.com/fiddler110/aegis/internal/persona"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/providerfactory"
+	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/skills"
 	"github.com/fiddler110/aegis/internal/tool"
 	"github.com/fiddler110/aegis/internal/tool/builtin"
@@ -197,6 +198,23 @@ func runChat(cmd *cobra.Command, args []string, o *chatOptions) error {
 	// enginecfg.BuiltinOptions above (P66.13/QUAL-06), which is also what finally
 	// gives this path a Commands resolver — without it the whole toolpath/ripgrep
 	// contract was inert here.
+	//
+	// P84.1: without this overlay, opts.Sandbox stays nil and the shell/test-runner
+	// tools fall back to sandbox.NewLocalBackend() — direct host exec regardless of
+	// sandbox.backend/strict — the same gap worker.go's P10.2 comment closed for the
+	// subprocess swarm path. Errors are non-fatal here, matching worker.go: an
+	// interactive chat run falls back to unsandboxed rather than refusing to start.
+	chatSandbox, _, fallbackReason, sbErr := server.SelectSandbox(cfg.Sandbox, cwd, logger)
+	if sbErr != nil {
+		logger.Warn("chat: sandbox selection failed, running unsandboxed", "err", sbErr)
+		chatSandbox = nil
+	} else if fallbackReason != "" {
+		logger.Warn("chat: sandbox fallback", "reason", fallbackReason)
+	}
+	if chatSandbox != nil {
+		defer chatSandbox.Close()
+	}
+	regOpts.Sandbox = chatSandbox
 	if err := builtin.Register(reg, regOpts); err != nil {
 		return err
 	}

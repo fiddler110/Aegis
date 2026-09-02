@@ -44,7 +44,10 @@ func newSessionPicker(termW, termH int, frame string) listDialog {
 func sessionPickerItems(sessions []api.SessionMeta) []list.Item {
 	items := make([]list.Item, len(sessions))
 	for i, s := range sessions {
-		items[i] = sessionItem{id: s.ID, title: s.Title, mode: s.Mode, updated: s.UpdatedAt}
+		// P84.2: s.Title is model-generated (server.generateTitle) and unlike
+		// every other title-display path in this package, this one renders
+		// straight to a bubbles list.Item with no termsafe pass in between.
+		items[i] = sessionItem{id: s.ID, title: stripDangerousSeqs(s.Title), mode: s.Mode, updated: s.UpdatedAt}
 	}
 	return items
 }
