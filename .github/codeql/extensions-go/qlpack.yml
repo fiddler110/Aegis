@@ -1,0 +1,6 @@
+name: aegis/codeql-go-extensions
+version: 0.0.1
+library: false
+dependencies:
+  codeql/go-all: "*"
+extractor: go

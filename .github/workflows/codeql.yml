@@ -35,6 +35,7 @@ jobs:
         with:
           languages: go
           build-mode: autobuild
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@fddeee1a7ece751b577e409a89057319e3172939 # v4

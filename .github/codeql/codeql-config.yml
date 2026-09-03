@@ -1,0 +1,13 @@
+name: "Aegis CodeQL config"
+
+# Runs the standard Go code-scanning suite, but with go/path-injection swapped
+# for the copy in .github/codeql/extensions-go that additionally recognizes
+# Aegis's own path-confinement helpers (sandbox.ValidatePath[In],
+# resolveRead/resolveWrite, resolveSafeImagePath, workdirAllowed) as
+# sanitizers/barriers — see AegisPathSanitizers.qll for what each one covers
+# and why. The rule keeps its original @id (go/path-injection), so GitHub
+# still tracks it as the same rule: alerts that stop firing here resolve as
+# fixed rather than being orphaned under a new one.
+disable-default-queries: true
+queries:
+  - uses: ./.github/codeql/extensions-go/queries/aegis-go-code-scanning.qls

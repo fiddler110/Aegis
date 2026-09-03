@@ -1,0 +1,12 @@
+- description: >-
+    Aegis's Go code-scanning suite: the standard suite, with go/path-injection
+    swapped for the copy in this pack that additionally knows about Aegis's
+    own path-confinement helpers (see AegisPathSanitizers.qll) so it stops
+    re-flagging call sites downstream of an already-validated path.
+- queries: .
+  from: codeql/go-queries
+- apply: code-scanning-selectors.yml
+  from: codeql/suite-helpers
+- exclude:
+    id: go/path-injection
+- queries: .
