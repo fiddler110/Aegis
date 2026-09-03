@@ -367,6 +367,18 @@ provider:
     X-Gateway-Token: "your-token"
     X-Tenant-ID: "your-tenant"
 
+  # Sends "Authorization: Bearer <token>" to a local backend only (P81.7/
+  # FIND-07) — Ollama or any OpenAI-compatible endpoint whose base_url is
+  # loopback. "" (default) sends nothing, matching prior behavior. Ollama
+  # itself does not check this header, so on its own this does not stop a
+  # local attacker with packet-capture privilege or one that wins the
+  # port-binding race; it gives a reverse proxy placed in front of Ollama
+  # something to enforce, and closes the gap directly against any local
+  # server that does validate bearer tokens (llama.cpp's server, vLLM,
+  # LiteLLM). See docs/installation.md for the supported proxy pattern. A
+  # `headers.Authorization` set above always wins over this.
+  local_auth_token: ""
+
   # Extended thinking.
   # null/~ = provider default: Anthropic disables by default (thinking is
   #          billed as extra tokens); native Ollama (P77.1) enables by

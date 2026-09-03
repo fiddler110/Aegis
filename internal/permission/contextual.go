@@ -142,6 +142,9 @@ func (g *ContextualGate) Check(ctx context.Context, t tool.Tool, input json.RawM
 				Tool: t.Name(), Cap: string(cap),
 				Rule: "egress_then_write", Decision: Ask, Reason: reason,
 			})
+			if note := tool.CallProvenance(ctx); note != "" {
+				reason = fmt.Sprintf("%s [%s]", reason, note)
+			}
 			if g.base.Approver.Approve(ctx, t.Name(), reason, input) {
 				return true, ""
 			}
@@ -166,6 +169,9 @@ func (g *ContextualGate) Check(ctx context.Context, t tool.Tool, input json.RawM
 				Tool: t.Name(), Cap: string(cap),
 				Rule: "taint_after_untrusted_content", Decision: Ask, Reason: reason,
 			})
+			if note := tool.CallProvenance(ctx); note != "" {
+				reason = fmt.Sprintf("%s [%s]", reason, note)
+			}
 			if g.base.Approver.Approve(ctx, t.Name(), reason, input) {
 				return true, ""
 			}

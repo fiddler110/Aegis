@@ -174,6 +174,27 @@ multi-turn run reloads the model *and* reprocesses the whole conversation betwee
 
 ---
 
+## 5. Know the risk if you turn on the tool-call shim
+
+`provider.tool_call_shim` (`internal/toolshim`) and the always-on prose-salvage decorator
+(`provider.WithProseToolCallSalvage`, `internal/provider/prosetoolcall.go`) both exist to recover a
+tool call a local model wrote as free-form text instead of a structured `tool_calls` entry — the
+common failure mode this whole document is tuning against. Neither can yet distinguish a call the
+model *intended* from a call it merely *quoted* — a web page, a file, or a tool result the model read
+and echoed back verbatim in a summary or explanation, if that text happens to look like a tool call.
+
+This is why the shim is opt-in (`tool_call_shim: off` by default) and why a call either mechanism
+recovers is now labeled **"recovered from prose"** in the approval prompt: the label is provenance,
+not containment. Read it as "this call did not arrive as a native structured call — check that the
+model actually meant to make it" before approving a write, execute, or network call carrying that
+label, especially right after a turn that read content from outside the workspace (a fetched URL, an
+MCP tool result, a file the model didn't author). The real containment — never promoting a call parsed
+out of a span of output that reproduces untrusted content — needs turn-scoped taint tracking that does
+not exist yet ([P81.28](../research/roadmap.md), sequenced behind
+[P81.1](../research/roadmap.md)'s tracking mechanism). Until then, the label is what you have.
+
+---
+
 ## Verifying the result
 
 Three checks, cheapest first.

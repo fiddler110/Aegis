@@ -502,6 +502,44 @@ func TestProviderConfig_LocalPromptProfile(t *testing.T) {
 	}
 }
 
+// TestProviderConfig_HeadersFor pins the P81.7/FIND-07 local bearer token:
+// it is only added for a target HeadersFor's own (name, baseURL) resolves as
+// local, never for a cloud target even when local_auth_token happens to be
+// set, and an explicit headers.Authorization always wins over it.
+func TestProviderConfig_HeadersFor(t *testing.T) {
+	tests := []struct {
+		name       string
+		provider   string
+		baseURL    string
+		token      string
+		headers    map[string]string
+		wantAuth   string // "" means no Authorization key at all
+		wantHasKey bool
+	}{
+		{"no token configured, local target", "ollama", "", "", nil, "", false},
+		{"token configured, local ollama adapter", "ollama", "", "s3cret", nil, "Bearer s3cret", true},
+		{"token configured, loopback openai-compat", "openai", "http://localhost:11434/v1", "s3cret", nil, "Bearer s3cret", true},
+		{"token configured, remote target untouched", "anthropic", "https://api.anthropic.com", "s3cret", nil, "", false},
+		{"token configured, LAN IP is not local", "openai", "http://192.168.1.10:1234/v1", "s3cret", nil, "", false},
+		{"explicit Authorization header wins", "ollama", "", "s3cret", map[string]string{"Authorization": "Bearer explicit"}, "Bearer explicit", true},
+		{"other headers preserved alongside the token", "ollama", "", "s3cret", map[string]string{"X-Foo": "bar"}, "Bearer s3cret", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := ProviderConfig{LocalAuthToken: tt.token, Headers: tt.headers}
+			got := p.HeadersFor(tt.provider, tt.baseURL)
+			auth, ok := got["Authorization"]
+			if ok != tt.wantHasKey || auth != tt.wantAuth {
+				t.Errorf("HeadersFor(%q, %q) Authorization = (%q, %v), want (%q, %v)",
+					tt.provider, tt.baseURL, auth, ok, tt.wantAuth, tt.wantHasKey)
+			}
+			if tt.headers["X-Foo"] != "" && got["X-Foo"] != tt.headers["X-Foo"] {
+				t.Errorf("HeadersFor dropped an existing header: got %v", got)
+			}
+		})
+	}
+}
+
 // TestProviderConfig_ToolCallShim pins the P53.6 opt-in: the default and every
 // unrecognized spelling leave the shim off, and an unrecognized one is
 // reportable rather than silently equivalent to the default — a user who typed

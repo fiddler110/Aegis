@@ -146,6 +146,34 @@ func TestGateCheckAnnotatesExecuteReasonWithSandboxBackend(t *testing.T) {
 	}
 }
 
+// TestGateCheckAnnotatesReasonWithCallProvenance is the P81.28/FIND-28
+// regression: a call recovered by parsing the model's free-form text (the
+// prose-salvage decorator or the tool_call_shim) must carry a
+// "recovered from prose" label in the approval prompt, since the model may
+// have merely quoted the call rather than intended it. A call with no
+// provenance annotation on its context must not gain the label.
+func TestGateCheckAnnotatesReasonWithCallProvenance(t *testing.T) {
+	exec := fakeTool{name: "shell", cap: tool.CapExecute}
+	approver := &recordingApprover{approve: true}
+	gate := New(ModeBuild, approver)
+
+	ctx := tool.WithCallProvenance(context.Background(), "recovered from prose")
+	if ok, _ := gate.Check(ctx, exec, nil); !ok {
+		t.Fatal("expected approval")
+	}
+	if !strings.Contains(approver.reason, "recovered from prose") {
+		t.Errorf("expected reason to carry the provenance label, got %q", approver.reason)
+	}
+
+	approver.reason = ""
+	if ok, _ := gate.Check(context.Background(), exec, nil); !ok {
+		t.Fatal("expected approval")
+	}
+	if strings.Contains(approver.reason, "recovered from prose") {
+		t.Errorf("an ordinary call must not carry the provenance label, got %q", approver.reason)
+	}
+}
+
 // TestGateCheckUsesEffectiveCapability covers P25.4c: a call a tool
 // reclassifies via CapabilityOverrider (e.g. shell's read-only allowlist) is
 // gated on that narrower capability, not the tool's static one — both in

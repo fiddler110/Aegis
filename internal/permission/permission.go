@@ -252,6 +252,15 @@ func (g Gate) Check(ctx context.Context, t tool.Tool, input json.RawMessage) (bo
 		if cap == tool.CapExecute && g.SandboxBackendLabel != "" {
 			reason = fmt.Sprintf("%s (sandbox: %s)", reason, g.SandboxBackendLabel)
 		}
+		// P81.28/FIND-28: a call recovered by parsing the model's prose rather
+		// than a native structured call carries a real risk the approver
+		// should see — untrusted content that reached model context is
+		// sometimes quoted back verbatim and mistaken for an intended call.
+		// Surfacing provenance is not containment (that is P81.1's taint
+		// tracking), only visibility.
+		if note := tool.CallProvenance(ctx); note != "" {
+			reason = fmt.Sprintf("%s [%s]", reason, note)
+		}
 		if g.Approver.Approve(ctx, t.Name(), reason, input) {
 			return true, ""
 		}

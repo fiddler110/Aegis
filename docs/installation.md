@@ -294,6 +294,42 @@ See [Providers & Models](providers.md) for the complete list of supported local 
 
 ---
 
+## Hardening the local model endpoint (multi-user hosts)
+
+**Skip this on a single-user development machine** — the default (plaintext HTTP on loopback, no
+auth in either direction) is the same posture every local-model tool ships, and the threat below
+needs another account or a hostile process already running on the same host. Read on if Aegis ever
+runs on a shared or multi-user box (see [FIND-07](../research/roadmap.md)).
+
+The default deployment sends every prompt — workspace file contents included — to
+`http://localhost:11434` over plaintext HTTP with no authentication either direction. A local process
+with packet-capture privilege reads the whole conversation; a local process that binds the port first,
+or wins a restart race, answers **as the model** and dictates what tool calls Aegis attempts next.
+
+`provider.local_auth_token` (see [configuration.md](configuration.md)) makes Aegis send
+`Authorization: Bearer <token>` to any local endpoint, but **Ollama itself does not check the
+header** — there is no upstream config to require it, and Unix-socket support for `OLLAMA_HOST`
+(which would remove the port/eavesdropping exposure entirely) is still an open, unmerged upstream PR
+as of this writing. So closing the gap means putting an authenticating reverse proxy in front of
+Ollama and pointing Aegis at the proxy instead:
+
+```
+Aegis  --https+bearer-->  reverse proxy (127.0.0.1:8443)  --http-->  Ollama (127.0.0.1:11434)
+```
+
+Any proxy that can check a header and forward the request works — Caddy's `reverse_proxy` with a
+`@denied` matcher on a missing/wrong `Authorization` header, or nginx with an `auth_request` /
+`map`-based check, are both a few lines of config. Point `provider.base_url` at the proxy's address,
+set `provider.local_auth_token` to the same value the proxy expects, and bind Ollama itself
+(`OLLAMA_HOST`) to loopback only so it is never reachable except through the proxy. This also gives
+you a place to terminate TLS with a certificate your own tooling trusts, closing the plaintext half of
+FIND-07 alongside the auth half.
+
+If you're on a single local server with no other local accounts, this is not worth the operational
+overhead — revisit if that changes.
+
+---
+
 ## Using Cloud Providers
 
 **Anthropic:**

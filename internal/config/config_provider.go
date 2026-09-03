@@ -277,6 +277,50 @@ type ProviderConfig struct {
 	PromptProfile string `koanf:"prompt_profile"`
 	// APIKey is populated from the environment, never from config files.
 	APIKey string `koanf:"-"`
+	// LocalAuthToken adds `Authorization: Bearer <token>` to every request
+	// against a local backend (P81.7/FIND-07). It exists because the default
+	// local deployment — Ollama on loopback HTTP — authenticates in neither
+	// direction: a local process with packet-capture privilege reads the
+	// whole conversation, and one that wins the port-binding race answers as
+	// the model.
+	//
+	// Read this honestly: Ollama itself does not check Authorization headers,
+	// so setting this alone does not stop either threat against a bare
+	// `ollama serve`. What it does is give Aegis's side of the handshake
+	// something to present, which is exactly what a reverse proxy placed in
+	// front of Ollama needs to enforce the boundary Ollama cannot — see
+	// docs/installation.md's local-endpoint-hardening section for the
+	// supported proxy pattern. Against any other local OpenAI-compatible
+	// server that *does* validate bearer tokens (llama.cpp's server, vLLM,
+	// LiteLLM), this closes the gap directly with no proxy required.
+	//
+	// Only applied when the resolved (provider, base_url) pair is local
+	// (LocalBackend) and provider.headers does not already set an
+	// "Authorization" key — an explicit header always wins. "" (default)
+	// adds nothing, matching today's behavior exactly.
+	LocalAuthToken string `koanf:"local_auth_token"`
+}
+
+// HeadersFor returns the HTTP headers to send to the (provider name, base
+// URL) pair name/baseURL identifies: p.Headers, plus a bearer
+// Authorization header derived from p.LocalAuthToken when that target
+// resolves to a local backend and p.Headers does not already set
+// "Authorization" (P81.7/FIND-07). Returns p.Headers unchanged — including a
+// nil map — whenever LocalAuthToken is unset, a cloud target is named, or an
+// Authorization header is already configured explicitly.
+func (p ProviderConfig) HeadersFor(name, baseURL string) map[string]string {
+	if p.LocalAuthToken == "" || !LocalBackend(name, baseURL) {
+		return p.Headers
+	}
+	if _, ok := p.Headers["Authorization"]; ok {
+		return p.Headers
+	}
+	merged := make(map[string]string, len(p.Headers)+1)
+	for k, v := range p.Headers {
+		merged[k] = v
+	}
+	merged["Authorization"] = "Bearer " + p.LocalAuthToken
+	return merged
 }
 
 // VRAMBudgetBytes returns provider.vram_budget_gb in bytes, or 0 when no budget

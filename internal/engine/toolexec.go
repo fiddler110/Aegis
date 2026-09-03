@@ -482,6 +482,22 @@ func (e *Engine) toolCtx(ctx context.Context) context.Context {
 	return tool.WithContextWindow(ctx, e.effectiveContextWindow())
 }
 
+// recoveredCallProvenance returns the approval-prompt provenance label for a
+// tool call whose id marks it as recovered from a model's free-form text
+// rather than a native structured call (P81.28/FIND-28) — the prose-salvage
+// decorator's fixed id, or one of the tool_call_shim's "shim-"/"shim-mixed-"
+// prefixed ids assigned in the shim retry loop below. "" for an ordinary
+// native call.
+func recoveredCallProvenance(id string) string {
+	switch {
+	case provider.IsProseSalvagedCallID(id):
+		return "recovered from prose"
+	case strings.HasPrefix(id, "shim-"):
+		return "recovered from prose (tool-call shim)"
+	}
+	return ""
+}
+
 // executeTool looks up and runs a single tool, converting failures into
 // model-visible error results rather than aborting the whole run.
 func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (string, bool, json.RawMessage) {
@@ -489,6 +505,9 @@ func (e *Engine) executeTool(ctx context.Context, tu provider.ToolUseBlock) (str
 		return fmt.Sprintf("no tools available (requested %q)", tu.Name), true, nil
 	}
 	ctx = e.toolCtx(ctx)
+	if note := recoveredCallProvenance(tu.ID); note != "" {
+		ctx = tool.WithCallProvenance(ctx, note)
+	}
 	t, ok := e.tools.Get(tu.Name)
 	if !ok {
 		return fmt.Sprintf("unknown tool %q; registered tools: %s", tu.Name, registeredToolNames(e.tools)), true, nil

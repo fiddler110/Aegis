@@ -332,6 +332,16 @@ func parseFunctionXML(body string, names map[string]bool) (*ToolUseBlock, bool) 
 // EventToolUseStart and EventToolUse this decorator emits for it.
 const callSalvageID = "tu_salvaged"
 
+// IsProseSalvagedCallID reports whether id names a tool call
+// WithProseToolCallSalvage recovered from a model's free-form text rather
+// than a structured tool_calls entry (P81.28/FIND-28). The engine uses this
+// to label the call's provenance in the approval prompt, since untrusted
+// content that reached model context is sometimes quoted back verbatim and
+// this salvage path cannot yet tell an intended call from a quoted one.
+func IsProseSalvagedCallID(id string) bool {
+	return id == callSalvageID
+}
+
 // parseCallObject decodes body as {"name"|"tool"|"function": ..., "arguments"
 // |"parameters"|"input": ...}, accepting either an object or a JSON-string-
 // encoded object for the argument field (models emit both), and requires the
