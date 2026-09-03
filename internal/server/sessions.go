@@ -119,7 +119,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if workdir != "" {
-		s.sessionWorkdirs.Store(sess.ID, workdir)
+		s.sess.workdirs.Store(sess.ID, workdir)
 	}
 	if len(s.cfg.Skills.BuiltinEnabled) > 0 {
 		effWorkdir := workdir
@@ -263,7 +263,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	// Read before deleting the map entry: reapSessionSpillIfUnshared (P81.24)
 	// needs this session's own workdir, and needs to check every *other*
 	// session's before it's gone from the map too.
-	workdir, hadWorkdir := s.sessionWorkdirs.Load(id)
+	workdir, hadWorkdir := s.sess.workdirs.Load(id)
 	// Store.Delete also cleans up checkpoint snapshots (P32.3) via the
 	// SetCheckpointCleaner wiring done in New — no separate call needed here.
 	if err := s.store.Delete(r.Context(), id); err != nil {
@@ -271,12 +271,12 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.sessionTools.Delete(id)
-	s.sessionWorkdirs.Delete(id)
-	s.sessionSkills.Delete(id)
-	s.taskScopes.Delete(id)
-	s.promptSectionCache.Delete(id)
-	s.sessionWebCache.Delete(id)
+	s.sess.tools.Delete(id)
+	s.sess.workdirs.Delete(id)
+	s.sess.skills.Delete(id)
+	s.sess.taskScopes.Delete(id)
+	s.sess.promptCache.Delete(id)
+	s.sess.webCache.Delete(id)
 	s.forgetSessionRunState(id)
 	if hadWorkdir {
 		if root, ok := workdir.(string); ok {
@@ -303,7 +303,7 @@ func (s *Server) reapSessionSpillIfUnshared(excluded, root string) {
 		return
 	}
 	shared := false
-	s.sessionWorkdirs.Range(func(_, v any) bool {
+	s.sess.workdirs.Range(func(_, v any) bool {
 		if other, ok := v.(string); ok && other == root {
 			shared = true
 			return false
@@ -330,11 +330,11 @@ func (s *Server) reapSessionSpillIfUnshared(excluded, root string) {
 // later session never collides with a stale semaphore, and a permission grant
 // is scoped to the session whose user answered the prompt.
 func (s *Server) forgetSessionRunState(id string) {
-	s.sessionSems.Delete(id)
+	s.sess.sems.Delete(id)
 	prefix := id + "\x00" // sseApprover's key: sessionID + "\x00" + toolName
-	s.sessionPermCache.Range(func(k, _ any) bool {
+	s.sess.permCache.Range(func(k, _ any) bool {
 		if key, ok := k.(string); ok && strings.HasPrefix(key, prefix) {
-			s.sessionPermCache.Delete(key)
+			s.sess.permCache.Delete(key)
 		}
 		return true
 	})

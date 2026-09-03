@@ -109,7 +109,7 @@ func (s *Server) sectionText(sessionID string, sec promptSection, local bool) st
 	if sec.volatile {
 		return sec.build()
 	}
-	v, _ := s.promptSectionCache.LoadOrStore(sessionID, &sync.Map{})
+	v, _ := s.sess.promptCache.LoadOrStore(sessionID, &sync.Map{})
 	perSession := v.(*sync.Map)
 	key := promptSectionKey{section: sec.name, local: local}
 	if cached, ok := perSession.Load(key); ok {

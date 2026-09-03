@@ -202,7 +202,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 			send:             send,
 			runID:            runID,
 			sessionID:        id,
-			permCache:        &s.sessionPermCache,
+			permCache:        &s.sess.permCache,
 			pendingApprovals: &s.pendingApprovals,
 			persistRule: func(toolName, pattern string) {
 				s.addPermissionRuleWithOrigin(toolName, pattern, reqorigin.Normalize(sess.Origin))
@@ -974,7 +974,7 @@ func toAPIEvent(ev engine.Event) api.Event {
 // sessionSemaphore returns the buffered channel used to serialize runs for a
 // session (capacity 1 — only one goroutine holds it at a time).
 func (s *Server) sessionSemaphore(id string) chan struct{} {
-	v, _ := s.sessionSems.LoadOrStore(id, make(chan struct{}, 1))
+	v, _ := s.sess.sems.LoadOrStore(id, make(chan struct{}, 1))
 	return v.(chan struct{})
 }
 

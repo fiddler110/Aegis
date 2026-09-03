@@ -132,10 +132,10 @@ func TestServerDeleteSessionClearsWorkdirAndSkillMaps(t *testing.T) {
 	}
 	srv.activateSessionSkill(meta.ID, "content-review")
 
-	if _, ok := srv.sessionWorkdirs.Load(meta.ID); !ok {
+	if _, ok := srv.sess.workdirs.Load(meta.ID); !ok {
 		t.Fatal("sessionWorkdirs not populated before delete; test setup is wrong")
 	}
-	if _, ok := srv.sessionSkills.Load(meta.ID); !ok {
+	if _, ok := srv.sess.skills.Load(meta.ID); !ok {
 		t.Fatal("sessionSkills not populated before delete; test setup is wrong")
 	}
 
@@ -143,10 +143,10 @@ func TestServerDeleteSessionClearsWorkdirAndSkillMaps(t *testing.T) {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
-	if _, ok := srv.sessionWorkdirs.Load(meta.ID); ok {
+	if _, ok := srv.sess.workdirs.Load(meta.ID); ok {
 		t.Error("sessionWorkdirs entry survived session delete (P26.2 leak)")
 	}
-	if _, ok := srv.sessionSkills.Load(meta.ID); ok {
+	if _, ok := srv.sess.skills.Load(meta.ID); ok {
 		t.Error("sessionSkills entry survived session delete (P26.2 leak)")
 	}
 }

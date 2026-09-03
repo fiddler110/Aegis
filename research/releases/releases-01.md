@@ -8,7 +8,66 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-02 (thirty-seventh record) — **QUAL-05, P67.14, P64.4 shipped, and P81.33's
+**Last updated:** 2026-09-03 (thirty-ninth record) — **P80.2 and P80.3 shipped, asked for directly:
+the three unread-package investigation closed clean on two of three areas and found a real budget bug
+in the third, fixed the same sitting; the `Server` struct's per-session map family is now grouped.**
+P80.2 (`internal/tui`, `internal/drive`, the sandbox container backends — the three areas the
+comprehensive audit's C1 never reached) was read via three independent investigations. `internal/tui`
+and the sandbox backends (Docker/Podman/WSL/Apple) came back clean — termsafe coverage, Bubbletea
+concurrency, resource lifetime, mount confinement, `--network none` policy and the unsandboxed-fallback
+question all check out, the last already remediated by the prior audit's own P7.4/P25.2/P81.22/SEC-09
+work. `internal/drive` surfaced a real defect: `internal/engine/budget.go`'s own doc comment says the
+budget is deliberately per-`Run` "so a long build mid-phase isn't guillotined", but `newRunBudget()`
+only snapshotted wall-clock start time, never the cost tracker's running totals — and since
+`internal/drive` (and both its callers, `internal/cli/chat_drive.go` and `internal/server/drive.go`)
+share one `Engine`/`cost.Tracker` for a whole drive's lifetime, `BudgetUSD`/`MaxTokensPerRun` were
+enforced cumulatively across every phase already run, not reset per phase-turn as documented. Fixed by
+baselining the tracker's `TotalUSD`/`TotalTokens`/`TotalGeneratedTokens` at `newRunBudget()` time and
+checking the delta in `costExceeded`/`tokensExceeded`, so a later phase is bounded by what it spends,
+not by what every prior phase already spent on the shared tracker. P80.3 (the struct half of the
+audit's L4, left undone when the file half shipped 2026-08-30 because grouping fields rewrites every
+reference) grouped the natural first slice the roadmap named — the seven-going-on-eight per-session
+`sync.Map` fields (`sessionTools`, `taskScopes`, `sessionWorkdirs`, `sessionSkills`,
+`promptSectionCache`, `sessionPermCache`, `sessionSems`, plus `sessionWebCache` added since the audit)
+— into one `sessionMaps` struct (`internal/server/sessionscope.go`), reachable as `Server.sess`. No
+test constructed those fields directly (`sync.Map`'s zero value is already usable), so the ~50-site
+concern the entry flagged did not apply to this slice; the handful of real call sites across
+`sessions.go`, `sessionscope.go`, `messages.go`, `helpers.go` and three test files were updated
+mechanically. `go build ./...` is clean and `go test ./...` is green except the one pre-existing,
+unrelated `TestEveryRegisterCallSiteDecidesTheLocalProfile` failure (confirmed to fail identically on
+the unmodified tree, from the same-day P74.21 commit). Full record:
+[P80.2 and P80.3, 2026-09-03](#p802-and-p803-2026-09-03).
+
+**Last updated (previous):** 2026-09-02 (thirty-eighth record) — **P67.10 shipped: all four tool-interface seams
+from the P67 external-source reading, built together as additive, safe-default extensions of
+`tool.Tool`.** `EquivalenceClassifier` is the third member of the loop-signature family alongside
+`PollExempter` and `SignatureTransparent`: a tool can supply its own "are these two calls the same"
+comparison key, consulted by `turnSignatureExcludingPolls` in place of `canonicalizeToolInput`'s generic
+structural comparison, falling back to it on `("", false)`. `Destroyer` gives the permission layer an
+irreversible axis distinct from `Capability`'s read/write/execute — `Gate.Check` escalates an otherwise-
+silent `Allow` to `Ask` (`DestructiveEscalationRule`) whenever the tool claims a call destructive, except
+in auto mode, which stays exempt on its existing "no approval, trusted context" contract; `git_pr` now
+implements it unconditionally (pushing and opening a PR is exactly the irreversible "send" the entry
+named, and `CapNetwork` alone was silently allowed in build mode before this). `InterruptPreference` plus
+`Engine.RequestStop` add a soft-stop path: `RequestStop(hard, hardCancel)` checks every call currently
+in flight (`Engine.inFlight`, tracked by `markInFlight`/`clearInFlight` around `executeTool`) via
+`tool.EffectivePreferFinish`, and only arms a graceful-stop flag (consumed once, right after the current
+tool round's results are appended — the one point ending the run there loses nothing) if every one of
+them prefers to finish; any non-preferring call, or nothing in flight, falls back to an immediate
+`hardCancel` exactly as before. A 5-second `gracefulStopGrace` timer is armed alongside the flag as a
+safety net, well under `MaxTurnStall`, so a soft stop can never itself become the reason a run hangs.
+`internal/server/runs.go`'s `stopSession` (the resumable-run HTTP stop path) now calls through
+`RequestStop(false, ...)` instead of cancelling directly. `SearchHinter` adds a short keyword line to
+`<deferred_tools>` beside `Summarize`'s one-line advertisement — `dast.go` and `security.go` are its
+first two consumers, naming the scanners/attack classes their `ShortDescription` omits. `write_file`
+deliberately does **not** implement `Destroyer`, despite "overwrite" being the entry's own motivating
+example: it escalated build mode's silent `Allow` to an unanswered `Ask` on `TestCheckpointRewind`'s very
+first write, hanging the whole package's test run for the full suite timeout — the honest signal that
+overwriting an existing file is the single most common action in ordinary agentic editing and is already
+recoverable via `/rewind`, not just a test to patch around. `go build ./...` is clean. Full record:
+[P67.10, 2026-09-02](#p6710-2026-09-02).
+
+**Last updated (previous):** 2026-09-02 (thirty-seventh record) — **QUAL-05, P67.14, P64.4 shipped, and P81.33's
 argv half done in part: the `internal/tui` package was opened for its own reason and four items folded
 in, as QUAL-05's own "promote when" condition asked for.** `model` (`tui.go`) dropped from 97 flat
 fields to 19, grouped into ten cohesive sub-structs (`streamState`, `toolsUI`, `overlays`, `chrome`,
@@ -723,6 +782,186 @@ likewise left for the rotation decision that already covers it.
 Every change was run against its package's test suite (`go test ./internal/server/...`,
 `./internal/security/...`, `./internal/sandbox/...`, `./internal/tui/...`, `./internal/config/...`,
 `./internal/cli/...`) plus a full `go build ./...`; new regression tests were added at each layer.
+
+### P80.2 and P80.3, 2026-09-03
+
+**Both filed 2026-08-30 as Tier 4 residue of the comprehensive architecture and security audit;
+neither had a fired trigger. Asked for directly 2026-09-03**, the same class of trigger P71.6/P71.11
+(2026-09-01) and P74.21 (2026-09-02) shipped on: a direct request is not the speculation the parking
+condition is conditioned against, even with no concrete cargo cited.
+
+**P80.2 — the three packages the audit's C1 never read.** Three independent investigations, one per
+package, each scoped to correctness rather than the permission-posture judgment the audit's own MCP
+server and swarm-backend passes already made.
+
+- **`internal/tui`** (17.6k non-test lines) — clean. Every path rendering model- or tool-originated
+  text goes through `internal/termsafe` before hitting the terminal: `stream.go`'s `applyEvent` strips
+  guard/error/steer text at ingestion, `mdRender`/`appendThinkingBlock` strip before glamour/lipgloss
+  render model prose, `sanitize.go` covers both raw-ESC and JSON-`\u00XX`-escaped forms for tool-call
+  previews and the approval dialog (an 8-case regression table already covers write/edit/multi_edit/
+  shell/web_fetch/unknown-tool), and `toolview.go`/`update_shell.go`/`update_slash.go`/
+  `sessionpicker.go` strip their own surfaces. This is already a heavily-audited path (P24.20/FIND-17,
+  P66.6/SEC-14, P66.15). Bubbletea concurrency: the package's one `go func()` (`terminal.go:68`)
+  communicates only through channels consumed via `tea.Cmd`, never touching model fields directly;
+  every `func() tea.Msg` closure captures value copies off a value-receiver `(m model)`. Resource
+  lifetime: the one goroutine's context is wired to every exit path (quit, ctrl+c, model swap,
+  slash-command dispatch); no tickers or `time.AfterFunc` calls exist in the package; SSE lifecycle
+  lives in `internal/client`, outside this package.
+- **Sandbox container backends** (`internal/sandbox`'s Docker/Podman/WSL/Apple paths) — clean.
+  `sandboxselect.go`'s container→OS→local cascade logs and surfaces every fallback step on `/status`;
+  `cfg.Strict` (on by default since P81.22) hard-refuses startup rather than silently bottoming out at
+  unsandboxed local, and `unsandboxedAutoExecError`/`cronAutoApproveGuard` separately block unattended
+  exec (`auto_approve_exec`, `mode: auto`, cron `auto_approve`) from running on a local backend without
+  an explicit opt-out — the audit's own prior P7.4/P25.2/P81.22/SEC-09 remediation, re-verified rather
+  than found wanting. `--network none` is applied identically across all three run-arg builders and the
+  persistent-container start path. All CLI args go through `exec.CommandContext` as `[]string`, never
+  shell-concatenated — no injection surface into the host invocation itself. `pathvalidator.go` does
+  real symlink-resolved, fail-closed mount confinement against `workspace.additional_roots`. Persistent
+  containers key purely on working-directory string, and directory *is* the trust boundary in this
+  model, so no cross-boundary reuse path exists.
+- **`internal/drive`** — one real defect, fixed this sitting (below); the fatal/resettable abort split
+  itself checked out clean. The phase loop (`drive.go:574-675`) classifies each `engine.Run` error
+  through `recoverBackendDown` (P50.1), `provider.IsContextOverflowError` (P47.2),
+  `recoverToolFailureStall`/`ErrToolFailureLimit` (P52.3) and `recoverReasoningLoop`/`ErrLoopDetected`
+  (P57.1) — each resets and continues; anything unrecognized, including `ErrTurnStalled` and
+  `ErrWallClockLimit`, falls through to a fatal `return err`. That is exactly the split CLAUDE.md
+  documents: stall/wall-clock fatal by not being handled, loop/tool-failure resettable by being handled.
+
+**The `internal/drive` defect and its fix.** `internal/engine/budget.go`'s own type doc says the bound
+is "deliberately per-Run rather than per-Engine: in the phased drive... a Run is one phase turn, which
+is the unit the drive resets around. One global cap would guillotine a long build mid-phase." That is
+not what `newRunBudget()` did: it snapshotted a fresh wall-clock start time on every call, but never the
+cost tracker's running totals, and `costExceeded`/`tokensExceeded` compared the tracker's raw cumulative
+`TotalUSD`/`TotalTokens`/`TotalGeneratedTokens` against the configured bound unconditionally. The
+tracker itself is constructed once per drive and shared for its whole lifetime by both callers —
+`internal/cli/chat_drive.go` (one `Engine` reused across phase turns) and `internal/server/drive.go`
+(likewise) — so `BudgetUSD`/`MaxTokensPerRun` were being enforced as a cumulative cap over the entire
+drive, the inverse of the documented per-phase-turn reset, and precisely the "guillotine a long build
+mid-phase" failure the comment says the design avoids. `budget_test.go` only ever exercised a single
+`Run()` call, so the gap was untested.
+
+Fixed in `internal/engine/budget.go`: `runBudget` gained `baseUSD`/`baseTokens`/`baseGenTokens`,
+captured from the tracker in `newRunBudget()` alongside the existing wall-clock `start`;
+`costExceeded`/`tokensExceeded` now check `tracker.TotalX() - baseX` against the bound instead of the
+raw total. `TestBudgetResetsPerRunNotPerTracker` (new) drives one `Engine` through two `Run()` calls on
+a shared tracker — the first spends $0.90 of a $1.00 budget and ends cleanly, the second spends another
+$0.50 (combined $1.40, over budget under the old cumulative check) and must not abort, since $0.50 alone
+is within budget; verified to fail against the pre-fix code and pass against the fix.
+`TestTokenBudgetErrorNamesTheOtherKey` (existing) had to be reordered — it built a tracker, added usage,
+*then* constructed a budget from it, which the fix now reads as "this usage happened before the run
+started" and baselines it away; usage is now added after `newRunBudget()`, matching the order
+`Engine.Run` itself uses.
+
+**P80.3 — the struct half of the audit's L4.** The file half (`server.go` 1,814 → 535 lines across
+seven topic files) shipped 2026-08-30 as a pure move; the struct half — grouping `Server`'s ~60 fields
+along the eight mutexes they imply — was deliberately left for a separate sitting, since it rewrites
+every reference rather than moving code, and bundling the two would have made neither reviewable on its
+own. This sitting took the roadmap entry's own suggested first slice: the per-session `sync.Map`
+family, whose accessors already lived in one file (`sessionscope.go`) and whose
+`handleDeleteSession` cleanup obligation is exactly the shape the entry's motivating example (**M6**,
+`toolCallWarned`) failed at. `sessionTools`, `taskScopes`, `sessionWorkdirs`, `sessionSkills`,
+`promptSectionCache`, `sessionPermCache` and `sessionSems` — the seven the entry named — plus
+`sessionWebCache` (added by P71.6, after the entry was filed, but documented as cleaned up "alongside
+the other per-session maps") are now fields of a new `sessionMaps` struct, reachable as the single
+`Server.sess` field in place of the eight it replaces. Each map keeps its own independent zero-value-
+ready `sync.Map` semantics; grouping added no lock and changed no concurrency behavior.
+
+The ~50-test-call-site concern the entry raised for the struct as a whole did not apply to this slice:
+no test in the package constructs any of the eight fields via a struct literal (a `sync.Map`'s zero
+value is already usable, so `newWithDeps` and every test's own `&Server{...}` literal simply omit
+them). The real call sites were a short, contained list — `sessions.go` (creation and
+`handleDeleteSession`/`forgetSessionRunState` cleanup), `sessionscope.go` (the accessors themselves),
+`messages.go` (two), `helpers.go` (one) — plus three test files (`registry_race_test.go`,
+`server_test.go`, `session_state_cleanup_test.go`) that reached the fields directly for setup/assertion
+and were updated the same mechanical way.
+
+**Tests:** `internal/engine/budget_test.go` (`TestBudgetResetsPerRunNotPerTracker` new,
+`TestTokenBudgetErrorNamesTheOtherKey` reordered); full `internal/server` suite (unchanged pass, no new
+tests needed — the refactor is a pure rename with no behavior change). `go build ./...` and `go test
+./...` are green except the one pre-existing, unrelated `TestEveryRegisterCallSiteDecidesTheLocalProfile`
+failure (confirmed identical on the unmodified tree).
+
+### P67.10, 2026-09-02
+
+Taken later the same day as the QUAL-05/P67.14/P64.4/P81.33 `internal/tui` sitting, but a separate,
+unrelated sitting against the tool interface itself. The entry read four missing seams out of the leaked
+Claude Code CLI source comparison and explicitly said "do not build all four together; they are related
+only by living on the same interface" — superseded here by direct request to build all four, each still
+kept independent (its own type, its own default, its own tests) rather than merged into one mechanism.
+
+**`EquivalenceClassifier` — the loop-signature family's third member.** Loop detection already had two
+per-tool opt-outs: `PollExempter` (P53.2, hide the call entirely) and `SignatureTransparent` (hide only
+its arguments). `EquivalenceClassifier.EquivalenceKey(input) (string, bool)` is the third: a tool-chosen
+comparison key stands in for `canonicalizeToolInput`'s generic structural comparison when it returns
+`true`, and falls back to that generic comparison on `("", false)` — the same safe-default shape as the
+other two. `turnSignatureExcludingPolls` (`loopdetect.go`) grew a third parameter, `equivKey`, consulted
+only for a call that survives both existing filters; `turnSignature` and every existing call site pass
+`nil` for it, reproducing the pre-P67.10 signature exactly when a tool doesn't opt in.
+`internal/engine/equivalence_test.go` and updates to `loopdetect_test.go`/`signaturetransparent_test.go`
+keep the three sets narrow and disjoint, as the entry asked.
+
+**`Destroyer` — an irreversible axis distinct from `Capability`.** `tool.Capability` separates read from
+write from execute but never reversible writes from irreversible ones. `Destroyer.Destructive(ctx,
+input) bool` takes a `context.Context` for the same reason `CapabilityOverrider` does — a call's
+destructiveness can depend on the actual target (does the file already exist?), not a construction-time
+root. `permission.Gate.Check` now escalates an otherwise-silent `Allow` to `Ask` whenever
+`tool.EffectiveDestructive` claims a call destructive (`DestructiveEscalationRule`, appending
+"(irreversible)" to the approval reason), except in `ModeAuto`, which `Decide` already short-circuits to
+`Allow` unconditionally and stays exempt to preserve that mode's own contract. `git_pr` is the shipped
+demonstrator: `Destructive` returns `true` unconditionally, since every call pushes the current branch
+and opens a PR — a `CapNetwork` call that was previously allowed silently in build mode despite being a
+one-way, externally-visible send. `internal/tool/builtin/destructive_test.go` and
+`internal/permission/permission_test.go` cover the escalation and the auto-mode exemption.
+
+`write_file` deliberately does **not** implement `Destroyer`, despite "overwrite" being the entry's own
+motivating example. It was tried — resolve the path, `os.Stat` it, the same shape `CapabilityOverrider`'s
+per-call classifiers already use — and it escalated build mode's silent `Allow` to an unanswered `Ask` on
+`TestCheckpointRewind`'s very first write, hanging that package's entire test run for the full 10-minute
+suite timeout. Read as a signal rather than a test to patch around: overwriting an existing file is the
+single most common action in ordinary agentic editing, and it is already recoverable via `/rewind`
+(`internal/checkpoint`) — escalating it would trade real approval fatigue for protection a checkpoint
+already provides. The comment explaining the decision lives at the `writeTool` declaration in
+`internal/tool/builtin/file.go`, next to the code that doesn't call `Destroyer`.
+
+**`InterruptPreference` + `Engine.RequestStop` — a soft-stop path.** Every stop path before this meant
+"cancel the run's context right now" — the client tearing down its HTTP request, `POST
+/sessions/{id}/stop`, the TUI's ESC/Ctrl+C. `InterruptPreference.PreferFinish(input) bool` lets a tool
+say a call is cheap enough to just let finish rather than cancel mid-flight. `Engine.RequestStop(hard,
+hardCancel)` (new file `internal/engine/interrupt.go`) never owns cancellation itself — `hardCancel` is
+always the caller's real `context.CancelFunc` — it only decides *when* to call it: immediately if `hard`
+or `hardCancel` is `nil` (today's only behavior, unchanged); immediately if nothing is in flight or any
+in-flight call's tool doesn't prefer to finish (`tool.EffectivePreferFinish`, checked against
+`Engine.inFlight`, a new map tracked by `markInFlight`/`clearInFlight` in `toolexec.go`'s `executeTool`,
+distinct from the existing `startedTools` — this one is cleared the instant a call returns, answering
+"what's running right now" rather than "what has ever started"); otherwise it arms
+`gracefulStopRequested` and a `gracefulStopGrace` (5s) safety-net timer via `time.AfterFunc`, both new
+`Engine` fields guarded by `gracefulStopMu`. `consumeGracefulStop` is checked once per turn, at the one
+safe point a soft stop is honored — immediately after a tool round's results are already appended to the
+conversation in `runIteration`, so ending the run there never discards a result the model or client
+hasn't seen; it reports `ErrInterrupted`, the same sentinel a hard cancel produces. `stopSession`
+(`internal/server/runs.go`) now stores a `func(hard bool)` instead of a raw `context.CancelFunc` and
+calls it as `st.cancel(false)`; `streamRun` (`messages.go`) wires it as `func(hard bool) {
+eng.RequestStop(hard, stopCancel) }`. `toolPreferFinish`/`timeAfterFunc` are var-seams over the real
+functions, the same pattern `gitpr.go`'s `scanPRTextForSecrets` already uses, so
+`internal/engine/interrupt_test.go`'s 245 lines can exercise the grace-timer fallback without an actual
+multi-second sleep.
+
+**`SearchHinter` — a keyword line for deferred tools.** `<deferred_tools>` printed only
+`tool.Summarize`, one string serving both the prompt-budget constraint and discoverability and therefore
+optimized for neither. `SearchHinter.SearchHint() string` supplies a short keyword line, separate from
+the summary; `Registry.Deferred()`'s `Info` gained a `Keywords` field populated by a new package-private
+`searchHint` helper (mirrors `Summarize`'s own fallback-to-empty shape), and
+`sysprompt.DeferredToolsBlock` appends `[keywords]` after the summary when present. `dast.go`'s
+`dastScanTool` and `security.go`'s `securityScanTool` are the two shipped consumers — `"OWASP ZAP, DAST,
+XSS, injection, penetration test, pentest"` and `"opengrep, trivy, gitleaks, trufflehog, grype, SAST,
+secrets, CVE, SBOM"` respectively, naming the concrete scanners and attack classes each tool's
+`ShortDescription` omits in favor of a one-line summary. `internal/sysprompt/deferred_test.go` and
+`internal/tool/seams_test.go` (128 lines, covering all four seams' safe-default fallback behavior
+together) are the new tests; `TestServerRuns`-adjacent coverage in `internal/server/runs_test.go` was
+updated for the `cancel` field's new signature.
+
+`go build ./...` and `go test ./internal/engine/... ./internal/permission/... ./internal/server/...
+./internal/sysprompt/... ./internal/tool/...` are green.
 
 ### QUAL-05, P67.14, P64.4 and P81.33's argv half, 2026-09-02
 

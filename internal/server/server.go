@@ -283,18 +283,10 @@ type Server struct {
 	// handleApprove and read by sseApprover.Approve.
 	pendingApprovals sync.Map
 
-	// sessionPermCache maps "sessionID\x00toolName" → struct{} for tools the
-	// user has approved with "allow always" during the current daemon lifetime.
-	sessionPermCache sync.Map
-
 	// pendingSteers maps session ID → *steerBox for mid-run steering.
 	// The box is written by handleSteer and drained by the engine between tool
 	// rounds, then by handlePostMessage once the run ends.
 	pendingSteers sync.Map
-
-	// sessionSems serializes runs within a session. Each session maps to a
-	// buffered channel of size 1; acquiring it blocks until the prior run finishes.
-	sessionSems sync.Map // string → chan struct{}
 
 	// runSem bounds total concurrent active runs across every session
 	// (P21.5). nil when server.max_concurrent_runs is 0 (unlimited).
@@ -304,52 +296,15 @@ type Server struct {
 	// backlog — see ServerConfig.MaxConcurrentRuns.
 	runSem chan struct{}
 
-	// sessionTools maps session ID → a *tool.Registry clone of s.tools (P9).
-	// tool_search exposes deferred tools by mutating a registry's exposed map;
-	// without a per-session clone, that mutation was permanent and
-	// process-wide, silently exposing a tool's schema to every other
-	// concurrent or future session and persona sharing the daemon's one
-	// registry. Lazily created on first use per session and reused across
-	// that session's turns so a loaded tool stays loaded turn to turn.
-	sessionTools sync.Map // string → *tool.Registry
-
-	// taskScopes maps session ID → that session's *permission.TaskScope (P46.1),
-	// the per-task file-write allowlist the `scope` tool mutates and ScopeGate
-	// enforces. Lazily created per session and reused across its turns so a
-	// scope set during one turn stays in force until the model clears it.
-	taskScopes sync.Map // string → *permission.TaskScope
-
-	// sessionWorkdirs maps session ID → that session's own working directory
-	// (P25.1), resolved and validated once at creation time in
-	// handleCreateSession. Missing/empty means the session uses the
-	// daemon's default workspace (s.workspace) — see workdirFor.
-	sessionWorkdirs sync.Map // string → string
-
-	// sessionSkills maps session ID → extra embedded built-in skill names
-	// activated on demand for that session (e.g. via /threat-model), layered
-	// on top of the persistent cfg.Skills.BuiltinEnabled list. In-memory only:
-	// it resets on daemon restart and never touches config, so built-ins stay
-	// dormant by default and are only ever pulled in by an explicit request.
-	sessionSkills sync.Map // string → []string
-
-	// promptSectionCache memoizes the *stable* system-prompt sections per
-	// session (P67.2): sessionID → *sync.Map keyed by promptSectionKey. Only
-	// sections declared with stableSection land here; a volatile one is
-	// recomputed every turn by design. Cleared for a session in
-	// handleDeleteSession alongside the other per-session maps, which is what
-	// keeps it from growing without bound in a long-lived daemon.
-	promptSectionCache sync.Map // string → *sync.Map
-
-	// sessionWebCache maps session ID → that session's *webcache.Cache
-	// (P71.6): web_fetch/web_search memoization, so a URL or query already
-	// seen this session is served from memory instead of re-issued — the
-	// mechanism the deep-research skill's audit trail always claimed to
-	// have. Lazily created per session and reused across its turns, exactly
-	// like sessionToolRegistry, so a page fetched in turn 1 is still cached
-	// after a compaction has erased the model's own memory of fetching it.
-	// Cleared for a session in handleDeleteSession alongside the other
-	// per-session maps.
-	sessionWebCache sync.Map // string → *webcache.Cache
+	// sess holds the per-session sync.Map family (P80.3): tool registry
+	// clones, task scopes, workdirs, activated skills, prompt-section cache,
+	// approved-tool cache and web cache, each keyed by session ID (or, for
+	// permCache, "sessionID\x00toolName"). Grouped into sessionMaps (see
+	// sessionscope.go) so a map added here sits next to the others
+	// handleDeleteSession must clear, rather than in a flat 60-field list
+	// where it's easy to add one and forget the cleanup — exactly the shape
+	// of the M6 audit bug (a per-session map handleDeleteSession forgot).
+	sess sessionMaps
 
 	// closeOnce makes Close idempotent: ListenAndServe defers it, and an
 	// embedder driving the Server through Handler() calls it directly, so both

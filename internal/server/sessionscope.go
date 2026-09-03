@@ -8,6 +8,7 @@ package server
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/knowledge"
@@ -20,6 +21,70 @@ import (
 	"github.com/fiddler110/aegis/internal/webcache"
 )
 
+// sessionMaps groups the sync.Map family keyed by session ID (P80.3 — see
+// the CLAUDE.md note on Server's field count). Each map is independent and
+// keeps its own zero-value-is-ready sync.Map semantics; grouping them here
+// is purely organizational; it does not add a lock or change concurrency
+// behavior. tools, taskScopes, workdirs, skills and webCache are keyed by
+// session ID directly; promptCache maps session ID to a *sync.Map keyed by
+// promptSectionKey; permCache is keyed by "sessionID\x00toolName".
+type sessionMaps struct {
+	// tools maps session ID → a *tool.Registry clone of s.tools (P9).
+	// tool_search exposes deferred tools by mutating a registry's exposed map;
+	// without a per-session clone, that mutation was permanent and
+	// process-wide, silently exposing a tool's schema to every other
+	// concurrent or future session and persona sharing the daemon's one
+	// registry. Lazily created on first use per session and reused across
+	// that session's turns so a loaded tool stays loaded turn to turn.
+	tools sync.Map // string → *tool.Registry
+
+	// taskScopes maps session ID → that session's *permission.TaskScope
+	// (P46.1), the per-task file-write allowlist the `scope` tool mutates and
+	// ScopeGate enforces. Lazily created per session and reused across its
+	// turns so a scope set during one turn stays in force until the model
+	// clears it.
+	taskScopes sync.Map // string → *permission.TaskScope
+
+	// workdirs maps session ID → that session's own working directory
+	// (P25.1), resolved and validated once at creation time in
+	// handleCreateSession. Missing/empty means the session uses the
+	// daemon's default workspace (s.workspace) — see workdirFor.
+	workdirs sync.Map // string → string
+
+	// skills maps session ID → extra embedded built-in skill names activated
+	// on demand for that session (e.g. via /threat-model), layered on top of
+	// the persistent cfg.Skills.BuiltinEnabled list. In-memory only: it
+	// resets on daemon restart and never touches config, so built-ins stay
+	// dormant by default and are only ever pulled in by an explicit request.
+	skills sync.Map // string → []string
+
+	// promptCache memoizes the *stable* system-prompt sections per session
+	// (P67.2): sessionID → *sync.Map keyed by promptSectionKey. Only
+	// sections declared with stableSection land here; a volatile one is
+	// recomputed every turn by design. Cleared for a session in
+	// handleDeleteSession alongside the other per-session maps, which is what
+	// keeps it from growing without bound in a long-lived daemon.
+	promptCache sync.Map // string → *sync.Map
+
+	// permCache maps "sessionID\x00toolName" → struct{} for tools the user
+	// has approved with "allow always" during the current daemon lifetime.
+	permCache sync.Map
+
+	// sems serializes runs within a session. Each session maps to a buffered
+	// channel of size 1; acquiring it blocks until the prior run finishes.
+	sems sync.Map // string → chan struct{}
+
+	// webCache maps session ID → that session's *webcache.Cache (P71.6):
+	// web_fetch/web_search memoization, so a URL or query already seen this
+	// session is served from memory instead of re-issued — the mechanism the
+	// deep-research skill's audit trail always claimed to have. Lazily
+	// created per session and reused across its turns, exactly like tools,
+	// so a page fetched in turn 1 is still cached after a compaction has
+	// erased the model's own memory of fetching it. Cleared for a session in
+	// handleDeleteSession alongside the other per-session maps.
+	webCache sync.Map // string → *webcache.Cache
+}
+
 // activateSessionSkill turns on a built-in skill for one session: it's added
 // to that session's extra-enabled set (read by effectiveSystem for the
 // <skills_available> index) and the session's tool registry clone gets an
@@ -27,7 +92,7 @@ import (
 // waiting for a restart or writing to config.
 func (s *Server) activateSessionSkill(id, name string) {
 	var extra []string
-	if v, ok := s.sessionSkills.Load(id); ok {
+	if v, ok := s.sess.skills.Load(id); ok {
 		extra = v.([]string)
 	}
 	for _, n := range extra {
@@ -36,7 +101,7 @@ func (s *Server) activateSessionSkill(id, name string) {
 		}
 	}
 	extra = append(append([]string{}, extra...), name)
-	s.sessionSkills.Store(id, extra)
+	s.sess.skills.Store(id, extra)
 
 	workdir := s.workdirFor(id)
 	enabled := append(append([]string{}, s.cfg.Skills.BuiltinEnabled...), extra...)
@@ -58,7 +123,7 @@ func (s *Server) activateSessionSkill(id, name string) {
 // plus any activated on demand for this session.
 func (s *Server) sessionEnabledSkills(id string) []string {
 	enabled := append([]string{}, s.cfg.Skills.BuiltinEnabled...)
-	if v, ok := s.sessionSkills.Load(id); ok {
+	if v, ok := s.sess.skills.Load(id); ok {
 		enabled = append(enabled, v.([]string)...)
 	}
 	return enabled
@@ -73,10 +138,10 @@ func (s *Server) sessionEnabledSkills(id string) []string {
 // every call was cloning ~60 entries under a read lock on the global registry
 // and immediately discarding the result.
 func (s *Server) sessionToolRegistry(id string) *tool.Registry {
-	if v, ok := s.sessionTools.Load(id); ok {
+	if v, ok := s.sess.tools.Load(id); ok {
 		return v.(*tool.Registry)
 	}
-	v, _ := s.sessionTools.LoadOrStore(id, s.tools.Clone())
+	v, _ := s.sess.tools.LoadOrStore(id, s.tools.Clone())
 	return v.(*tool.Registry)
 }
 
@@ -101,10 +166,10 @@ func (s *Server) subAgentToolRegistry(parentSessionID string) *tool.Registry {
 // across a session's turns the way sessionToolRegistry shares a registry
 // clone.
 func (s *Server) sessionWebCacheFor(id string) *webcache.Cache {
-	if v, ok := s.sessionWebCache.Load(id); ok {
+	if v, ok := s.sess.webCache.Load(id); ok {
 		return v.(*webcache.Cache)
 	}
-	v, _ := s.sessionWebCache.LoadOrStore(id, webcache.New())
+	v, _ := s.sess.webCache.LoadOrStore(id, webcache.New())
 	return v.(*webcache.Cache)
 }
 
@@ -112,7 +177,7 @@ func (s *Server) sessionWebCacheFor(id string) *webcache.Cache {
 // creating an empty (inactive) one on first use so the `scope` tool and
 // ScopeGate share the same object across the session's turns.
 func (s *Server) taskScopeFor(id string) *permission.TaskScope {
-	v, _ := s.taskScopes.LoadOrStore(id, permission.NewTaskScope())
+	v, _ := s.sess.taskScopes.LoadOrStore(id, permission.NewTaskScope())
 	return v.(*permission.TaskScope)
 }
 
@@ -136,7 +201,7 @@ func (s *Server) toolRegistryFor(sessionID string) *tool.Registry {
 // without hitting the session store.
 func (s *Server) workdirFor(id string) string {
 	if id != "" {
-		if v, ok := s.sessionWorkdirs.Load(id); ok {
+		if v, ok := s.sess.workdirs.Load(id); ok {
 			if wd, _ := v.(string); wd != "" {
 				return wd
 			}

@@ -49,10 +49,10 @@ func TestDeleteSessionFreesPerSessionRunState(t *testing.T) {
 	// the semaphore the way handlePostMessage does and record an
 	// "allow always" grant the way sseApprover does.
 	srv.sessionSemaphore(meta.ID)
-	srv.sessionPermCache.Store(meta.ID+"\x00shell", struct{}{})
-	srv.sessionPermCache.Store(meta.ID+"\x00write_file", struct{}{})
+	srv.sess.permCache.Store(meta.ID+"\x00shell", struct{}{})
+	srv.sess.permCache.Store(meta.ID+"\x00write_file", struct{}{})
 	// A second session's grant must survive the first one's delete.
-	srv.sessionPermCache.Store("other-session\x00shell", struct{}{})
+	srv.sess.permCache.Store("other-session\x00shell", struct{}{})
 	// M6: toolCallWarned is the third map keyed by session, and was the one
 	// still missing from this list — it records that a session was told its
 	// model cannot call tools, and nothing ever removed the entry.
@@ -68,13 +68,13 @@ func TestDeleteSessionFreesPerSessionRunState(t *testing.T) {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
-	if _, ok := srv.sessionSems.Load(meta.ID); ok {
+	if _, ok := srv.sess.sems.Load(meta.ID); ok {
 		t.Error("sessionSems still holds the deleted session's semaphore")
 	}
-	if got := countKeys(&srv.sessionPermCache, meta.ID+"\x00"); got != 0 {
+	if got := countKeys(&srv.sess.permCache, meta.ID+"\x00"); got != 0 {
 		t.Errorf("sessionPermCache still holds %d grant(s) for the deleted session", got)
 	}
-	if got := countKeys(&srv.sessionPermCache, "other-session\x00"); got != 1 {
+	if got := countKeys(&srv.sess.permCache, "other-session\x00"); got != 1 {
 		t.Errorf("another session's grants were dropped too: %d remain, want 1", got)
 	}
 	srv.toolCallWarnedMu.Lock()
@@ -125,7 +125,7 @@ func TestDeleteSessionFreesWebCache(t *testing.T) {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
-	if _, ok := srv.sessionWebCache.Load(meta.ID); ok {
+	if _, ok := srv.sess.webCache.Load(meta.ID); ok {
 		t.Error("sessionWebCache still holds the deleted session's cache")
 	}
 	// A fresh lookup after delete must build a new, empty cache rather than

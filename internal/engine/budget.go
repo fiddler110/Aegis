@@ -41,19 +41,35 @@ type runBudget struct {
 	tracker   *cost.Tracker
 	now       func() time.Time
 	start     time.Time
+
+	// baseUSD/baseTokens/baseGenTokens are the tracker's cumulative totals at
+	// the moment this budget was created (P80.2 drive-investigation fix): the
+	// cost tracker is one instance shared for a whole drive's lifetime
+	// (internal/drive resets around Run, not around the tracker), so without
+	// a baseline these bounds were being checked against all-time spend
+	// across every phase already run — exactly the "one global cap would
+	// guillotine a long build mid-phase" failure the type doc above says
+	// this design avoids. costExceeded/tokensExceeded check the delta off
+	// these instead of the tracker's raw totals.
+	baseUSD       float64
+	baseTokens    int
+	baseGenTokens int
 }
 
 // newRunBudget captures the bounds configured on e and starts the clock.
 //
 // The baseline is taken here — before compaction, not at the loop — because a
 // compaction pass is itself a model call that can take real time on a local
-// backend, and that is time the operator's bound was meant to cover.
+// backend, and that is time the operator's bound was meant to cover. The same
+// call also snapshots the tracker's current totals, so a phased drive's later
+// Run calls are bounded by what *that* Run spends, not by what every prior
+// phase already spent on the tracker they all share.
 func (e *Engine) newRunBudget() *runBudget {
 	clock := e.now
 	if clock == nil {
 		clock = time.Now
 	}
-	return &runBudget{
+	b := &runBudget{
 		usd:       e.budgetUSD,
 		tokens:    e.maxTokensPerRun,
 		genTokens: e.maxGenTokens,
@@ -62,6 +78,12 @@ func (e *Engine) newRunBudget() *runBudget {
 		now:       clock,
 		start:     clock(),
 	}
+	if b.tracker != nil {
+		b.baseUSD = b.tracker.TotalUSD()
+		b.baseTokens = b.tracker.TotalTokens()
+		b.baseGenTokens = b.tracker.TotalGeneratedTokens()
+	}
+	return b
 }
 
 // deadline attaches the wall-clock bound to ctx as a real deadline (P59.2),
@@ -129,7 +151,7 @@ func (b *runBudget) costExceeded() error {
 	if b.usd <= 0 || b.tracker == nil {
 		return nil
 	}
-	if spent := b.tracker.TotalUSD(); spent >= b.usd {
+	if spent := b.tracker.TotalUSD() - b.baseUSD; spent >= b.usd {
 		return fmt.Errorf("engine: cost budget reached: spent $%.4f of $%.2f limit", spent, b.usd)
 	}
 	return nil
@@ -145,13 +167,13 @@ func (b *runBudget) tokensExceeded() error {
 		return nil
 	}
 	if b.genTokens > 0 {
-		if gen := b.tracker.TotalGeneratedTokens(); gen >= b.genTokens {
+		if gen := b.tracker.TotalGeneratedTokens() - b.baseGenTokens; gen >= b.genTokens {
 			return fmt.Errorf("engine: generation budget reached: the model generated %d of %d tokens (cost.max_generated_tokens_per_run)",
 				gen, b.genTokens)
 		}
 	}
 	if b.tokens > 0 {
-		if total := b.tracker.TotalTokens(); total >= b.tokens {
+		if total := b.tracker.TotalTokens() - b.baseTokens; total >= b.tokens {
 			return fmt.Errorf("engine: token budget reached: counted %d of %d tokens (cost.max_tokens_per_run). "+
 				"That count includes the whole prompt on every turn, so it grows with conversation length as well as with work done — "+
 				"to bound generated output instead, set cost.max_generated_tokens_per_run",

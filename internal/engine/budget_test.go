@@ -262,11 +262,15 @@ func TestMaxGeneratedTokensPerRunCountsOutputOnly(t *testing.T) {
 // told only "used N of M". The abort has to say that the number counts the whole
 // prompt every turn and name the key that counts generated output instead.
 func TestTokenBudgetErrorNamesTheOtherKey(t *testing.T) {
+	// Usage is added *after* newRunBudget baselines the tracker (P80.3: the
+	// baseline must not swallow spend that belongs to this run) so it counts
+	// as this run's own spend, matching how Engine.Run itself orders things —
+	// newRunBudget once at the start, tracker.AddTokens per turn after.
 	tracker := cost.NewTracker()
-	tracker.AddTokens(provider.Usage{InputTokens: 50_000, OutputTokens: 100, IsEstimated: true})
-
 	e := &Engine{cost: tracker, maxTokensPerRun: 10_000}
-	err := e.newRunBudget().tokensExceeded()
+	b := e.newRunBudget()
+	tracker.AddTokens(provider.Usage{InputTokens: 50_000, OutputTokens: 100, IsEstimated: true})
+	err := b.tokensExceeded()
 	if err == nil {
 		t.Fatal("expected the context-token budget to fire")
 	}
@@ -278,10 +282,95 @@ func TestTokenBudgetErrorNamesTheOtherKey(t *testing.T) {
 
 	// The generation budget is checked first, so a run that has blown both is
 	// told the more specific thing rather than the misleading one.
-	e = &Engine{cost: tracker, maxTokensPerRun: 10_000, maxGenTokens: 50}
-	err = e.newRunBudget().tokensExceeded()
+	tracker2 := cost.NewTracker()
+	e = &Engine{cost: tracker2, maxTokensPerRun: 10_000, maxGenTokens: 50}
+	b2 := e.newRunBudget()
+	tracker2.AddTokens(provider.Usage{InputTokens: 50_000, OutputTokens: 100, IsEstimated: true})
+	err = b2.tokensExceeded()
 	if err == nil || !strings.Contains(err.Error(), "generation budget") {
 		t.Errorf("expected the generation budget to take precedence, got %v", err)
+	}
+}
+
+// TestBudgetResetsPerRunNotPerTracker is the P80.2-drive-investigation
+// regression: internal/drive shares one Engine (and therefore one
+// *cost.Tracker) across every phase's Run call, resetting only what Run
+// itself resets — exactly the design runBudget's own doc comment describes
+// ("a Run is one phase turn... one global cap would guillotine a long build
+// mid-phase"). Before the fix, costExceeded/tokensExceeded read the
+// tracker's raw cumulative totals, so a second Run on the same tracker
+// inherited the first Run's spend as a head start against its own budget —
+// the opposite of "per-Run". This drives the same Engine through two Run
+// calls, each individually well under BudgetUSD, whose combined spend would
+// have tripped the old cumulative check.
+func TestBudgetResetsPerRunNotPerTracker(t *testing.T) {
+	// $15/1M input tokens for opus (internal/cost's pricing table): 60,000
+	// input tokens costs $0.90.
+	adapter := &scriptedAdapter{turns: [][]provider.Event{
+		// Run A: a single turn that ends the run outright, spending $0.90 of
+		// a $1.00 budget.
+		{
+			{Type: provider.EventTextDelta, Text: "a"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 60_000}},
+		},
+		// Run B: a turn requesting a tool, spending another $0.50. Combined
+		// with run A's $0.90 that is $1.40 — over budget under the old
+		// cumulative check, but this run alone only spent $0.50.
+		{
+			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "t1", Name: "echo", Input: json.RawMessage(`{"msg":"x"}`)}},
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 33_334}}, // ~$0.50
+		},
+		{
+			{Type: provider.EventTextDelta, Text: "done"},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn},
+		},
+	}}
+
+	reg := tool.NewRegistry()
+	et := &echoTool{}
+	if err := reg.Register(et); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := cost.NewTracker()
+	eng, err := New(Options{
+		Adapter:   adapter,
+		Tools:     reg,
+		Cost:      tracker,
+		BudgetUSD: 1.0,
+		Model:     "claude-opus-4-8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conv := &Conversation{}
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "phase A"}}})
+	if err := eng.Run(context.Background(), conv, func(Event) {}); err != nil {
+		t.Fatalf("run A: unexpected error: %v", err)
+	}
+	if spent := tracker.TotalUSD(); spent < 0.85 || spent > 0.95 {
+		t.Fatalf("run A: expected ~$0.90 spent, got $%.4f", spent)
+	}
+
+	conv.Append(provider.Message{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "phase B"}}})
+	var gotErr error
+	if err := eng.Run(context.Background(), conv, func(ev Event) {
+		if ev.Kind == KindError {
+			gotErr = ev.Err
+		}
+	}); err != nil {
+		gotErr = err
+	}
+
+	if gotErr != nil {
+		t.Errorf("run B must not inherit run A's spend against its own budget, got error: %v", gotErr)
+	}
+	if et.called != 1 {
+		t.Errorf("run B's tool call must run since its own spend is under budget, called %d", et.called)
+	}
+	if adapter.calls != 3 {
+		t.Errorf("run B must complete both its turns, calls = %d", adapter.calls)
 	}
 }
 

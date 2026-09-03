@@ -55,7 +55,7 @@ func TestConcurrentSkillActivationAcrossSessions(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
 			srv.activateSessionSkill(a.ID, "threat-modeling")
-			srv.sessionSkills.Delete(a.ID) // let it activate again next round
+			srv.sess.skills.Delete(a.ID) // let it activate again next round
 			_ = regA.Schemas()
 		}
 	}()
@@ -63,7 +63,7 @@ func TestConcurrentSkillActivationAcrossSessions(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
 			srv.activateSessionSkill(b.ID, "content-review")
-			srv.sessionSkills.Delete(b.ID)
+			srv.sess.skills.Delete(b.ID)
 			_ = regB.Deferred()
 		}
 	}()
