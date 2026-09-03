@@ -15,7 +15,6 @@
     - [P60.3 — Checkpoints capture files only, so `/rewind` is silent about everything else](#p603--checkpoints-capture-files-only-so-rewind-is-silent-about-everything-else)
     - [P65.4 — Resume is phase-granular, artifact-inferred, and only the drive has it](#p654--resume-is-phase-granular-artifact-inferred-and-only-the-drive-has-it)
     - [P67.13 — There is no way to execute a plan without committing to it](#p6713--there-is-no-way-to-execute-a-plan-without-committing-to-it)
-    - [P66.26 — `synchronous=NORMAL` on the three SQLite databases (PERF-02, refiled from P66.9)](#p6626--synchronousnormal-on-the-three-sqlite-databases-perf-02-refiled-from-p669)
     - [P80.3 remainder — `Server`'s auth/lockout and context-window field groups](#p803-remainder--servers-authlockout-and-context-window-field-groups)
     - [P66.19 — Capability gaps with no fired trigger](#p6619--capability-gaps-with-no-fired-trigger)
     - [P64.5 — `ask_user` is one free-form question; unattended answers cannot be routed](#p645--ask_user-is-one-free-form-question-unattended-answers-cannot-be-routed)
@@ -43,9 +42,24 @@ same day it was re-tiered, P81.31 shipped in full, P81.18 shipped except one exp
 helper — see below); full closing
 record in
 [releases.md](releases/releases-01.md#threat-model-2026-08-31--the-p81-batch-closing-record).
-Tier 4: **20 open** — parked build items, none with a fired trigger; see
+Tier 4: **19 open** — parked build items, none with a fired trigger; see
 [Open Work — Tier 4](#open-work--tier-4). Verification: **6 open** — code already written,
 waiting on a live-model run; see [Verification Work](#verification-work).
+
+**P66.26 closed, P66.18 and P66.23 partially shipped, 2026-09-03.** Taken on direct request to
+review the P66.17/.18/.20/.23/.26 residue grab-bags for anything actually implementable now. **P66.26**
+shipped in full: `internal/sqlitestore.OpenDerived` runs `knowledge.db` and `longmem.db` at
+`synchronous=NORMAL`; `sessions.db` stays at the default FULL, per the entry's own contentious-half
+reasoning. Two findings shipped out of **P66.18**'s residue (ARCH-09: a mid-stream `EventError` no
+longer discards text already streamed to the user; QUAL-09: `internal/drive` gained a package doc
+comment) and two out of **P66.23**'s (VULN-07: `expandFileMentions` now confines through the same
+symlink-aware `sandbox.ValidatePath` every other read path uses, closing the workspace-symlink escape;
+VULN-10: a hook's captured stderr is now capped at 8 KiB instead of unbounded). **P66.20**'s remaining
+findings were checked against current code and none justified a residue-drive-by fix this sitting —
+see the entry for what was checked and why. **P66.17** was not investigated against code this sitting
+(its 11 findings are local-model behavior/estimation nuances the roadmap already flags as
+individually cheap but easy to get wrong blind — see the entry). Full record:
+[P66.26 closed, P66.18/P66.23 partially shipped, 2026-09-03](releases/releases-01.md#p6626-closed-p6618p6623-partially-shipped-2026-09-03).
 
 **P81.11 closed 2026-09-03.** Its residual scheduling question — whether `govulncheck` gets a
 schedule of its own independent of the disabled `ci.yml` — turned out to already be answered: a
@@ -149,15 +163,17 @@ condition for what would change that.
 
 ## Open Work — Tier 4
 
-**Status: 20 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
+**Status: 19 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
 trigger), two from the P81 threat-model batch (**P81.7**, **P81.28**, each parked for a stated
 reason — see each entry; both partially shipped 2026-09-03, remainder described in each entry),
-six from the P66 review batch, three from the P67 external-source reading (**P67.11**, **P67.12**,
+five from the P66 review batch, three from the P67 external-source reading (**P67.11**, **P67.12**,
 **P67.13**), and **P77.6** (spun out of P66.19). **P81.11** closed 2026-09-03 (see
 [Status](#status)) rather than staying in this count; **P81.31** shipped in full and **P81.18**
 shipped except its explicitly-deferred trust-store helper, both 2026-09-03 (see
 [releases.md](releases/releases-01.md#p8131-shipped-p8118-shipped-except-its-trust-store-helper-2026-09-03)).
-Everything else that was ever in this tier has shipped — see
+**P66.26** closed in full the same day (see [Status](#status)); **P66.18** and **P66.23** stay open
+with part of their residue shipped — see each entry. Everything else that was ever in this tier has
+shipped — see
 [releases.md](releases/releases-01.md#roadmap-housekeeping-closed-items-migrated-from-roadmapmd-2026-09-03)
 for the closed-item record.
 
@@ -262,15 +278,27 @@ build, with no fired trigger of its own.
 
 ### P66.18 — Architecture, quality and maintainability residue
 
-A mid-stream `EventError` discards the whole assistant turn **including text already streamed to the
-user**, so the transcript loses content the user watched arrive (ARCH-09) — the most user-visible item
-in this grab-bag and the one most likely to be reported as a bug. Session-scoped in-memory state leaks
-on prune, and two maps leak on delete (ARCH-10). Ten ad-hoc `truncate` helpers sit alongside the one
-canonical truncation policy in `truncate.go` (QUAL-07). `context.Background()` appears inside
-request-scoped handlers (QUAL-08). `internal/drive` has no package doc and ~10.5% of exported symbols
-are undocumented (QUAL-09).
+**ARCH-09 and QUAL-09 shipped 2026-09-03.** A mid-stream `EventError` used to discard the whole
+assistant turn **including text already streamed to the user**, so the transcript lost content the
+user watched arrive — the most user-visible item in this grab-bag and the one most likely to be
+reported as a bug. `Engine.turn` (`internal/engine/engine.go`) now builds the same partial content
+(thinking then text) on `EventError` that a successful turn would, and the caller appends it to the
+conversation before propagating the error — covered by
+`TestMidStreamErrorPreservesStreamedText`/`TestMidStreamErrorWithNoTextAppendsNothing`
+(`internal/engine/midstreamerror_test.go`). `internal/drive` gained a package doc comment (moved from
+a floating comment that sat one declaration too late to be recognized as one).
 
-Priority: Tier 4 — no trigger.
+**What remains.** Session-scoped in-memory state leaks on prune, and two maps leak on delete
+(ARCH-10) — not investigated this sitting. Ten ad-hoc `truncate` helpers sit alongside the one
+canonical truncation policy in `truncate.go` (QUAL-07) — read but not touched: each helper differs
+in byte-vs-rune handling and notice text, so collapsing them blind risks a silent behavior change:
+worth its own sitting with each call site checked, not a residue-grab-bag drive-by.
+`context.Background()` appears inside request-scoped handlers (QUAL-08) — not investigated this
+sitting. `internal/drive`'s ~10.5% undocumented-exported-symbol figure was not re-measured; a spot
+check of the package's exported declarations found each already carrying a preceding comment, so
+the gap (if it still exists) is smaller than originally measured.
+
+Priority: Tier 4 — no trigger. ARCH-09 and QUAL-09 shipped; ARCH-10, QUAL-07 and QUAL-08 remain.
 
 ### P66.20 — Efficiency residue
 
@@ -292,6 +320,16 @@ to the pre-existing P60.3. Two `flushMessages` calls per turn where one would do
 and would silently corrupt text (PERF-08) — marked SUSPECTED and never confirmed. If any item here is
 promoted, promote that one, and confirm it first.
 
+**Checked 2026-09-03, nothing shipped.** PERF-09 was read against the current
+`internal/server/messages.go`: the two `flushMessages` calls fire at different points in a turn
+(`KindTurnDone`, before the tool round runs, vs `KindTrace`, after it) and the function already
+short-circuits to a no-op when nothing new is pending — so the "second call" is a cheap guarded check,
+not a second write, and there is no real waste to remove. PERF-04, PERF-06 and PERF-07 were read but
+not attempted: PERF-04's affordability was already established by the entry's own benchmark, but
+wiring a staleness check through `server.go`'s repo-map lifecycle without regressing the `POST
+/repomap/index` path it already has is more than a residue-drive-by; PERF-07 is explicitly
+sequenced behind P60.3, which has no container-commit checkpoint mechanism to compress/dedupe yet.
+
 Priority: Tier 4 — no triggers. PERF-08 is the only one with a correctness edge.
 
 ### P66.23 — Go-code security residue
@@ -303,20 +341,40 @@ scheduled.
 general fact behind it is worth more than the instance: **nothing in this module validates tool input
 against `InputSchema()`, so every enum in every builtin is advisory** (VULN-04, downgraded to Low by
 arbitration because `latexBuildTool.Capability()` is already `CapExecute`, so no boundary is crossed —
-but a future `CapRead` tool with an enum would be a different story). The DAST work directory is
-chmod'ed 0777 in a shared temp dir, letting a local user plant the SARIF that becomes both the
-operator's report and model context (VULN-06, POSIX-only, needs a hostile local user racing a scan
-window). `expandFileMentions` confines lexically only, so a workspace symlink reads outside the root —
-bypassing the symlink check every other read path gets (VULN-07, reachability caveat: only the
-planted-symlink variant is confirmed). Windows reserved device names and ADS (`file.txt:stream`) are
-not rejected by path validation (VULN-08, read but never executed). Five walk callbacks read whole
-files unbounded (VULN-09). Hook stderr is captured unbounded and returned to the model (VULN-10).
+but a future `CapRead` tool with an enum would be a different story). Five walk callbacks read whole
+files unbounded (VULN-09).
+
+**VULN-07 and VULN-10 shipped 2026-09-03.** `expandFileMentions` (`internal/server/messages.go`) used
+to confine lexically only (`filepath.Rel` against `..`), so a workspace symlink could resolve outside
+the root even though the mention text itself never named a traversal — it now validates through
+`sandbox.ValidatePath`, the same symlink-aware confinement every other read path in Aegis goes
+through, closing the gap the reachability caveat named. Regression:
+`TestExpandFileMentionsConfinement/symlink_escape_is_blocked`
+(`internal/server/messages_mentions_test.go`; skips gracefully on a Windows box without
+`SeCreateSymbolicLinkPrivilege`/Developer Mode, matching the existing `internal/sandbox` convention).
+Hook stderr (`internal/hooks/exec.go`) is now capped at 8 KiB via a `capturedStderr` writer that
+silently discards past the limit rather than growing unbounded — it becomes both the pre_tool_use veto
+reason handed to the model and a logged field, so an unbounded capture let a runaway or hostile hook
+flood both. Regression: `TestCapturedStderrCapsOutput` (`internal/hooks/exec_test.go`).
+
+**VULN-06 checked, not fixed.** The DAST work directory is chmod'ed 0777 in a shared temp dir
+(`internal/security/dast.go`), which does look like a quick permission-narrowing fix — but the code's
+own comment explains why 0777 is there: the official `zaproxy` image runs as its own non-root `zap`
+user, and world-writable is ZAP's own documented workaround for the resulting host-UID/container-UID
+mount mismatch. Narrowing it without a real fix (matching the container's UID, or a `--user` mapping)
+would just break the scanner. A real fix is a bigger lift than this residue item implied — closer to
+"pick and verify a UID-matching strategy for the zaproxy image" than a one-line permission change — so
+it's left for its own sitting rather than attempted speculatively here.
+
+Windows reserved device names and ADS (`file.txt:stream`) are not rejected by path validation
+(VULN-08, read but never executed) — not investigated this sitting.
 
 **Promote when:** VULN-04's _general_ form — schema validation for tool input — is worth its own item
 if a read- or network-capability tool ever grows an enum that gates a path or a binary. The rest are
 opportunistic.
 
-Priority: Tier 4 — all Low, all confirmed, none with a fired trigger.
+Priority: Tier 4 — all Low, all confirmed, none with a fired trigger. VULN-07 and VULN-10 shipped;
+VULN-04, VULN-06, VULN-08 and VULN-09 remain.
 
 ### P66.17 — Local-model path: the Low-severity residue
 
@@ -337,6 +395,13 @@ every spill (LLM-18).
 **Promote when:** one of them is implicated in a live-run failure, or you are already in the file.
 LLM-06 and LLM-10 are the two most likely to matter on a 16GB-VRAM machine, since both cause an
 avoidable model reload.
+
+**2026-09-03: reviewed against this write-up, not against code.** Part of the same sitting that shipped
+P66.26/P66.18/P66.23's cheap halves; nothing here was implemented. Unlike those, every finding in this
+grab-bag touches local-model behavior or token-estimation heuristics — exactly the surface this
+document elsewhere warns is easy to get wrong without a live model in front of you (see
+[P68.4](#p684--the-triage-rubrics-measuring-band-sits-below-the-strongest-local-model)). None was worth
+opening code for on a blind pass; this entry's own "do not schedule" stands.
 
 Priority: Tier 4 — real, individually cheap, no trigger. Do not schedule.
 
@@ -443,31 +508,6 @@ plausible one. Building the overlay with no consumer produces an untested second
 strictly worse than not having it.
 
 Priority: Tier 4 — no fired trigger, L. Do not build speculatively.
-
-### P66.26 — `synchronous=NORMAL` on the three SQLite databases (PERF-02, refiled from P66.9)
-
-**Filed 2026-08-16**, carved out of P66.9 so a deliberately-skipped sub-item is visible rather than
-buried in a closed entry. Every SQLite database runs at the default `synchronous=FULL`, paying an
-fsync per transaction.
-
-The item splits cleanly, and only one half is contentious. **`knowledge.db` and `longmem.db` are
-unconditionally safe**: both are derived stores, rebuildable from their sources, and losing the tail
-of a write on power loss costs a re-index. Neither was in P66.9's reach — they live in
-`internal/knowledge` and `internal/memory`, not `internal/session` — which is the only reason they
-did not ship with it. **`sessions.db` is the contentious half**, and is why the debate downgraded
-PERF-02 to Low: it holds checkpoints (`/rewind`), the cost ledger and traces, so `NORMAL` trades a
-durability guarantee on the one database whose loss is not recoverable from elsewhere. Do that half
-only with the trade written down at the DSN, or not at all.
-
-Note that P66.9 already removed most of the pressure that motivated this: delta coalescing cut the
-`bg_events` insert rate by roughly the coalescing factor, and that table was the source of the
-fsync-per-token pattern the finding was reacting to. Re-measure before building — this document has
-twice recorded a fixed instrument inverting an already-acted-on verdict.
-
-**Promote when** a measurement on the _current_ tree (post-P66.9) shows fsync cost still material on
-the local path, or when `knowledge.db` re-indexing becomes a noticed cost on its own.
-
-Closes PERF-02. Priority: Tier 4 — S. No dependency.
 
 ### P80.3 remainder — `Server`'s auth/lockout and context-window field groups
 

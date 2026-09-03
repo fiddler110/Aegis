@@ -1,3 +1,19 @@
+// Package drive implements the phased skill drive: the in-harness form of the
+// parked P38.8 per-phase wrapper. The generic `--skill` drive (chat.go) runs a
+// whole multi-phase build in one ever-growing conversation; on a small local
+// context window that rising peak is what stalls the threat-model build — the
+// P38.1 wall every P39.x fix has only been chipping at. A phased drive instead
+// runs each phase in its OWN fresh conversation, seeded only with a compact
+// phase-specific prompt, so a phase's peak context is ~one phase's worth of
+// work (its prompt + the one reference it reads + the prior files it pulls
+// from disk), not the accumulation of every prior phase. That bounded-context
+// property is exactly what let the external P38.8 wrapper reach a
+// verify-clean suite where the single-context drive never has; this brings it
+// inside the supported code path, reusing the generic drive's guards (PENDING
+// oracle, P39.7 no-progress nudge, --max-turns, the P39.6 verify + P38.1
+// quality round) but resetting context at every phase boundary. Prior
+// phases' outputs are grounded from disk, not from conversation history, so
+// the reset loses nothing the model needs.
 package drive
 
 import (
@@ -15,22 +31,6 @@ import (
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/skills"
 )
-
-// A phased skill drive is the in-harness form of the parked P38.8 per-phase
-// wrapper. The generic `--skill` drive (chat.go) runs a whole multi-phase build
-// in one ever-growing conversation; on a small local context window that rising
-// peak is what stalls the threat-model build — the P38.1 wall every P39.x fix
-// has only been chipping at. A phased drive instead runs each phase in its OWN
-// fresh conversation, seeded only with a compact phase-specific prompt, so a
-// phase's peak context is ~one phase's worth of work (its prompt + the one
-// reference it reads + the prior files it pulls from disk), not the accumulation
-// of every prior phase. That bounded-context property is exactly what let the
-// external P38.8 wrapper reach a verify-clean suite where the single-context
-// drive never has; this brings it inside the supported code path, reusing the
-// generic drive's guards (PENDING oracle, P39.7 no-progress nudge, --max-turns,
-// the P39.6 verify + P38.1 quality round) but resetting context at every phase
-// boundary. Prior phases' outputs are grounded from disk, not from conversation
-// history, so the reset loses nothing the model needs.
 
 // Phase is one bounded work unit of a phased drive: a set of run-dir-relative
 // file globs it must clear of `<!-- PENDING` markers, and a compact prompt that

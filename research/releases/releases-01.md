@@ -8,7 +8,32 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-03 (forty-second record) — **P81.31 shipped in full, P81.18 shipped except
+**Last updated:** 2026-09-03 (forty-third record) — **P66.26 closed in full; P66.18 and P66.23 each
+shipped two findings out of their residue grab-bags.** Taken on direct request to review the
+P66.17/.18/.20/.23/.26 findings for anything actually implementable now, rather than treating the
+Tier 4 "do not build speculatively" caveat as a reason to skip the review itself.
+`internal/sqlitestore.OpenDerived` (new) opens a store at `synchronous=NORMAL` instead of SQLite's
+default FULL; `internal/knowledge` and `internal/longmem` now use it, `internal/session` still uses
+`Open` (FULL), closing P66.26/PERF-02 exactly along the split the entry itself drew. ARCH-09: a
+mid-stream `provider.EventError` used to discard the whole assistant turn including text already
+streamed to the user; `Engine.turn` (`internal/engine/engine.go`) now returns the same partial content
+a successful turn would build, and the caller persists it before propagating the error. QUAL-09:
+`internal/drive` gained a package doc comment. VULN-07: `expandFileMentions`
+(`internal/server/messages.go`) now confines through `sandbox.ValidatePath`, the same symlink-aware
+check every other read path in Aegis uses, instead of a lexical `..` check a workspace symlink could
+route around. VULN-10: a hook's captured stderr (`internal/hooks/exec.go`) is capped at 8 KiB instead
+of growing unbounded — it becomes both the veto reason handed to the model and a logged field.
+VULN-06 (DAST work directory chmod 0777) was read and deliberately left alone: the surrounding comment
+explains the 0777 is the documented ZAP workaround for a host-UID/container-UID mount mismatch, so a
+narrower permission would just break the scanner without a real UID-matching fix behind it — a bigger
+lift than the entry implied. PERF-09 (two `flushMessages` calls per turn) was checked and found to
+already be a cheap no-op guard, not a real double-write. `go build ./...`, `go vet ./...` and
+`go test ./...` are green except the one pre-existing, unrelated
+`TestEveryRegisterCallSiteDecidesTheLocalProfile` failure (confirmed identical on the unmodified
+tree, same as the prior record). Full record:
+[P66.26 closed, P66.18/P66.23 partially shipped, 2026-09-03](#p6626-closed-p6618p6623-partially-shipped-2026-09-03).
+
+**Last updated (previous):** 2026-09-03 (forty-second record) — **P81.31 shipped in full, P81.18 shipped except
 its OS-trust-store helper (explicitly deferred, documented instead).** P81.31/FIND-31 had two asks: a
 byte cap on checkpoint growth, and a confirmation gate before `/rewind` overwrites a file changed by
 something other than the agent's own turn. Both are built. `checkpoint.Store.EvictOldestOverCap`
@@ -1622,6 +1647,119 @@ mid-conversation rather than never.
 `internal/providerfactory/factory_test.go` (`TestBuild_RejectsModelHarnessDeferringToolSearch`,
 `_RejectsOversizedPromptSuffixUnderLocalProfile`, `_AllowsShortPromptSuffixUnderLocalProfile`). `go build
 ./...` and the full `go test ./...` are green.
+
+### P66.26 closed, P66.18/P66.23 partially shipped, 2026-09-03
+
+Taken on direct request to review the P66.17/.18/.20/.23/.26 residue grab-bags — each filed as a
+Tier 4 "no trigger, do not build speculatively" collection — for anything actually safe and
+implementable now. The request to review is itself the trigger for the review; each individual fix
+below still had to earn its place on its own merits, and several candidates that looked cheap on
+first read turned out not to be (documented below and in each roadmap entry, matching this
+document's own "every Tier-4 item that has actually been measured so far turned out to be wrong in
+some way" pattern).
+
+**P66.26/PERF-02 — closed in full.** Every SQLite database ran at the default `synchronous=FULL`
+(an fsync per transaction). The item's own split was already clean: `knowledge.db` and `longmem.db`
+are derived, rebuildable stores where losing the tail of a write on power loss costs a re-index;
+`sessions.db` holds checkpoints, the cost ledger and traces, which is why the debate had downgraded
+this to Low and the entry insisted the trade be written down rather than applied silently.
+`internal/sqlitestore.Open` was split into a shared `open(dbPath, label string, synchronousNormal
+bool)`, with `Open` (unchanged behavior, `synchronousNormal: false`) and a new `OpenDerived`
+(`synchronousNormal: true`) as the two exported entry points — `OpenDerived` appends
+`&_pragma=synchronous(NORMAL)` to the DSN modernc.org/sqlite already builds for `BusyTimeoutDSN`,
+the same per-connection-pragma-via-DSN mechanism that field already uses and for the same reason:
+`PRAGMA synchronous`, like `busy_timeout`, is per-connection state that a plain `db.Exec` would only
+set on whichever pooled connection happened to serve it. `internal/knowledge` and `internal/longmem`
+now call `OpenDerived`; `internal/session` still calls `Open`, so `sessions.db` stays at FULL exactly
+as the contentious-half reasoning demanded. Verified directly rather than assumed: a scratch test
+opened both kinds of store and read back `PRAGMA synchronous`, confirming `1` (NORMAL) for
+`OpenDerived` and `2` (FULL) for `Open`.
+
+**P66.18 — two of five findings shipped.**
+
+- **ARCH-09**, the entry's own "most user-visible" item: a mid-stream `provider.EventError` discarded
+  the whole assistant turn, including text already streamed to the user via `KindText` events — so a
+  reply that failed partway through vanished from the transcript even though the user had watched it
+  arrive. `Engine.turn`'s `EventError` case (`internal/engine/engine.go`) now builds the same partial
+  `provider.Message` content a successful turn would (thinking blocks, then a text block if any text
+  arrived) and returns it alongside the error; tool-use blocks are deliberately left out even if one
+  had fully arrived, since an unpaired `tool_use` with no `tool_result` would violate the transcript's
+  turn-taking shape. The caller (`internal/engine/engine.go`, the turn-processing function around the
+  post-`e.turn` error branch) appends that partial message to `rl.conv` before emitting `KindError` and
+  returning — but only on the terminal-error path, not the P74.16 context-overflow-clip retry a few
+  lines above it, since that path re-issues the same turn and appending a partial message there would
+  leave a stray entry in the conversation being retried. New tests:
+  `TestMidStreamErrorPreservesStreamedText` and `TestMidStreamErrorWithNoTextAppendsNothing`
+  (`internal/engine/midstreamerror_test.go`) — the latter pins that an error with nothing streamed
+  yet must not add a stray empty assistant message.
+- **QUAL-09**: `internal/drive` had no package doc comment, despite already carrying a substantial
+  design-rationale paragraph — it just sat one declaration too late (after the `import` block, before
+  `type Phase`) to be recognized as one by `go doc`. Moved verbatim to immediately precede `package
+  drive`. A spot check of the package's exported declarations found each already carrying a preceding
+  comment, so the entry's ~10.5%-undocumented figure, if still accurate, wasn't found on this pass.
+
+  ARCH-10 (two leaking maps), QUAL-07 (ten ad-hoc `truncate` helpers) and QUAL-08
+  (`context.Background()` in request-scoped handlers) were read but not touched — QUAL-07 in
+  particular needs each of the ten call sites checked individually before any consolidation, since
+  they differ in byte-vs-rune handling and notice text; collapsing them blind risks a silent behavior
+  change, which is a sitting of its own rather than a residue-grab-bag drive-by.
+
+**P66.20 — read, nothing shipped.** PERF-09 ("two `flushMessages` calls per turn where one would
+do") was checked directly against `internal/server/messages.go`: the two calls fire at genuinely
+different points in a turn — once on `KindTurnDone` (before the tool round runs, persisting the
+assistant's own reply) and once on `KindTrace` (after it, persisting any tool-result messages the
+round appended) — and `flushMessages` already short-circuits to a no-op (`if conv.Persisted >=
+len(conv.Messages) { return }`) when nothing new is pending. There was no real double-write to
+remove. PERF-04 (repo-map staleness), PERF-06 (`toolshim.Prompt` rebuild) and PERF-07 (checkpoint
+snapshot compression) were read but not attempted this sitting — PERF-07 is explicitly sequenced
+behind P60.3, which has no container-commit checkpoint mechanism yet to compress/dedupe.
+
+**P66.23 — two of six findings shipped, one checked and deliberately left alone.**
+
+- **VULN-07**: `expandFileMentions` (`internal/server/messages.go`) confined `@path#L10-40` mentions
+  to the workspace with a purely lexical check — `filepath.Join` then `filepath.Rel` against `..` —
+  which a workspace symlink can route around even though the mention text itself never names a
+  traversal, bypassing the symlink-aware confinement every other read path in Aegis gets. The manual
+  check is replaced with a call to `sandbox.ValidatePath(workspace, filepath.FromSlash(atPath))`, the
+  same validator `internal/sandbox`'s own tests already pin against symlink escapes. New test:
+  `TestExpandFileMentionsConfinement/symlink_escape_is_blocked`
+  (`internal/server/messages_mentions_test.go`), following the existing `mustSymlink`-style convention
+  of skipping (not failing) when the platform refuses to create a symlink — confirmed to skip cleanly
+  on this Windows box without `SeCreateSymbolicLinkPrivilege`/Developer Mode, and to run for real
+  wherever that privilege is available.
+- **VULN-10**: a hook's captured stderr (`internal/hooks/exec.go`) grew in an unbounded
+  `bytes.Buffer`, and that text becomes both the `pre_tool_use` veto reason handed back to the model
+  and a logged field — an unbounded capture let a runaway or hostile hook consume memory and flood
+  both. A new `capturedStderr` type caps the capture at `maxHookStderr` (8 KiB), silently discarding
+  bytes past the limit rather than erroring the write (a capped `io.Writer` must never fail a
+  command's own stderr copy just because the hook was chatty) and appending a `"... [truncated]"`
+  marker to `String()` when it happened. New test: `TestCapturedStderrCapsOutput`
+  (`internal/hooks/exec_test.go`).
+- **VULN-06 checked, deliberately not fixed.** The DAST work directory
+  (`internal/security/dast.go`) is `os.Chmod`'d `0o777` in the shared system temp dir — on the surface
+  a one-line permission-narrowing fix. The surrounding comment says why it isn't: the official
+  `zaproxy` container image runs as its own non-root `zap` user, and making the mounted work directory
+  world-writable is ZAP's own documented workaround for the resulting host-UID/container-UID mount
+  mismatch. Narrowing the mode without a real fix behind it (matching the container's UID, or a
+  `docker run --user` mapping) would simply break the scanner. A real fix is a materially bigger lift
+  than the entry implied — closer to "pick and verify a UID-matching strategy for the zaproxy image"
+  — so it stays a residue item rather than being attempted speculatively in this sitting.
+
+  VULN-04 (tool-input schema validation, general form) and VULN-08 (Windows reserved device names /
+  ADS) were not investigated this sitting; VULN-09 (unbounded walk-callback reads) likewise.
+
+**P66.17 — reviewed against its own write-up, not against code; nothing shipped.** All eleven
+findings in this grab-bag touch local-model behavior or token-estimation heuristics, which is exactly
+the surface this document elsewhere warns is easy to measure wrong without a live model in front of
+you (see [P68.4](../roadmap.md#p684--the-triage-rubrics-measuring-band-sits-below-the-strongest-local-model)).
+None looked safe to fix blind, so this entry's own "do not schedule" stands unchanged.
+
+Verification: `go build ./...` and `go vet ./...` are clean across the tree. `go test ./...` is green
+except the one pre-existing `TestEveryRegisterCallSiteDecidesTheLocalProfile` failure in
+`internal/tool/builtin`, confirmed identical (same two call sites named) on the unmodified tree via
+`git stash` — unrelated to anything touched here. Packages exercised directly:
+`internal/sqlitestore`, `internal/knowledge`, `internal/longmem`, `internal/session`,
+`internal/engine` (including `-race`), `internal/drive`, `internal/server`, `internal/hooks`.
 
 ### P81.31 shipped, P81.18 shipped except its trust-store helper, 2026-09-03
 

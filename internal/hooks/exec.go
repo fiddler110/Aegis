@@ -84,6 +84,44 @@ func (e *Exec) matches(s ExecSpec, tool string) bool {
 	return false
 }
 
+// maxHookStderr caps how much of a hook command's stderr Aegis keeps: it
+// becomes both the pre_tool_use veto reason handed back to the model and a
+// logged field, and an unbounded capture lets a runaway or hostile hook
+// consume memory and flood both with it (VULN-10).
+const maxHookStderr = 8 * 1024
+
+// capturedStderr collects up to a limit's worth of a hook's stderr, silently
+// discarding anything past it rather than erroring the write — a capped
+// io.Writer must never fail a command's own stderr copy just because a hook
+// was chatty.
+type capturedStderr struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (c *capturedStderr) Write(p []byte) (int, error) {
+	if room := c.limit - c.buf.Len(); room > 0 {
+		if room > len(p) {
+			room = len(p)
+		} else {
+			c.truncated = true
+		}
+		c.buf.Write(p[:room])
+	} else if len(p) > 0 {
+		c.truncated = true
+	}
+	return len(p), nil
+}
+
+func (c *capturedStderr) String() string {
+	s := strings.TrimSpace(c.buf.String())
+	if c.truncated {
+		s += "\n... [truncated]"
+	}
+	return s
+}
+
 // run executes one hook command, returning its exit code and captured stderr.
 func (e *Exec) run(ctx context.Context, s ExecSpec, ev hookEvent) (exitCode int, stderr string) {
 	timeout := time.Duration(s.TimeoutSec) * time.Second
@@ -97,10 +135,10 @@ func (e *Exec) run(ctx context.Context, s ExecSpec, ev hookEvent) (exitCode int,
 	shell, args := sandbox.ShellCommand(s.Command)
 	cmd := exec.CommandContext(ctx, shell, args...)
 	cmd.Stdin = bytes.NewReader(payload)
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
+	errBuf := &capturedStderr{limit: maxHookStderr}
+	cmd.Stderr = errBuf
 	err := cmd.Run()
-	stderr = strings.TrimSpace(errBuf.String())
+	stderr = errBuf.String()
 	if err == nil {
 		return 0, stderr
 	}

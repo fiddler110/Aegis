@@ -24,6 +24,7 @@ import (
 	"github.com/fiddler110/aegis/internal/permission"
 	"github.com/fiddler110/aegis/internal/provider"
 	"github.com/fiddler110/aegis/internal/reqorigin"
+	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/swarm"
 	"github.com/fiddler110/aegis/internal/trace"
 )
@@ -1029,13 +1030,13 @@ func expandFileMentions(text, workspace string) string {
 		if _, err := fmt.Sscanf(rangeStr, "%d-%d", &start, &end); err != nil || start < 1 || end < start {
 			continue
 		}
-		abs := filepath.Join(workspace, filepath.FromSlash(atPath))
-		// Confine the resolved path to the workspace: filepath.Join cleans
-		// ".." segments but does not prevent them from escaping the root, so a
-		// mention like @../../etc/passwd would otherwise read outside the
-		// workspace. Leave any escaping token as-is (CWE-22).
-		if rel, relErr := filepath.Rel(workspace, abs); relErr != nil ||
-			rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// Confine the resolved path to the workspace via the same
+		// symlink-aware validator every other read path in Aegis goes
+		// through (VULN-07): a lexical ".." check alone lets a workspace
+		// symlink resolve outside the root even when the mention text never
+		// names one.
+		abs, err := sandbox.ValidatePath(workspace, filepath.FromSlash(atPath))
+		if err != nil {
 			continue
 		}
 		data, err := os.ReadFile(abs)

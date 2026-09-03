@@ -56,7 +56,7 @@ type Store struct {
 // short name that scopes entity lookups (typically the workspace directory base
 // name, e.g. "myrepo"). embedder is optional (nil disables semantic recall).
 func Open(project, dbPath string, embedder embed.Embedder) (*Store, error) {
-	db, err := sqlitestore.Open(dbPath, "longmem")
+	db, err := sqlitestore.OpenDerived(dbPath, "longmem")
 	if err != nil {
 		return nil, err
 	}

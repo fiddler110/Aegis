@@ -40,7 +40,7 @@ type Store struct {
 // embedder is optional (nil disables semantic recall and keeps BM25-only
 // search, the zero-config default).
 func Open(root, dbPath string, embedder embed.Embedder) (*Store, error) {
-	db, err := sqlitestore.Open(dbPath, "knowledge")
+	db, err := sqlitestore.OpenDerived(dbPath, "knowledge")
 	if err != nil {
 		return nil, err
 	}

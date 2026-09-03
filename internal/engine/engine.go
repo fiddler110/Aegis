@@ -1142,6 +1142,14 @@ func (e *Engine) runIteration(ctx context.Context, rl *runLoopState, iter int) (
 				return true, nil
 			}
 		}
+		// ARCH-09: preserve whatever text the model streamed before the
+		// failure — otherwise the transcript loses content the user watched
+		// arrive. Not done for the overflow-clip retry above: that path
+		// re-issues the same turn, and appending a partial assistant message
+		// there would leave a stray entry in the conversation it is retrying.
+		if len(assistant.Content) > 0 {
+			rl.conv.Append(assistant)
+		}
 		rl.emit(Event{Kind: KindError, Err: err})
 		return false, err
 	}
@@ -2169,7 +2177,24 @@ func (e *Engine) turn(ctx context.Context, conv *Conversation, emit EmitFunc, su
 			usage = ev.Usage
 			stopReason = ev.Stop
 		case provider.EventError:
-			return provider.Message{}, nil, nil, provider.StopOther, ev.Err
+			// ARCH-09: a mid-stream failure must not discard text already
+			// streamed to the user — build the same partial content the
+			// success path would (thinking then text; tool-use blocks are
+			// left out since one may be incomplete, and a bare tool_use with
+			// no result would violate the transcript's turn-taking shape) so
+			// the caller can persist what was actually shown.
+			var partial []provider.Block
+			for _, tb := range thinking {
+				partial = append(partial, tb)
+			}
+			if len(text) > 0 {
+				partial = append(partial, provider.TextBlock{Text: string(text)})
+			}
+			var msg provider.Message
+			if len(partial) > 0 {
+				msg = provider.Message{Role: provider.RoleAssistant, Content: partial}
+			}
+			return msg, nil, nil, provider.StopOther, ev.Err
 		}
 	}
 

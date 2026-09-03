@@ -64,6 +64,31 @@ func TestExecToolFilter(t *testing.T) {
 	}
 }
 
+// TestCapturedStderrCapsOutput is the VULN-10 regression: a hook's stderr
+// must not grow unbounded in memory, or in what gets surfaced as the veto
+// reason / log field, no matter how much a runaway or hostile hook writes.
+func TestCapturedStderrCapsOutput(t *testing.T) {
+	c := &capturedStderr{limit: 16}
+	n, err := c.Write([]byte("0123456789"))
+	if err != nil || n != 10 {
+		t.Fatalf("first write: n=%d err=%v", n, err)
+	}
+	n, err = c.Write([]byte("abcdefghij")) // 10 more; only 6 bytes of room left
+	if err != nil || n != 10 {
+		t.Fatalf("second write: n=%d err=%v", n, err)
+	}
+	got := c.String()
+	if !strings.HasPrefix(got, "0123456789abcdef") {
+		t.Errorf("captured content = %q, want it to start with the first 16 bytes", got)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("captured content = %q, want a truncation marker", got)
+	}
+	if len(c.buf.Bytes()) != 16 {
+		t.Errorf("underlying buffer holds %d bytes, want capped at 16", len(c.buf.Bytes()))
+	}
+}
+
 func TestNewExecNilWhenEmpty(t *testing.T) {
 	if h := NewExec(nil, nil); h != nil {
 		t.Error("expected nil Exec for empty specs")

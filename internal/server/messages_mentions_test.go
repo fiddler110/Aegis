@@ -40,4 +40,23 @@ func TestExpandFileMentionsConfinement(t *testing.T) {
 			t.Fatalf("expected token left as-is, got %q", got)
 		}
 	})
+
+	t.Run("symlink escape is blocked", func(t *testing.T) {
+		// VULN-07: a workspace symlink used to bypass expandFileMentions'
+		// purely lexical ".." check, since the mention text itself never
+		// names a traversal — the check now runs through sandbox.ValidatePath
+		// the same way every other read path does.
+		link := filepath.Join(ws, "escape.txt")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Skipf("symlinks unavailable in this environment (%v); on Windows enable Developer Mode or run elevated to exercise this test", err)
+		}
+		in := "leak @escape.txt#L1-1"
+		got := expandFileMentions(in, ws)
+		if strings.Contains(got, "TOPSECRET") {
+			t.Fatalf("symlink escape leaked file outside workspace: %q", got)
+		}
+		if got != in {
+			t.Fatalf("expected token left as-is, got %q", got)
+		}
+	})
 }

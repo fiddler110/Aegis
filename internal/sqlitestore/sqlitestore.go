@@ -45,6 +45,9 @@ const BusyTimeoutDSN = "?_pragma=busy_timeout(5000)"
 // "session", "knowledge", "longmem"). Callers are responsible for their own
 // schema migration afterward.
 //
+// synchronous stays at SQLite's default FULL — an fsync per transaction.
+// Use OpenDerived instead for a store that can afford NORMAL (PERF-02/P66.26).
+//
 // The database file is *not* hardened here: the WAL and shm sidecars do not
 // exist until the connection has been used, so a caller hardens by calling
 // HardenPermissions after its migration has run. Open cannot do it for them
@@ -61,10 +64,30 @@ const BusyTimeoutDSN = "?_pragma=busy_timeout(5000)"
 // below is itself a write, so -wal and -shm exist by the time Open returns and
 // a HardenPermissions call after migration does catch them.
 func Open(dbPath, label string) (*sql.DB, error) {
+	return open(dbPath, label, false)
+}
+
+// OpenDerived is Open with `synchronous=NORMAL` instead of SQLite's default
+// FULL, cutting the fsync from every transaction to one per WAL checkpoint.
+// Only for a store that is a derived/rebuildable cache: on power loss NORMAL
+// can lose the last few committed transactions (never corrupt the file, since
+// WAL mode's torn-page protection is independent of this setting), which is
+// an acceptable trade for a store a re-index recovers and not for one holding
+// the only copy of anything (PERF-02/P66.26). knowledge.db and longmem.db
+// qualify; sessions.db — checkpoints, cost ledger, traces — does not.
+func OpenDerived(dbPath, label string) (*sql.DB, error) {
+	return open(dbPath, label, true)
+}
+
+func open(dbPath, label string, synchronousNormal bool) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", dbPath+BusyTimeoutDSN)
+	dsn := dbPath + BusyTimeoutDSN
+	if synchronousNormal {
+		dsn += "&_pragma=synchronous(NORMAL)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s db: %w", label, err)
 	}
