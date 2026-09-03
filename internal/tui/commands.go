@@ -225,15 +225,15 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdSession,
 		},
 		{
-			name: "rewind", argHint: "[n] [scope]", needsArgs: true,
+			name: "rewind", argHint: "[n] [scope] [--force]", needsArgs: true,
 			shortDesc:    "List or restore checkpoints (code/conversation/both)",
-			detailedHelp: "/rewind [n] [code|conversation|both]\n  No args: list checkpoints (rewind points) for this session, newest first.\n  /rewind <n>: restore checkpoint n (both files and conversation by default).\n  Scope: 'code' restores only files, 'conversation' only the transcript, 'both' (default) does both.\n  Each checkpoint is the state just before a user turn; rewinding undoes that turn's file changes and/or messages.\n  This is Aegis's undo. See also: pressing Esc twice with an empty input box (and not streaming) opens an interactive backtrack picker over the same checkpoints.",
+			detailedHelp: "/rewind [n] [code|conversation|both] [--force]\n  No args: list checkpoints (rewind points) for this session, newest first.\n  /rewind <n>: restore checkpoint n (both files and conversation by default).\n  Scope: 'code' restores only files, 'conversation' only the transcript, 'both' (default) does both.\n  Each checkpoint is the state just before a user turn; rewinding undoes that turn's file changes and/or messages.\n  A file rewind is refused if the file changed after the turn ended from something other than the agent's own edits (a reviewer's change in another editor, a concurrent session); add --force to restore anyway and overwrite it.\n  This is Aegis's undo. See also: pressing Esc twice with an empty input box (and not streaming) opens an interactive backtrack picker over the same checkpoints.",
 			handler:      (*SlashDispatcher).cmdRewind,
 		},
 		{
-			name: "rollback", argHint: "[n]", needsArgs: true,
+			name: "rollback", argHint: "[n] [--force]", needsArgs: true,
 			shortDesc:    "Restore checkpoint n and run git reset --hard to pre-turn HEAD",
-			detailedHelp: "/rollback [n]\n  No args: list checkpoints (rollback points) for this session, newest first.\n  /rollback <n>: restore checkpoint n's conversation AND run `git reset --hard` to that checkpoint's commit — a harder reset than /rewind's 'both' scope, which restores files by rewriting them rather than resetting git history.\n  Use this when a turn's file changes need to be fully undone at the git level, not just reverted in the working tree.\n  This is Aegis's undo. See also: pressing Esc twice with an empty input box (and not streaming) opens an interactive backtrack picker over the same checkpoints.",
+			detailedHelp: "/rollback [n] [--force]\n  No args: list checkpoints (rollback points) for this session, newest first.\n  /rollback <n>: restore checkpoint n's conversation AND run `git reset --hard` to that checkpoint's commit — a harder reset than /rewind's 'both' scope, which restores files by rewriting them rather than resetting git history.\n  Use this when a turn's file changes need to be fully undone at the git level, not just reverted in the working tree.\n  Refused, like /rewind, if a file changed after the turn ended from something other than the agent's own edits; add --force to proceed anyway.\n  This is Aegis's undo. See also: pressing Esc twice with an empty input box (and not streaming) opens an interactive backtrack picker over the same checkpoints.",
 			handler:      (*SlashDispatcher).cmdRollback,
 		},
 		{

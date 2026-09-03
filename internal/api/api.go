@@ -453,6 +453,15 @@ type RewindRequest struct {
 	CheckpointID string `json:"checkpoint_id"`
 	Scope        string `json:"scope,omitempty"`
 	GitRollback  bool   `json:"git_rollback,omitempty"` // P3.4: also reset git HEAD
+	// ConfirmExternalChanges must be true to restore files (scope "code" or
+	// "both") when the server detects a captured path changed after the
+	// checkpoint's own turn finished — i.e. something other than the agent
+	// edited it since (P81.31/FIND-31). Without it, such a rewind is refused
+	// with a 409 naming the changed paths and nothing is written; the caller
+	// re-sends the same request with this set to proceed anyway. Ignored when
+	// no external change is detected, so it is safe to always send false and
+	// only retry with it once refused.
+	ConfirmExternalChanges bool `json:"confirm_external_changes,omitempty"`
 }
 
 // RewindResponse reports the result of a rewind.

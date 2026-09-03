@@ -8,7 +8,46 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-03 (forty-first record) — **P81.11 closed on a `git log` read (no code
+**Last updated:** 2026-09-03 (forty-second record) — **P81.31 shipped in full, P81.18 shipped except
+its OS-trust-store helper (explicitly deferred, documented instead).** P81.31/FIND-31 had two asks: a
+byte cap on checkpoint growth, and a confirmation gate before `/rewind` overwrites a file changed by
+something other than the agent's own turn. Both are built. `checkpoint.Store.EvictOldestOverCap`
+(`internal/checkpoint/checkpoint.go`) deletes a session's oldest checkpoints, oldest first, until its
+total captured-file bytes are back under a configurable per-session cap
+(`cleanup.checkpoint_max_session_mb`, 0 = unbounded/unchanged default) — enforced synchronously right
+after each new checkpoint is created rather than waiting for the next `PruneOlderThan` sweep, since a
+size bound is a per-turn disk-fill risk and the age-based pruner's own cadence can be a day behind. The
+checkpoint just created is never evicted, so rewind always has something to target.
+`checkpoint.Store.RecordPostTurnState` hashes each captured path once the owning turn's own writes are
+done and stores it as a baseline; `ExternalChangesSince` compares that baseline against the live file at
+rewind time. `handleRewind` (`internal/server/sessions.go`) now checks this before restoring files
+(scope `code`/`both`) and, unconfirmed, refuses with **428** (not 409 — kept distinct from
+`ErrRestoreRefused`'s security refusal, which no confirm flag can fix) naming the changed paths; nothing
+is written. `RewindRequest.ConfirmExternalChanges` (new field) proceeds anyway. The TUI's `/rewind` and
+`/rollback` gained a `--force` flag and print the changed-path list with a copy-pasteable re-run
+suggestion on refusal. Checkpoints from before this shipped (no recorded baseline) are silently skipped
+rather than flagged, so old rewindable state doesn't become permanently blocked. New tests:
+`internal/checkpoint/p81_31_test.go` (five cases: edit-after-turn detected, deletion-after-turn
+detected, no-baseline skipped, cap eviction keeps the newest checkpoint, no-op under cap) and
+`TestRewindRefusesOverExternalChange` (`internal/server/server_checkpoint_test.go`, full HTTP path:
+refused with nothing written, then succeeds once confirmed). P81.18/FIND-18: `server.CertFingerprint`
+(new, `internal/server/tls.go`) reads a PEM cert file and returns the same colon-separated SHA-256 form
+already logged at daemon startup; `aegis ui` (`internal/cli/ui.go`) now prints it alongside its existing
+self-signed-certificate notice, so an operator who clicks through the browser warning has something to
+compare against without hunting the daemon's own log. `docs/configuration.md` gained a tunnelled/proxied
+UI section under `server.tls` documenting the supported path (`cert_file`/`key_file` with a
+browser-trusted certificate, or manually importing `daemon.crt` into the OS/browser trust store) — no
+automated trust-store-import command was built; that's real, separate platform-specific work
+(Windows `certutil`, macOS Keychain, Linux distro-specific `update-ca-certificates`) with no fired
+trigger of its own, so it's documented as a manual step rather than scoped in speculatively. The same
+edit filled in `cleanup.archived_session_ttl_days` and `cleanup.checkpoint_ttl_days` in
+`docs/configuration.md`'s full config reference, which had drifted out of sync with
+`config.CleanupConfig` before this. `go build ./...`, `go vet ./...` and the full `go test ./...` are
+green except the one pre-existing, unrelated `TestEveryRegisterCallSiteDecidesTheLocalProfile` failure
+(confirmed identical on the unmodified tree). Full record:
+[P81.31 shipped, P81.18 shipped except its trust-store helper, 2026-09-03](#p8131-shipped-p8118-shipped-except-its-trust-store-helper-2026-09-03).
+
+**Last updated (previous):** 2026-09-03 (forty-first record) — **P81.11 closed on a `git log` read (no code
 needed — its scheduled `govulncheck` job has existed since 2026-08-07, before the threat model that
 filed it even ran); P81.7 and P81.28 partially shipped, each split into a cheap half that's now built
 and a half that stays parked.** P81.7: `provider.local_auth_token` sends a bearer token to any local
@@ -1583,6 +1622,88 @@ mid-conversation rather than never.
 `internal/providerfactory/factory_test.go` (`TestBuild_RejectsModelHarnessDeferringToolSearch`,
 `_RejectsOversizedPromptSuffixUnderLocalProfile`, `_AllowsShortPromptSuffixUnderLocalProfile`). `go build
 ./...` and the full `go test ./...` are green.
+
+### P81.31 shipped, P81.18 shipped except its trust-store helper, 2026-09-03
+
+The last two of the four remaining P81 threat-model Tier 4 items, taken together on direct request
+(P81.11, P81.7 and P81.28 shipped the same day — see below).
+
+**P81.31/FIND-31 — both asks shipped.** The finding was two independent risks that only look related
+because they share `internal/checkpoint`: unbounded growth, and a silent overwrite on rewind.
+
+*Byte cap and eviction.* `checkpoint.Store.EvictOldestOverCap(ctx, sessionID, maxBytes)`
+(`internal/checkpoint/checkpoint.go`) sums a session's checkpoint-file bytes
+(`SUM(LENGTH(content))` grouped by checkpoint, oldest-created first) and deletes checkpoints oldest
+first until the session is back under `maxBytes`, stopping before evicting the last-remaining
+checkpoint even if it alone still exceeds the cap — rewind needs *something* to target, and refusing
+the checkpoint that triggered the call would break rewind for the very turn this protects.
+`config.CleanupConfig.CheckpointMaxSessionMB` (koanf `cleanup.checkpoint_max_session_mb`, 0 = disabled,
+matching the pre-P81.31 unbounded default) is the surfaced config key the entry asked for. Wired into
+`internal/server/messages.go` right after a new checkpoint is created (not the periodic
+`runRetentionPrune` ticker `PruneOlderThan` already uses) — deliberately: a size bound is a per-turn
+disk-fill risk, and `interval_hours` defaults to a full day, which is not a useful bound on "can this
+fill the disk before the next sweep."
+
+*Confirmation before an external-edit overwrite.* `checkpoint_files` gained a nullable `post_digest`
+BLOB column. `Store.RecordPostTurnState(ctx, checkpointID)` — called from `messages.go` right after
+`eng.Run`/`runDrive` returns, once the turn's own writes are done — hashes each captured path's current
+content (SHA-256) as the "expected present" baseline, or records a zero-length sentinel distinct from
+both a real digest and SQL `NULL` when the path doesn't exist. `Store.ExternalChangesSince(ctx,
+checkpointID)` re-hashes each captured path with a recorded baseline and reports any that no longer
+match — a file the turn left alone that someone else then edited or deleted. Paths with no baseline
+(`post_digest IS NULL` — checkpoints from before this shipped, or a turn that never reached the
+post-run bookkeeping) are skipped rather than flagged, so existing checkpoints don't become permanently
+unrewindable. `handleRewind` (`internal/server/sessions.go`) checks this before a `code`/`both`-scope
+restore (and before the P3.4 git rollback, which would erase the evidence) unless the request already
+sets the new `RewindRequest.ConfirmExternalChanges` field; unconfirmed with changes found, it refuses
+with **HTTP 428** (Precondition Required — deliberately distinct from `ErrRestoreRefused`'s existing 409,
+which no confirm flag can fix, since that's the P70.1 out-of-workspace security refusal) naming every
+changed path, and nothing is written. `client.Client.Rewind`/`Rollback` gained a
+`confirmExternalChanges bool` parameter (every call site in the tree updated: TUI, server tests). The
+TUI's `/rewind [n] [scope] [--force]` and `/rollback [n] [--force]` accept the new flag, and on a 428
+print the changed-path list with the exact re-run command to confirm.
+
+Tests: `internal/checkpoint/p81_31_test.go` —
+`TestExternalChangesSinceDetectsAnEditAfterTheTurn`,
+`TestExternalChangesSinceDetectsDeletion`,
+`TestExternalChangesSinceSkipsCheckpointsWithNoBaseline`,
+`TestEvictOldestOverCapKeepsTheNewestCheckpoint`,
+`TestEvictOldestOverCapNoOpUnderCap`. `internal/server/server_checkpoint_test.go`'s new
+`TestRewindRefusesOverExternalChange` drives the real HTTP handler end-to-end (a scripted-adapter turn
+writes a file, a simulated external edit follows, the unconfirmed rewind is refused with the file
+untouched, the confirmed retry restores it) — the existing `TestCheckpointRewind` still passes
+unmodified, confirming the new check doesn't false-positive on a normal rewind.
+
+**P81.18/FIND-18 — the fingerprint half shipped; the OS-trust-store helper is explicitly not built.**
+`server.certFingerprint` (the colon-separated-hex SHA-256 form, already logged at daemon startup) is
+now reachable from outside the package via the new `server.CertFingerprint(certPath string) (string,
+error)`, which reads and PEM-decodes the cert file directly. `aegis ui` (`internal/cli/ui.go`) calls it
+right after `connectOrStartDaemon` (which guarantees the cert file exists by then, generated or
+pre-existing) and appends the fingerprint to its existing self-signed-certificate notice — the
+daemon's own startup log line carrying the same value is easy to miss, and unavailable at all when
+`aegis ui` attaches to an already-running daemon it didn't start. `docs/configuration.md` gained a
+tunnelled/proxied-UI section under `server.tls` naming the supported path
+(`cert_file`/`key_file` pointed at a certificate the browser already trusts, e.g. one terminated by a
+reverse proxy in front of the daemon) and the manual alternative (import the auto-generated
+`daemon.crt` into the OS/browser trust store — `certutil -addstore Root daemon.crt` on Windows,
+`security add-trusted-cert` on macOS, the distro's `update-ca-certificates` equivalent on Linux).
+
+**Not built: an automated "install into OS trust store" command.** The original entry offered this as
+one option among several ("offer a helper..."); it is real, separate, platform-specific work (Windows
+CryptoAPI/`certutil`, macOS Keychain Services, per-distro Linux CA bundle conventions) with no fired
+trigger of its own — Tier 4's "no trigger" caveat applies to it specifically even though the rest of
+the entry shipped. Documented as a manual step instead of scoped in speculatively.
+
+While already in `docs/configuration.md`'s cleanup block for this work, filled in two config keys that
+had drifted out of the full reference before this — `archived_session_ttl_days` and
+`checkpoint_ttl_days` both existed in `config.CleanupConfig` (P81.24) with no documentation entry.
+
+New tests: `TestCertFingerprintFromFileMatchesGeneratedCert`, `TestCertFingerprintMissingFile`
+(`internal/server/tls_test.go`). `go build ./...`, `go vet ./...` and the full `go test ./...` are
+green except the one pre-existing, unrelated `TestEveryRegisterCallSiteDecidesTheLocalProfile` failure
+(confirmed to fail identically on the unmodified tree, unrelated to `internal/checkpoint`,
+`internal/server`, `internal/cli`, `internal/tui`, `internal/client`, `internal/api` or
+`internal/config`, the only packages this work touched).
 
 ### P81.11 closed, P81.7 and P81.28 partially shipped, 2026-09-03
 

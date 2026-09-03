@@ -282,6 +282,20 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 			s.logger.Warn("create checkpoint", "session", id, "err", err)
 		} else {
 			snap = s.checkpoints.NewSnapshotter(cp.ID)
+			// P81.31/FIND-31: enforce the per-session byte cap right after
+			// creation rather than waiting for the next periodic prune —
+			// unbounded checkpoint growth is a per-turn disk-fill risk, and
+			// the age-based CheckpointTTLDays pruner (runRetentionPrune) can
+			// be up to IntervalHours (default 24) behind. Best-effort: the
+			// checkpoint we just created is unaffected either way (see
+			// EvictOldestOverCap's own doc).
+			if mb := s.cfg.Cleanup.CheckpointMaxSessionMB; mb > 0 {
+				if n, err := s.checkpoints.EvictOldestOverCap(context.Background(), id, int64(mb)<<20); err != nil {
+					s.logger.Warn("evict checkpoints over byte cap", "session", id, "err", err)
+				} else if n > 0 {
+					s.logger.Info("evicted old checkpoints over byte cap", "session", id, "evicted", n, "cap_mb", mb)
+				}
+			}
 			// P3.4: capture the HEAD commit SHA asynchronously so rollback can
 			// reset to it. GAP-2.1: derived from the daemon's own lifetime
 			// context (s.daemonCtx) rather than context.Background(), so
@@ -455,6 +469,18 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, id string, re
 		})
 	} else {
 		runErr = eng.Run(runCtx, conv, emit)
+	}
+
+	// P81.31/FIND-31: record each captured file's post-turn digest now that
+	// the turn's own writes are done, so a later rewind can tell an external
+	// edit (made after this point, by something other than this turn) from
+	// the agent's own work. Best-effort, and skipped for a snapshotter that
+	// captured nothing — RecordPostTurnState only ever set post_digest, never
+	// consulted, when there is no such row.
+	if snap != nil {
+		if err := s.checkpoints.RecordPostTurnState(context.Background(), snap.CheckpointID()); err != nil {
+			s.logger.Warn("record checkpoint post-turn state", "checkpoint", snap.CheckpointID(), "err", err)
+		}
 	}
 
 	// The engine drains the steer channel only between tool rounds, so a steer

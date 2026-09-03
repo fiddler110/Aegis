@@ -135,7 +135,7 @@ func TestCheckpointRewind(t *testing.T) {
 	}
 
 	// Rewind code only: file reverts, conversation stays.
-	resp, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "code")
+	resp, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "code", false)
 	if err != nil {
 		t.Fatalf("Rewind code: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCheckpointRewind(t *testing.T) {
 	}
 
 	// Rewind conversation: messages truncate to the pre-turn count (0).
-	resp, err = cl.Rewind(ctx, meta.ID, cps[0].ID, "conversation")
+	resp, err = cl.Rewind(ctx, meta.ID, cps[0].ID, "conversation", false)
 	if err != nil {
 		t.Fatalf("Rewind conversation: %v", err)
 	}
@@ -161,6 +161,66 @@ func TestCheckpointRewind(t *testing.T) {
 	sess, _ = cl.GetSession(ctx, meta.ID)
 	if len(sess.Messages) != 0 {
 		t.Errorf("after conversation rewind, %d messages remain, want 0", len(sess.Messages))
+	}
+}
+
+// TestRewindRefusesOverExternalChange is P81.31/FIND-31: a rewind that would
+// silently overwrite a file changed by something other than the turn's own
+// tool calls — a reviewer's edit made in another editor while the session was
+// open, here simulated by writing the file directly after the run completes —
+// must be refused (428) with nothing written, and must proceed once the
+// caller confirms.
+func TestRewindRefusesOverExternalChange(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "out.txt")
+	if err := os.WriteFile(target, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cl, cleanup := newCheckpointTestServer(t, root, &scriptedAdapter{path: "out.txt", content: "v2"})
+	defer cleanup()
+	ctx := context.Background()
+
+	meta, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := cl.PostMessage(ctx, meta.ID, "overwrite the file")
+	if err != nil {
+		t.Fatalf("PostMessage: %v", err)
+	}
+	for range ch {
+	}
+
+	cps, err := cl.ListCheckpoints(ctx, meta.ID)
+	if err != nil || len(cps) != 1 {
+		t.Fatalf("ListCheckpoints: %v (n=%d)", err, len(cps))
+	}
+
+	// A reviewer edits the file in another editor after the turn finished.
+	if err := os.WriteFile(target, []byte("reviewer's edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "code", false); err == nil {
+		t.Fatal("expected rewind to be refused over the external change")
+	} else if se, ok := err.(*client.StatusError); !ok || se.Code != 428 {
+		t.Fatalf("err = %v, want a 428 StatusError", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "reviewer's edit" {
+		t.Fatalf("refused rewind still wrote the file: got %q", got)
+	}
+
+	// Confirmed, it proceeds and overwrites as normal.
+	resp, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "code", true)
+	if err != nil {
+		t.Fatalf("confirmed Rewind: %v", err)
+	}
+	if resp.FilesRestored != 1 {
+		t.Errorf("FilesRestored = %d, want 1", resp.FilesRestored)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "v1" {
+		t.Errorf("after confirmed rewind, file = %q, want v1", got)
 	}
 }
 
@@ -250,7 +310,7 @@ func TestRewindWaitsForInFlightRun(t *testing.T) {
 	rewindDone := make(chan struct{})
 	go func() {
 		defer close(rewindDone)
-		if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "conversation"); err != nil {
+		if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "conversation", false); err != nil {
 			t.Errorf("Rewind: %v", err)
 		}
 	}()
@@ -392,11 +452,11 @@ func TestRewindValidation(t *testing.T) {
 	}
 
 	// Unknown checkpoint → error.
-	if _, err := cl.Rewind(ctx, meta.ID, "no-such-checkpoint", "both"); err == nil {
+	if _, err := cl.Rewind(ctx, meta.ID, "no-such-checkpoint", "both", false); err == nil {
 		t.Error("expected error for unknown checkpoint")
 	}
 	// Empty checkpoint id → error.
-	if _, err := cl.Rewind(ctx, meta.ID, "", "both"); err == nil {
+	if _, err := cl.Rewind(ctx, meta.ID, "", "both", false); err == nil {
 		t.Error("expected error for empty checkpoint id")
 	}
 	// Invalid scope → error.
@@ -408,7 +468,7 @@ func TestRewindValidation(t *testing.T) {
 	if len(cps) == 0 {
 		t.Fatal("expected a checkpoint")
 	}
-	if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "bogus"); err == nil {
+	if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "bogus", false); err == nil {
 		t.Error("expected error for invalid scope")
 	}
 }
@@ -619,7 +679,7 @@ func TestRewindRefusesCheckpointWithOutOfWorkspacePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "both"); err == nil {
+	if _, err := cl.Rewind(ctx, meta.ID, cps[0].ID, "both", false); err == nil {
 		t.Fatal("Rewind succeeded, want a refusal")
 	} else if !strings.Contains(err.Error(), "refused") {
 		t.Errorf("Rewind err = %v, want it to report the refusal", err)

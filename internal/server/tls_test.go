@@ -266,3 +266,34 @@ func TestCertFingerprintMatchesOpenSSLForm(t *testing.T) {
 		t.Errorf("fingerprint %q does not start with the SHA-256 of the input", got)
 	}
 }
+
+// TestCertFingerprintFromFileMatchesGeneratedCert is P81.18/FIND-18: the
+// exported CertFingerprint (read from disk, used by `aegis ui`) must agree
+// with the fingerprint ensureTLSCert logs for the same certificate.
+func TestCertFingerprintFromFileMatchesGeneratedCert(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "daemon.crt")
+	keyPath := filepath.Join(dir, "daemon.key")
+
+	cert, err := ensureTLSCert(certPath, keyPath, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("ensureTLSCert: %v", err)
+	}
+	want := certFingerprint(cert.Certificate[0])
+
+	got, err := CertFingerprint(certPath)
+	if err != nil {
+		t.Fatalf("CertFingerprint: %v", err)
+	}
+	if got != want {
+		t.Errorf("CertFingerprint(%q) = %q, want %q", certPath, got, want)
+	}
+}
+
+// TestCertFingerprintMissingFile checks the error path a `aegis ui` running
+// before any daemon has ever started at this data dir would hit.
+func TestCertFingerprintMissingFile(t *testing.T) {
+	if _, err := CertFingerprint(filepath.Join(t.TempDir(), "nope.crt")); err == nil {
+		t.Error("expected an error for a missing certificate file")
+	}
+}

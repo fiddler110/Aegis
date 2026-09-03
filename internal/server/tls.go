@@ -163,6 +163,25 @@ func certFingerprint(der []byte) string {
 	return b.String()
 }
 
+// CertFingerprint reads the PEM certificate at certPath and returns its
+// SHA-256 fingerprint in the same colon-separated hex form certFingerprint
+// logs at daemon startup. Exported for `aegis ui` (internal/cli/ui.go),
+// which prints it alongside its self-signed-certificate warning (P81.18/
+// FIND-18) so an operator who does click through the browser's warning has
+// something on hand to compare against — the daemon's own startup log line
+// is easy to miss, and is the one place this value existed before.
+func CertFingerprint(certPath string) (string, error) {
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return "", fmt.Errorf("no PEM block found in %s", certPath)
+	}
+	return certFingerprint(block.Bytes), nil
+}
+
 // fileExists reports whether path is present, treating any stat error other
 // than "not found" as present: the P81.25 warning should err toward telling
 // the operator that material may have been replaced.

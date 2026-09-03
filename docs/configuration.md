@@ -829,6 +829,33 @@ server:
     enabled: true
     cert_file: ""  # optional operator-supplied cert; auto-generated if empty
     key_file: ""   # optional operator-supplied key; auto-generated if empty
+    # ---
+    # Tunnelling or reverse-proxying `aegis ui` (P81.18/FIND-18): the
+    # self-signed-certificate warning is narrow on loopback, where the
+    # operator already knows the only thing that could answer on that port is
+    # the daemon they just started. It stops meaning that the moment the UI
+    # is reached through an SSH tunnel, a reverse proxy, or any other hop —
+    # exactly the setup where "click through the warning" is dangerous
+    # advice, and exactly the setup that trains an operator to do it anyway.
+    #
+    # The supported path is cert_file/key_file: supply a certificate your
+    # browser (or OS) already trusts — one issued by an internal CA, or one
+    # from a proxy that terminates TLS itself and forwards to the daemon over
+    # plaintext loopback (the same pattern documented above for
+    # provider.local_auth_token/FIND-07). With a trusted cert configured, the
+    # daemon never generates or serves the self-signed one, and there is
+    # nothing left for the browser to warn about.
+    #
+    # If you'd rather keep the auto-generated certificate and make your own
+    # browser/OS trust it instead, add <data_dir>/daemon.crt to your OS or
+    # browser trust store using its normal "import a certificate" flow (e.g.
+    # `certutil -addstore Root daemon.crt` on Windows as an administrator,
+    # `security add-trusted-cert` on macOS, or your distro's
+    # update-ca-certificates equivalent on Linux) — Aegis does not do this for
+    # you; there is no built-in helper command. Whichever path you take,
+    # `aegis ui` prints the certificate's SHA-256 fingerprint on every start
+    # when TLS is on, so you have something to compare against if you ever do
+    # see a warning you weren't expecting.
 
   # Defaults to 10 (P27.12/FIND-14). Caps how many message-turn runs may be
   # actively executing across ALL sessions at once. A request past the cap is
@@ -1846,7 +1873,29 @@ cleanup:
   # 0 disables automatic pruning.
   session_ttl_days: 0
 
-  # How often the pruner runs, in hours.
+  # Auto-delete archived sessions N days after they were archived. Archiving
+  # is a separate "keep this, out of the way" gesture, so session_ttl_days
+  # deliberately never touches an archived session — this is the horizon for
+  # archived ones specifically. 0 (the default) keeps them forever.
+  archived_session_ttl_days: 0
+
+  # Auto-delete checkpoints (per-turn file snapshots used by /rewind) older
+  # than N days, independent of whether their owning session still exists or
+  # is archived — a checkpoint's value decays with wall-clock time, not
+  # session lifetime. 0 (the default) keeps them forever.
+  checkpoint_ttl_days: 0
+
+  # Caps the total bytes of file snapshots a single session's checkpoints may
+  # hold (P81.31/FIND-31). Unlike the TTLs above, which age out on the
+  # periodic pruner below, this is enforced synchronously right after each
+  # new checkpoint is created — oldest checkpoints for the session are
+  # deleted first until it's back under the cap, and the checkpoint just
+  # created is never evicted. 0 (the default) leaves checkpoint growth
+  # unbounded.
+  checkpoint_max_session_mb: 0
+
+  # How often the three TTL-based prunes above run, in hours.
+  # checkpoint_max_session_mb is not on this ticker (see its own doc).
   interval_hours: 24
 
 

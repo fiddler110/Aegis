@@ -2,12 +2,15 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
+	"github.com/fiddler110/aegis/internal/client"
 	"github.com/fiddler110/aegis/internal/reqorigin"
 )
 
@@ -85,7 +88,7 @@ func (d *SlashDispatcher) cmdRewind(args []string) SlashResult {
 			label := strings.ReplaceAll(cp.Label, "\n", " ")
 			fmt.Fprintf(&b, "  %2d  %s%s\n      %s\n", i+1, cp.CreatedAt.Format("15:04:05"), files, label)
 		}
-		b.WriteString("\nUse /rewind <n> [code|conversation|both] to restore.")
+		b.WriteString("\nUse /rewind <n> [code|conversation|both] [--force] to restore.")
 		return SlashResult{Output: b.String()}
 	}
 
@@ -94,16 +97,28 @@ func (d *SlashDispatcher) cmdRewind(args []string) SlashResult {
 		return SlashResult{Output: fmt.Sprintf("Invalid checkpoint number %q. Use /rewind to see the list (1–%d).", args[0], len(cps)), IsError: true}
 	}
 	scope := "both"
-	if len(args) > 1 {
-		scope = strings.ToLower(args[1])
-		if scope != "code" && scope != "conversation" && scope != "both" {
-			return SlashResult{Output: "Scope must be 'code', 'conversation', or 'both'.", IsError: true}
+	force := false
+	for _, a := range args[1:] {
+		switch strings.ToLower(a) {
+		case "--force", "-f", "force":
+			force = true
+		case "code", "conversation", "both":
+			scope = strings.ToLower(a)
+		default:
+			return SlashResult{Output: fmt.Sprintf("Unrecognized argument %q. Scope must be 'code', 'conversation', or 'both'; add --force to confirm restoring over external changes.", a), IsError: true}
 		}
 	}
 
 	cp := cps[n-1]
-	resp, err := d.client.Rewind(ctx, d.sessionID, cp.ID, scope)
+	resp, err := d.client.Rewind(ctx, d.sessionID, cp.ID, scope, force)
 	if err != nil {
+		// P81.31/FIND-31: the server refuses a file restore over a path it
+		// found changed since the checkpoint's own turn — surface that as
+		// guidance to re-run with --force rather than a bare failure.
+		var statusErr *client.StatusError
+		if errors.As(err, &statusErr) && statusErr.Code == http.StatusPreconditionRequired {
+			return SlashResult{Output: fmt.Sprintf("Rewind refused: %s\nRe-run as `/rewind %s %s --force` to restore anyway.", statusErr.Msg, args[0], scope), IsError: true}
+		}
 		return SlashResult{Output: fmt.Sprintf("Rewind failed: %v", err), IsError: true}
 	}
 
@@ -282,13 +297,22 @@ func (d *SlashDispatcher) cmdRollback(args []string) SlashResult {
 			label := strings.ReplaceAll(cp.Label, "\n", " ")
 			fmt.Fprintf(&b, "  %2d  %s%s\n      %s\n", i+1, cp.CreatedAt.Format("15:04:05"), git, label)
 		}
-		b.WriteString("\nUse /rollback <n> to restore files AND git reset --hard to pre-turn HEAD.")
+		b.WriteString("\nUse /rollback <n> [--force] to restore files AND git reset --hard to pre-turn HEAD.")
 		return SlashResult{Output: b.String()}
 	}
 
 	n, err := strconv.Atoi(args[0])
 	if err != nil || n < 1 || n > len(cps) {
 		return SlashResult{Output: fmt.Sprintf("Invalid number %q (1–%d).", args[0], len(cps)), IsError: true}
+	}
+	force := false
+	for _, a := range args[1:] {
+		switch strings.ToLower(a) {
+		case "--force", "-f", "force":
+			force = true
+		default:
+			return SlashResult{Output: fmt.Sprintf("Unrecognized argument %q. Add --force to confirm restoring over external changes.", a), IsError: true}
+		}
 	}
 	cp := cps[n-1]
 
@@ -297,8 +321,12 @@ func (d *SlashDispatcher) cmdRollback(args []string) SlashResult {
 		noGit = " (no git SHA recorded — file-only restore)"
 	}
 
-	resp, err := d.client.Rollback(ctx, d.sessionID, cp.ID, "both")
+	resp, err := d.client.Rollback(ctx, d.sessionID, cp.ID, "both", force)
 	if err != nil {
+		var statusErr *client.StatusError
+		if errors.As(err, &statusErr) && statusErr.Code == http.StatusPreconditionRequired {
+			return SlashResult{Output: fmt.Sprintf("Rollback refused: %s\nRe-run as `/rollback %s --force` to restore anyway.", statusErr.Msg, args[0]), IsError: true}
+		}
 		return SlashResult{Output: fmt.Sprintf("Rollback failed: %v", err), IsError: true}
 	}
 

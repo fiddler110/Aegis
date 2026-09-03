@@ -613,10 +613,15 @@ func (c *Client) ListCheckpoints(ctx context.Context, sessionID string) ([]api.C
 }
 
 // Rewind restores a session to a checkpoint. scope is "both", "code", or
-// "conversation" (empty means "both").
-func (c *Client) Rewind(ctx context.Context, sessionID, checkpointID, scope string) (*api.RewindResponse, error) {
+// "conversation" (empty means "both"). confirmExternalChanges must be true to
+// proceed with a file restore the server has flagged as touching a path
+// changed outside the checkpoint's own turn (P81.31/FIND-31) — pass false on
+// the first attempt; a StatusError with Code 409 means the server refused and
+// its Msg names the changed paths, and the same call retried with true
+// restores anyway.
+func (c *Client) Rewind(ctx context.Context, sessionID, checkpointID, scope string, confirmExternalChanges bool) (*api.RewindResponse, error) {
 	var out api.RewindResponse
-	req := api.RewindRequest{CheckpointID: checkpointID, Scope: scope}
+	req := api.RewindRequest{CheckpointID: checkpointID, Scope: scope, ConfirmExternalChanges: confirmExternalChanges}
 	if err := c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/rewind", req, &out); err != nil {
 		return nil, err
 	}
@@ -637,10 +642,11 @@ func (c *Client) Fork(ctx context.Context, sessionID, checkpointID string) (*api
 }
 
 // Rollback is like Rewind but also runs `git reset --hard <sha>` to restore
-// git HEAD to the pre-turn state (P3.4). Scope defaults to "both".
-func (c *Client) Rollback(ctx context.Context, sessionID, checkpointID, scope string) (*api.RewindResponse, error) {
+// git HEAD to the pre-turn state (P3.4). Scope defaults to "both". See
+// Rewind's doc for confirmExternalChanges.
+func (c *Client) Rollback(ctx context.Context, sessionID, checkpointID, scope string, confirmExternalChanges bool) (*api.RewindResponse, error) {
 	var out api.RewindResponse
-	req := api.RewindRequest{CheckpointID: checkpointID, Scope: scope, GitRollback: true}
+	req := api.RewindRequest{CheckpointID: checkpointID, Scope: scope, GitRollback: true, ConfirmExternalChanges: confirmExternalChanges}
 	if err := c.do(ctx, http.MethodPost, "/sessions/"+sessionID+"/rewind", req, &out); err != nil {
 		return nil, err
 	}

@@ -93,10 +93,23 @@ type CleanupConfig struct {
 	// month ago is dead weight in the database whether or not its session
 	// was ever deleted or archived. 0 disables auto-cleanup.
 	CheckpointTTLDays int `koanf:"checkpoint_ttl_days"`
+	// CheckpointMaxSessionMB caps the total bytes of file snapshots a single
+	// session's checkpoints may hold (P81.31/FIND-31). Unlike the three TTLs
+	// above, which age out on the periodic pruner, this is enforced
+	// synchronously right after each new checkpoint is created
+	// (checkpoint.Store.EvictOldestOverCap) — a size bound is a per-turn risk
+	// (a workspace with large files can fill the disk well inside one
+	// IntervalHours window), so it cannot wait for the next sweep the way an
+	// age-based rule can. Oldest checkpoints for the session are deleted first
+	// until the session is back under the cap; the checkpoint just created is
+	// never evicted, so rewind always has at least one target. 0 (the default)
+	// leaves checkpoint growth unbounded, matching the pre-P81.31 behavior.
+	CheckpointMaxSessionMB int `koanf:"checkpoint_max_session_mb"`
 	// IntervalHours is how often the pruner runs. Defaults to 24. Shared by
 	// SessionTTLDays, ArchivedSessionTTLDays and CheckpointTTLDays — they are
 	// three retention horizons over the same one daemon-lifetime ticker, not
-	// three separate schedules to configure.
+	// three separate schedules to configure. CheckpointMaxSessionMB is not on
+	// this ticker at all (see its own doc).
 	IntervalHours int `koanf:"interval_hours"`
 }
 

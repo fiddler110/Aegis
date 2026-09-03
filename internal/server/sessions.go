@@ -652,6 +652,26 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 	resp := api.RewindResponse{Scope: scope}
 
 	if scope == "both" || scope == "code" {
+		// P81.31/FIND-31: refuse a file restore that would silently discard an
+		// edit made outside this turn's own tool calls — a reviewer's change in
+		// another editor, a concurrent session, a build script — unless the
+		// caller has already confirmed it. Checked before the git rollback
+		// below too: a `reset --hard` would erase the very evidence this is
+		// warning about.
+		if !req.ConfirmExternalChanges {
+			changed, err := s.checkpoints.ExternalChangesSince(r.Context(), cp.ID)
+			if err != nil {
+				s.logger.Warn("rewind: check external changes", "checkpoint", cp.ID, "err", err)
+			} else if len(changed) > 0 {
+				// 428 (Precondition Required), not 409: distinct from
+				// ErrRestoreRefused's 409 below, which the caller cannot fix by
+				// retrying with confirmation — this one specifically can.
+				writeError(w, http.StatusPreconditionRequired, fmt.Sprintf(
+					"%d file(s) changed outside the agent's own edits since this checkpoint: %s. Re-send with confirm_external_changes to restore anyway (this will overwrite them).",
+					len(changed), strings.Join(changed, ", ")))
+				return
+			}
+		}
 		// P3.4: git-native rollback — run `git reset --hard <sha>` before restoring
 		// snapshotted files so untracked changes and index state are also reset.
 		if req.GitRollback && cp.GitSHA != "" {

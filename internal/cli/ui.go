@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/fiddler110/aegis/internal/config"
+	"github.com/fiddler110/aegis/internal/server"
 	"github.com/spf13/cobra"
 )
 
@@ -35,7 +36,16 @@ func newUICmd() *cobra.Command {
 
 			url := webUIURL(cfg.Server.Addr, cfg.Server.TLS.Enabled)
 			if cfg.Server.TLS.Enabled {
-				fmt.Fprintln(cmd.OutOrStdout(), "TLS is enabled: your browser will warn about the daemon's self-signed certificate — this is expected (see docs/configuration.md).")
+				msg := "TLS is enabled: your browser will warn about the daemon's self-signed certificate — this is expected (see docs/configuration.md)."
+				// P81.18/FIND-18: give the operator something to compare
+				// against before clicking through — printed here rather than
+				// only in the daemon's own startup log, which this process
+				// may not even be the one that wrote (an already-running
+				// daemon's log line is easy to miss or unavailable).
+				if fp, err := server.CertFingerprint(cfg.TLSCertPath()); err == nil {
+					msg += fmt.Sprintf("\nCertificate fingerprint (SHA-256): %s\nCompare this against what your browser shows for the warning before accepting it.", fp)
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), msg)
 			}
 
 			warnSandboxFallback(cl)

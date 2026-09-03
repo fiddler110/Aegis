@@ -12,7 +12,9 @@
 package checkpoint
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -117,6 +119,12 @@ CREATE TABLE IF NOT EXISTS checkpoint_files (
 	// restore refuse the checkpoint, a zero mode makes it fall back to 0o644.
 	_, _ = s.db.Exec(`ALTER TABLE checkpoints ADD COLUMN workspace_root TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE checkpoint_files ADD COLUMN mode INTEGER NOT NULL DEFAULT 0`)
+	// P81.31: the SHA-256 of a captured path's content once the owning turn's
+	// own edits are done (RecordPostTurnState) — nullable, left NULL for rows
+	// this feature predates or never got the chance to run for. A zero-length
+	// (non-NULL) value is the "the path should not exist" case, distinct from
+	// both NULL ("no baseline recorded") and a real 32-byte digest.
+	_, _ = s.db.Exec(`ALTER TABLE checkpoint_files ADD COLUMN post_digest BLOB`)
 	return nil
 }
 
@@ -397,6 +405,165 @@ func (s *Store) PruneOlderThan(ctx context.Context, cutoff time.Time) (int, erro
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+// absentDigest is the sentinel post_digest value recorded for a captured path
+// that does not exist once the owning turn's own edits are done — distinct
+// from both NULL (no baseline recorded at all) and a real 32-byte SHA-256
+// digest, and from Go's nil (database/sql writes a zero-length non-nil slice
+// as an empty BLOB, not NULL).
+var absentDigest = []byte{}
+
+// RecordPostTurnState stores each of checkpointID's captured paths' current
+// on-disk content digest as the baseline ExternalChangesSince later compares
+// against (P81.31/FIND-31). Call it once, after the turn that owns the
+// checkpoint has finished making its own writes — from that point on, any
+// difference between a captured path's live content and this digest was not
+// produced by this turn's own tool calls: a reviewer's edit in another
+// editor, a concurrent Aegis session, a build script, anything external.
+//
+// Best-effort like Capture/CaptureBytes: a read/stat error for one path is
+// swallowed rather than aborting the rest, since this is provenance for a
+// confirmation prompt, not the restore path itself. A checkpoint that
+// captured no files is a no-op.
+func (s *Store) RecordPostTurnState(ctx context.Context, checkpointID string) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM checkpoint_files WHERE checkpoint_id = ?`, checkpointID)
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return err
+		}
+		paths = append(paths, p)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+
+	for _, p := range paths {
+		digest := absentDigest
+		if data, err := os.ReadFile(p); err == nil {
+			sum := sha256.Sum256(data)
+			digest = sum[:]
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE checkpoint_files SET post_digest = ? WHERE checkpoint_id = ? AND path = ?`,
+			digest, checkpointID, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ExternalChangesSince returns the captured paths in checkpointID whose
+// current on-disk content no longer matches the baseline RecordPostTurnState
+// recorded (P81.31/FIND-31) — i.e. paths that changed after the owning turn
+// finished, from something other than that turn's own tool calls. A rewind
+// that silently overwrites such a path would discard an edit the agent never
+// made and the user may not know about.
+//
+// A path with no recorded baseline (RecordPostTurnState was never called for
+// this checkpoint — rows from before this feature existed, or a checkpoint
+// whose turn never reached the post-run bookkeeping) is skipped rather than
+// reported: there is nothing to compare against, and treating "unknown" as
+// "changed" would make every pre-existing checkpoint permanently unrewindable
+// without a confirm flag.
+func (s *Store) ExternalChangesSince(ctx context.Context, checkpointID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT path, post_digest FROM checkpoint_files WHERE checkpoint_id = ? AND post_digest IS NOT NULL`, checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var changed []string
+	for rows.Next() {
+		var path string
+		var digest []byte
+		if err := rows.Scan(&path, &digest); err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if len(digest) == 0 {
+				continue // still absent, as recorded
+			}
+			changed = append(changed, path)
+			continue
+		}
+		sum := sha256.Sum256(data)
+		if len(digest) == 0 || !bytes.Equal(sum[:], digest) {
+			changed = append(changed, path)
+		}
+	}
+	return changed, rows.Err()
+}
+
+// EvictOldestOverCap deletes sessionID's checkpoints, oldest first, until
+// their total captured-file bytes are at or under maxBytes (P81.31/FIND-31).
+// It returns the number of checkpoints deleted. maxBytes <= 0 disables the
+// check (unbounded, the pre-P81.31 default).
+//
+// The most recently created checkpoint is never evicted, even if it alone
+// exceeds the cap: the caller of this (checkpoint creation) needs at least
+// one checkpoint left to rewind to, and rejecting the checkpoint that
+// triggered the call would silently break rewind for the very turn this
+// protects. That is a size-based ceiling — PruneOlderThan (P81.24) is the
+// existing age-based one; they run independently and neither substitutes for
+// the other (an old low-traffic session with two large checkpoints trips
+// this, not that; a young session with hundreds of tiny ones trips that, not
+// this).
+func (s *Store) EvictOldestOverCap(ctx context.Context, sessionID string, maxBytes int64) (int, error) {
+	if maxBytes <= 0 {
+		return 0, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT c.id, COALESCE((SELECT SUM(LENGTH(f.content)) FROM checkpoint_files f WHERE f.checkpoint_id = c.id), 0)
+FROM checkpoints c WHERE c.session_id = ?
+ORDER BY c.created_at ASC, c.id ASC`, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	type row struct {
+		id   string
+		size int64
+	}
+	var all []row
+	var total int64
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.size); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		all = append(all, r)
+		total += r.size
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	rows.Close()
+
+	if total <= maxBytes || len(all) <= 1 {
+		return 0, nil
+	}
+	var evicted int
+	for _, r := range all {
+		if len(all)-evicted <= 1 || total <= maxBytes {
+			break
+		}
+		if err := s.Delete(ctx, r.id); err != nil {
+			return evicted, err
+		}
+		total -= r.size
+		evicted++
+	}
+	return evicted, nil
 }
 
 // NewSnapshotter returns a Snapshotter that captures pre-modification file

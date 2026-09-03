@@ -9,8 +9,6 @@
     - [P81.28 — Prose tool-call parsing can promote quoted untrusted text into real calls (FIND-28)](#p8128--prose-tool-call-parsing-can-promote-quoted-untrusted-text-into-real-calls-find-28)
     - [P66.18 — Architecture, quality and maintainability residue](#p6618--architecture-quality-and-maintainability-residue)
     - [P66.20 — Efficiency residue](#p6620--efficiency-residue)
-    - [P81.31 — Checkpoint growth is unbounded and `/rewind` can silently discard outside edits (FIND-31)](#p8131--checkpoint-growth-is-unbounded-and-rewind-can-silently-discard-outside-edits-find-31)
-    - [P81.18 — The self-signed certificate warning conditions operators to click through (FIND-18)](#p8118--the-self-signed-certificate-warning-conditions-operators-to-click-through-find-18)
     - [P66.23 — Go-code security residue](#p6623--go-code-security-residue)
     - [P66.17 — Local-model path: the Low-severity residue](#p6617--local-model-path-the-low-severity-residue)
     - [P77.6 — No OS-level process sandbox on Windows (GAP-05, spun out of P66.19)](#p776--no-os-level-process-sandbox-on-windows-gap-05-spun-out-of-p6619)
@@ -40,11 +38,12 @@
 ## Status
 
 **Updated 2026-09-03.** Tier 1: **0 open**. Tier 2: **0 open**. Tier 3: **0 open** — the P81
-threat-model batch (filed 2026-08-31) is fully resolved except three Tier 4 items (P81.11 closed the
-same day it was re-tiered — see below); full closing
+threat-model batch (filed 2026-08-31) is fully resolved except two Tier 4 items (P81.11 closed the
+same day it was re-tiered, P81.31 shipped in full, P81.18 shipped except one explicitly-deferred
+helper — see below); full closing
 record in
 [releases.md](releases/releases-01.md#threat-model-2026-08-31--the-p81-batch-closing-record).
-Tier 4: **22 open** — parked build items, none with a fired trigger; see
+Tier 4: **20 open** — parked build items, none with a fired trigger; see
 [Open Work — Tier 4](#open-work--tier-4). Verification: **6 open** — code already written,
 waiting on a live-model run; see [Verification Work](#verification-work).
 
@@ -54,6 +53,16 @@ weekly-cron `govulncheck` job has run in `codeql.yml` since 2026-08-07 (P63.2, c
 **before** the threat model that filed this item even ran. The entry's own text describing the
 question as open was stale from the moment it was written. No code changed to close this; full
 record in [releases.md](releases/releases-01.md#p8111-closed-p817-and-p8128-partially-shipped-2026-09-03).
+
+**P81.31 shipped in full, P81.18 shipped except its trust-store helper, 2026-09-03.** P81.31/FIND-31:
+a per-session checkpoint byte cap with oldest-first eviction
+(`cleanup.checkpoint_max_session_mb`), and a rewind-time confirmation gate that refuses (HTTP 428) to
+overwrite a file changed by something other than the agent's own turn until the caller confirms.
+P81.18/FIND-18: `aegis ui` now prints the daemon's certificate fingerprint alongside its existing
+self-signed-certificate notice, and `docs/configuration.md` documents the supported tunnelled/proxied
+path; an automated OS-trust-store-import command was deliberately not built (real, platform-specific,
+no fired trigger — documented as a manual step instead). Full record in
+[releases.md](releases/releases-01.md#p8131-shipped-p8118-shipped-except-its-trust-store-helper-2026-09-03).
 
 **This document tracks only open work and current counts.** A completed item's full record — what
 it was, what building it found, and what was measured to close it — belongs in
@@ -140,12 +149,14 @@ condition for what would change that.
 
 ## Open Work — Tier 4
 
-**Status: 22 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
-trigger), four from the P81 threat-model batch (**P81.7**, **P81.18**, **P81.28**, **P81.31**,
-each parked for a stated reason — see each entry; **P81.7** and **P81.28** partially shipped
-2026-09-03, remainder described in each entry), six from the P66 review batch, three from the
-P67 external-source reading (**P67.11**, **P67.12**, **P67.13**), and **P77.6** (spun out of
-P66.19). **P81.11** closed 2026-09-03 (see [Status](#status)) rather than staying in this count.
+**Status: 20 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
+trigger), two from the P81 threat-model batch (**P81.7**, **P81.28**, each parked for a stated
+reason — see each entry; both partially shipped 2026-09-03, remainder described in each entry),
+six from the P66 review batch, three from the P67 external-source reading (**P67.11**, **P67.12**,
+**P67.13**), and **P77.6** (spun out of P66.19). **P81.11** closed 2026-09-03 (see
+[Status](#status)) rather than staying in this count; **P81.31** shipped in full and **P81.18**
+shipped except its explicitly-deferred trust-store helper, both 2026-09-03 (see
+[releases.md](releases/releases-01.md#p8131-shipped-p8118-shipped-except-its-trust-store-helper-2026-09-03)).
 Everything else that was ever in this tier has shipped — see
 [releases.md](releases/releases-01.md#roadmap-housekeeping-closed-items-migrated-from-roadmapmd-2026-09-03)
 for the closed-item record.
@@ -282,64 +293,6 @@ and would silently corrupt text (PERF-08) — marked SUSPECTED and never confirm
 promoted, promote that one, and confirm it first.
 
 Priority: Tier 4 — no triggers. PERF-08 is the only one with a correctness edge.
-
-### P81.31 — Checkpoint growth is unbounded and `/rewind` can silently discard outside edits (FIND-31)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-31**](../threat-model-20260831-002123/3-findings.md#find-31-checkpoint-growth-is-unbounded-and-rewind-can-silently-discard-non-agent-changes),
-CVSS 4.4, `Low`, CWE-770). Checkpoints are per-turn file snapshots taken before mutating calls. On a
-large workspace across a long session they grow with no documented bound and can fill the disk.
-Separately, `/rewind` restores those snapshots over the live working tree — a legitimate and useful
-feature that can also silently revert changes the agent did not make, including a reviewer's edits
-made in another editor while the session was open.
-
-Neither is severe alone. Together they mean the restore path is both unbounded in cost and unconfirmed
-in effect.
-
-**What would close it.** Cap total snapshot bytes per session, evict oldest-first, and surface the cap
-as a config key. Before a rewind, compare current file state against the snapshot's recorded post-turn
-digest and require confirmation for any file changed outside the agent's own tool calls.
-`internal/checkpoint.PruneOlderThan` already deletes checkpoints before a time cutoff (called from the
-session-delete handler and `session.Store.Prune`), but that is age-based, not size-based — neither a
-total-byte cap nor eviction exists yet.
-
-**Related and not the same.** **P60.3** (Tier 4) is that checkpoints capture files only, so `/rewind`
-is silent about everything else. That is a coverage gap; this is a bound and a confirmation. Take them
-together if `internal/checkpoint` is open.
-
-**Checked 2026-09-01: the "rides along with P81.24 for free" framing this entry originally carried was
-wrong and is retracted.** P81.24's shipped mechanism is `fsguard.RestrictToOwner` — a Windows ACL
-restriction on the session DB and its `-wal`/`-shm` companions — which touches file _permissions_, not
-retention. It shipped without adding any byte cap or eviction logic; this item's two asks are both
-still fully unbuilt.
-
-Priority: Tier 4 — no fired trigger (no report of a filled disk or a lost external edit). Both halves
-are real, independent work; neither rides along with anything already shipped.
-
-### P81.18 — The self-signed certificate warning conditions operators to click through (FIND-18)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-18**](../threat-model-20260831-002123/3-findings.md#find-18-the-self-signed-certificate-warning-conditions-operators-to-click-through),
-CVSS 4.3, `Low`, CWE-295, `Transfer Risk`). Every in-repo client pins the daemon's self-signed
-certificate through `client.NewFromConfig`, so the pin is transparent for the TUI, ACP and MCP paths.
-The browser is the one consumer that is not pinned: opening `aegis ui` with TLS on produces a
-certificate warning the operator must dismiss. The CLI calls this out explicitly, which is the right
-handling. The residual effect is that the operator learns to click through certificate warnings on
-this origin — including one presented by something that is not the daemon.
-
-Narrow on loopback. It widens the moment the UI is tunnelled or proxied, which is exactly the
-configuration where the warning would have meant something.
-
-**What would close it.** Document in `docs/installation.md` a supported path for tunnelled or proxied
-UI access using `cert_file`/`key_file` with a certificate the operator's browser already trusts. Offer
-a helper that adds the generated certificate to the OS trust store on request, so the default local
-experience has no warning to normalise. Print the certificate fingerprint in the CLI output so an
-operator who does click through has something to compare against — which is also what **P81.25** needs
-for its pin-change acknowledgement.
-
-Priority: Tier 4 — mostly documentation and a convenience helper, no fired trigger while the UI stays
-on loopback. Promote when someone actually tunnels it. The fingerprint line is small enough to take
-with **P81.25**.
 
 ### P66.23 — Go-code security residue
 
