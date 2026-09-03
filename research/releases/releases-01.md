@@ -8,7 +8,37 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-03 (thirty-ninth record) — **P80.2 and P80.3 shipped, asked for directly:
+**Last updated:** 2026-09-03 (fortieth record) — **P71.7, P71.12 and P71.13 shipped, closing the P71
+batch in full: a publication-date signal for `web_search`, boilerplate stripped from `web_fetch`, and
+a template directory for self-hosted tools instead of Aegis managing one itself.** P71.7 (search
+results carry no date) was blocked on confirming a per-result date field existed in a real provider's
+schema without a Brave API key to test live — resolved by finding independent confirmation instead (a
+Brave API user's own forum post describing the `age`/`page_age` fields, corroborated by a second
+source on `age`'s ISO 8601 format), which is what the entry's own "Promote when" bar actually asked
+for. `searchResult` gained a `date` field; `braveSearch` prefers `page_age` over `age`;
+`searxngSearch` now reads `publishedDate` too (confirmed live against this repo's own SearXNG
+instance — present in the schema, `null` for the one engine checked); DuckDuckGo/Marginalia results
+still carry none. `web_search` output gets a `published: <date>` line per result when the backend
+supplied one; `deep-research/SKILL.md` now says the signal is backend-dependent rather than assuming
+it. P71.12 (main-content extraction) was filed as a negative measurement recommending against
+building it — the full fix (`<main>`/`<article>` detection) risks silently under-returning on a
+mis-detected container, for a measured 3–12%/1.2–1.5 KB-per-page win. Built anyway on direct request,
+scoped to the risk-free half: `htmlToText` now skips `nav`/`header`/`footer`/`aside` outright, which
+only removes definitionally-boilerplate text and carries none of the container-detection regression
+risk. P71.13 (Aegis managing its own SearXNG container) was corrected in scope by the user mid-review:
+the operator's own instance is inherently single-machine and doesn't generalize the way the shared,
+Aegis-built scanner images do, so Aegis taking on container-lifecycle responsibility for it was the
+wrong shape. Built instead as `containers/` — a template directory Aegis does not manage the lifecycle
+of — with `containers/searxng/` holding a `compose.yaml`, a `settings.yml` pre-configured for Aegis
+(`search.formats: [html, json]`, since SearXNG's JSON output is off by default), and a README with the
+same honest self-hosting tradeoff this entry documents (relocates **P71.1**'s challenge-page risk
+rather than removing it) plus the exact Aegis config to use. `go build ./...` is clean and
+`go test ./internal/tool/builtin/... ./internal/skills/...` is green, including three new tests
+(`TestHTMLToTextDropsBoilerplateTags`, `TestParseBraveResultsPrefersPageAgeOverAge`, and an extended
+`TestSearxngSearch`). Full record:
+[P71.7, P71.12 and P71.13, 2026-09-03](#p717-p7112-and-p7113-2026-09-03).
+
+**Last updated (previous):** 2026-09-03 (thirty-ninth record) — **P80.2 and P80.3 shipped, asked for directly:
 the three unread-package investigation closed clean on two of three areas and found a real budget bug
 in the third, fixed the same sitting; the `Server` struct's per-session map family is now grouped.**
 P80.2 (`internal/tui`, `internal/drive`, the sandbox container backends — the three areas the
@@ -1139,6 +1169,68 @@ mid-conversation rather than never.
 `internal/providerfactory/factory_test.go` (`TestBuild_RejectsModelHarnessDeferringToolSearch`,
 `_RejectsOversizedPromptSuffixUnderLocalProfile`, `_AllowsShortPromptSuffixUnderLocalProfile`). `go build
 ./...` and the full `go test ./...` are green.
+
+### P71.7, P71.12 and P71.13, 2026-09-03
+
+The last three entries of the P71 batch (filed 2026-08-19), closing it in full — **P71.6** and
+**P71.11** shipped 2026-09-01 (see below). Each of the three had a real blocker or an explicit
+"don't build" recommendation on file; the user asked to look at each on its own merits rather than
+skip the batch, and each resolved differently.
+
+**P71.7 — `web_search` results carry no publication date.** The entry's own "Promote when" bar was
+confirming a per-result date field on a keyed provider, which needed a live authenticated Brave API
+call this environment has no key for. Resolved without one: a Brave API user's own community-forum
+post confirms the `SearchResult` JSON carries both `age` and `page_age` fields (unable to say which is
+which, but both exist), corroborated by a separate source describing `age`'s ISO 8601 format —
+external, independent confirmation of the schema, which is what the bar asked for regardless of who
+ran the call. Also checked live against this repo's own SearXNG instance (`10.0.0.2:8787`): its JSON
+schema carries `publishedDate`, `null` for the one engine (`google cse`) exercised — real but
+engine-dependent, not guaranteed.
+
+Built: `searchResult` (`internal/tool/builtin/web.go`) gained a `date` field, populated only by
+providers that carry the signal — DuckDuckGo and Marginalia never set it. `braveSearch`
+(`internal/tool/builtin/websearch_providers.go`) prefers `page_age` (the page's own
+publication/update date) over `age` (a display-oriented freshness value); its JSON-parsing half was
+pulled out to a standalone `parseBraveResults` so the preference order is unit-testable without
+network mocking (`TestParseBraveResultsPrefersPageAgeOverAge`). `searxngSearch` now reads
+`publishedDate` (`TestSearxngSearch` extended to cover both a populated and a `null` value).
+`web_search`'s formatted output gets a `published: <date>` line per result when present.
+`internal/skills/builtin/deep-research/SKILL.md` sections 1 and 3 now say the signal is
+backend-dependent (Brave, or a SearXNG instance whose engine reports one) instead of assuming
+it's always available.
+
+**P71.12 — main-content extraction for `web_fetch`.** Filed as a negative measurement recommending
+against building it: 3–12%/1.2–1.5 KB of boilerplate per page (measured across four
+`learn.microsoft.com` pages, 2026-08-19), and the obvious full fix — preferring a detected
+`<main>`/`<article>` container — risks a mis-detected container silently returning *less* than the
+naive walk. Built anyway on direct request, scoped to the risk-free half only: `htmlToText`
+(`internal/tool/builtin/web.go`) now skips `nav`/`header`/`footer`/`aside` elements outright, alongside
+the pre-existing `script`/`style`/`noscript` skip, rather than attempting container detection. Those
+four tags are definitionally chrome — site navigation, breadcrumbs, cookie banners, footers — so
+dropping them only removes text and cannot under-return the way a mis-detected container could; the
+regression risk the original entry flagged doesn't apply to this narrower change. Exact benefit:
+exactly the boilerplate the 2026-08-19 measurement already counted is now actually removed from every
+`web_fetch`, not merely measured. `TestHTMLToTextDropsBoilerplateTags` (`internal/tool/builtin/web_test.go`)
+locks in both halves: boilerplate gone, real `<main>`/`<article>` content untouched.
+
+**P71.13 — Aegis could manage its own SearXNG container.** The user corrected this entry's premise
+directly: the operator's own SearXNG instance is inherently single-machine, so Aegis owning that one
+container's lifecycle doesn't generalize the way the shared, Aegis-built scanner images do (built
+once, used by every scan on that machine — a real security-tooling workload; see
+`internal/security/multiscanner/Containerfile`). Built instead as `containers/` at the repo root — a
+template directory, not an Aegis-managed lifecycle, so none of the "hard container-runtime dependency
+for a zero-infra chat-loop feature" concern the original entry raised applies. `containers/README.md`
+is the index (built for more than one tool from the start); `containers/searxng/` holds `compose.yaml`,
+a `settings.yml` pre-configured for Aegis's needs (`search.formats: [html, json]` — SearXNG's JSON
+output is off by default and `web_search`'s provider path requires it), and a README with the same
+honest self-hosting tradeoff this entry documents (relocates **P71.1**'s challenge-page risk rather
+than removing it, and a non-residential host IP is *more* exposed to it than a residential one) plus
+the exact `search:` config block to use. The engine list follows the original entry's "Do, if picked
+up" guidance: Google and Bing disabled by default, Mojeek/Startpage/Brave/DuckDuckGo enabled — the
+safer set for a non-residential IP. `docs/configuration.md`'s existing searxng example now links to
+the template.
+
+`go build ./...` is clean; `go test ./internal/tool/builtin/... ./internal/skills/...` is green.
 
 ### P84.1, P84.2 and P84.3, 2026-09-01
 

@@ -458,6 +458,9 @@ func (t *searchTool) Execute(ctx context.Context, input json.RawMessage) (tool.R
 	var b strings.Builder
 	for i, r := range results {
 		fmt.Fprintf(&b, "%d. %s\n   %s\n", i+1, r.title, r.urlStr)
+		if r.date != "" {
+			fmt.Fprintf(&b, "   published: %s\n", r.date)
+		}
 		if r.snippet != "" {
 			fmt.Fprintf(&b, "   %s\n", r.snippet)
 		}
@@ -601,6 +604,11 @@ func looksLikeMarginaliaChallenge(body []byte) bool {
 
 type searchResult struct {
 	title, urlStr, snippet string
+	// date is a publication-date signal, populated only by providers that
+	// carry one (P71.7): Brave's `page_age`/`age` fields, SearXNG's
+	// `publishedDate`. DuckDuckGo and Marginalia results never set it — the
+	// zero-config scrape carries no such signal.
+	date string
 }
 
 // parseDDGLite parses the DuckDuckGo Lite endpoint HTML as a fallback when
@@ -717,8 +725,17 @@ func htmlToText(body []byte) string {
 	var b strings.Builder
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode && (n.Data == "script" || n.Data == "style" || n.Data == "noscript") {
-			return
+		// P71.12: nav/header/footer/aside are structurally boilerplate — site
+		// navigation, breadcrumbs, cookie banners, footers — never the article
+		// content a fetch is for. Unlike preferring a <main>/<article>
+		// container (rejected: a mis-detected container can silently return
+		// less than the naive walk), dropping these four tags only removes
+		// text, so it carries no regression risk.
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "script", "style", "noscript", "nav", "header", "footer", "aside":
+				return
+			}
 		}
 		if n.Type == html.TextNode {
 			b.WriteString(n.Data)

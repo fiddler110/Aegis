@@ -2257,7 +2257,9 @@ DuckDuckGo/Marginalia scrape ladder if that call itself errors.
 
 **If you already run a SearXNG instance, point at it — it's the best option
 you can have.** No key, no per-query cost, no external rate limit, and
-results stay on infrastructure you control:
+results stay on infrastructure you control. Don't have one yet? A ready-to-run
+compose template, already shaped for Aegis, lives at
+[`containers/searxng/`](../containers/searxng/):
 
 ```yaml
 search:

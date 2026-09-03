@@ -1,0 +1,53 @@
+# Overrides on top of the SearXNG image's own baked-in defaults
+# (`use_default_settings: true` merges this file over them — you are not
+# maintaining a full settings.yml, only what Aegis's use case needs changed).
+# Full option reference: https://docs.searxng.org/admin/settings/settings.html
+
+use_default_settings: true
+
+general:
+  instance_name: "Aegis SearXNG"
+
+server:
+  # REQUIRED: replace before running. Any fixed value here is a known secret.
+  #   openssl rand -hex 32
+  secret_key: "REPLACE_ME_WITH_YOUR_OWN_SECRET_openssl_rand_-hex_32"
+
+  # This template assumes a private instance (localhost or LAN-only, reached
+  # only by Aegis). The bot-detection limiter needs Redis/Valkey to work at
+  # all — false here, not a weaker default, since a limiter with no backing
+  # store is dead weight. If you expose this instance beyond your own
+  # machine/LAN, add a Redis service and turn limiter on; see
+  # https://docs.searxng.org/admin/searx.limiter.html
+  limiter: false
+
+  # Aegis's web_fetch tool already fetches and reads pages directly; SearXNG
+  # proxying images through itself is pure overhead here.
+  image_proxy: false
+
+search:
+  # web_search's provider path (internal/tool/builtin/websearch_providers.go)
+  # requests `?format=json` and parses SearXNG's JSON schema. Without this,
+  # every Aegis search against this instance fails closed.
+  formats:
+    - html
+    - json
+
+# P71.13's engine pick: Google/Bing are the two most likely to instant-block
+# a datacenter/CI host IP (more likely to trip than a residential IP, which
+# is the whole reason to self-host in the first place); Mojeek/Startpage/
+# Brave/DuckDuckGo are the safer default set. Re-enable Google/Bing yourself
+# if you're running this on a residential connection and want their results.
+engines:
+  - name: google
+    disabled: true
+  - name: bing
+    disabled: true
+  - name: mojeek
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: duckduckgo
+    disabled: false

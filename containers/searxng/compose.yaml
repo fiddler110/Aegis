@@ -1,0 +1,40 @@
+# SearXNG meta-search backend for Aegis's `search.provider: searxng`.
+#
+# Not managed by Aegis — bring this up yourself and point Aegis at it. See
+# README.md in this directory for full setup, the engine-selection rationale,
+# and the exact Aegis config to use.
+#
+# Quick start:
+#   1. Put a real secret in settings.yml (see README.md) — the shipped
+#      placeholder is not safe to run with.
+#   2. docker compose up -d   (or: podman compose up -d)
+#   3. curl "http://localhost:8080/search?q=test&format=json" — should return
+#      JSON, not an error. If it doesn't, format=json likely isn't enabled;
+#      see README.md.
+#   4. Set search.provider: searxng and search.base_url in Aegis config.
+
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: aegis-searxng
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    # Least-privilege: SearXNG needs nothing beyond dropping to its own user.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

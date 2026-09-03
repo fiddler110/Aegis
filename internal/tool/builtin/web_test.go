@@ -310,6 +310,31 @@ func TestParseMarginalia(t *testing.T) {
 	}
 }
 
+// TestHTMLToTextDropsBoilerplateTags is the P71.12 regression: nav/header/
+// footer/aside content (site navigation, cookie banners, breadcrumbs,
+// footers) must not appear in a fetched page's text, while ordinary body
+// content is untouched.
+func TestHTMLToTextDropsBoilerplateTags(t *testing.T) {
+	body := []byte(`<html><body>
+<header>Site Logo | Sign in</header>
+<nav>Home &gt; Docs &gt; Guide</nav>
+<main><article><h1>Real Title</h1><p>The actual content the model needs.</p></article></main>
+<aside>Related articles you might like</aside>
+<footer>Copyright 2026. All rights reserved.</footer>
+</body></html>`)
+	got := htmlToText(body)
+	for _, want := range []string{"Real Title", "The actual content the model needs."} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected body content %q to survive, got: %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"Site Logo", "Sign in", "Home", "Docs", "Guide", "Related articles", "Copyright 2026"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("expected boilerplate %q to be dropped, got: %q", unwanted, got)
+		}
+	}
+}
+
 // TestSearchFallsBackToMarginaliaWhenDDGBlocked is the P71.2 integration
 // regression: with DuckDuckGo throttled, web_search must still return
 // results from the new second backend and name it, rather than reporting

@@ -127,8 +127,9 @@ Each round:
    authoritative site's name. Re-running a near-identical query is a wasted
    round.
 3. **Select** — apply the source-quality bar (section 3) to the result
-   titles/URLs/snippets *before* fetching. Skip what fails the bar; record
-   the skip in the audit trail.
+   titles/URLs/snippets *before* fetching — and to each result's `published:`
+   date when the backend supplied one. Skip what fails the bar; record the
+   skip in the audit trail.
 4. **Read** — `web_fetch` the selected URLs. Output is capped; pass a larger
    `max_chars` when a page is load-bearing and the default window cut it off.
 5. **Record** — `edit_file` the working file from section 0, appending this
@@ -182,9 +183,15 @@ destroy exactly when the log is most needed.
 - **Load-bearing claims need two independent sources.** Independent means
   separately produced — ten articles rewriting one press release are one
   source.
-- **Note publication dates.** For fast-moving topics prefer recent material
-  and flag anything old enough that it may no longer hold; for stable topics
-  age is fine but say what you checked.
+- **Note publication dates when the search result carries one.** `web_search`
+  results include a `published: <date>` line only when the active backend
+  supplies one — Brave (`search.provider: brave`) and, when the underlying
+  engine reports it, a configured SearXNG instance. The zero-config
+  DuckDuckGo/Marginalia fallback carries no such signal; for those, a fetched
+  page's own dateline (visible after `web_fetch`) is the earliest point a date
+  is available. For fast-moving topics prefer recent material and flag
+  anything old enough that it may no longer hold; for stable topics age is
+  fine but say what you checked.
 
 ## 4. Citation discipline
 

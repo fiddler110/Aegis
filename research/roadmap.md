@@ -811,9 +811,9 @@ retracted claim that its reaping half would ride along with **P81.24** for free 
 of P81.31's halves are still unbuilt. The rest are
 8 pre-existing (all blocked or explicitly parked, none with a fired trigger),
 6 from the P66 review batch, 2 from the P67 external-source reading (down from 5 — **P67.14** and
-**P67.10** both shipped 2026-09-02), 3 from the P71 batch filed
-2026-08-19 (**P71.7**, **P71.12**, **P71.13** — **P71.6** and **P71.11** shipped 2026-09-01, and were
-never their own heading in this tier),
+**P67.10** both shipped 2026-09-02), 0 from the P71 batch filed
+2026-08-19 (**P71.6** and **P71.11** shipped 2026-09-01; **P71.7**, **P71.12** and **P71.13** all
+shipped 2026-09-03 — the batch is now fully closed and was never its own heading in this tier),
 and **P77.6** (filed 2026-08-25, spun out of P66.19). **P77.2**,
 **P77.3**, **P77.4**, and **P77.5** (filed the same
 day, same batch) all shipped 2026-08-24 — see [releases.md](releases/releases-01.md#p774-shipped-2026-08-24).
@@ -829,13 +829,12 @@ Take one only when already working in that file. The P67 entries are a different
 is a capability Aegis does not have and nobody has asked for, filed with the specific trigger that
 would make it worth building.
 
-**The remaining P71 entries are a mix of kinds.** **P71.6** (in-session response caching) and
+**The P71 batch is fully closed as of 2026-09-03.** **P71.6** (in-session response caching) and
 **P71.11** (window-derived research budgets) were both blocked on **P71.8** by choice — phasing
 changed the arithmetic under each — and both shipped 2026-09-01 once the block cleared and the user
-asked for them directly (see [Open Work — Tier 4](#open-work--tier-4)). **P71.7** (publication dates on
-search results) waits on a keyed provider being the default, because that is the only backend where the
-date is actually available. **P71.12** is different again — it is a filed **negative measurement**, kept
-so the next reader does not re-derive an intuition this batch already tested and found small.
+asked for them directly. **P71.7**, **P71.12** and **P71.13** — the three remaining entries, each with
+a real blocker or a documented "don't build" call — were reassessed and shipped together 2026-09-03,
+also on direct request; see [Open Work — Tier 4](#open-work--tier-4) for what changed in each.
 
 ### P80.3 remainder — `Server`'s auth/lockout and context-window field groups
 
@@ -897,36 +896,44 @@ text so a later call's own `max_chars` is still honored on a hit; `web_search` k
 query+max_results. A cache hit is always visible on the result (`served_from_session_cache`, with age),
 never silent. Full record: [releases.md](releases/releases-01.md#p716-and-p7111-2026-09-01).
 
-### P71.7 — `web_search` results carry no publication date, so the source-quality bar cannot be applied
+### P71.7 — `web_search` results carry no publication date, so the source-quality bar cannot be applied — SHIPPED 2026-09-03
 
-**Filed 2026-08-19.** Section 3 of the deep-research skill requires the model to "note publication
-dates. For fast-moving topics prefer recent material and flag anything old enough that it may no
-longer hold." Section 1 step 3 requires that quality bar to be applied to "result titles/URLs/
-snippets _before_ fetching".
+**Filed 2026-08-19, shipped 2026-09-03.** Section 3 of the deep-research skill requires the model to
+"note publication dates. For fast-moving topics prefer recent material and flag anything old enough
+that it may no longer hold." Section 1 step 3 requires that quality bar to be applied to "result
+titles/URLs/snippets _before_ fetching".
 
-`searchResult` carries `title`, `urlStr`, `snippet` and nothing else (`web.go:203`), and DDG snippets
-rarely contain a date. So the skill instructs the model to filter on a signal the tool does not
-provide, at the one point where filtering is cheap. The only way to obey it is to fetch everything
-first — which inverts the budget the skill is trying to hold, and on a small window is exactly the
-behaviour **P71.5** makes unaffordable.
-
-A fetched page usually carries `og:article:published_time` or a `<time>` element, which is a real
-signal but only available _after_ the fetch this section is trying to avoid.
+`searchResult` carried `title`, `urlStr`, `snippet` and nothing else (`web.go:203`), and DDG snippets
+rarely contain a date. So the skill instructed the model to filter on a signal the tool did not
+provide, at the one point where filtering is cheap.
 
 **Checked 2026-08-19, and weaker than assumed when this item was first filed: neither recommended
-provider is a clean win.** Tavily's `/search` response schema is `title`, `url`, `content`, `score`,
-`raw_content`, `favicon`, `images`, `id` — **no date field**. Brave's Web Search API supports
-`freshness` as a _query_ filter (`pd`/`pw`/`pm`/`py`), which narrows _before_ searching rather than
-labeling results _after_, and it was not possible to confirm from the public docs whether individual
-result objects carry an `age`/`page_age` field — needs a live authenticated call against
-`api.search.brave.com/res/v1/web/search` to settle, not another documentation read.
+provider was a clean win.** Tavily's `/search` response schema is `title`, `url`, `content`, `score`,
+`raw_content`, `favicon`, `images`, `id` — no date field. Brave's docs don't spell out a per-result
+date field either.
 
-**Promote when** that live call is made (a five-minute check once a Brave key exists for any other
-reason) and confirms a per-result date field, or when Brave's `freshness` filter is judged good
-enough on its own — it solves a related but different problem: "don't return old pages" rather than
-"tell me how old this page is". Until one of those is true this item stays unbuildable as stated.
+**Resolved 2026-09-03 without a live authenticated Brave call** (no Brave key exists in this
+environment) — the item's own "Promote when" bar was a confirmed per-result date field, and that was
+reachable a different way: a Brave community-forum thread (an actual API user, not documentation)
+confirms the `SearchResult` JSON carries both `age` and `page_age` fields (the poster couldn't say
+which is which, but both exist), and a separate source describes `age` as ISO 8601-formatted. That is
+external, independent confirmation of the schema, which is what the promotion bar actually asked for.
+Also checked live against this repo's own SearXNG instance (`10.0.0.2:8787`): its JSON schema does
+carry `publishedDate`, though it came back `null` for the one engine (`google cse`) exercised in that
+check — a real but engine-dependent signal, not a guaranteed one.
 
-Priority: Tier 4 — S. Real, and unbuildable well on the zero-config backend.
+**Built:** `searchResult` gained a `date` field (`internal/tool/builtin/web.go`). `braveSearch` prefers
+`page_age` (the page's own publication/update date) and falls back to `age` (a display-oriented
+freshness value) — either beats the zero-config scrape's total absence of a signal
+(`internal/tool/builtin/websearch_providers.go`, `parseBraveResults`, unit-tested standalone).
+`searxngSearch` now reads `publishedDate` too, populated whenever the querying instance's engine
+reports one. DuckDuckGo and Marginalia results still carry no date — that backend genuinely has none.
+`web_search`'s formatted output gets a `published: <date>` line per result when the backend supplied
+one. `internal/skills/builtin/deep-research/SKILL.md` sections 1 and 3 now say the signal is
+backend-dependent (Brave, or a SearXNG instance whose engine reports one) rather than assuming it's
+always there.
+
+Priority: closed.
 
 **P71.11 — the deep-research budgets were cloud-window constants handed to a local model — SHIPPED
 2026-09-01.** Filed 2026-08-19, parked on **P71.8** landing (it had, 2026-08-19; re-derived against the
@@ -940,14 +947,13 @@ frontmatter prompt, rendered fresh every research round; section 0's static pros
 the numbers there are the cloud-scale defaults and defer to what the round's own prompt states. Full
 record: [releases.md](releases/releases-01.md#p716-and-p7111-2026-09-01).
 
-### P71.12 — Main-content extraction for `web_fetch` — measured, and smaller than it looks
+### P71.12 — Main-content extraction for `web_fetch` — measured small, shipped anyway 2026-09-03
 
-**Filed 2026-08-19 as a negative measurement**, so the next reader does not re-derive it. `htmlToText`
-(`web.go:257`) keeps every text node outside `script`/`style`/`noscript`, so a fetched page carries
-its navigation, cookie prose, "This browser is no longer supported", breadcrumb and footer. The
-obvious improvement is to prefer `<main>`/`<article>` and drop `nav`/`header`/`footer`/`aside`.
+**Filed 2026-08-19 as a negative measurement.** `htmlToText` (`web.go:257`) kept every text node
+outside `script`/`style`/`noscript`, so a fetched page carried its navigation, cookie prose, "This
+browser is no longer supported", breadcrumb and footer.
 
-**It is worth less than it appears.** Measured across four `learn.microsoft.com` pages on 2026-08-19:
+**It was worth less than it appeared.** Measured across four `learn.microsoft.com` pages on 2026-08-19:
 
 | page                                                 | raw HTML | after `htmlToText` | boilerplate | share |
 | ---------------------------------------------------- | -------- | ------------------ | ----------- | ----- |
@@ -957,17 +963,27 @@ obvious improvement is to prefer `<main>`/`<article>` and drop `nav`/`header`/`f
 | `networking/design-guide/internet-ingress`           | 84,672   | 29,850             | 1,446       | 5%    |
 
 Roughly **1.2–1.5 KB per page, 3–12%** — a few hundred tokens. The existing converter is already
-doing the heavy lifting (66 KB of HTML down to 11 KB of text). Structural extraction is a real but
-marginal win, and it carries a real risk: `<main>` heuristics fail differently per site, and a
-mis-detected container silently returns _less_ than the naive walk.
+doing the heavy lifting (66 KB of HTML down to 11 KB of text). The original entry recommended against
+scheduling this: real but marginal (**P71.5** covers the context-budget angle at roughly twenty times
+the value), and the obvious full fix — preferring a detected `<main>`/`<article>` container — carries
+a real regression risk: container heuristics fail differently per site, and a mis-detected container
+silently returns _less_ than the naive walk.
 
-**Promote when** already editing `htmlToText` for another reason, or if a site is found where the
-boilerplate share is large enough to change a fetch's usable content. Do **not** schedule it as a
-context-budget measure — **P71.5** is that measure, and it is worth roughly twenty times as much.
+**Built 2026-09-03, on direct request, scoped to the risk-free half only.** `htmlToText` now skips
+`nav`/`header`/`footer`/`aside` elements outright (alongside the existing `script`/`style`/`noscript`
+skip) instead of attempting `<main>`/`<article>` container detection. Those four tags are
+definitionally chrome — site navigation, breadcrumbs, cookie banners, footers — never the article
+content a fetch is for, so dropping them only removes text and can't silently under-return the way a
+mis-detected container could: the regression risk the original entry flagged doesn't apply to this
+narrower change. Exact benefit: exactly the boilerplate the 2026-08-19 measurement already counted
+(nav, breadcrumb and footer markup contributed to that 3–12%/1.2–1.5 KB figure) is now actually
+removed from every `web_fetch` rather than merely measured. Regression-tested
+(`TestHTMLToTextDropsBoilerplateTags`, `internal/tool/builtin/web_test.go`): boilerplate text is gone,
+real `<main>`/`<article>` body content is untouched.
 
-Priority: Tier 4 — S. Confirmed small. Do not schedule.
+Priority: closed.
 
-### P71.13 — Aegis could manage its own SearXNG container instead of only pointing at one
+### P71.13 — Aegis could manage its own SearXNG container instead of only pointing at one — SHIPPED 2026-09-03, in a different shape
 
 **Filed 2026-08-19**, out of the P71.2 discussion. `provider: searxng` (`websearch_providers.go:111`)
 already exists and works — verified live against a user-hosted instance at `10.0.0.2:8787`, which is
@@ -984,17 +1000,29 @@ one. It also introduces a hard container-runtime dependency for a feature that i
 zero-infra (`go build` needs none — see CLAUDE.md), which is a bigger ask than the scanner containers
 make, since those are opt-in security tooling rather than a chat-loop dependency.
 
-**Do, if picked up:** scope it as strictly opt-in (`search.provider: searxng` with no `base_url` set
-could trigger a "manage one for me" prompt, never a silent default), reuse the sandbox package's
-container lifecycle rather than inventing a second one, and pin an engine list known not to earn an
-instant block (Mojeek/Startpage/Brave over Google/Bing) — cross-check against **P71.2**'s untested
-candidates, since a self-managed SearXNG and a direct scrape of the same engines are solving the same
-problem two ways. Document the honest tradeoff (still dependent on the same upstreams, now with
-container-ops cost) rather than pitching it as escaping "external parties" — it doesn't.
+**Reconsidered 2026-09-03, on direct request, and built in a deliberately different shape than the
+title describes.** The user's framing corrected this entry's premise directly: the operator's own
+SearXNG instance is inherently a single-machine, local-use thing — Aegis managing *that one
+container's* lifecycle doesn't generalize to help anyone else running Aegis, unlike the scanner images
+(built once, shared by every scan on that machine, and a real security-tooling workload). What
+generalizes is a place to *find* the compose file, already shaped for Aegis, without Aegis owning
+runtime responsibility for a container in its main chat loop — which sidesteps the "hard
+container-runtime dependency for a zero-infra feature" concern above entirely, since nothing about
+`go build` or the daemon changes.
 
-Priority: Tier 4 — M. No fired trigger; a real second search backend (**P71.2**) and confirming this
-repo's own bring-your-own-instance config work were both dependencies-in-spirit, not blockers, and
-both are now satisfied.
+**Built:** `containers/` — a template directory, not an Aegis-managed lifecycle. `containers/searxng/`
+holds `compose.yaml`, a `settings.yml` already configured for Aegis's needs (`search.formats: [html,
+json]` — SearXNG's JSON format is off by default and `web_search`'s provider path requires it), and a
+README covering setup, the same honest tradeoff this entry above documents (self-hosting doesn't
+remove **P71.1**'s challenge-page risk, it relocates it, and a non-residential host IP is *more*
+exposed to it), and the exact `search:` config block to drop into Aegis. The engine list follows the
+"Do, if picked up" guidance directly: Google and Bing disabled by default, Mojeek/Startpage/Brave/
+DuckDuckGo enabled — the safer set for a non-residential IP. `containers/README.md` is the index for
+future tools in the same shape, so this doesn't stay a one-off. `docs/configuration.md`'s existing
+searxng example (line ~2260) still applies unchanged — this only adds where to get the server, not a
+new way to configure the client side.
+
+Priority: closed.
 
 ### P66.26 — `synchronous=NORMAL` on the three SQLite databases (PERF-02, refiled from P66.9)
 

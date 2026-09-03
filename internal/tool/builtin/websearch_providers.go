@@ -48,12 +48,18 @@ func (t *searchTool) braveSearch(ctx context.Context, query string, max int) ([]
 	if err != nil {
 		return nil, err
 	}
+	return parseBraveResults(body, max)
+}
+
+func parseBraveResults(body []byte, max int) ([]searchResult, error) {
 	var out struct {
 		Web struct {
 			Results []struct {
 				Title       string `json:"title"`
 				URL         string `json:"url"`
 				Description string `json:"description"`
+				Age         string `json:"age"`
+				PageAge     string `json:"page_age"`
 			} `json:"results"`
 		} `json:"web"`
 	}
@@ -62,7 +68,14 @@ func (t *searchTool) braveSearch(ctx context.Context, query string, max int) ([]
 	}
 	var results []searchResult
 	for _, r := range out.Web.Results {
-		results = append(results, searchResult{title: collapse(r.Title), urlStr: r.URL, snippet: collapse(stripHTML(r.Description))})
+		// P71.7: page_age is the page's own publication/update date; age is a
+		// display-oriented freshness value. Prefer page_age, fall back to age
+		// — either beats the zero-config scrape's total absence of a signal.
+		date := r.PageAge
+		if date == "" {
+			date = r.Age
+		}
+		results = append(results, searchResult{title: collapse(r.Title), urlStr: r.URL, snippet: collapse(stripHTML(r.Description)), date: date})
 		if len(results) >= max {
 			break
 		}
@@ -128,9 +141,10 @@ func (t *searchTool) searxngSearch(ctx context.Context, query string, max int) (
 	}
 	var out struct {
 		Results []struct {
-			Title   string `json:"title"`
-			URL     string `json:"url"`
-			Content string `json:"content"`
+			Title         string `json:"title"`
+			URL           string `json:"url"`
+			Content       string `json:"content"`
+			PublishedDate string `json:"publishedDate"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -138,7 +152,10 @@ func (t *searchTool) searxngSearch(ctx context.Context, query string, max int) (
 	}
 	var results []searchResult
 	for _, r := range out.Results {
-		results = append(results, searchResult{title: collapse(r.Title), urlStr: r.URL, snippet: collapse(r.Content)})
+		// P71.7: SearXNG's JSON schema always carries publishedDate, but it is
+		// only populated when the underlying engine reports one — many
+		// results leave it null, so this is a bonus signal, not a guarantee.
+		results = append(results, searchResult{title: collapse(r.Title), urlStr: r.URL, snippet: collapse(r.Content), date: r.PublishedDate})
 		if len(results) >= max {
 			break
 		}
