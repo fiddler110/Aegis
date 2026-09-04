@@ -130,7 +130,7 @@ func Run(ctx context.Context, body io.ReadCloser, out chan<- provider.Event, opt
 	// runner and a dead one are the same problem from the harness's side, so
 	// they get the same recovery; idleFired only sharpens the message.
 	var idleFired atomic.Bool
-	resetIdle := func() {}
+	resetIdle, stopIdle := func() {}, func() {}
 	if opts.IdleTimeout > 0 {
 		timer := time.AfterFunc(opts.IdleTimeout, func() {
 			idleFired.Store(true)
@@ -138,17 +138,32 @@ func Run(ctx context.Context, body io.ReadCloser, out chan<- provider.Event, opt
 		})
 		defer timer.Stop()
 		resetIdle = func() { timer.Reset(opts.IdleTimeout) }
+		stopIdle = func() { timer.Stop() }
 	}
 
 	sawTerminal := false
 	scanner := NewScanner(body)
 readLoop:
-	for scanner.Scan() {
-		// Reset per delivered line, not per parsed chunk: the bound is on the
-		// server sending *anything*, and a line the decoder skips (blank, a
+	for {
+		// The watchdog is armed only across the read itself. The bound is on the
+		// server sending *anything* — and a line the decoder skips (blank, a
 		// keepalive, JSON it can't unmarshal) is still evidence the runner is
-		// alive.
+		// alive, so it resets per delivered line rather than per parsed chunk.
+		//
+		// LLM-17: it is disarmed again the moment a line lands, because dec.Line
+		// blocks inside emit while the consumer reads the event. Leaving it armed
+		// there measured the *consumer's* processing time against the server's
+		// idle bound, so a caller slower than IdleTimeout per event (a TUI
+		// redrawing, a tool result being persisted) had the body closed
+		// underneath it and was told the model runner had stalled. A wedged
+		// consumer is not a dead backend; the engine's MaxTurnStall is the bound
+		// that covers it.
 		resetIdle()
+		ok := scanner.Scan()
+		stopIdle()
+		if !ok {
+			break
+		}
 		st := dec.Line(scanner.Text(), emit)
 		if st == StatusTerminal || st == StatusEnd {
 			sawTerminal = true

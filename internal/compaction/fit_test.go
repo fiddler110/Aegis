@@ -1,7 +1,9 @@
 package compaction
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -207,5 +209,89 @@ func TestSummarizeUnfittableBudgetIsNonFatal(t *testing.T) {
 	}
 	if len(out) != len(msgs) {
 		t.Errorf("messages should be returned unchanged on failure, got %d", len(out))
+	}
+}
+
+// TestFitTranscriptDropsTheFewestMessagesThatFit pins the stage-2 result across
+// the LLM-13 change from a linear walk to a binary search. The walk re-rendered
+// and re-tokenized the whole remaining prefix once per candidate — O(n²) work at
+// the one moment in a run with the least room to spare — and the search is only
+// admissible because fits() is monotone in the number dropped. So the assertion
+// is minimality, not speed: n must fit and n-1 must not, which is exactly what
+// the walk returned and the only property any caller depends on.
+func TestFitTranscriptDropsTheFewestMessagesThatFit(t *testing.T) {
+	s := New(Options{Adapter: &recordingAdapter{summary: "s"}, Model: "m", ContextWindow: 2048, KeepRecent: 2})
+	var prefix []provider.Message
+	for i := 0; i < 40; i++ {
+		role := provider.RoleUser
+		if i%2 == 1 {
+			role = provider.RoleAssistant
+		}
+		prefix = append(prefix, text(role, "MARK"+strconv.Itoa(i)+" "+strings.Repeat("y", 2000)))
+	}
+
+	transcript, dropped, err := s.fitTranscript(prefix, "")
+	if err != nil {
+		t.Fatalf("fitTranscript: %v", err)
+	}
+	if dropped == 0 {
+		t.Fatal("this fixture is meant to reach stage 2; nothing was dropped")
+	}
+	budget := s.summarizeFitBudget()
+	if n := summarizeRequestTokens(transcript, ""); n > budget {
+		t.Errorf("returned transcript is over budget: %d > %d", n, budget)
+	}
+	limit := blockTruncationLadder[len(blockTruncationLadder)-1]
+	if want := renderTranscriptCapped(prefix[dropped:], limit); transcript != want {
+		t.Error("returned transcript is not the capped render of the surviving suffix")
+	}
+	if n := summarizeRequestTokens(renderTranscriptCapped(prefix[dropped-1:], limit), ""); n <= budget {
+		t.Errorf("dropped %d messages when %d would have fit (%d <= %d)", dropped, dropped-1, n, budget)
+	}
+}
+
+// TestMisconfiguredSummaryTokensIsLoud is LLM-14. A summary budget at or above
+// the context window silently switched off the check that keeps the
+// summarization request inside that window — a silent disable at exactly the
+// moment the check matters. The summarizer still runs (refusing to compact would
+// be worse); it just no longer does it quietly.
+func TestMisconfiguredSummaryTokensIsLoud(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	s := New(Options{Adapter: &recordingAdapter{summary: "s"}, Model: "m",
+		ContextWindow: 2048, SummaryTokens: 4096, Logger: logger})
+
+	if got := s.summarizeFitBudget(); got != 0 {
+		t.Fatalf("summarizeFitBudget = %d, want 0 — the fixture must reproduce the disabled check", got)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "summary_tokens") || !strings.Contains(out, "size-checked") {
+		t.Errorf("no warning naming the misconfiguration was logged: %q", out)
+	}
+
+	// One line per Summarizer: this runs on every compaction of every session
+	// and the condition cannot change without a retune.
+	before := strings.Count(out, "summary_tokens")
+	for i := 0; i < 5; i++ {
+		s.summarizeFitBudget()
+	}
+	if after := strings.Count(buf.String(), "summary_tokens"); after != before {
+		t.Errorf("warning repeated: %d lines, want %d", after, before)
+	}
+}
+
+// TestFixedTriggerBudgetStaysSilent is the other half of LLM-14: a MaxBudget
+// smaller than the summary reservation is not a misconfiguration, it is a fixed
+// trigger budget that says nothing about what a request may weigh. Warning there
+// would train the reader to ignore the warning that matters.
+func TestFixedTriggerBudgetStaysSilent(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	s := New(Options{Adapter: &recordingAdapter{summary: "s"}, Model: "m", MaxBudget: 5, Logger: logger})
+	if got := s.summarizeFitBudget(); got != 0 {
+		t.Fatalf("summarizeFitBudget = %d, want 0 (skip)", got)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a fixed trigger budget must not warn: %q", buf.String())
 	}
 }

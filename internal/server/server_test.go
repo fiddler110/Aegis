@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"net/http"
 	"strings"
@@ -947,6 +948,10 @@ func TestEffectiveSystem_localProfileTrimsPrompt(t *testing.T) {
 		srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store, fixedAdapter{}, tool.NewRegistry())
 		srv.memory = memory.Sources{ProjectRoot: root, DataDir: filepath.Join(root, "data")}
 		srv.repoMap = bigRepoMap
+		// Stamp the staleness clock the way New does after its own load
+		// (P66.20/PERF-04), or repoMapFor re-reads this hand-injected block off
+		// a temp dir that was never indexed and finds nothing.
+		srv.repoMapCheckedAt = time.Now()
 		return srv
 	}
 

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
@@ -271,13 +272,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.sess.tools.Delete(id)
-	s.sess.workdirs.Delete(id)
-	s.sess.skills.Delete(id)
-	s.sess.taskScopes.Delete(id)
-	s.sess.promptCache.Delete(id)
-	s.sess.webCache.Delete(id)
-	s.forgetSessionRunState(id)
+	s.forgetSession(id)
 	if hadWorkdir {
 		if root, ok := workdir.(string); ok {
 			s.reapSessionSpillIfUnshared(id, root)
@@ -315,6 +310,96 @@ func (s *Server) reapSessionSpillIfUnshared(excluded, root string) {
 	}
 	if err := builtin.ReapSpillDir(root); err != nil {
 		s.logger.Warn("reap session spill directory", "workdir", root, "err", err)
+	}
+}
+
+// forgetSession drops every piece of in-process state keyed by session id.
+// It is the single list a new per-session map has to join (P66.20/ARCH-10):
+// handleDeleteSession used to spell the deletes out inline, which is how
+// sessionSems and sessionPermCache went missing for a release and why
+// forgetSessionRunState exists at all. One helper, two callers — the delete
+// handler and the prune reconciler below — so a seventh map cannot be
+// remembered in one place and forgotten in the other.
+func (s *Server) forgetSession(id string) {
+	s.sess.tools.Delete(id)
+	s.sess.workdirs.Delete(id)
+	s.sess.skills.Delete(id)
+	s.sess.taskScopes.Delete(id)
+	s.sess.promptCache.Delete(id)
+	s.sess.webCache.Delete(id)
+	s.forgetSessionRunState(id)
+}
+
+// trackedSessionIDs returns every session id this process currently holds
+// state for, across all of forgetSession's maps. The two composite-key maps
+// (permCache, toolCallWarned) contribute the id half of their keys, so a
+// session whose only residue is an "allow always" grant is still seen.
+func (s *Server) trackedSessionIDs() []string {
+	seen := map[string]struct{}{}
+	for _, m := range []*sync.Map{
+		&s.sess.tools, &s.sess.workdirs, &s.sess.skills,
+		&s.sess.taskScopes, &s.sess.promptCache, &s.sess.webCache, &s.sess.sems,
+	} {
+		m.Range(func(k, _ any) bool {
+			if id, ok := k.(string); ok {
+				seen[id] = struct{}{}
+			}
+			return true
+		})
+	}
+	s.sess.permCache.Range(func(k, _ any) bool {
+		if key, ok := k.(string); ok {
+			id, _, _ := strings.Cut(key, "\x00")
+			seen[id] = struct{}{}
+		}
+		return true
+	})
+	s.toolCallWarnedMu.Lock()
+	for key := range s.toolCallWarned {
+		id, _, _ := strings.Cut(key, "\x00")
+		seen[id] = struct{}{}
+	}
+	s.toolCallWarnedMu.Unlock()
+
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// forgetPrunedSessions is the prune-path half of forgetSession (ARCH-10).
+// Store.Prune and Store.PruneArchived delete rows by predicate and report only
+// a count, so unlike the delete handler there is no id to hand forgetSession —
+// the sessions this process is holding state for are instead reconciled
+// against what the store still has.
+//
+// The snapshot is taken *before* the listing on purpose: an id that appears in
+// the maps only after the snapshot cannot be considered, so a session created
+// concurrently with a prune can never be mistaken for a vanished one and have
+// its workdir (recorded at creation, and a confinement input) forgotten out
+// from under it. Ids only ever leave the store by deletion, so "in the
+// snapshot, absent from the listing" is exactly the pruned set.
+func (s *Server) forgetPrunedSessions(ctx context.Context) {
+	tracked := s.trackedSessionIDs()
+	if len(tracked) == 0 {
+		return
+	}
+	metas, err := s.store.ListAll(ctx)
+	if err != nil {
+		// Nothing is corrupted by skipping a reconciliation pass — the state is
+		// bounded by the next one — so a store hiccup is logged, not fatal.
+		s.logger.Warn("prune: could not list sessions to reconcile in-memory state", "err", err)
+		return
+	}
+	live := make(map[string]struct{}, len(metas))
+	for _, m := range metas {
+		live[m.ID] = struct{}{}
+	}
+	for _, id := range tracked {
+		if _, ok := live[id]; !ok {
+			s.forgetSession(id)
+		}
 	}
 }
 
@@ -957,6 +1042,7 @@ func (s *Server) handlePruneSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	s.forgetPrunedSessions(r.Context())
 	s.logger.Info("pruned old sessions", "deleted", n, "ttl_days", days)
 	writeJSON(w, http.StatusOK, api.PruneResponse{Deleted: n})
 }
@@ -1022,9 +1108,17 @@ func deriveTitle(text string) string {
 // generateTitle calls the model asynchronously to produce a short session
 // title from the user's first message. Falls back to deriveTitle when no
 // SmallModel is configured (avoids a full-model call just for a title).
+//
+// A configured small_model is still what opts a deployment into titling at
+// all — that gate is unchanged — but which model the call then *names* goes
+// through auxModel (P66.20/LLM-06): on a single local Ollama server, naming
+// the small model here evicts whatever the user is talking to and buys a cold
+// reload on their next turn, for a cosmetic label. Locally the title runs on
+// the resident primary instead; on a cloud provider it runs on small_model
+// exactly as before.
 func (s *Server) generateTitle(sessionID, firstMessage string) {
-	model := s.cfg.Provider.SmallModel
-	if model == "" || s.adapter == nil {
+	model := s.auxModel(s.cfg.Provider.Model)
+	if s.cfg.Provider.SmallModel == "" || model == "" || s.adapter == nil {
 		// No dedicated small model configured; use the simple truncation fallback.
 		_ = s.store.SetTitle(context.Background(), sessionID, deriveTitle(firstMessage))
 		return

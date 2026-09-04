@@ -6,7 +6,9 @@ package compaction
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/fiddler110/aegis/internal/provider"
@@ -96,6 +98,18 @@ const (
 	// toolResultRuneLimit is the long-standing per-tool-result cap applied when
 	// rendering a transcript, independent of any fit-driven shrinking.
 	toolResultRuneLimit = 800
+
+	// summaryLeadIn and fallbackLeadIn open the synthetic user message each
+	// compaction path splices in ahead of the preserved tail. They are constants
+	// because they are load-bearing twice over: they are how a reader (and the
+	// model) knows the turns above were replaced, and — since LLM-15 — how the
+	// *next* compaction tells its own previous summary apart from ordinary
+	// conversation text when it goes looking for the carried file lists. Changing
+	// one is changing the wire format the `<read-files>`/`<modified-files>` tags
+	// travel in; see isSummaryMessage.
+	summaryLeadIn  = "Summary of earlier conversation (older turns were compacted):\n\n"
+	fallbackLeadIn = "Earlier conversation was dropped by deterministic fallback compaction " +
+		"(the AI summarizer failed repeatedly, so no AI-generated summary is available):\n\n"
 )
 
 // blockTruncationLadder is the descending ladder of per-block rune caps tried,
@@ -121,6 +135,12 @@ type Summarizer struct {
 	// leaves verbatim. Floored at 1 by ClearColdToolResults, which is where the
 	// reasoning for the floor lives.
 	coldCacheKeep int
+
+	// log is where the one thing this package has to say about its own
+	// configuration goes (LLM-14); nil means slog.Default(). warnOnce keeps it to
+	// one line per Summarizer, which is one per server.
+	log      *slog.Logger
+	warnOnce sync.Once
 
 	// maxTokens is the completion budget the compaction trigger has to reserve
 	// room for (P66.14/LLM-02). Atomic for the same reason contextWindow is: the
@@ -184,6 +204,10 @@ type Options struct {
 	// deliberately does not default to it: KeepRecent protects the shape of the
 	// conversation for the summarizer, this protects the model's working set.
 	ColdCacheKeep int
+	// Logger receives the misconfiguration warning summarizeFitBudget can raise
+	// (LLM-14). Optional: nil falls back to slog.Default(), which is what every
+	// caller with no logger of its own to hand should leave it at.
+	Logger *slog.Logger
 }
 
 // New constructs a Summarizer.
@@ -213,10 +237,20 @@ func New(opts Options) *Summarizer {
 		summaryTokens:       opts.SummaryTokens,
 		preservePrefixCache: opts.PreservePrefixCache,
 		coldCacheKeep:       opts.ColdCacheKeep,
+		log:                 opts.Logger,
 	}
 	s.contextWindow.Store(int64(opts.ContextWindow))
 	s.maxTokens.Store(int64(opts.MaxTokens))
 	return s
+}
+
+// logger returns the configured logger, or the process default. Kept as a
+// method so nothing has to remember to fill the field in.
+func (s *Summarizer) logger() *slog.Logger {
+	if s.log != nil {
+		return s.log
+	}
+	return slog.Default()
 }
 
 // SetContextWindow updates the context window driving compaction thresholds.
@@ -489,7 +523,7 @@ func (s *Summarizer) compact(ctx context.Context, system string, msgs []provider
 	out = make([]provider.Message, 0, len(msgs)-boundary+1)
 	out = append(out, provider.Message{
 		Role:    provider.RoleUser,
-		Content: []provider.Block{provider.TextBlock{Text: "Summary of earlier conversation (older turns were compacted):\n\n" + summary}},
+		Content: []provider.Block{provider.TextBlock{Text: summaryLeadIn + summary}},
 	})
 	out = append(out, msgs[boundary:]...)
 	if freedTokens = estBefore - s.estimate(b, system, out); freedTokens < 0 {
@@ -529,9 +563,8 @@ func (s *Summarizer) FallbackCompact(msgs []provider.Message) ([]provider.Messag
 	}
 	out := make([]provider.Message, 0, len(msgs)-boundary+1)
 	out = append(out, provider.Message{
-		Role: provider.RoleUser,
-		Content: []provider.Block{provider.TextBlock{Text: "Earlier conversation was dropped by deterministic fallback " +
-			"compaction (the AI summarizer failed repeatedly, so no AI-generated summary is available):\n\n" + note}},
+		Role:    provider.RoleUser,
+		Content: []provider.Block{provider.TextBlock{Text: fallbackLeadIn + note}},
 	})
 	out = append(out, msgs[boundary:]...)
 	return out, true
@@ -599,11 +632,28 @@ func (s *Summarizer) boundary(msgs []provider.Message) int {
 // result means even an empty transcript cannot fit; the caller turns that into
 // a (non-fatal) error rather than issuing the request anyway.
 func (s *Summarizer) summarizeFitBudget() int {
-	budget := int(s.contextWindow.Load())
+	window := int(s.contextWindow.Load())
+	budget := window
 	if budget <= 0 {
 		budget = s.maxBudget
 	}
 	if budget <= s.summaryTokens {
+		// LLM-14: a real context window no larger than the reserved summary
+		// output is a misconfiguration, not the fixed-trigger-budget case this
+		// branch was written for — compaction.summary_tokens has been set at or
+		// above provider.context_window, and the consequence is that the check
+		// which keeps the summarization request inside the window stops running
+		// at exactly the moment it matters. Silence there is the defect; the
+		// summarizer still runs (refusing to compact would be worse), but it says
+		// so. Once per Summarizer: this is called on every compaction of every
+		// session, and the condition cannot change without a retune.
+		if window > 0 {
+			s.warnOnce.Do(func() {
+				s.logger().Warn("compaction: summary_tokens is not smaller than the context window, "+
+					"so the summarization request is no longer size-checked before it is sent",
+					"summary_tokens", s.summaryTokens, "context_window", window)
+			})
+		}
 		return 0
 	}
 	reserve := summarizeReserveBuffer
@@ -669,12 +719,31 @@ func (s *Summarizer) fitTranscript(prefix []provider.Message, fixed string) (tra
 		}
 	}
 
-	// Stage 2: still too large — drop the oldest messages, oldest-first.
-	for n := 1; n < len(prefix); n++ {
-		truncated := renderTranscriptCapped(prefix[n:], limit)
+	// Stage 2: still too large — drop the oldest messages, oldest-first, and
+	// keep the fewest that fit.
+	//
+	// Binary search rather than a linear walk (LLM-13). The walk re-rendered and
+	// re-tokenized the entire remaining prefix once per candidate n, which is
+	// quadratic work over a transcript that is by definition near the context
+	// window — the one moment in a run with the least time to spare. The search
+	// is sound because fits() is monotone in n: renderTranscriptCapped(prefix[n:])
+	// renders a suffix of renderTranscriptCapped(prefix[n-1:]), and
+	// tokenest.Estimate is a sum of non-negative per-rune costs, so dropping one
+	// more message can never make the request larger. Same answer, log(n) renders.
+	lo, hi := 1, len(prefix)-1
+	best, bestN := "", 0
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		truncated := renderTranscriptCapped(prefix[mid:], limit)
 		if fits(truncated) {
-			return truncated, n, nil
+			best, bestN = truncated, mid
+			hi = mid - 1
+		} else {
+			lo = mid + 1
 		}
+	}
+	if bestN > 0 {
+		return best, bestN, nil
 	}
 	return "", 0, fmt.Errorf("summarization request cannot be shrunk to fit the context budget (%d tokens available for the transcript)", budget)
 }

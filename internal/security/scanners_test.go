@@ -187,3 +187,31 @@ func TestTrivyScanArgsIncludeDevDeps(t *testing.T) {
 		t.Error("trivyScanArgs lost its explicit scanner list (P11.6)")
 	}
 }
+
+// VULN-09/G122: findK8sManifests bounded how many YAML files it opened
+// (k8sManifestMaxFiles) but not how large one could be, so a rendered chart or
+// an exported dataset with a .yaml extension was read whole just to look for
+// two substrings. A file over k8sManifestMaxBytes is now skipped before the
+// read; an ordinary manifest beside it is still found.
+func TestFindK8sManifestsSkipsOversizedYAML(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "deploy.yaml"), []byte("apiVersion: apps/v1\nkind: Deployment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	big := make([]byte, k8sManifestMaxBytes+1)
+	for i := range big {
+		big[i] = ' '
+	}
+	copy(big, []byte("apiVersion: v1\nkind: Pod\n"))
+	if err := os.WriteFile(filepath.Join(dir, "huge.yaml"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findK8sManifests(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || filepath.Base(got[0]) != "deploy.yaml" {
+		t.Fatalf("got %v, want deploy.yaml only", got)
+	}
+}

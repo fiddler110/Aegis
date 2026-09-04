@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/cost"
@@ -77,6 +78,36 @@ func (s *Server) resolveModel(p persona.Persona, sessionModel string) string {
 func (s *Server) guardModel(sessionModel string) string {
 	return enginecfg.GuardModel(s.cfg, sessionModel)
 }
+
+// auxModel picks the model an *auxiliary* call runs on — compaction, a session
+// title, anything the user never sees answer them directly. It is
+// enginecfg.GuardModel's rule without the output_guard.model escape hatch, and
+// it exists because P59.5's carve-out had only ever been applied at the guard
+// (P66.20/LLM-06).
+//
+// On a cloud provider the small model is separate remote capacity, so an
+// auxiliary call routed to it is a pure win: cheaper, faster, and no cost to
+// the session's own model. On a single local Ollama server it is the same GPU,
+// and naming a non-resident model evicts the resident one — the auxiliary call
+// is then followed by a full cold reload of the model the user is actually
+// talking to. That inversion matters more for compaction than it ever did for
+// the guard: compaction fires when the context is fullest, so the reload it
+// provokes is paid back with the largest prefill of the whole run.
+//
+// base is what to fall back to — the model that is (or is about to be)
+// resident. Callers with no session model in hand pass the configured primary.
+func auxModel(cfg *config.Config, base string) string {
+	if cfg == nil || cfg.Provider.SmallModel == "" {
+		return base
+	}
+	p := cfg.Provider
+	if strings.EqualFold(p.Default, "ollama") || strings.Contains(p.BaseURL, ":11434") {
+		return base
+	}
+	return p.SmallModel
+}
+
+func (s *Server) auxModel(base string) string { return auxModel(s.cfg, base) }
 
 func (s *Server) outputGuardConfig(p persona.Persona) guard.Config {
 	return enginecfg.OutputGuardConfig(s.cfg, p, s.logger)

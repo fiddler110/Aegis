@@ -104,7 +104,11 @@ Takeaways:
   tool-incapable model is still fine to converse with). A probe that can't reach a verdict — an
   unreachable server, a timeout — stays silent rather than blaming the model. The probe is not extra
   latency in practice: it runs against the model your turn is about to load anyway, so it shares that
-  cold load rather than adding one. The daemon deliberately blocks on **one** trial only — the rest
+  cold load rather than adding one. Sharing it requires the probe and the turn to agree on `num_ctx`
+  — a probe that loaded the model at Ollama's default 4096 while the turn then asked for 32768 would
+  force a full unload and reload, buying a cold load instead of sharing one — so the probe is issued
+  through the same resolved-window adapter the run uses (P66.20). The daemon deliberately blocks on
+  **one** trial only — the rest
   of the conformance sample runs in the background and refines the cached rate for later notices — so
   raising `provider.tool_call_probe_trials` never delays your first reply.
 - Since P53.5 that verdict is no longer re-paid on every restart. The probe result — and the

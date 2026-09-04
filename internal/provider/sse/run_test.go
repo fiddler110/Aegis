@@ -445,3 +445,33 @@ func TestRun_ContextCancellationStops(t *testing.T) {
 		t.Error("Run did not close the response body")
 	}
 }
+
+// TestRun_IdleTimeoutIgnoresConsumerBackpressure is the LLM-17 regression guard.
+// The watchdog bounds the gap between two lines *from the server*, but a
+// decoder's emit blocks while the consumer reads the event, so a caller slower
+// than IdleTimeout per event (a TUI redrawing, a result being persisted) used to
+// have the body closed underneath it and be told the model runner had stalled.
+// Here the body has every line ready immediately and only the consumer is slow;
+// the stream must still complete normally.
+func TestRun_IdleTimeoutIgnoresConsumerBackpressure(t *testing.T) {
+	const idle = 50 * time.Millisecond
+	body := stringBody("one\ntwo\nthree\nTERMINAL\n")
+
+	out := make(chan provider.Event)
+	go Run(context.Background(), body, out, Options{
+		Provider: "test", IdleTimeout: idle, MissingTerminal: "no terminator",
+	}, newTestDecoder())
+
+	var got []provider.Event
+	for ev := range out {
+		got = append(got, ev)
+		time.Sleep(3 * idle) // the consumer, not the server, is slow
+	}
+	last := lastEvent(t, got)
+	if last.Type == provider.EventError {
+		t.Fatalf("a slow consumer was reported as a failed stream: %v", last.Err)
+	}
+	if last.Type != provider.EventDone {
+		t.Errorf("final event = %+v, want EventDone — consumer backpressure is not an idle server", last)
+	}
+}

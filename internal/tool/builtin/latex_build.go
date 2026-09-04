@@ -18,6 +18,19 @@ import (
 
 type latexBuildTool struct{ root string }
 
+// latexCompilers is the `compiler` enum from InputSchema, enforced rather than
+// declared. A schema enum is advisory in this package — parseArgs is a bare
+// json.Unmarshal, nothing validates input against InputSchema() — and this one
+// names the binary handed to exec.LookPath. Unenforced it is a
+// misrepresentation at the approval prompt: the operator approves "latex_build"
+// and `{"compiler":"powershell"}` runs powershell instead, while a value
+// carrying a separator ("./build/x.exe") resolves against the process working
+// directory and runs a planted binary (VULN-04). The allowlist is the check.
+var latexCompilers = map[string]bool{"xelatex": true, "pdflatex": true, "lualatex": true}
+
+// latexCompilerNames lists latexCompilers in the schema's order, for the error.
+var latexCompilerNames = []string{"xelatex", "pdflatex", "lualatex"}
+
 func (t *latexBuildTool) Name() string                { return "latex_build" }
 func (t *latexBuildTool) Capability() tool.Capability { return tool.CapExecute }
 func (t *latexBuildTool) Description() string {
@@ -57,6 +70,13 @@ func (t *latexBuildTool) Execute(ctx context.Context, input json.RawMessage) (to
 	}
 	if args.Compiler == "" {
 		args.Compiler = "xelatex"
+	}
+	if !latexCompilers[args.Compiler] {
+		return tool.Result{
+			Content: fmt.Sprintf("unsupported compiler %q — latex_build runs only: %s",
+				args.Compiler, strings.Join(latexCompilerNames, ", ")),
+			IsError: true,
+		}, nil
 	}
 	// 4 is reachable so that a document still reporting "Rerun to get
 	// cross-references right" after the bib pass (which itself forces 3) has an

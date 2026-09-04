@@ -19,9 +19,10 @@ import (
 // times it was actually asked.
 type probeAdapter struct {
 	calls    atomic.Int32
-	toolCall bool  // emit a structured tool call
-	streamEr error // fail at Stream()
-	eventErr error // fail mid-stream
+	numCtx   atomic.Int32 // NumCtx of the most recent request (P66.20/LLM-10)
+	toolCall bool         // emit a structured tool call
+	streamEr error        // fail at Stream()
+	eventErr error        // fail mid-stream
 	gate     chan struct{}
 }
 
@@ -29,6 +30,7 @@ func (a *probeAdapter) Name() string { return "probe" }
 
 func (a *probeAdapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
 	a.calls.Add(1)
+	a.numCtx.Store(int32(req.NumCtx))
 	if a.streamEr != nil {
 		return nil, a.streamEr
 	}
@@ -197,6 +199,49 @@ func TestToolCallingWarningSkipsNonLocalProvider(t *testing.T) {
 	}
 	if a.calls.Load() != 0 {
 		t.Error("a cloud provider must never be probed")
+	}
+}
+
+// TestToolCallingWarningProbesAtTheRunsContextWindow is P66.20/LLM-10. The
+// probe's entire justification for running at turn start is that it shares the
+// cold model load the turn was about to pay for — which is only true if it asks
+// Ollama for the same num_ctx. toolcallprobe.Run sets none, so a bare adapter
+// let the probe load the model at Ollama's default 4096 and the very next
+// request (the turn itself, at the resolved window) forced a full unload and
+// reload of the weights: the probe buying a cold load instead of sharing one.
+func TestToolCallingWarningProbesAtTheRunsContextWindow(t *testing.T) {
+	a := &probeAdapter{toolCall: true}
+	s := ollamaServer(t, a)
+	s.cfg.Provider.ContextWindow = 32768
+
+	want, _ := s.effectiveContextWindowFor(context.Background(), "resident-model")
+	if want <= 0 {
+		t.Fatalf("test setup: effective window = %d, want a positive window to assert against", want)
+	}
+	s.toolCallingWarning(context.Background(), "sess-1", "resident-model")
+
+	if a.calls.Load() != 1 {
+		t.Fatalf("probed %d times, want exactly 1", a.calls.Load())
+	}
+	if got := int(a.numCtx.Load()); got != want {
+		t.Errorf("probe requested num_ctx=%d, want %d — the window the turn behind it will ask for", got, want)
+	}
+}
+
+// TestToolCallingWarningLeavesNumCtxUnsetWithNoDetectedWindow keeps the fix
+// from inventing a number: with nothing configured and nothing detectable,
+// provider.WithNumCtx returns the adapter untouched and the request carries no
+// NumCtx at all, exactly as before.
+func TestToolCallingWarningLeavesNumCtxUnsetWithNoDetectedWindow(t *testing.T) {
+	a := &probeAdapter{toolCall: true}
+	s := ollamaServer(t, a)
+
+	if win, _ := s.effectiveContextWindowFor(context.Background(), "unknown-model"); win > 0 {
+		t.Skipf("test setup: a window of %d was resolvable; this case needs none", win)
+	}
+	s.toolCallingWarning(context.Background(), "sess-1", "unknown-model")
+	if got := a.numCtx.Load(); got != 0 {
+		t.Errorf("probe requested num_ctx=%d with no window resolved, want 0 (unset)", got)
 	}
 }
 

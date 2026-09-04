@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/api"
 	"github.com/fiddler110/aegis/internal/repomap"
@@ -28,6 +29,10 @@ func (s *Server) handleRepoMapIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	s.repoMapMu.Lock()
 	s.repoMap = repomap.Block(m.Render())
+	// This rebuild *is* a freshness check, and a stricter one than
+	// repoMapFor's: stamp the clock so the next prompt build reuses it rather
+	// than immediately re-walking the tree we have just finished walking.
+	s.repoMapCheckedAt = time.Now()
 	s.repoMapMu.Unlock()
 	writeJSON(w, http.StatusOK, api.RepoMapIndexResponse{FileCount: len(m.Files), Path: cache})
 }

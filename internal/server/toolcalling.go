@@ -30,7 +30,20 @@ func (s *Server) toolCallingWarning(ctx context.Context, sessionID, model string
 	if s.toolCalling == nil || !s.isOllamaProvider() {
 		return ""
 	}
-	warn := s.toolCalling.Warning(ctx, s.adapter, model)
+	// The probe must ask for the *same* num_ctx the turn behind it will ask for
+	// (P66.20/LLM-10). Its whole justification is that it shares the cold load
+	// the run was about to pay for anyway — but toolcallprobe.Run sets no
+	// NumCtx of its own, so a bare s.adapter falls through to the adapter's
+	// construction-time value, which providerfactory only sets when
+	// provider.context_window is configured explicitly. Under the documented
+	// auto-detect posture that is zero, Ollama loads the model at its own
+	// default 4096, and the first real turn then asks for the resolved window
+	// (32768, say) and forces a full unload/reload of the weights — the probe
+	// costing a cold load rather than sharing one. Wrapping it in the same
+	// per-run decorator newEngine uses makes the two agree, and covers the
+	// background conformance trials too: Gate.refine reuses this adapter.
+	win, _ := s.effectiveContextWindowFor(ctx, model)
+	warn := s.toolCalling.Warning(ctx, s.modelAdapter(win), model)
 	if warn == "" {
 		return ""
 	}

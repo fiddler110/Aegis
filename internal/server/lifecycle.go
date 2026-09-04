@@ -209,12 +209,19 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 // session still exists. Each is gated on its own TTL being non-zero, so
 // leaving one at the disabled default never blocks the others sharing this
 // ticker.
+//
+// Both session sweeps are followed by forgetPrunedSessions (ARCH-10): a row
+// deleted here takes its in-process maps with it, the same way the delete
+// handler's does. It runs once at the end rather than after each sweep because
+// the reconciliation is against the store's whole live set either way.
 func (s *Server) runRetentionPrune() {
+	pruned := false
 	if s.cfg.Cleanup.SessionTTLDays > 0 {
 		ttl := time.Duration(s.cfg.Cleanup.SessionTTLDays) * 24 * time.Hour
 		if n, err := s.store.Prune(context.Background(), ttl); err != nil {
 			s.logger.Error("auto-prune sessions", "err", err)
 		} else if n > 0 {
+			pruned = true
 			s.logger.Info("auto-pruned old sessions", "deleted", n, "ttl_days", s.cfg.Cleanup.SessionTTLDays)
 		}
 	}
@@ -223,8 +230,12 @@ func (s *Server) runRetentionPrune() {
 		if n, err := s.store.PruneArchived(context.Background(), ttl); err != nil {
 			s.logger.Error("auto-prune archived sessions", "err", err)
 		} else if n > 0 {
+			pruned = true
 			s.logger.Info("auto-pruned archived sessions", "deleted", n, "ttl_days", s.cfg.Cleanup.ArchivedSessionTTLDays)
 		}
+	}
+	if pruned {
+		s.forgetPrunedSessions(context.Background())
 	}
 	if s.cfg.Cleanup.CheckpointTTLDays > 0 && s.checkpoints != nil {
 		cutoff := time.Now().Add(-time.Duration(s.cfg.Cleanup.CheckpointTTLDays) * 24 * time.Hour)

@@ -286,3 +286,74 @@ func tailOf(s string, n int) string {
 	}
 	return s[len(s)-n:]
 }
+
+// VULN-09/G122: the Go grep backend used to os.ReadFile every file the walk
+// visited and only then ask isBinary, so one huge file anywhere in the tree —
+// a DB dump, a core file — went fully resident in the daemon's heap on any grep
+// call. It now streams.
+//
+// A size cap was the obvious fix and is deliberately absent: ripgrep applies no
+// default --max-filesize, so capping this backend alone would make the two
+// disagree about a large text file, which is exactly what the search-backend
+// equivalence invariant forbids. This test pins that agreement over a file well
+// past any cap that was considered, so a cap cannot be reintroduced quietly.
+func TestGrepBackendsAgreeOnALargeTextFile(t *testing.T) {
+	rg, walk := backendPair(t)
+	root := t.TempDir()
+
+	var sb strings.Builder
+	sb.WriteString("needle_at_the_top\n")
+	for sb.Len() < 12<<20 {
+		sb.WriteString("filler line with no match at all\n")
+	}
+	sb.WriteString("needle_at_the_bottom\n")
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, pattern := range []string{"needle_at_the_top", "needle_at_the_bottom"} {
+		got, want := runGrep(t, root, rg, map[string]any{"pattern": pattern}), runGrep(t, root, walk, map[string]any{"pattern": pattern})
+		if got != want {
+			t.Errorf("backends disagree on a 12 MiB text file for %q:\n rg:   %q\n walk: %q", pattern, got, want)
+		}
+		if !strings.Contains(want, "big.txt:") {
+			t.Errorf("the walker lost the match in a large file for %q: %q", pattern, want)
+		}
+	}
+}
+
+// Streaming must not change how a file's lines are numbered or trimmed, and a
+// binary file must still be skipped on its head alone. The NUL sits past the
+// first line so a head-only sniff is what catches it.
+func TestGrepStreamingPreservesLineSemantics(t *testing.T) {
+	root := t.TempDir()
+	write := func(name string, content []byte) {
+		if err := os.WriteFile(filepath.Join(root, name), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("crlf.txt", []byte("alpha\r\nbeta needle\r\ngamma\r\n"))
+	write("noeol.txt", []byte("first\nsecond needle"))
+	write("empty.txt", nil)
+	write("bin.dat", append([]byte("needle at the start\n"), 0x00, 'x'))
+
+	walk := toolpath.New(map[string]string{"ripgrep": "off"})
+	out := runGrep(t, root, walk, map[string]any{"pattern": "needle"})
+	for _, want := range []string{"crlf.txt:2:beta needle", "noeol.txt:2:second needle"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "bin.dat") {
+		t.Errorf("a binary file was searched:\n%s", out)
+	}
+	if strings.Contains(out, "\r") {
+		t.Errorf("a carriage return survived into the output: %q", out)
+	}
+
+	// An empty file has no lines, so an empty-matching pattern must not report
+	// one — the whole-file split used to yield a phantom line 1 here.
+	if got := runGrep(t, root, walk, map[string]any{"pattern": "^$"}); strings.Contains(got, "empty.txt") {
+		t.Errorf("an empty file reported a line: %q", got)
+	}
+}

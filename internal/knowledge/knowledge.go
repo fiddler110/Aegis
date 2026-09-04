@@ -121,6 +121,16 @@ func (s *Store) Index(ctx context.Context) (int, error) {
 		name := strings.ToLower(d.Name())
 		ext := strings.ToLower(filepath.Ext(name))
 
+		// VULN-09/G122: sniff the size before loading anything. The walk covers
+		// every .md/.txt/.rst/.go file under the project root, and a generated
+		// dump or an exported dataset with one of those extensions was read
+		// whole into the daemon's heap before its size was ever considered.
+		// Nothing over the cap could be usefully indexed anyway — only the first
+		// embedTextLimit bytes reach the embedder.
+		if info, infoErr := d.Info(); infoErr != nil || info.Size() > maxIndexedFileBytes {
+			return nil
+		}
+
 		var body string
 		switch {
 		case ext == ".md" || ext == ".txt" || ext == ".rst":
@@ -180,6 +190,12 @@ func (s *Store) upsert(ctx context.Context, path, title, body string) error {
 // embedTextLimit caps how much text is sent per embedding call; long
 // documents are truncated rather than chunked, keeping indexing cheap.
 const embedTextLimit = 4000
+
+// maxIndexedFileBytes is the largest file Index will read. Generous for prose
+// and source — this repo's longest document is well under a megabyte — and low
+// enough that one oversized file cannot put the daemon's heap at the mercy of
+// whatever happens to be sitting in the tree.
+const maxIndexedFileBytes = 4 << 20
 
 func truncateForEmbed(s string) string {
 	if len(s) > embedTextLimit {

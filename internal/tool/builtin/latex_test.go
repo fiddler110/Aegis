@@ -381,6 +381,92 @@ func TestLatexBuildCompilesConfinedDocument(t *testing.T) {
 	}
 }
 
+// VULN-04. The `compiler` enum in InputSchema is advisory — parseArgs is a bare
+// json.Unmarshal — and its value is the binary handed to exec.LookPath, so an
+// unenforced enum means the operator approves "latex_build" at the prompt and
+// something else runs. The refusal has to land before any subprocess, which is
+// why this test needs no LaTeX installed.
+func TestLatexBuildRejectsCompilerOutsideTheEnum(t *testing.T) {
+	root := t.TempDir()
+	writeLatexFile(t, root, "main.tex",
+		"\\documentclass{article}\n\\begin{document}\nhi\n\\end{document}\n")
+
+	tl := &latexBuildTool{root: root}
+	for _, compiler := range []string{
+		"powershell", "cmd", "sh",
+		"./build/x.exe", `.\build\x.exe`, "/usr/bin/env",
+		"XeLaTeX", "xelatex ", "xelatex;id",
+	} {
+		res, err := tl.Execute(context.Background(), latexInput(t, map[string]any{
+			"path": "main.tex", "compiler": compiler,
+		}))
+		if err != nil {
+			t.Fatalf("%q: %v", compiler, err)
+		}
+		if !res.IsError {
+			t.Errorf("%q: expected a refusal, got: %s", compiler, res.Content)
+			continue
+		}
+		if !strings.Contains(res.Content, "unsupported compiler") {
+			t.Errorf("%q: expected the allowlist refusal, got: %s", compiler, res.Content)
+		}
+		for _, want := range latexCompilerNames {
+			if !strings.Contains(res.Content, want) {
+				t.Errorf("%q: refusal should name %q: %s", compiler, want, res.Content)
+			}
+		}
+	}
+}
+
+// The three declared values, and an omitted one, must all still be accepted.
+// None of them reaches a subprocess here: the .tex file does not exist, so a
+// permitted compiler falls through to the "file not found" result instead.
+func TestLatexBuildAcceptsEveryDeclaredCompiler(t *testing.T) {
+	root := t.TempDir()
+	tl := &latexBuildTool{root: root}
+	for _, compiler := range []string{"", "xelatex", "pdflatex", "lualatex"} {
+		args := map[string]any{"path": "missing.tex"}
+		if compiler != "" {
+			args["compiler"] = compiler
+		}
+		res, err := tl.Execute(context.Background(), latexInput(t, args))
+		if err != nil {
+			t.Fatalf("%q: %v", compiler, err)
+		}
+		if strings.Contains(res.Content, "unsupported compiler") {
+			t.Errorf("%q: a declared compiler was refused: %s", compiler, res.Content)
+		}
+	}
+}
+
+// The enforced allowlist and the declared enum must not drift apart; the whole
+// point of the fix is that the schema stops being the only statement of the set.
+func TestLatexBuildCompilerAllowlistMatchesSchema(t *testing.T) {
+	var doc struct {
+		Properties struct {
+			Compiler struct {
+				Enum []string `json:"enum"`
+			} `json:"compiler"`
+		} `json:"properties"`
+	}
+	tl := &latexBuildTool{}
+	if err := json.Unmarshal(tl.InputSchema(), &doc); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	declared := doc.Properties.Compiler.Enum
+	if len(declared) != len(latexCompilers) {
+		t.Fatalf("schema declares %v, allowlist holds %d entries", declared, len(latexCompilers))
+	}
+	for _, name := range declared {
+		if !latexCompilers[name] {
+			t.Errorf("schema declares %q but the allowlist refuses it", name)
+		}
+	}
+	if len(latexCompilerNames) != len(latexCompilers) {
+		t.Errorf("latexCompilerNames %v is out of step with the allowlist", latexCompilerNames)
+	}
+}
+
 // soleRoot is the single-writable-root set the confinement scanners see for a
 // session with no workspace.additional_roots configured (P52.13) — i.e. every
 // case these tests exercise.

@@ -144,6 +144,14 @@ var jsPatterns = []*regexp.Regexp{
 // file with hundreds of imports can't dominate the rendered map's byte budget.
 const maxImportsPerFile = 40
 
+// maxSourceFileBytes is the largest file Build will read to extract symbols
+// from. Well above any hand-written source file (this repo's largest is ~60 KB)
+// and far below the sizes that make a whole-file read a memory hazard: the walk
+// visits every file carrying a recognized extension, so a generated bundle or a
+// checked-in data blob named `.js` would otherwise go fully resident. A file
+// over the cap still contributes to the fingerprint; it just yields no symbols.
+const maxSourceFileBytes = 4 << 20
+
 // Import-extraction regexps. These pull the specifier (module path / package)
 // out of an import statement; resolution to a repo-relative path (or leaving it
 // as a bare token) happens in the per-language helpers below.
@@ -427,6 +435,15 @@ func Build(root string, opts Options) (*Map, error) {
 		info, infoErr := d.Info()
 		if infoErr == nil {
 			fpLines = append(fpLines, fmt.Sprintf("%s:%d:%d", rel, info.Size(), info.ModTime().UnixNano()))
+			// VULN-09/G122: sniff the size before loading. The walk covers every
+			// recognized source extension in the tree, and a generated or
+			// vendored file with a source extension can be enormous — reading it
+			// whole put it in the daemon's heap before anything decided it was
+			// worth looking at. It still contributes its fingerprint line, so a
+			// change to it invalidates the cache exactly as before.
+			if info.Size() > maxSourceFileBytes {
+				return nil
+			}
 		}
 
 		data, readErr := os.ReadFile(path)

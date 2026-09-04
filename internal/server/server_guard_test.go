@@ -1,6 +1,8 @@
 package server
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/config"
@@ -160,6 +162,59 @@ func TestGuardModelStaysResidentOnLocalBackend(t *testing.T) {
 	}}
 	if m := s.guardModel("claude-opus-4-8"); m != "claude-haiku-4-5-20251001" {
 		t.Errorf("explicit output_guard.model must outrank small_model, got %q", m)
+	}
+}
+
+// TestAuxModelCarriesTheLocalCarveOutToEverySite is P66.20/LLM-06: P59.5's
+// "don't evict the resident model" rule had been applied at exactly one of the
+// sites that pick a small auxiliary model — the output guard — while
+// compaction and session titles kept naming small_model unconditionally. It
+// matters more for compaction than it ever did for the guard: compaction fires
+// when the context is fullest, so the reload it provokes is followed by the
+// largest prefill of the run.
+func TestAuxModelCarriesTheLocalCarveOutToEverySite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    config.ProviderConfig
+		base string
+		want string
+	}{
+		{"cloud prefers the small model", config.ProviderConfig{Default: "anthropic", SmallModel: "small-fast"}, "big", "small-fast"},
+		{"ollama by name stays resident", config.ProviderConfig{Default: "ollama", SmallModel: "small-fast"}, "qwen3.6:35b-a3b", "qwen3.6:35b-a3b"},
+		{"ollama by port stays resident", config.ProviderConfig{BaseURL: "http://127.0.0.1:11434", SmallModel: "small-fast"}, "qwen3.6:35b-a3b", "qwen3.6:35b-a3b"},
+		{"no small model configured is a no-op", config.ProviderConfig{Default: "anthropic"}, "big", "big"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{cfg: &config.Config{Provider: tc.p}}
+			if got := s.auxModel(tc.base); got != tc.want {
+				t.Errorf("auxModel(%q) = %q, want %q", tc.base, got, tc.want)
+			}
+		})
+	}
+	if got := auxModel(nil, "base"); got != "base" {
+		t.Errorf("auxModel(nil, ...) = %q, want the base model", got)
+	}
+}
+
+// TestCompactionModelStaysResidentOnLocalBackend pins the carve-out at the
+// site it costs the most, through the wiring that actually chooses it.
+func TestCompactionModelStaysResidentOnLocalBackend(t *testing.T) {
+	local := &config.Config{Provider: config.ProviderConfig{
+		Default: "ollama", Model: "qwen3.6:35b-a3b", SmallModel: "small-fast", MaxTokens: 1024,
+	}}
+	s := &Server{cfg: local, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), adapter: fixedAdapter{text: "ok"}}
+	s.wireCompaction(local)
+	if s.compModel != "qwen3.6:35b-a3b" {
+		t.Errorf("compaction model on a local backend = %q, want the resident primary", s.compModel)
+	}
+
+	cloud := &config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", Model: "claude-opus-4-8", SmallModel: "claude-haiku-4-5-20251001", MaxTokens: 1024,
+	}}
+	s = &Server{cfg: cloud, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), adapter: fixedAdapter{text: "ok"}}
+	s.wireCompaction(cloud)
+	if s.compModel != "claude-haiku-4-5-20251001" {
+		t.Errorf("compaction model on a cloud provider = %q, want small_model (unchanged)", s.compModel)
 	}
 }
 

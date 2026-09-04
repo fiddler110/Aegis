@@ -276,6 +276,19 @@ func Register(reg *tool.Registry, opts Options) error {
 	} else {
 		tools = append(tools, &editTool{root: root, tracker: ft, lsp: opts.LSP})
 	}
+	// git_branch (GAP-04) takes git_pr's split for the same reason. Always
+	// exposed in the default profile, where branching before editing is the
+	// routine workflow step this tool exists to make cheap; deferred under
+	// LocalProfile, where a file-scoped small-model task rarely branches on
+	// turn one and its schema would otherwise push the local base prompt over
+	// localBasePromptCeilingTokens — measured at 146 tokens, and the ceiling had
+	// 0 to spare. Deferred is not removed: tool_search loads it by name, so the
+	// local profile keeps the safe path without paying for it every turn.
+	if opts.LocalProfile {
+		deferred = append(deferred, &gitBranchTool{root: root})
+	} else {
+		tools = append(tools, &gitBranchTool{root: root})
+	}
 	if opts.DataDir != "" {
 		src := memory.Sources{ProjectRoot: root, DataDir: opts.DataDir}
 		tools = append(tools, &rememberTool{src: src}, &saveSkillTool{src: src})

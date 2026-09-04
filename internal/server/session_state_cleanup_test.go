@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,99 @@ func TestDeleteSessionFreesWebCache(t *testing.T) {
 	// reusing whatever survived the map deletion by reference.
 	if _, _, ok := srv.sessionWebCacheFor(meta.ID).Get("https://example.com/"); ok {
 		t.Error("cache recreated after delete should be empty")
+	}
+}
+
+// TestPruneFreesPerSessionStateToo is P66.20/ARCH-10's remaining half. The
+// delete handler's cleanup list was complete; the *prune* paths cleaned
+// nothing at all — Store.Prune and Store.PruneArchived delete rows by
+// predicate and report a count, so every map keyed by a pruned session's id
+// kept its entry for the daemon's lifetime. A daemon with retention configured
+// leaks exactly the state a daemon without it does not.
+func TestPruneFreesPerSessionStateToo(t *testing.T) {
+	store, err := session.Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		Provider:   config.ProviderConfig{Model: "test", MaxTokens: 100},
+		Permission: config.PermissionConfig{Mode: "plan"},
+	}
+	srv := newWithDeps(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), store,
+		fixedAdapter{text: "hello from agent"}, tool.NewRegistry())
+	srv.authToken = "test-token"
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	cl := client.New(ts.URL).WithToken("test-token")
+	ctx := context.Background()
+
+	gone, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	kept, err := cl.CreateSession(ctx, api.CreateSessionRequest{Mode: "build"})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	// Populate every map forgetSession is responsible for, for both sessions.
+	for _, id := range []string{gone.ID, kept.ID} {
+		srv.sessionToolRegistry(id)
+		srv.taskScopeFor(id)
+		srv.sessionWebCacheFor(id)
+		srv.sessionSemaphore(id)
+		// A default-workdir session is never tracked in sessionWorkdirs (see
+		// handleCreateSession), so seed it directly — the map still has to be
+		// reconciled, and it is the one whose residue would matter most.
+		srv.sess.workdirs.Store(id, t.TempDir())
+		srv.sess.skills.Store(id, []string{"deep-research"})
+		srv.sess.promptCache.Store(id, &sync.Map{})
+		srv.sess.permCache.Store(id+"\x00shell", struct{}{})
+		srv.toolCallWarnedMu.Lock()
+		if srv.toolCallWarned == nil {
+			srv.toolCallWarned = map[string]struct{}{}
+		}
+		srv.toolCallWarned[id+"\x00qwen3:14b"] = struct{}{}
+		srv.toolCallWarnedMu.Unlock()
+	}
+
+	// Delete the row the way Prune does — straight out of the store, with no
+	// handler-side cleanup — then run the reconciliation the prune handler now
+	// performs.
+	if err := store.Delete(ctx, gone.ID); err != nil {
+		t.Fatalf("store.Delete: %v", err)
+	}
+	w := httptest.NewRecorder()
+	srv.handlePruneSessions(w, httptest.NewRequest("POST", "/sessions/prune?days=1", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /sessions/prune = %d, body %s", w.Code, w.Body.String())
+	}
+
+	for _, tc := range []struct {
+		name string
+		load func(string) bool
+	}{
+		{"tools", func(id string) bool { _, ok := srv.sess.tools.Load(id); return ok }},
+		{"workdirs", func(id string) bool { _, ok := srv.sess.workdirs.Load(id); return ok }},
+		{"skills", func(id string) bool { _, ok := srv.sess.skills.Load(id); return ok }},
+		{"taskScopes", func(id string) bool { _, ok := srv.sess.taskScopes.Load(id); return ok }},
+		{"promptCache", func(id string) bool { _, ok := srv.sess.promptCache.Load(id); return ok }},
+		{"webCache", func(id string) bool { _, ok := srv.sess.webCache.Load(id); return ok }},
+		{"sems", func(id string) bool { _, ok := srv.sess.sems.Load(id); return ok }},
+		{"permCache", func(id string) bool { return countKeys(&srv.sess.permCache, id+"\x00") > 0 }},
+		{"toolCallWarned", func(id string) bool {
+			srv.toolCallWarnedMu.Lock()
+			defer srv.toolCallWarnedMu.Unlock()
+			_, ok := srv.toolCallWarned[id+"\x00qwen3:14b"]
+			return ok
+		}},
+	} {
+		if tc.load(gone.ID) {
+			t.Errorf("%s still holds the pruned session's entry", tc.name)
+		}
+		if !tc.load(kept.ID) {
+			t.Errorf("%s dropped a live session's entry", tc.name)
+		}
 	}
 }
 

@@ -45,6 +45,13 @@ func ValidatePath(root, path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", fmt.Errorf("path is required")
 	}
+	// AccessRead: ValidatePath carries no access intent, and its callers
+	// include the lexical argv oracle in internal/tool/builtin, so it gets the
+	// permissive half of the stream rule. Every write in the codebase goes
+	// through ValidatePathIn (builtin's resolveWrite), which passes its own.
+	if err := rejectSpecialName(path, AccessRead); err != nil {
+		return "", err
+	}
 	return validateAgainstRoot(root, absCandidate(root, path), path)
 }
 
@@ -77,6 +84,9 @@ func ValidatePathIn(roots []Root, path string, access Access) (string, error) {
 	}
 	if len(roots) == 0 {
 		return "", fmt.Errorf("no workspace root configured")
+	}
+	if err := rejectSpecialName(path, access); err != nil {
+		return "", err
 	}
 	primary := roots[0].Path
 	abs := absCandidate(primary, path)
@@ -188,6 +198,78 @@ func isWindowsRootedNoVolume(p string) bool {
 		return false
 	}
 	return (p[0] == '/' || p[0] == '\\') && filepath.VolumeName(p) == ""
+}
+
+// reservedWindowsNames are the DOS device names Windows still resolves from
+// *any* directory, extension and all: `filepath.Join(root, "NUL")` opens the
+// null device, not a file under root. The confinement checks cannot see this —
+// the joined path is a perfectly ordinary relative path inside root — so the
+// name has to be refused by name (VULN-08).
+var reservedWindowsNames = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com1": true, "com2": true, "com3": true, "com4": true, "com5": true,
+	"com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true, "lpt5": true,
+	"lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
+// rejectSpecialName refuses the Windows path shapes that pass confinement while
+// naming something other than a file under root. It is Windows-gated: a colon
+// is a legal filename character on Linux and macOS, and a file literally named
+// `NUL` in a repo checked out there is an ordinary file, so applying either rule
+// everywhere would reject paths that are correct on the platform in use.
+func rejectSpecialName(p string, access Access) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	return windowsSpecialNameError(p, access)
+}
+
+// windowsSpecialNameError is rejectSpecialName's rule with the platform gate
+// lifted, so the three shapes can be tested from any host. Callers outside the
+// tests want rejectSpecialName.
+//
+// The three shapes, in the order checked:
+//
+//   - Drive-relative (`C:notes.txt`). filepath.IsAbs is false and the volume is
+//     non-empty, so absCandidate falls through to filepath.Join and produces
+//     `D:\repo\C:notes.txt`, which validates as confined while the OS would have
+//     read from drive C's own working directory. IsRooted already calls this
+//     shape rooted; refusing it here is what stops the two from disagreeing.
+//   - A reserved device name in any segment. Windows strips the extension and
+//     trailing spaces before matching, so `CON.txt` and `nul ` are the device
+//     too — a write lands nowhere while reporting success, and filetracker
+//     records a write that never happened; a read of CON from a console-less
+//     daemon errors or hangs. Refused in both directions.
+//   - A colon in any segment past the volume prefix (`README.md:payload`), which
+//     NTFS reads as an alternate data stream. Refused for **writes only**. The
+//     hazard is specifically written content that no reviewer can see —
+//     filepath.WalkDir does not enumerate streams, so glob, grep, the repo map
+//     and git all walk straight past it — while a *read* of a stream is a read
+//     of something already inside the root and hides nothing. Keeping the read
+//     direction open matters because ValidatePath is also the oracle
+//     argv_confine.go runs over shell and git argv tokens, most of which are not
+//     paths at all: `--pretty=format:%h %s` carries a colon because that is
+//     git's format syntax, and refusing it there would deny read-only git
+//     commands on Windows and nowhere else.
+func windowsSpecialNameError(p string, access Access) error {
+	vol := filepath.VolumeName(p)
+	if vol != "" && !filepath.IsAbs(p) {
+		return fmt.Errorf("path %q is drive-relative: Windows resolves it against that drive's own working directory, not against the workspace root — write it workspace-relative, or as a full absolute path", p)
+	}
+	for _, seg := range strings.FieldsFunc(p[len(vol):], func(r rune) bool { return r == '/' || r == '\\' }) {
+		if access == AccessWrite && strings.Contains(seg, ":") {
+			return fmt.Errorf("path %q names the NTFS alternate data stream %q: content written there is invisible to glob, grep, the repo map and git, so it is refused", p, seg)
+		}
+		name := strings.ToLower(seg)
+		if i := strings.IndexByte(name, '.'); i >= 0 {
+			name = name[:i]
+		}
+		if reservedWindowsNames[strings.TrimRight(name, " ")] {
+			return fmt.Errorf("path %q names the reserved Windows device %q, which resolves from every directory rather than to a file under the workspace root", p, seg)
+		}
+	}
+	return nil
 }
 
 // IsRooted reports whether the OS will resolve p from a filesystem root rather

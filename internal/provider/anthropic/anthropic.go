@@ -19,6 +19,11 @@ import (
 const (
 	defaultBaseURL = "https://api.anthropic.com"
 	apiVersion     = "2023-06-01"
+
+	// providerName is the name every error this adapter constructs is stamped
+	// with. The decoder builds errors without a reference to the Adapter, so the
+	// name lives here rather than being read back off Name().
+	providerName = "anthropic"
 )
 
 // Adapter talks to the Anthropic Messages API.
@@ -603,6 +608,19 @@ func (d *eventDecoder) handleData(data string, emit func(provider.Event) bool) s
 			if input == "" {
 				input = "{}"
 			}
+			if !json.Valid([]byte(input)) {
+				// LLM-08: the accumulated input_json_delta fragments do not parse.
+				// The OpenAI adapter has reported this as a classified error since
+				// P35.2; this one used to hand the broken bytes downstream as a
+				// json.RawMessage, where it surfaced as an opaque unmarshal failure
+				// at tool dispatch with nothing naming the stream as the cause.
+				// The tool name goes in Detail, never in Message — it is
+				// model-authored text and Message is what the retry and
+				// backend-liveness classifiers substring-match (P61.7).
+				emit(provider.Event{Type: provider.EventError,
+					Err: provider.NewMalformedToolCallError(providerName, bs.toolName)})
+				return sse.StatusAbort
+			}
 			if !emit(provider.Event{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{
 				ID:    bs.toolID,
 				Name:  bs.toolName,
@@ -634,7 +652,21 @@ func (d *eventDecoder) handleData(data string, emit func(provider.Event) bool) s
 	case "message_stop":
 		terminal = true // P61.2: the protocol's own end-of-stream event
 	case "error":
-		emit(provider.Event{Type: provider.EventError, Err: fmt.Errorf("anthropic: %s: %s", ev.Error.Type, ev.Error.Message)})
+		// LLM-08: a mid-stream {"error":...} envelope used to be a bare
+		// fmt.Errorf, which no classifier can read — errors.As finds no
+		// *APIError, so IsContextOverflowError and IsBackendUnavailableError both
+		// answer false and the phased drive aborts on an unclassifiable error
+		// instead of resetting the context or waiting for the backend. Both other
+		// adapters have gone through NewStreamError since P33.16.
+		//
+		// Type and message are both provider-authored (this envelope comes from
+		// the API's infrastructure, not from a generation), so both are safe to
+		// classify on, and both are needed: the type carries `invalid_request_error`
+		// while the message carries `prompt is too long`, and it is the latter that
+		// makes an over-long prompt classify as a recoverable context overflow
+		// rather than a generic terminal failure. The rendered text is unchanged.
+		emit(provider.Event{Type: provider.EventError,
+			Err: provider.NewStreamError(providerName, ev.Error.Type+": "+ev.Error.Message)})
 		return sse.StatusAbort
 	}
 	if terminal {

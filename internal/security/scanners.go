@@ -413,6 +413,14 @@ func (kubescapeScanner) Relevant(dir string) (bool, string) {
 // first few hundred YAML files; this is a safety cap, not a tuned budget.
 const k8sManifestMaxFiles = 500
 
+// k8sManifestMaxBytes bounds how large one of those YAML files may be before
+// it is read (VULN-09/G122). k8sManifestMaxFiles bounds the count, which does
+// nothing about a single enormous file: a rendered Helm chart or a CRD bundle
+// runs to a few hundred KB, so anything past this is not a manifest we could
+// usefully hand kubescape, and reading it whole to look for two substrings put
+// it in the daemon's heap first.
+const k8sManifestMaxBytes = 8 << 20
+
 // findK8sManifests walks dir (bounded, skipping the same dependency/build/
 // VCS directories DetectLanguages skips) for files kubescape would actually
 // have something to analyze: a Helm/Kustomize marker file by name, or any
@@ -447,6 +455,9 @@ func findK8sManifests(dir string) ([]string, error) {
 			return nil
 		}
 		seen++
+		if info, infoErr := d.Info(); infoErr != nil || info.Size() > k8sManifestMaxBytes {
+			return nil
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil

@@ -8,7 +8,160 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-03 (forty-third record) — **P66.26 closed in full; P66.18 and P66.23 each
+**Last updated:** 2026-09-03 (forty-fourth record) — **the P66/P67 sweep: P66.17, P66.18, P66.20
+and P66.23 closed in full; GAP-04 shipped out of P66.19; a pre-existing red invariant test fixed;
+P67.13 documented as a design note.** Full record:
+[The P66/P67 sweep, 2026-09-03](#the-p66p67-sweep-2026-09-03). Highlights: a **live plan-mode escape
+on Windows** was closed as a side effect of P66.23/VULN-08 (`Get-Content C:\Users\x\.ssh\id_rsa`
+classified as `CapRead` because the drive-relative form folded into the workspace root — a
+CRIT-2-family defect that the fuzz corpus was passing *by accident*); the Anthropic adapter's
+mid-stream errors were unclassifiable, so a recoverable overflow aborted a drive instead of
+resetting it; and three of the batch's findings were **refuted against current code** rather than
+implemented.
+
+---
+
+### The P66/P67 sweep, 2026-09-03
+
+Taken on direct request: review every open P66 and P67 item, validate whether it still needs
+implementing, and build what does. Three sub-agents worked disjoint file sets, and their verdicts
+were deliberately allowed to come back "stale" or "needs a live model" rather than being pushed to
+produce a fix each.
+
+**The headline is not a feature.** P66.23/VULN-08 was filed as a Low-severity tidiness item —
+Windows reserved device names and alternate data streams are not rejected by path validation,
+confirmed by code reading, never executed. Executing it found something the finding did not claim.
+`splitShellWords` strips backslashes, so `Get-Content C:\Users\x\.ssh\id_rsa` yields the candidate
+`C:Usersx.sshid_rsa`. That form is drive-relative: `filepath.IsAbs` is false and `VolumeName` is
+`"C:"`, so `absCandidate` folded it into `<root>\C:Usersx.sshid_rsa`, `escapesRoot` called it
+confined, and `classifyShellCommand` therefore downgraded the command to `CapRead` — **allowed
+silently in plan mode**, while PowerShell would have read the real key. This is exactly the CRIT-2
+shape CLAUDE.md describes ("an unconfined `argv[0]`"), and `FuzzClassifyShellCommand` seeds #52 and
+#58 were passing *because* of the ADS folding rather than in spite of it. The drive-relative rule
+now rejects the form, the seeds pass for the right reason, and the invariant is genuinely stronger
+on Windows than it was.
+
+Both Windows hazards were reproduced on the host before fixing, not inferred:
+`os.WriteFile(filepath.Join(dir,"NUL"),…)` returns nil and discards; `os.WriteFile(…,"C:notes.txt")`
+returns nil and `os.ReadDir` then lists only `C`, the `notes.txt` stream being invisible to every
+`WalkDir`-based tool Aegis has.
+
+**The ADS rule is split by access, and the split is load-bearing.** Rejecting a colon in both
+directions broke `git log --pretty=format:%h %s`: `argv_confine.go`'s `firstArgvEscape` uses
+`sandbox.ValidatePath` as a lexical oracle over argv tokens that are mostly not paths, so a blanket
+rule denies read-only git on Windows and nowhere else. Writes are where the invisible-content hazard
+lives; a read of a stream is a read of something already inside the root and hides nothing. So
+`AccessWrite` refuses the colon and `AccessRead` does not. `argv_confine.go` is unchanged and the
+fuzz oracle was not weakened.
+
+**What shipped**
+
+| Item | Finding | Outcome |
+|---|---|---|
+| P66.23 | VULN-04 | `latex_build`'s `compiler` enum is now enforced against an allowlist before `exec.LookPath`. A third test parses `InputSchema()` so the enum and the allowlist cannot drift. |
+| P66.23 | VULN-08 | Above. New `pathvalidator_special_test.go`; the platform gate is asserted from both directions so a Linux CI run proves it rather than skipping. |
+| P66.23 | VULN-09 | 3 of 5 sites capped; grep's Go fallback **streams** instead. |
+| P66.18 | ARCH-10 | The *delete* path was already complete (P66.15). The **prune** paths cleaned nothing — now reconciled against the store, covering `PruneArchived` too, which the finding never mentioned. |
+| P66.20 | PERF-04 | Repo map re-checks staleness on a 5s TTL; secondary workdirs, which had *no* invalidation at all, fixed too. |
+| P66.20 | PERF-08 | Confirmed real (256-event queue, fills in ~2.5–8.5s behind a throttled tab). Text deltas coalesce on overflow instead of leaving a silent hole; non-text events keep drop-oldest. |
+| P66.17 | LLM-06 | The P59.5 local carve-out now covers compaction and titles, not just the guard. |
+| P66.17 | LLM-07 | `ImageBlock`/`ThinkingBlock` were free in every token estimate. |
+| P66.17 | LLM-08 | Anthropic mid-stream errors now classified; malformed tool-call JSON reported rather than emitted. |
+| P66.17 | LLM-13/14/15/17 | Binary-searched `fitTranscript`; loud `summary_tokens` misconfiguration; carried-file tags read only from real summaries; SSE watchdog no longer counts consumer backpressure as a stalled runner. |
+| P66.19 | GAP-04 | New `git_branch` tool — see below. |
+
+**VULN-09 did not take the fix it was filed with, and that matters.** The recommendation was a size
+cap on all five walk callbacks. ripgrep applies **no default `--max-filesize`**, so an 8 MiB cap on
+the pure-Go grep backend would have made the two backends disagree about a large text file —
+violating the CLAUDE.md invariant that they return identical results. The Go fallback instead streams
+line-by-line off the open file (`Peek(8000)` → `isBinary` on the head → `ReadString('\n')`), which
+removes the unbounded heap load with byte-identical results. `ReadString` rather than `bufio.Scanner`
+deliberately: Scanner's 64 KB token limit would abort on a minified bundle where the old
+`strings.Split` did not. A new `TestGrepBackendsAgreeOnALargeTextFile` (12 MiB) is the guard rail
+against anyone reintroducing a cap. `internal/cli/chat.go:1237` was **stale** — the code moved and
+already had the fix.
+
+**LLM-08a is the most user-visible of the local-model fixes.** The Anthropic adapter raised
+mid-stream failures as a bare `fmt.Errorf`, so `errors.As(*APIError)` failed and both
+`IsContextOverflowError` and `IsBackendUnavailableError` were false — a recoverable context overflow
+therefore **aborted a drive** instead of resetting it. The OpenAI adapter has used
+`provider.NewStreamError` since P33.16; this was the one adapter that never got it.
+
+**Three findings were refuted against current code**, which is the outcome this tier's own "take the
+measurement first" rule exists to produce:
+
+- **QUAL-08** — the claim that request-scoped handlers run an unbounded model-server probe is false.
+  `effectiveContextWindowFor` already wraps it in a 5s `ctxWinDetectTimeout`, so both cited sites are
+  bounded regardless of the `context.Background()` they pass.
+- **LLM-12** — `ollamainfo.Detect`'s `/api/show` is not "always wasted": it is the sole source of
+  `Result.ModelMax`, read at five call sites. Skipping it would drop that.
+- **PERF-06** — half stale. `engine/compact.go`'s `memoizedOverhead` already memoizes
+  `toolshim.Prompt` on `reg.SchemaVersion()`; one sub-millisecond site remains, and a second memo
+  would need invalidating on the same registry-version signal CLAUDE.md warns about, for no gain.
+
+**LLM-11 was left open on purpose.** Failover does copy the primary's `NumCtx` to every fallback
+(`failover.go:70`). Three plausible fixes exist and choosing between them is a measurement, not a
+deduction, so nothing was changed. It also surfaced a half the original finding missed: even a
+correct per-target `num_ctx` leaves the compaction trigger and the summarizer budgeted against the
+*primary's* window, which is a daemon-side problem. Both halves are now recorded on the roadmap
+entry with the recipe that would settle them.
+
+**GAP-04 — `git_branch` (`internal/tool/builtin/gitbranch.go`).** `git` was read-only and
+`git_commit` committed; the one step between them — put this work on a branch — had no tool, so it
+went through `shell`. That inverted the risk gradient the permission layer exists to express: the
+safe, routine operation needed `CapExecute` and an approval for an arbitrary command line, while
+`shell`'s far larger blast radius was the only way to get it. The tool is `CapWrite` (switching a
+branch rewrites the working tree but cannot run an arbitrary binary), so it is Deny in plan mode and
+Ask in build mode — strictly narrower than the call it replaces. Operations: `list`, `create`
+(optional `from`, optional `switch`), `switch`, `delete`. Delete is `-d` only and **never** `-D`; the
+refusal names the shell escape hatch rather than pretending none exists, and a test asserts the
+branch survives. Merge, rebase and reset are deliberately absent. The operation enum is enforced
+against a map, not trusted from the schema — VULN-04's lesson applied at the point of writing rather
+than after.
+
+`git_branch` is **deferred under `LocalProfile`**, taking `git_pr`'s split: its schema measured 146
+tokens and `localBasePromptCeilingTokens` had exactly 0 to spare, so
+`TestEffectiveSystem_localProfileBudget` failed the moment it was added always-exposed. Raising the
+ceiling was the other option; deferring is better here, since a file-scoped small-model task rarely
+branches on turn one and `tool_search` still loads it by name.
+
+**A pre-existing red test was fixed.** `TestEveryRegisterCallSiteDecidesTheLocalProfile` — a
+CLAUDE.md-documented invariant — was **failing at HEAD** before any of this work, flagging
+`internal/cli/chat.go` and `internal/cli/debate.go`. Both sites were in fact correct: they build
+options via `enginecfg.BuiltinOptions`, which sets `LocalProfile` for every caller. The decision had
+moved into the shared helper and the textual auditor could no longer see it — a variant of the
+"guard on the guard" case the test's own author anticipated. The test now recognises the helper form,
+which is *stricter* than the comment escape hatch it sits beside: the field is provably set rather
+than merely discussed.
+
+**P67.13** got a design note rather than a build (`research/design-plan-overlay.md`), on the
+explicit grounds that its promote-when condition — a named first consumer — has not fired. Writing
+it took the one measurement the note itself said to take first, and **the load-bearing assumption
+came back half-wrong**: the plan was to install the copy-on-write overlay beneath the existing
+context-carried `checkpoint.Snapshotter` seam so no write tool would change. All nine write sites do
+reach that seam, but the call is `SnapshotterFrom(ctx).Capture(abs)` — it *notifies* the snapshotter
+and the tool then does its own `os.WriteFile`. It observes; it does not intercept. The overlay is
+still buildable there, but it needs the seam upgraded from notifying to path-resolving across nine
+sites, and `captureShellWrites` does not fit the shape at all. Recorded so the next reader does not
+re-derive it.
+
+**P66.19's GAP-07, P67.11 and P67.12 were validated as still-open and left parked**, each with no
+fired trigger.
+
+**Verification.** `go build ./...`, `go vet ./...` and `go test ./...` all green across the tree;
+`go test -race` green on `internal/server`, `internal/provider/sse`, `internal/tool/builtin` and
+`internal/compaction`. The Windows escape claim was verified independently against the built
+validator rather than taken from the sub-agent's report.
+
+**Process note worth keeping.** One sub-agent ran `git stash` in the shared worktree to isolate a
+test failure, which swept up two other agents' uncommitted work mid-flight. All three recovered and
+the final tree was verified from scratch, but the lesson is concrete: **agents working a shared
+worktree in parallel must not run repo-wide git state commands.** Partition by file set, and isolate
+with a worktree if git operations are needed at all.
+
+---
+
+**Previous record:** 2026-09-03 (forty-third record) — **P66.26 closed in full; P66.18 and P66.23 each
 shipped two findings out of their residue grab-bags.** Taken on direct request to review the
 P66.17/.18/.20/.23/.26 findings for anything actually implementable now, rather than treating the
 Tier 4 "do not build speculatively" caveat as a reason to skip the review itself.

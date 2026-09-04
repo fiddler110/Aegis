@@ -593,10 +593,15 @@ func TestLatexBuildMissingCompiler(t *testing.T) {
 	root := t.TempDir()
 	os.WriteFile(filepath.Join(root, "doc.tex"), []byte(`\documentclass{article}\begin{document}hello\end{document}`), 0o644)
 
+	// An unrecognized name no longer reaches exec.LookPath at all — VULN-04's
+	// allowlist refuses it first — so the install hint is now reached the only
+	// way it can be in production: a declared compiler that is not installed.
+	t.Setenv("PATH", "")
+
 	lt := &latexBuildTool{root: root}
 	res, err := lt.Execute(context.Background(), mustJSON(t, map[string]any{
 		"path":     "doc.tex",
-		"compiler": "definitely-not-a-real-latex-compiler-xyz",
+		"compiler": "lualatex",
 	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

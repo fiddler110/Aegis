@@ -202,16 +202,36 @@ func collectCarriedFiles(prefixText []string, current fileContext) (read, modifi
 		mergeFilePaths(carriedModified, current.modified)
 }
 
-// prefixText pulls every text block out of the prefix being summarized, which
-// is where a previous summary's tagged lists live. Only TextBlocks: a tagged
-// list can never appear in a tool result, and scanning those would let a file
-// this session merely *printed* enter the record as one it read.
+// prefixText pulls the text of every *previous compaction summary* out of the
+// prefix being summarized, which is where the tagged lists live.
+//
+// The narrowing to summary messages is LLM-15. The tags are a wire format
+// between successive summaries, and this code writes one end of it — so the
+// reader has to be as specific as the writer. Scanning every text block meant
+// anything that merely contained the tag opened the record: a model quoting the
+// mechanism back in its prose, a user pasting a transcript, or a tool result
+// echoed into an assistant turn could all inject paths the session never
+// touched, and paths are the one part of a summary the code (not the model)
+// promises is accurate. Restricting it to the synthetic message compaction
+// itself spliced in — user role, opening with one of the two lead-ins — keeps
+// accumulation working across any number of compactions while giving the
+// mechanism exactly one author.
+//
+// Only TextBlocks, for the reason it always was: a tagged list can never appear
+// in a tool result, and scanning those would let a file this session merely
+// *printed* enter the record as one it read.
 func prefixText(msgs []provider.Message) []string {
 	var out []string
 	for _, m := range msgs {
+		if m.Role != provider.RoleUser {
+			continue
+		}
 		for _, blk := range m.Content {
 			tb, ok := blk.(provider.TextBlock)
 			if !ok {
+				continue
+			}
+			if !isSummaryMessage(tb.Text) {
 				continue
 			}
 			if strings.Contains(tb.Text, readFilesOpen) || strings.Contains(tb.Text, modifiedFilesOpen) {
@@ -220,4 +240,10 @@ func prefixText(msgs []provider.Message) []string {
 		}
 	}
 	return out
+}
+
+// isSummaryMessage reports whether text is one of the two synthetic messages a
+// compaction splices in — the only place tagged file lists are ever written.
+func isSummaryMessage(text string) bool {
+	return strings.HasPrefix(text, summaryLeadIn) || strings.HasPrefix(text, fallbackLeadIn)
 }

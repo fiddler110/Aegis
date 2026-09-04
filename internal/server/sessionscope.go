@@ -6,13 +6,16 @@
 package server
 
 import (
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/knowledge"
 	"github.com/fiddler110/aegis/internal/permission"
+	"github.com/fiddler110/aegis/internal/repomap"
 	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/sandbox"
 	"github.com/fiddler110/aegis/internal/skills"
@@ -225,19 +228,73 @@ func (s *Server) knowledgeStoreFor(root string) (*knowledge.Store, error) {
 	})
 }
 
+// repoMapRecheckInterval bounds how often a prompt build may re-ask whether the
+// repository map has gone stale (P66.20/PERF-04). The daemon used to load the
+// map once at construction and inject that value for its whole lifetime, so a
+// long-lived daemon described the repository as it looked at startup — every
+// file the agent itself created was missing from the overview it was reasoning
+// against.
+//
+// loadRepoMap already does the right thing (fingerprint, rebuild only when
+// stale); it was simply never called again. The staleness check is a stat-only
+// walk measured at ~11.5ms against this repository, versus ~185ms for a full
+// rebuild and a turn measured in seconds, so re-asking is affordable — but a
+// turn is not the only thing that builds a prompt and several may land in a
+// burst, so the answer is reused for a few seconds. Short enough that a file
+// written by one turn is in the map by the next, long enough that a rapid
+// sequence of turns pays for one walk rather than one each.
+const repoMapRecheckInterval = 5 * time.Second
+
 // repoMapFor returns the cached repository-map system-prompt block for
-// root (P25.9), lazily loading and caching it on first use for a root other
-// than the daemon's own default workspace.
+// root (P25.9), lazily loading it on first use for a root other than the
+// daemon's own default workspace and re-checking staleness at most once per
+// repoMapRecheckInterval.
+//
+// The primary workspace keeps its own field rather than joining the rootCache
+// below because POST /repomap/index writes it directly (P14.3): an explicit
+// `/index` must still publish its rebuild immediately, and it does — the
+// refresh here starts from whatever that handler last stored and re-checks it
+// against the same on-disk cache the handler saved.
 func (s *Server) repoMapFor(root string) string {
 	if root == "" || root == s.workspace {
 		s.repoMapMu.Lock()
 		defer s.repoMapMu.Unlock()
+		if time.Since(s.repoMapCheckedAt) >= repoMapRecheckInterval {
+			s.repoMapCheckedAt = time.Now()
+			s.repoMap = loadRepoMap(s.workspace, repoMapOptions(s.cfg), s.logger)
+		}
 		return s.repoMap
 	}
-	v, _ := s.repoMaps.getOrCreate(root, func() (string, error) {
-		return loadRepoMap(root, repoMapOptions(s.cfg), s.logger), nil
+	e, err := s.repoMaps.getOrCreate(root, func() (*repoMapEntry, error) {
+		return &repoMapEntry{}, nil
 	})
-	return v
+	if err != nil {
+		return ""
+	}
+	return e.block(root, repoMapOptions(s.cfg), s.logger)
+}
+
+// repoMapEntry is one secondary workdir's cached map block plus the clock that
+// bounds its staleness re-check. The rootCache holds the entry — created once,
+// never replaced — and the entry's own mutex guards the value, so a slow
+// rebuild for one root never blocks a lookup for another (rootCache's own
+// mutex is shared across every root it holds).
+type repoMapEntry struct {
+	mu        sync.Mutex
+	rendered  string
+	loaded    bool
+	checkedAt time.Time
+}
+
+func (e *repoMapEntry) block(root string, opts repomap.Options, logger *slog.Logger) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.loaded || time.Since(e.checkedAt) >= repoMapRecheckInterval {
+		e.loaded = true
+		e.checkedAt = time.Now()
+		e.rendered = loadRepoMap(root, opts, logger)
+	}
+	return e.rendered
 }
 
 // workdirAllowed reports whether workdir (already resolved to an absolute

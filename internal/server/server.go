@@ -106,7 +106,12 @@ type Server struct {
 	permRules    []permission.Rule // parsed text-based allow/deny rules; guarded by permMu
 	permMu       sync.Mutex        // protects permRules (approvals add rules at runtime, TQ6)
 	repoMap      string            // cached repository map block for the system prompt (empty when not indexed); guarded by repoMapMu
-	repoMapMu    sync.Mutex        // protects repoMap (rebuilt at runtime by POST /repomap/index, P14.3)
+	repoMapMu    sync.Mutex        // protects repoMap/repoMapCheckedAt (rebuilt at runtime by POST /repomap/index, P14.3)
+	// repoMapCheckedAt is when repoMapFor last asked loadRepoMap whether the
+	// primary workspace's map had gone stale (P66.20/PERF-04). The zero value
+	// means "never", so the first prompt build after startup re-checks; see
+	// repoMapRecheckInterval.
+	repoMapCheckedAt time.Time
 	personaDirs  []string          // directories rescanned by refreshPersonas for hot reload
 
 	// daemonCtx is cancelled when ListenAndServe's caller shuts the daemon
@@ -129,7 +134,7 @@ type Server struct {
 	// /commands admin listing — so commands directory discovery needs no
 	// per-root cache here.)
 	knowledgeStores rootCache[*knowledge.Store]
-	repoMaps        rootCache[string]
+	repoMaps        rootCache[*repoMapEntry]
 	// personaProjectDir/personaProjectTrusted gate control-field trust for
 	// project-sourced persona files (P27.7/FIND-09) — see persona.LoadFromDirs.
 	// Computed once at startup from the workspace-trust store, matching how
@@ -492,7 +497,7 @@ func New(cfg *config.Config, logger *slog.Logger) (_ *Server, err error) {
 
 	s.memory = memory.NewSources(cwd, cfg.DataDir)
 	s.repoMap = loadRepoMap(cwd, repoMapOptions(cfg), logger)
-	_, _ = s.repoMaps.getOrCreate(cwd, func() (string, error) { return s.repoMap, nil })
+	s.repoMapCheckedAt = time.Now()
 
 	s.wirePersonasAndCommands(cfg, cwd, logger)
 

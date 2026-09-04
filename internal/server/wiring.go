@@ -382,14 +382,17 @@ func (s *Server) wireHooks(cfg *config.Config, logger *slog.Logger) {
 }
 
 // wireCompaction sizes and builds the compaction summarizer against the
-// model compaction actually runs on (provider.small_model when set,
-// otherwise the global model). Callers must only invoke this when s.adapter
-// is non-nil.
+// model compaction actually runs on (provider.small_model when set and the
+// backend is not a single local Ollama server, otherwise the global model —
+// see auxModel). Callers must only invoke this when s.adapter is non-nil.
+//
+// The base is cfg.Provider.Model rather than a session's own model because the
+// summarizer is built once per server and shared by every session (see the
+// CLAUDE.md compaction note); the configured primary is the model a local
+// backend will have resident in the overwhelming majority of turns, which is
+// the one thing the local carve-out needs to be right about.
 func (s *Server) wireCompaction(cfg *config.Config) {
-	compModel := cfg.Provider.Model
-	if cfg.Provider.SmallModel != "" {
-		compModel = cfg.Provider.SmallModel // prefer a fast small model for compaction
-	}
+	compModel := auxModel(cfg, cfg.Provider.Model)
 	s.compModel = compModel
 	// Resolve the effective context window first (P23.1): explicit config, or
 	// auto-detected from a local Ollama server — whose OpenAI-compat endpoint

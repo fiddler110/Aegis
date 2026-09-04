@@ -365,21 +365,23 @@ func (t *grepTool) Execute(ctx context.Context, input json.RawMessage) (tool.Res
 			return ctx.Err()
 		default:
 		}
-		data, err := os.ReadFile(path)
-		if err != nil || isBinary(data) {
+		full := false
+		if err := scanFileLines(path, func(n int, line string) bool {
+			if !re.MatchString(line) {
+				return true
+			}
+			out = append(out, fmt.Sprintf("%s:%d:%s", rel, n, strings.TrimRight(line, "\r")))
+			// P64.1: keep walking past the inline cap up to the collection
+			// ceiling, so the matches beyond grepMaxMatches are recoverable
+			// from a spill file instead of discarded. The inline result is
+			// byte-identical to what it was.
+			full = len(out) >= grepSpillMaxMatches
+			return !full
+		}); err != nil {
 			return nil
 		}
-		for i, line := range strings.Split(string(data), "\n") {
-			if re.MatchString(line) {
-				out = append(out, fmt.Sprintf("%s:%d:%s", rel, i+1, strings.TrimRight(line, "\r")))
-				// P64.1: keep walking past the inline cap up to the collection
-				// ceiling, so the matches beyond grepMaxMatches are recoverable
-				// from a spill file instead of discarded. The inline result is
-				// byte-identical to what it was.
-				if len(out) >= grepSpillMaxMatches {
-					return filepath.SkipAll
-				}
-			}
+		if full {
+			return filepath.SkipAll
 		}
 		return nil
 	})
@@ -534,11 +536,55 @@ func skipDirForGlob(name string) bool {
 }
 
 func isBinary(data []byte) bool {
-	n := min(len(data), 8000)
+	n := min(len(data), binarySniffBytes)
 	for i := range n {
 		if data[i] == 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// scanFileLines calls fn with each 1-based line of path, stopping early when fn
+// returns false. The file is streamed rather than read whole (VULN-09/G122):
+// the grep fallback walks every file in the workspace, so `os.ReadFile` here
+// meant one multi-gigabyte file anywhere in the tree — a DB dump, a core file —
+// went fully resident in the daemon's heap on any grep call. Only the head is
+// buffered for the binary sniff; after that the resident cost is one line.
+//
+// A size cap would have been the cheaper fix and is deliberately not applied:
+// ripgrep has no default --max-filesize, so capping this backend would make the
+// two backends disagree about a large text file, which is the one thing the
+// search-backend equivalence invariant forbids.
+//
+// Line splitting is by "\n" with the terminator dropped and any "\r" left on
+// for the caller to handle, matching what the whole-file `strings.Split` did.
+// It differs in one place, and in ripgrep's direction: a trailing newline no
+// longer yields a phantom empty final line, and an empty file yields no lines
+// at all rather than one empty one.
+func scanFileLines(path string, fn func(n int, line string) bool) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	br := bufio.NewReaderSize(f, binarySniffBytes)
+	head, _ := br.Peek(binarySniffBytes)
+	if isBinary(head) {
+		return nil
+	}
+
+	for n := 1; ; n++ {
+		line, readErr := br.ReadString('\n')
+		if line == "" && readErr != nil {
+			return nil
+		}
+		if !fn(n, strings.TrimSuffix(line, "\n")) {
+			return nil
+		}
+		if readErr != nil {
+			return nil
+		}
+	}
 }

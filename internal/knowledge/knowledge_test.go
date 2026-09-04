@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,4 +167,50 @@ func TestOpenAppliesPermissionHardening(t *testing.T) {
 		t.Fatalf("reopen after hardening: %v", err)
 	}
 	s2.Close()
+}
+
+// VULN-09/G122: Index used to os.ReadFile every .md/.txt/.rst it walked past
+// before considering its size, so one oversized document — an exported dataset
+// or a generated dump with a prose extension — went fully resident. A file over
+// maxIndexedFileBytes is now skipped; nothing over the cap could have been
+// usefully indexed anyway, since only embedTextLimit bytes reach the embedder.
+func TestIndexSkipsOversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "small.md"), []byte("# Small\n\nauthentication notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	big := make([]byte, maxIndexedFileBytes+1)
+	for i := range big {
+		big[i] = 'a'
+	}
+	copy(big, []byte("# Huge\n\nauthentication notes\n"))
+	if err := os.WriteFile(filepath.Join(dir, "huge.md"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(dir, filepath.Join(dir, "knowledge.db"), nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	n, err := s.Index(context.Background())
+	if err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("indexed %d files, want 1 (the oversized one must be skipped)", n)
+	}
+	results, err := s.Search(context.Background(), "authentication", 5)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	for _, r := range results {
+		if r.Path == "huge.md" {
+			t.Errorf("the oversized file was indexed: %+v", results)
+		}
+	}
+	if len(results) != 1 || results[0].Path != "small.md" {
+		t.Errorf("got %+v, want the small document only", results)
+	}
 }

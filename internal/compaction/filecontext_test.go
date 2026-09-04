@@ -207,3 +207,56 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+// TestCarriedFilesComeOnlyFromASummary is LLM-15. The tagged lists are a wire
+// format this package writes at one end and reads at the other, and the reader
+// used to accept them from any text block in the prefix — so a model quoting the
+// mechanism in its prose, or a user pasting a transcript, could put paths into a
+// record whose whole value is that the code (not the model) vouches for it.
+// Only the synthetic message a compaction spliced in counts.
+func TestCarriedFilesComeOnlyFromASummary(t *testing.T) {
+	tags := readFilesOpen + "\nfabricated/path.go\n" + readFilesClose + "\n"
+	real := summaryLeadIn + "## Goal\n- x\n" + readFilesOpen + "\nreal/path.go\n" + readFilesClose + "\n"
+
+	msgs := []provider.Message{
+		text(provider.RoleAssistant, "I have been tracking files like this:\n"+tags),
+		text(provider.RoleUser, "here is a transcript I saved earlier:\n"+tags),
+		text(provider.RoleUser, real),
+	}
+	read, _ := collectCarriedFiles(prefixText(msgs), fileContext{})
+	if contains(read, "fabricated/path.go") {
+		t.Errorf("read list %v accepted tags from ordinary conversation text", read)
+	}
+	if !contains(read, "real/path.go") {
+		t.Errorf("read list %v lost the path a previous summary actually recorded", read)
+	}
+}
+
+// TestFallbackSummaryIsAlsoASummarySource guards the other lead-in: the
+// deterministic fallback writes the lists too (it fires exactly when a local
+// summarizer keeps failing, and it replaces the prefix outright), so its message
+// must stay a recognized source or accumulation ends at the first fallback.
+func TestFallbackSummaryIsAlsoASummarySource(t *testing.T) {
+	a := &capturingAdapter{summary: "## Goal\n- x"}
+	s := New(Options{Adapter: a, Model: "m", MaxBudget: 5, KeepRecent: 2})
+
+	first, _, err := s.Compact(
+		WithFiles(context.Background(), []string{"kept/read.go"}, nil), "", longConversation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fallback compaction over a conversation that already carries a summary,
+	// then a second one over its output: the path must survive both hops.
+	out, changed := s.FallbackCompact(append(first, longConversation()...))
+	if !changed {
+		t.Fatal("expected the first fallback to compact")
+	}
+	out, changed = s.FallbackCompact(append(out, longConversation()...))
+	if !changed {
+		t.Fatal("expected the second fallback to compact")
+	}
+	read, _ := parseFileLists(firstText(t, out[0]))
+	if !contains(read, "kept/read.go") {
+		t.Errorf("read list %v lost the path across two fallback compactions", read)
+	}
+}

@@ -937,3 +937,123 @@ func TestHealthyReachableThroughDecorators(t *testing.T) {
 		t.Error("CheckBackendHealth: healthy = false against a live server")
 	}
 }
+
+// malformedToolCallStream is a tool_use block whose accumulated input_json_delta
+// fragments do not parse — the shape a generation cut off mid-arguments leaves
+// behind.
+const malformedToolCallStream = `event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"write_file"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\": \"a.go\", \"content\": \"pack"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+
+// TestMalformedToolCallIsReportedNotEmitted is the LLM-08 regression guard for
+// the tool-call half: unparseable arguments used to ride downstream as a
+// json.RawMessage and fail as an opaque unmarshal error at dispatch, with
+// nothing naming the stream as the cause. The OpenAI adapter has classified this
+// since P35.2; this pins the same behaviour here.
+func TestMalformedToolCallIsReportedNotEmitted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(malformedToolCallStream))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithBaseURL(srv.URL))
+	stream, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 100})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	var streamErr error
+	for ev := range stream {
+		switch ev.Type {
+		case provider.EventToolUse:
+			t.Fatalf("emitted a tool call with unparseable arguments: %s", ev.ToolUse.Input)
+		case provider.EventError:
+			streamErr = ev.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("a tool call with unparseable arguments must surface as an error")
+	}
+	var apiErr *provider.APIError
+	if !errors.As(streamErr, &apiErr) {
+		t.Fatalf("error %v is not an *APIError; nothing downstream can classify it", streamErr)
+	}
+	if apiErr.Retryable() {
+		t.Error("a malformed tool call is terminal — retrying re-runs the same prompt for the same result")
+	}
+	// P61.7: the model authors the tool name, so it must not reach the message
+	// every classifier substring-matches.
+	if strings.Contains(apiErr.Message, "write_file") {
+		t.Errorf("tool name leaked into the classified Message: %q", apiErr.Message)
+	}
+	if !strings.Contains(apiErr.Error(), "write_file") {
+		t.Errorf("rendered error %q should still name the tool", apiErr.Error())
+	}
+}
+
+// TestMidStreamErrorIsClassified is the LLM-08 regression guard for the error
+// half: the mid-stream {"error":...} envelope used to be a bare fmt.Errorf, so
+// errors.As found no *APIError and every recovery path — context-overflow reset,
+// backend-down wait — saw an unclassifiable error and aborted.
+func TestMidStreamErrorIsClassified(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		typ, msg    string
+		wantOverflw bool
+		wantDead    bool
+	}{
+		{"over-long prompt", "invalid_request_error", "prompt is too long: 300000 tokens > 200000 maximum", true, false},
+		{"upstream overload", "overloaded_error", "Overloaded", false, false},
+		{"connection reset", "api_error", "connection reset by peer", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"" + tc.typ + "\",\"message\":\"" + tc.msg + "\"}}\n\n"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("content-type", "text/event-stream")
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+
+			a := New("k", WithBaseURL(srv.URL))
+			stream, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 100})
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			var streamErr error
+			for ev := range stream {
+				if ev.Type == provider.EventError {
+					streamErr = ev.Err
+				}
+			}
+			if streamErr == nil {
+				t.Fatal("expected a mid-stream error event")
+			}
+			var apiErr *provider.APIError
+			if !errors.As(streamErr, &apiErr) {
+				t.Fatalf("error %v is not an *APIError; no recovery path can classify it", streamErr)
+			}
+			// The rendered text still carries both halves of the envelope.
+			for _, want := range []string{tc.typ, tc.msg} {
+				if !strings.Contains(streamErr.Error(), want) {
+					t.Errorf("rendered error %q lost %q", streamErr.Error(), want)
+				}
+			}
+			if got := provider.IsContextOverflowError(streamErr); got != tc.wantOverflw {
+				t.Errorf("IsContextOverflowError = %v, want %v", got, tc.wantOverflw)
+			}
+			if got := provider.IsBackendUnavailableError(streamErr); got != tc.wantDead {
+				t.Errorf("IsBackendUnavailableError = %v, want %v", got, tc.wantDead)
+			}
+		})
+	}
+}

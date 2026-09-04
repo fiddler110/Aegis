@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fiddler110/aegis/internal/fsguard"
@@ -132,8 +133,40 @@ func spillText(ctx context.Context, root, kind, text string) (rel string, ok boo
 	if err := fsguard.RestrictToOwner(spillPath); err != nil {
 		slog.Warn("spill: could not restrict file permissions", "path", spillPath, "err", err)
 	}
-	reapSpills(dir)
+	reapSpillsThrottled(dir)
 	return spillDirRel + "/" + name, true
+}
+
+// spillReapInterval bounds how often a spill pays for a full directory scan
+// (LLM-18). reapSpills stats every entry in the directory, and a round that
+// spills several large results ran that scan once per spill for no benefit: the
+// bounds it enforces are a TTL and two soft caps, none of which can be crossed
+// meaningfully between two spills seconds apart. Throttling trades a bounded
+// overshoot — at most one interval's worth of spills above the cap — for
+// dropping the scan from once-per-spill to once-per-interval. That is the trade
+// reapSpills' own doc comment already makes ("failing to reap is a disk problem
+// and failing the caller is a correctness problem").
+const spillReapInterval = 30 * time.Second
+
+var (
+	spillReapMu   sync.Mutex
+	spillReapLast = map[string]time.Time{}
+)
+
+// reapSpillsThrottled runs reapSpills at most once per spillReapInterval per
+// directory. Keyed by directory because one process serves several workspaces —
+// a daemon session outside the primary workspace, a cron job, a sub-agent — and
+// a shared timestamp would let a busy workspace starve a quiet one's reap.
+func reapSpillsThrottled(dir string) {
+	now := time.Now()
+	spillReapMu.Lock()
+	if last, ok := spillReapLast[dir]; ok && now.Sub(last) < spillReapInterval {
+		spillReapMu.Unlock()
+		return
+	}
+	spillReapLast[dir] = now
+	spillReapMu.Unlock()
+	reapSpills(dir)
 }
 
 // hardenSpillDir applies fsguard.RestrictToOwner to the spill *directory*

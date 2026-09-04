@@ -34,7 +34,28 @@ func Estimate(s string) int {
 	return (ascii+3)/4 + dense + (other+1)/2
 }
 
+// ImageBlockTokens is the flat per-image charge Message applies to an
+// ImageBlock. It is a documented constant rather than a function of the block's
+// size, because the block carries base64-encoded *compressed* bytes and every
+// vision provider prices an image by its pixel dimensions: a 40KB JPEG and a
+// 40KB PNG of the same scene tokenize identically and cost wildly different
+// numbers of bytes, so a length-derived number would be precision this estimator
+// has no basis for. The value is the ceiling both major vision providers land
+// on for a full-size image (Anthropic caps a single image near 1,600 tokens;
+// OpenAI's high-detail tiling tops out around 1,100), chosen at the top of that
+// range on the same rule the rest of this file follows: an over-estimate
+// compacts early, an under-estimate lets the backend silently drop the oldest
+// turns. It is exported so a caller reasoning about headroom can name the same
+// number rather than re-deriving one.
+const ImageBlockTokens = 1600
+
 // Message estimates the token count of a single message's content blocks.
+//
+// Every block type the wire carries is priced here. Images and thinking used to
+// be counted as free (LLM-07), which is an undercount in the one direction that
+// matters: a vision turn or a reasoning model's replayed thinking is real prompt
+// the backend charges for, and a transcript the estimator believes is smaller
+// than it is compacts late — after the server has already truncated it.
 func Message(m provider.Message) int {
 	n := 0
 	for _, b := range m.Content {
@@ -45,6 +66,15 @@ func Message(m provider.Message) int {
 			n += Estimate(v.Name) + Estimate(string(v.Input))
 		case provider.ToolResultBlock:
 			n += Estimate(v.Content)
+		case provider.ImageBlock:
+			n += ImageBlockTokens
+		case provider.ThinkingBlock:
+			// The reasoning text is ordinary text and prices as such. The
+			// signature is opaque provider bytes, but it does go on the wire
+			// (anthropic's toWireMessages replays it verbatim, and it must, or
+			// the provider rejects the next tool use), so it is counted rather
+			// than assumed free.
+			n += Estimate(v.Text) + Estimate(v.Signature)
 		}
 	}
 	return n

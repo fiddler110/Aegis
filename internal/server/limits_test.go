@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -233,6 +234,11 @@ func (b *blockingWriter) Write(p []byte) (int, error) {
 // (here, a Write call held open by blockingWriter) isn't draining it, further
 // sends must drop the oldest queued event instead of growing the queue
 // without bound.
+//
+// The events are tool calls rather than text deltas because P66.20 split the
+// two postures apart: text deltas fold instead of dropping (see
+// TestSSEWriterFoldsTextDeltasInsteadOfDroppingThem), while everything else
+// keeps the recency rule this test pins.
 func TestSSEWriterDropsOldestOnOverflow(t *testing.T) {
 	bw := newBlockingWriter()
 	var writeMu sync.Mutex
@@ -242,7 +248,7 @@ func TestSSEWriterDropsOldestOnOverflow(t *testing.T) {
 
 	// This first event gets dequeued by the writer goroutine immediately and
 	// blocks inside Write, leaving the queue itself empty and ready to fill.
-	sw.send(api.Event{Kind: api.KindText, Text: "0"})
+	sw.send(api.Event{Kind: api.KindToolCall, Tool: "shell", ToolID: "0"})
 	select {
 	case <-bw.started:
 	case <-time.After(5 * time.Second):
@@ -250,10 +256,10 @@ func TestSSEWriterDropsOldestOnOverflow(t *testing.T) {
 	}
 
 	for i := 1; i <= bufSize+7; i++ {
-		sw.send(api.Event{Kind: api.KindText, Text: fmt.Sprintf("%d", i)})
+		sw.send(api.Event{Kind: api.KindToolCall, Tool: "shell", ToolID: fmt.Sprintf("%d", i)})
 	}
 
-	if got := len(sw.ch); got > bufSize {
+	if got := sw.queueLen(); got > bufSize {
 		t.Errorf("queue length = %d, want <= %d (bounded)", got, bufSize)
 	}
 	if dropped == 0 {
@@ -262,6 +268,106 @@ func TestSSEWriterDropsOldestOnOverflow(t *testing.T) {
 
 	close(bw.release)
 	sw.Close()
+}
+
+// sseFrames replays what a blockingWriter actually received as decoded events.
+// Safe to call only after sw.Close(), which joins the writer goroutine.
+func sseFrames(t *testing.T, bw *blockingWriter) []api.Event {
+	t.Helper()
+	var out []api.Event
+	for _, frame := range strings.Split(bw.buf.String(), "\n\n") {
+		_, data, ok := strings.Cut(frame, "data: ")
+		if !ok {
+			continue
+		}
+		var ev api.Event
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			t.Fatalf("unmarshal %q: %v", data, err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// TestSSEWriterFoldsTextDeltasInsteadOfDroppingThem is P66.20/PERF-08: a
+// stalled consumer used to cost the *middle* of the model's answer, silently
+// and undetectably — drop-oldest is right for a tool_call but wrong for a
+// token stream. Every byte sent must still arrive, in order; only the number
+// of frames it takes to deliver them may shrink.
+func TestSSEWriterFoldsTextDeltasInsteadOfDroppingThem(t *testing.T) {
+	bw := newBlockingWriter()
+	var writeMu sync.Mutex
+	var dropped int
+	const bufSize = 3
+	sw := newSSEWriter(bw, noopFlusher{}, &writeMu, bufSize, func() { dropped++ })
+
+	// The first delta is dequeued immediately and blocks inside Write.
+	sw.send(api.Event{Kind: api.KindText, Text: "a"})
+	select {
+	case <-bw.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer goroutine never reached the blocking write")
+	}
+
+	want := "a"
+	for _, s := range []string{"b", "c", "d", "e", "f", "g", "h", "i", "j"} {
+		sw.send(api.Event{Kind: api.KindText, Text: s})
+		want += s
+	}
+	if got := sw.queueLen(); got > bufSize {
+		t.Errorf("queue length = %d, want <= %d (still bounded)", got, bufSize)
+	}
+	if dropped != 0 {
+		t.Errorf("onDrop fired %d time(s); folding text loses nothing and must not warn", dropped)
+	}
+
+	close(bw.release)
+	sw.Close()
+
+	var got strings.Builder
+	for _, ev := range sseFrames(t, bw) {
+		got.WriteString(ev.Text)
+	}
+	if got.String() != want {
+		t.Errorf("delivered text = %q, want %q (no delta may be lost or reordered)", got.String(), want)
+	}
+}
+
+// TestSSEWriterFoldingKeepsNonTextEventsInOrder guards the ordering half of the
+// fold: a tool_call queued between two text deltas must never end up on the
+// wrong side of them, so the fold may only ever join *adjacent* text.
+func TestSSEWriterFoldingKeepsNonTextEventsInOrder(t *testing.T) {
+	bw := newBlockingWriter()
+	var writeMu sync.Mutex
+	sw := newSSEWriter(bw, noopFlusher{}, &writeMu, 3, func() {})
+
+	sw.send(api.Event{Kind: api.KindText, Text: "start"})
+	select {
+	case <-bw.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer goroutine never reached the blocking write")
+	}
+	sw.send(api.Event{Kind: api.KindText, Text: "a"})
+	sw.send(api.Event{Kind: api.KindToolCall, Tool: "shell"})
+	sw.send(api.Event{Kind: api.KindText, Text: "b"})
+	sw.send(api.Event{Kind: api.KindText, Text: "c"})
+
+	close(bw.release)
+	sw.Close()
+
+	var kinds []string
+	var text strings.Builder
+	for _, ev := range sseFrames(t, bw) {
+		kinds = append(kinds, string(ev.Kind))
+		text.WriteString(ev.Text)
+	}
+	if text.String() != "startabc" {
+		t.Errorf("delivered text = %q, want %q", text.String(), "startabc")
+	}
+	// The tool call must still sit between "a" and "b".
+	if joined := strings.Join(kinds, ","); !strings.Contains(joined, "text,tool_call,text") {
+		t.Errorf("event kinds = %q, want the tool_call still between the two text runs", joined)
+	}
 }
 
 // TestSSEBufferSizeConfigurable verifies a small server.sse_buffer_size is

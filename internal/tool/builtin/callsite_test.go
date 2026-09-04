@@ -41,6 +41,18 @@ func TestEveryRegisterCallSiteDecidesTheLocalProfile(t *testing.T) {
 			if strings.Contains(precedingComment(src[:idx]), "LocalProfile") {
 				continue
 			}
+			// A site that builds its options with enginecfg.BuiltinOptions has
+			// decided, and has decided in the one place CLAUDE.md says the
+			// decision belongs — that helper sets LocalProfile from
+			// cfg.Provider.LocalPromptProfile() for every caller. Recognising it
+			// is stricter than the comment escape hatch above, not looser: the
+			// field is provably set rather than merely discussed. Without this
+			// arm the test failed on chat.go and debate.go after they moved to
+			// the helper, which is the "decision made correctly, in the shared
+			// place, and the auditor could not see it" shape.
+			if optsFromBuiltinOptions(src[:idx], call) {
+				continue
+			}
 			rel, _ := filepath.Rel(root, path)
 			t.Errorf("%s: builtin.Register call site neither passes LocalProfile nor explains in a preceding comment why it does not", filepath.ToSlash(rel))
 		}
@@ -50,6 +62,35 @@ func TestEveryRegisterCallSiteDecidesTheLocalProfile(t *testing.T) {
 	if sites < 4 {
 		t.Fatalf("found only %d builtin.Register call sites; the scan is no longer finding them", sites)
 	}
+}
+
+// optsFromBuiltinOptions reports whether the options value passed to
+// builtin.Register was built by enginecfg.BuiltinOptions earlier in the same
+// file. It takes the second argument's identifier out of the call and looks for
+// its assignment; overlaying host wiring onto that value afterwards
+// (opts.Sandbox = …) does not unset LocalProfile, so an intervening assignment
+// to a field is not a disqualifier. A composite literal passed inline has no
+// identifier and falls through to the checks above, which is correct — that
+// site really does have to say what it decided.
+func optsFromBuiltinOptions(before, call string) bool {
+	open := strings.Index(call, "(")
+	if open < 0 {
+		return false
+	}
+	args := strings.SplitN(call[open+1:], ",", 2)
+	if len(args) < 2 {
+		return false
+	}
+	ident := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(args[1]), ")"))
+	if ident == "" || strings.ContainsAny(ident, "{}().") {
+		return false
+	}
+	for _, assign := range []string{ident + " := enginecfg.BuiltinOptions(", ident + " = enginecfg.BuiltinOptions("} {
+		if strings.Contains(before, assign) {
+			return true
+		}
+	}
+	return false
 }
 
 // repoRoot walks up from this package to the directory holding go.mod.

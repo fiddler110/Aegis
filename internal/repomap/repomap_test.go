@@ -724,3 +724,39 @@ func TestBlockWrapsWhenNonEmpty(t *testing.T) {
 		t.Errorf("Block should wrap in repo_map tags: %q", b)
 	}
 }
+
+// VULN-09/G122: Build's walk used to os.ReadFile every file carrying a
+// recognized source extension before anything looked at its size, so a
+// generated bundle or a checked-in blob named .go/.js went fully resident in
+// the daemon's heap. A file over maxSourceFileBytes now yields no symbols; an
+// ordinary one beside it is unaffected.
+func TestBuildSkipsOversizedSourceFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "small.go", "package a\n\nfunc SmallSymbol() {}\n")
+
+	var big strings.Builder
+	big.WriteString("package a\n\nfunc HugeSymbol() {}\n")
+	for big.Len() <= maxSourceFileBytes {
+		big.WriteString("// padding padding padding padding padding padding\n")
+	}
+	writeFile(t, dir, "huge.go", big.String())
+
+	m, err := Build(dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range m.Files {
+		if f.Path == "huge.go" {
+			t.Errorf("an oversized file contributed symbols: %+v", f)
+		}
+	}
+	var sawSmall bool
+	for _, f := range m.Files {
+		if f.Path == "small.go" {
+			sawSmall = true
+		}
+	}
+	if !sawSmall {
+		t.Errorf("the ordinary file beside it was lost: %+v", m.Files)
+	}
+}
