@@ -524,4 +524,14 @@ type ProviderFallbackConfig struct {
 	Provider string `koanf:"provider"` // "anthropic", "openai", or "ollama"
 	Model    string `koanf:"model"`    // model id for this fallback
 	BaseURL  string `koanf:"base_url"` // optional API base override
+	// ContextWindow overrides ProviderConfig.ContextWindow for this fallback
+	// target only (LLM-11). Without it, providerfactory.Build used to hand
+	// every fallback the *primary* model's context_window — live-confirmed
+	// 2026-09-04: a fallback pinned to num_ctx 32768 was served num_ctx 16384,
+	// the primary's window, on every fallback request. 0 (unset) sends no
+	// num_ctx at all for this target, letting Ollama serve whatever that
+	// model's own Modelfile pins — the correct default for a fallback whose
+	// window was never measured, rather than a number borrowed from a
+	// different model.
+	ContextWindow int `koanf:"context_window"`
 }

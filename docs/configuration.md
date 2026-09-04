@@ -506,6 +506,9 @@ provider:
   fallback: []
   #   - provider: ollama
   #     model: "llama3.2"
+  #     context_window: 0 # this target's own window; 0 lets Ollama serve the
+  #                        # model's Modelfile default. Never inherits the
+  #                        # primary's context_window (LLM-11).
   #   - provider: openai
   #     model: "gpt-4o-mini"
   #     base_url: ""      # optional per-fallback API base override

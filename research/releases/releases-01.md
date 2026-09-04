@@ -8,7 +8,36 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated:** 2026-09-03 (forty-fourth record) — **the P66/P67 sweep: P66.17, P66.18, P66.20
+**Last updated: 2026-09-04 — P66.17/LLM-11 closed in full, live-verified, including the daemon-side
+half the original finding named but left open.** Failover was riding the *primary* model's serving
+window to every fallback target, in two independent places: the runtime `numCtxAdapter` wrapper
+(stamped before `failoverAdapter` ever saw the request) and `providerfactory.Build` itself (every
+fallback was constructed from `cfg.Provider.ContextWindow`, the primary's field —
+`ProviderFallbackConfig` had no window of its own). **Reproduced live before fixing**, not inferred:
+two locally pinned models (`aegis-qwen35-9b:16k`/`:32k`), the primary routed through a proxy that
+failed every `/api/chat` call to force real retries and a real failover, the fallback routed through
+a logging proxy capturing the exact request Ollama received. Four requests, all `num_ctx: 16384` —
+the primary's window, not the fallback's 32768. Fixed both sites, then re-ran the identical live
+setup against the fixed binary: four requests, all `num_ctx: 32768`. **Fixing this surfaced a second,
+more severe bug in the same function**: `failoverAdapter.Stream` applied a model override to the
+*primary* target too, so `providerfactory.Build` passing `cfg.Provider.Model` as the primary's
+`FallbackTarget.Model` silently overwrote every caller-chosen model — task routing's `small_model`,
+the output guard's model, a persona's model pin — back to the primary's default on every call that
+reached the primary, with no error and no log line, the instant any fallback was configured at all.
+Fixed by never applying a `FallbackTarget.Model` override to the primary. **Then closed the half
+originally left open**: the engine's proactive-compaction trigger stayed sized for the primary's
+window for the rest of a run even while a fallback — potentially with a *smaller* window, the
+dangerous direction — was actually serving every request. A new `provider.FailoverObserver`
+capability reports which model actually served the most recent call; `newEngine`
+(`internal/server/engine_build.go`) now sizes the compaction trigger against that model when a
+fallback is active, decoupled from the value still stamped on the wire request (which must stay tied
+to the primary, unconditionally, or the primary would get served the wrong `num_ctx` the next time it
+recovers). Five regression tests across three packages pin the request-level, construction-level,
+model-override, and compaction-trigger halves separately, including one exercising real `newEngine`/
+`engine.Run` calls through a forced failover and recovery. Full record:
+[P66.17/LLM-11 closed, 2026-09-04](#p6617llm-11-closed-2026-09-04).
+
+**2026-09-03 (forty-fourth record)** — **the P66/P67 sweep: P66.18, P66.20
 and P66.23 closed in full; GAP-04 shipped out of P66.19; a pre-existing red invariant test fixed;
 P67.13 documented as a design note.** Full record:
 [The P66/P67 sweep, 2026-09-03](#the-p66p67-sweep-2026-09-03). Highlights: a **live plan-mode escape
@@ -18,6 +47,123 @@ CRIT-2-family defect that the fuzz corpus was passing *by accident*); the Anthro
 mid-stream errors were unclassifiable, so a recoverable overflow aborted a drive instead of
 resetting it; and three of the batch's findings were **refuted against current code** rather than
 implemented.
+
+---
+
+### P66.17/LLM-11 closed, 2026-09-04
+
+**What it was.** `internal/provider/failover.go` copies the request wholesale and only overrides
+`Model`, so the daemon's per-run `provider.WithNumCtx` — resolved for the **primary** model — rode
+to every fallback target. `providerfactory.Build` compounded it: both the primary and every
+fallback were built from the same `cfg.Provider.ContextWindow`, so even a request-level fix would
+have left a fallback's adapter falling back to a static default sized for the wrong model.
+
+**How the num_ctx half was settled.** The roadmap named three plausible fixes and said choosing
+between them was a measurement, not a deduction — reading the code couldn't show whether clearing a
+fallback's `NumCtx` was safe, only running it could. Built a throwaway logging HTTP proxy
+(`scratchpad/numctx_probe`, not part of the repo) that answers Ollama's `/api/version` readiness
+probe but returns HTTP 500 for every `/api/chat`, put it in front of the primary
+(`aegis-qwen35-9b:16k`, `context_window: 16384`), and put a second logging-only proxy in front of
+the fallback (`aegis-qwen35-9b:32k`) to capture the exact request body Ollama received. One
+`aegis chat` turn, forced through three primary retries and a real failover switch, showed the
+fallback's request carrying `num_ctx: 16384` — the primary's window — in 4/4 requests. That ruled
+out "leave it" (option (c)) outright: the current behavior is a real defect, not a defensible
+choice, so clearing the inherited value could not regress a case that was ever correct.
+
+**What shipped for the num_ctx half.**
+- `failoverAdapter.Stream` (`internal/provider/failover.go`) clears `r.NumCtx` back to `0` for every
+  target after the primary (`i > 0`), so that target's own adapter resolves its own configured or
+  detected default instead of the value stamped for the primary.
+- `ProviderFallbackConfig.ContextWindow` (`internal/config/config_provider.go`) is a new per-fallback
+  `context_window` field. `providerfactory.Build` now constructs each fallback from its own value
+  instead of `cfg.Provider.ContextWindow` (`internal/providerfactory/factory.go`). Unset (`0`) sends
+  no `num_ctx` at all, letting Ollama serve that model's own Modelfile pin — the correct default for
+  a fallback whose window was never separately configured, rather than a number borrowed from a
+  different model. No new trust-policy entry needed: `fallback` was already frozen as a whole block
+  under `provider`, so the new sub-field inherits that.
+- `docs/configuration.md`'s `provider.fallback` example documents the field.
+
+**Re-verified live.** Rebuilt the binary with both fixes, re-ran the identical proxy setup with the
+fallback's `context_window: 32768` now set explicitly: 4/4 requests carried `num_ctx: 32768`.
+`TestFailover_FallbackDoesNotInheritPrimaryNumCtx` (`internal/provider/failover_test.go`) pins the
+request-clearing half against a fake adapter pair; `TestBuild_FallbackUsesItsOwnContextWindowNotPrimarys`
+(`internal/providerfactory/factory_test.go`) pins the construction half against two real `httptest`
+Ollama-shaped servers, asserting the fallback's actual wire request carries its own window.
+
+**A second, separate defect turned up in the same function while fixing the first.**
+`FallbackTarget.Model` is meant for a fallback provider using a different model id than the primary
+("`'' keeps the request's original model`"), but `failoverAdapter.Stream` applied that same override
+logic to `targets[0]` (the primary) too — and `providerfactory.Build` passed `cfg.Provider.Model` as
+the primary target's `FallbackTarget.Model`. The result: the instant any `provider.fallback` entry
+was configured, *every* request that reached the primary had its `Model` field silently overwritten
+back to the primary's own default — clobbering task routing's `small_model`, the output guard's
+model, a persona's model pin — with no error and no log line. A focused test proved it before fixing:
+a request built with `Model: "routed-small-model"` reached the (fake) primary adapter as
+`"cfg-provider-model"` instead. Fixed by moving the override under `i > 0` only — a request to the
+primary now reaches it exactly as built, identical to the no-fallback case (which already worked,
+since `WithFailover` returns the primary unwrapped when there are no fallbacks). `WithFailover`'s
+now-unused `primaryModel` parameter was removed rather than left dead.
+`TestFailover_PrimaryNeverGetsAModelOverride` pins it.
+
+**The second half the original finding named — compaction staying tuned to the primary's window
+after a failover — is now closed too, not left open.** The engine's proactive-compaction trigger
+(`ContextWindowTokens` in `engine.Options`) was resolved once per turn from the *nominal* (primary/
+routed) model, with no way to learn a failover had happened underneath — `Adapter.Stream` returns
+only `(<-chan Event, error)`, no signal of which target actually served the call. Left uncorrected,
+a fallback with a *smaller* window than the primary's — the dangerous direction — would leave
+compaction believing it has more headroom than the model actually serving requests, risking the
+silent-truncation failure the whole window system exists to prevent.
+
+Fixed with a new optional `Adapter` capability, `provider.FailoverObserver`
+(`internal/provider/provider.go`), implemented by `failoverAdapter`: it records, under a mutex
+(the shared adapter serves concurrent sessions), which model actually served the most recent
+successful call, and whether that was a fallback. `provider.ActiveFailoverModel` reaches it through
+the decorator chain the same way `RaisedContextWindow` does. `newEngine`
+(`internal/server/engine_build.go`) now resolves a separate `compactionCtxWin`: the primary's own
+window by default, but the *active* fallback's own window (via the same `effectiveContextWindowFor`
+detection/config machinery already used for the primary) when one is in effect — reset the moment
+the primary serves a call again, so a recovered primary is reflected on the very next turn, not left
+stale.
+
+**Deliberately not maxed against the primary's window, unlike the existing P47.5b escalation
+floor.** `ContextWindowFloor`'s "larger wins" contract is sound for its own purpose (an escalation
+only ever grows the primary's window), but wrong here: a fallback's real window can be *smaller*,
+and maxing against the primary would keep the trigger under-sized in exactly the dangerous direction
+this fix exists to close. `compactionCtxWin` is used only for `ContextWindowTokens` — the trigger's
+informational sizing — never for anything stamped on a wire request (`s.modelAdapter`, the guard's
+adapter): those must stay tied to each request's own nominal model unconditionally, or the primary
+would receive the fallback's `num_ctx` the next time it recovers, recreating LLM-11 in reverse.
+
+`TestFailover_ActiveFailoverModelReflectsWhatActuallyServed` (`internal/provider/failover_test.go`)
+pins the observer against fake adapters: inactive before any call, inactive after a primary success,
+active with the fallback's model name after a forced failover, and back to inactive the instant the
+primary serves again. `TestNewEngine_CompactionTriggerFollowsActiveFailover`
+(`internal/server/engine_failover_ctxwin_test.go`) exercises the real path end to end — real
+`newEngine`/`engine.Run` calls against a fake Ollama window-detection server and a togglable fake
+primary/fallback pair — asserting `eng.EffectiveContextWindow()` follows the primary (16384) at
+baseline, the fallback (32768) once a forced failure actually routes a turn through it, and back to
+the primary (16384) the turn after it recovers.
+
+**The summarizer's own window (`internal/server/wiring.go`'s `wireCompaction`) is unchanged, and on
+closer look it did not need to be — this is already closed, not a remaining gap.** `wireCompaction`
+builds the `compaction.Summarizer` once per daemon, shared by every session, so it looked like the
+same failover-blind-spot pattern the engine trigger had. But P66.14 already gave every `Compact` call
+a per-call override for exactly this reason: `compaction.WithTokenBudget(ctx, overhead, scale,
+trigger)` (`internal/compaction/budget.go`) lets a caller hand down its own trigger without touching
+the shared Summarizer's fields, and `compactionGuard.withTokenBudget` (`internal/engine/compact.go`)
+already calls it every turn, deriving `trigger` from `g.contextWindowTokens` — which *is*
+`compactionCtxWin` for any engine built through `newEngine`, since that is what
+`engine.Options.ContextWindowTokens` now carries. So the engine-driven compaction gate, the path that
+runs on every turn, was already made failover-aware by the fix above — no separate wiring needed.
+
+The one path that bypasses that per-call channel is `handleCompactSession`'s `ForceCompact`
+(`internal/server/sessions.go`, the manual `/compact` endpoint): it reads the Summarizer's own static
+window rather than a per-call trigger. But `ForceCompact` forces compaction unconditionally — there is
+no trigger comparison for a stale window to get wrong — and the request it sends still goes through
+`failoverAdapter`, so the num_ctx-leak fix above already keeps its wire request correct during a
+failover. Nothing here needed converting `wireCompaction` from a startup-time constant to a per-call
+read; that would have been a materially larger, riskier change (shared mutable state across concurrent
+sessions) for a gap that, on inspection, does not exist.
 
 ---
 

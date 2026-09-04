@@ -63,7 +63,7 @@ func TestRaiseContextWindow_UnwrapsDecorators(t *testing.T) {
 
 	// Through retry + failover (targets[0] is the primary the drive runs on).
 	inner := WithRetry(&raiserAdapter{}, DefaultRetryPolicy(), logger)
-	fo := WithFailover(inner, "primary-model",
+	fo := WithFailover(inner,
 		[]FallbackTarget{{Adapter: plainAdapter{}, Model: "fallback"}}, logger)
 	if !RaiseContextWindow(fo, 32768) {
 		t.Error("must unwrap failover→retry→base to escalate the primary's window")
@@ -92,7 +92,7 @@ func TestRaisedContextWindow_UnwrapsDecorators(t *testing.T) {
 		t.Errorf("RaisedContextWindow before any escalation = %d, want 0", got)
 	}
 	wrapped := WithRetry(base, DefaultRetryPolicy(), logger)
-	fo := WithFailover(wrapped, "primary-model",
+	fo := WithFailover(wrapped,
 		[]FallbackTarget{{Adapter: plainAdapter{}, Model: "fallback"}}, logger)
 	if !RaiseContextWindow(fo, 32768) {
 		t.Fatal("setup: escalation must reach the base through failover→retry")

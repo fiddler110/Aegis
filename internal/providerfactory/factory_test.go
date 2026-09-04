@@ -234,6 +234,67 @@ func TestBuild_UnsupportedFallbackProviderSkippedNotFatal(t *testing.T) {
 	}
 }
 
+// TestBuild_FallbackUsesItsOwnContextWindowNotPrimarys is the LLM-11
+// regression, live-confirmed 2026-09-04: providerfactory.Build used to hand
+// every fallback target the *primary's* provider.context_window, so a
+// fallback pinned to num_ctx 32768 was served num_ctx 16384 (the primary's
+// window) on every request that reached it. Each fallback must build from its
+// own ProviderFallbackConfig.ContextWindow instead.
+func TestBuild_FallbackUsesItsOwnContextWindowNotPrimarys(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+
+	var gotNumCtx int
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Options struct {
+				NumCtx int `json:"num_ctx"`
+			} `json:"options"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotNumCtx = body.Options.NumCtx
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer fallback.Close()
+
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default:       "ollama",
+		BaseURL:       primary.URL,
+		Model:         "primary-model",
+		ContextWindow: 16384,
+		MaxRetries:    1,
+		Fallback: []config.ProviderFallbackConfig{{
+			Provider:      "ollama",
+			Model:         "fallback-model",
+			BaseURL:       fallback.URL,
+			ContextWindow: 32768,
+		}},
+	}}
+	a, err := Build(cfg, testLogger(&bytes.Buffer{}))
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	stream, err := a.Stream(context.Background(), provider.Request{
+		Model:    "primary-model",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range stream {
+	}
+	if gotNumCtx != 32768 {
+		t.Errorf("fallback num_ctx = %d, want 32768 (its own configured window, not the primary's 16384)", gotNumCtx)
+	}
+}
+
 // TestBuildOne_OllamaDefaultsKeepAliveResident is the P35.4 guard: an unset
 // provider.keep_alive must be substituted with the bounded resident default on
 // the native path, so a multi-turn run reuses its KV cache across turns instead

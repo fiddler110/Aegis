@@ -348,6 +348,50 @@ func RaisedContextWindow(a Adapter) int {
 	return 0
 }
 
+// FailoverObserver is an optional Adapter capability: report whether the most
+// recently completed Stream call was actually served by a fallback target
+// rather than the primary, and if so, which model. The failover decorator
+// implements it. Reach it through ActiveFailoverModel.
+//
+// It exists for the same reason ContextWindowFloorReporter does (P59.7,
+// LLM-11's second half): "the model the caller asked to route to" and "the
+// model that actually generated the response" can differ after a failover,
+// and Stream's own return value — a channel of events and an error — carries
+// no signal of the substitution. Without this, the engine's proactive-
+// compaction trigger stays sized for the primary's window for the rest of the
+// run even while every request is actually being served, correctly, by a
+// fallback with a different one (potentially *smaller* — the dangerous
+// direction, since undersizing the trigger risks the silent truncation
+// compaction exists to prevent).
+//
+// Deliberately narrower than ContextWindowFloorReporter's "larger wins"
+// contract: a fallback's window can be smaller than the primary's, so a
+// caller must use the reported value directly while active is true, not max
+// it against the primary's own window.
+type FailoverObserver interface {
+	LastServedFallback() (model string, active bool)
+}
+
+// ActiveFailoverModel reports the model name of the most recent fallback
+// target that served a — or a decorator chain wrapping it — unwrapping the
+// retry decorator (but never past the failover decorator itself, unlike
+// RaiseContextWindow/RaisedContextWindow, which deliberately reach only the
+// primary — see failoverAdapter.Unwrap). active is false when no failover has
+// happened yet, or the most recent call was served by the primary.
+func ActiveFailoverModel(a Adapter) (model string, active bool) {
+	for a != nil {
+		if r, ok := a.(FailoverObserver); ok {
+			return r.LastServedFallback()
+		}
+		u, ok := a.(interface{ Unwrap() Adapter })
+		if !ok {
+			return "", false
+		}
+		a = u.Unwrap()
+	}
+	return "", false
+}
+
 // HealthChecker is an optional Adapter capability: a cheap liveness probe
 // against the backing model server, independent of a full Stream request. The
 // native Ollama adapter implements it (a GET /api/version) so a driven build

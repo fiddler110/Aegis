@@ -105,14 +105,16 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 		}
 		apiKey := config.ProviderAPIKey(fb.Provider)
 		fbBase, err := buildOne(buildOneConfig{
-			name:                  fb.Provider,
-			apiKey:                apiKey,
-			baseURL:               fb.BaseURL,
-			headers:               cfg.Provider.HeadersFor(fb.Provider, fb.BaseURL),
-			think:                 cfg.Provider.Think,
-			reasoningEffort:       cfg.Provider.ReasoningEffort,
-			maxTokens:             cfg.Provider.MaxTokens,
-			contextWindow:         cfg.Provider.ContextWindow,
+			name:            fb.Provider,
+			apiKey:          apiKey,
+			baseURL:         fb.BaseURL,
+			headers:         cfg.Provider.HeadersFor(fb.Provider, fb.BaseURL),
+			think:           cfg.Provider.Think,
+			reasoningEffort: cfg.Provider.ReasoningEffort,
+			maxTokens:       cfg.Provider.MaxTokens,
+			// LLM-11: this target's own window, never the primary's
+			// cfg.Provider.ContextWindow — see ProviderFallbackConfig.ContextWindow.
+			contextWindow:         fb.ContextWindow,
 			keepAlive:             cfg.Provider.KeepAlive,
 			responseHeaderTimeout: cfg.Provider.ResponseHeaderTimeout(),
 			streamIdleTimeout:     cfg.Provider.StreamIdleTimeout(),
@@ -128,7 +130,7 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 			Model:   fb.Model,
 		})
 	}
-	return provider.WithFailover(primary, cfg.Provider.Model, targets, logger), nil
+	return provider.WithFailover(primary, targets, logger), nil
 }
 
 // Decorate applies the shipping decorator chain to a caller-supplied base

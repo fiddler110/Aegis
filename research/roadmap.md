@@ -7,7 +7,6 @@
   - [Open Work — Tier 4](#open-work--tier-4)
     - [P81.7 — The local model endpoint is unauthenticated plaintext HTTP on loopback (FIND-07)](#p817--the-local-model-endpoint-is-unauthenticated-plaintext-http-on-loopback-find-07)
     - [P81.28 — Prose tool-call parsing can promote quoted untrusted text into real calls (FIND-28)](#p8128--prose-tool-call-parsing-can-promote-quoted-untrusted-text-into-real-calls-find-28)
-    - [P66.17 — Local-model path: the remaining live-model question](#p6617--local-model-path-the-remaining-live-model-question)
     - [P77.6 — No OS-level process sandbox on Windows (GAP-05, spun out of P66.19)](#p776--no-os-level-process-sandbox-on-windows-gap-05-spun-out-of-p6619)
     - [P60.3 — Checkpoints capture files only, so `/rewind` is silent about everything else](#p603--checkpoints-capture-files-only-so-rewind-is-silent-about-everything-else)
     - [P65.4 — Resume is phase-granular, artifact-inferred, and only the drive has it](#p654--resume-is-phase-granular-artifact-inferred-and-only-the-drive-has-it)
@@ -33,14 +32,22 @@
 
 ## Status
 
+**P66.17/LLM-11 closed 2026-09-04, live-verified.** Failover was riding the primary model's serving
+window to every fallback target, at both the runtime request layer and the adapter-construction
+layer; live-reproduced with two locally pinned models and a forced failover before fixing, then
+re-verified live against the fixed binary. Full record:
+[P66.17/LLM-11 closed](releases/releases-01.md#p6617llm-11-closed-2026-09-04). This was the sole
+open remainder of the P66/P67 sweep below — P66.17 is now closed in full.
+
 **P66/P67 sweep, 2026-09-03 — P66.18, P66.20 and P66.23 closed in full; P66.17 closed except
-LLM-11; GAP-04 shipped out of P66.19.** Taken on direct request to review every open P66 and P67
+LLM-11 (itself closed the next day, above); GAP-04 shipped out of P66.19.** Taken on direct request
+to review every open P66 and P67
 item and build what still needed building. Fifteen findings shipped, **three refuted against current
 code** (QUAL-08's
 unbounded probe is already bounded by a 5s `ctxWinDetectTimeout`; LLM-12's `/api/show` is the sole
 source of `Result.ModelMax`; PERF-06 is already memoized on `reg.SchemaVersion()`), and **one
-deliberately left open** (LLM-11 — three plausible fixes, and choosing needs a live failover
-measurement; see [P66.17](#p6617--local-model-path-the-remaining-live-model-question)).
+deliberately left open at the time** (LLM-11 — three plausible fixes, and choosing needed a live
+failover measurement).
 
 **The most important outcome was not on the list.** P66.23/VULN-08 was filed as Low-severity
 tidiness — Windows device names and ADS unrejected, "code reading; not executed". Executing it found
@@ -58,7 +65,7 @@ same day it was re-tiered, P81.31 shipped in full, P81.18 shipped except one exp
 helper — see below); full closing
 record in
 [releases.md](releases/releases-01.md#threat-model-2026-08-31--the-p81-batch-closing-record).
-Tier 4: **16 open** — parked build items, none with a fired trigger; see
+Tier 4: **15 open** — parked build items, none with a fired trigger; see
 [Open Work — Tier 4](#open-work--tier-4). Verification: **6 open** — code already written,
 waiting on a live-model run; see [Verification Work](#verification-work).
 
@@ -168,19 +175,20 @@ condition for what would change that.
 
 ## Open Work — Tier 4
 
-**Status: 16 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
+**Status: 15 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
 trigger), two from the P81 threat-model batch (**P81.7**, **P81.28**, each parked for a stated
 reason — see each entry; both partially shipped 2026-09-03, remainder described in each entry),
-two from the P66 review batch (**P66.17**'s LLM-11 remainder and **P66.19**'s GAP-07 remainder),
+one from the P66 review batch (**P66.19**'s GAP-07 remainder),
 three from the P67 external-source reading (**P67.11**, **P67.12**, **P67.13**), and **P77.6**
 (spun out of P66.19). **P81.11** closed 2026-09-03 (see
 [Status](#status)) rather than staying in this count; **P81.31** shipped in full and **P81.18**
 shipped except its explicitly-deferred trust-store helper, both 2026-09-03 (see
 [releases.md](releases/releases-01.md#p8131-shipped-p8118-shipped-except-its-trust-store-helper-2026-09-03)).
 **P66.26** closed in full the same day (see [Status](#status)). **P66.18**, **P66.20** and
-**P66.23** closed in full 2026-09-03 in the P66/P67 sweep, and **P66.17** closed except LLM-11 —
-their write-ups moved to
-[releases.md](releases/releases-01.md#the-p66p67-sweep-2026-09-03). Everything else that was ever
+**P66.23** closed in full 2026-09-03 in the P66/P67 sweep; their write-ups moved to
+[releases.md](releases/releases-01.md#the-p66p67-sweep-2026-09-03). **P66.17** closed in full
+2026-09-04 (its LLM-11 remainder resolved live — see
+[Status](#status)). Everything else that was ever
 in this tier has shipped — see
 [releases.md](releases/releases-01.md#roadmap-housekeeping-closed-items-migrated-from-roadmapmd-2026-09-03)
 for the closed-item record.
@@ -283,42 +291,6 @@ weaker taint mechanism just for this would be wasted work; this stays sequenced 
 
 Priority: Tier 4 — the cheap, separable half has shipped. The remaining containment is **P81.1**'s to
 build, with no fired trigger of its own.
-
-### P66.17 — Local-model path: the remaining live-model question
-
-**Closed except LLM-11, 2026-09-03.** Ten of the eleven findings are resolved: **LLM-06** (the P59.5
-local carve-out now covers compaction and titles, not only the guard), **LLM-07** (`ImageBlock` and
-`ThinkingBlock` were free in every token estimate), **LLM-08** (Anthropic mid-stream errors were a
-bare `fmt.Errorf`, so a recoverable context overflow aborted a drive instead of resetting it; plus
-malformed tool-call JSON now reported rather than emitted), **LLM-10** (the probe loaded the model at
-4,096 and forced a full weight reload on the first real turn), **LLM-13**, **LLM-14**, **LLM-15**,
-**LLM-17**, **LLM-18** (spill reaping now throttled per directory). **LLM-12 was refuted** —
-`ollamainfo.Detect`'s `/api/show` is not "always wasted": it is the sole source of `Result.ModelMax`,
-read at five call sites. Record:
-[The P66/P67 sweep](releases/releases-01.md#the-p66p67-sweep-2026-09-03).
-
-**What remains: LLM-11, and it needs a live failover, not a decision.** `internal/provider/failover.go`
-copies the request wholesale and overrides only `Model`, so the daemon's per-run `provider.WithNumCtx`
-— resolved for the **primary** model — rides to every fallback; `providerfactory` also hands every
-fallback the primary's `cfg.Provider.ContextWindow`. Three fixes are plausible and choosing between
-them is a measurement: (a) clear `NumCtx` for non-primary targets so the fallback adapter uses its own
-window; (b) add a per-target `NumCtx` populated from per-fallback detection; (c) leave it, on
-`failover.go`'s own documented grounds that a fallback is normally a cloud model that ignores
-`num_ctx`. (a) may *regress* the common case where the detected primary window was authoritative and
-larger than the configured default, which is exactly what a measurement would show and reading cannot.
-
-**A second half the original finding missed:** even a correct per-target `num_ctx` leaves the engine's
-compaction trigger and `compaction.Summarizer`'s window tuned for the primary, so the transcript stays
-budgeted against the wrong model after a failover. That half is daemon-side
-(`internal/server/contextwindow.go`), not a provider change.
-
-**How to settle it:** configure a local primary and a local fallback pinned to *different* `num_ctx`
-values on the same Ollama, force the primary to fail past its retries (stop its model, or point it at
-a dead port), and capture the fallback's `/api/chat` body — assert `options.num_ctx` is the fallback's
-window, not the primary's.
-
-Priority: Tier 4 — no fired trigger. Unlike the rest of this grab-bag it is not "cheap and untried";
-it is a fix whose *choice* is blocked on evidence.
 
 ### P77.6 — No OS-level process sandbox on Windows (GAP-05, spun out of P66.19)
 

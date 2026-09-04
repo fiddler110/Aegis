@@ -298,7 +298,39 @@ func (s *Server) newEngine(sessionID, mode string, approver permission.Approver,
 	// server silently truncates the prompt — resolved for *this turn's* model
 	// (P52.1), after turnModel has picked it, since a persona pin or a routed
 	// small model can have a very different window from the global default.
+	//
+	// This value drives s.modelAdapter below (what gets stamped onto a
+	// request to the primary) and must stay tied to model's own window,
+	// always — never substituted with a fallback's, or the primary would be
+	// served the wrong num_ctx the next time it recovers (LLM-11 in reverse).
 	ctxWin, _ := s.effectiveContextWindowFor(context.Background(), model)
+
+	// compactionCtxWin is what the proactive-compaction trigger measures
+	// against, and can differ from ctxWin: if the last request this adapter
+	// served went to a fallback (still likely true — an outage usually spans
+	// more than one turn), sizing the trigger against the primary's window
+	// for the rest of the run risks the silent-truncation failure compaction
+	// exists to prevent, should the fallback's real window be smaller
+	// (LLM-11's second half — the wire-level fix landed 2026-09-04, this is
+	// the daemon-side bookkeeping half it deliberately didn't touch).
+	// ActiveFailoverModel resets to "false" the moment the primary serves a
+	// call again, so a recovered primary is reflected on the very next turn.
+	//
+	// Deliberately NOT reused for guardWin below or for s.modelAdapter(ctxWin):
+	// both of those become the num_ctx actually stamped on a wire request, and
+	// that must always stay tied to the model the request is nominally for —
+	// substituting the fallback's window there would serve the *primary* a
+	// wrong num_ctx the next time it recovers, recreating LLM-11 in reverse.
+	// compactionCtxWin only ever feeds ContextWindowTokens, which is
+	// informational sizing for the trigger, never wire content.
+	compactionCtxWin := ctxWin
+	if fbModel, active := provider.ActiveFailoverModel(s.adapter); active {
+		if fbWin, _ := s.effectiveContextWindowFor(context.Background(), fbModel); fbWin > 0 {
+			s.logger.Info("provider failover: sizing this turn's compaction trigger against the active fallback, not the primary",
+				"primary_model", model, "primary_window", ctxWin, "fallback_model", fbModel, "fallback_window", fbWin)
+			compactionCtxWin = fbWin
+		}
+	}
 
 	var guardOpts enginecfg.GuardOptions
 	if guardEnabled {
@@ -370,7 +402,7 @@ func (s *Server) newEngine(sessionID, mode string, approver permission.Approver,
 		// approval round trip (KindApprovalRequest/TUI dialog), two callers.
 		Approver:                approver,
 		Model:                   model,
-		ContextWindowTokens:     ctxWin,
+		ContextWindowTokens:     compactionCtxWin,
 		ContextWindowFloor:      func() int { return provider.RaisedContextWindow(s.adapter) },
 		SteerChan:               steerCh,
 		ZeroToolNudgeMaxRetries: s.cfg.Provider.ZeroToolNudge,
