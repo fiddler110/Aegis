@@ -53,6 +53,7 @@ Load the relevant file when performing each task:
 | [Orchestrator](./references/orchestrator.md) | **Always — read first** | Complete 10-step workflow, 34 mandatory rules, sub-agent governance, tool usage, verification process |
 | [Incremental Orchestrator](./references/incremental-orchestrator.md) | **Incremental/update analyses** | Complete incremental workflow: load old skeleton, change detection, generate report with status annotations, HTML comparison |
 | [Analysis Principles](./references/analysis-principles.md) | Analyzing code for security issues | Verify-before-flagging rules, security infrastructure inventory, OWASP Top 10:2025, platform defaults, exploitability tiers, severity standards |
+| [MAESTRO Framework](./references/maestro-framework.md) | Target system is agentic/AI-driven (LLM orchestration, tool-calling, multi-agent, MCP, RAG) | 7-layer agentic AI threat taxonomy (CSA MAESTRO), applicability detection, cross-layer threats — supplements STRIDE-A, reuses its tiers/status/findings pipeline |
 | [Diagram Conventions](./references/diagram-conventions.md) | Creating ANY Mermaid diagram | Color palette, shapes, sidecar co-location rules, pre-render checklist, DFD vs architecture styles, sequence diagram styles |
 | [Output Formats](./references/output-formats.md) | Writing ANY output file | Templates for 0.1-architecture.md, 1-threatmodel.md, 2-stride-analysis.md, 3-findings.md, 0-assessment.md, common mistakes checklist |
 | [Skeletons](./references/skeletons/) | **Before writing EACH output file** | 8 verbatim fill-in skeletons (`skeleton-*.md`) — read the relevant skeleton, copy VERBATIM, fill `[FILL]` placeholders. One skeleton per output file. Loaded on-demand to minimize context usage. |
@@ -74,6 +75,7 @@ Load the relevant file when performing each task:
 - Validate security control implementations
 - Identify trust boundary violations and architectural risks
 - Write prioritized security findings with CVSS 4.0 / CWE / OWASP mappings
+- When the target is agentic/AI-driven (LLM orchestration, tool-calling, multi-agent, MCP, RAG), also apply MAESTRO 7-layer analysis (see [MAESTRO Framework](./references/maestro-framework.md)) — determined automatically in Step 1c, no separate invocation needed
 
 **Comparing commits or reports:**
 - To compare security posture between commits, use incremental mode with the older report as baseline

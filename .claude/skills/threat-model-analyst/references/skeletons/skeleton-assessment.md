@@ -23,6 +23,9 @@
 [CONDITIONAL: Include if 1.2-threatmodel-summary.mmd was generated]
 | [1.2-threatmodel-summary.mmd](1.2-threatmodel-summary.mmd) | Summary DFD for large systems |
 [END-CONDITIONAL]
+[CONDITIONAL: Include if 2b-maestro-layers.md was generated (Step 1c determined agentic/AI-driven)]
+| [2b-maestro-layers.md](2b-maestro-layers.md) | MAESTRO 7-layer agentic AI threat analysis |
+[END-CONDITIONAL]
 [CONDITIONAL: Include for incremental analysis]
 | [incremental-comparison.html](incremental-comparison.html) | Visual comparison report |
 [END-CONDITIONAL]
@@ -159,6 +162,7 @@
 | Scope | [FILL] |
 | Excluded | [FILL] |
 | Focus Areas | [FILL] |
+| MAESTRO Applicability | [FILL: "Applicable — see 2b-maestro-layers.md" OR "Not applicable — no agentic/LLM-orchestration components identified"] |
 
 ### Infrastructure Context
 | Category | Discovered from Codebase | Findings Affected |
@@ -253,6 +257,7 @@
 | **Remediation Effort** | `Low` · `Medium` · `High` |
 | **Mitigation Type** | `Redesign` · `Standard Mitigation` · `Custom Mitigation` · `Existing Control` · `Accept Risk` · `Transfer Risk` |
 | **Threat Status** | `Open` · `Mitigated` · `Platform` |
+| **MAESTRO Layers** (agentic systems only) | **L1** Foundation Models · **L2** Data Operations · **L3** Agent Frameworks · **L4** Deployment & Infrastructure · **L5** Evaluation & Observability · **L6** Security & Compliance · **L7** Agent Ecosystem · **LX** Cross-Layer |
 | **Incremental Tags** | `[Existing]` · `[Fixed]` · `[Partial]` · `[New]` · `[Removed]` (incremental reports only) |
 | **CVSS** | CVSS 4.0 vector with `CVSS:4.0/` prefix |
 | **CWE** | Hyperlinked CWE ID (e.g., [CWE-306](https://cwe.mitre.org/data/definitions/306.html)) |

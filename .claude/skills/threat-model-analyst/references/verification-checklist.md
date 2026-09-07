@@ -38,6 +38,17 @@ This file is the **single source of truth** for all verification rules that must
 - [ ] **Coverage table status values** use emoji prefixes: `✅ Covered (FIND-XX)`, `✅ Mitigated (FIND-XX)`, `🔄 Mitigated by Platform` — NOT plain text like "Finding", "Mitigated", "Covered"
 - [ ] **Coverage table column names** are exactly `Threat ID | Finding ID | Status` — NOT `Threat | Finding | Status`
 
+### After writing `2b-maestro-layers.md` (only if generated):
+- [ ] `## Applicability` section present with a 7-row Layer Applicability Table (all 7 layers listed, even the N/A ones)
+- [ ] Every layer marked "No" has a non-empty Justification cell
+- [ ] `## Summary` table includes only layers marked "Yes" plus a `Cross-Layer (LX)` row
+- [ ] Every layer section has `### Tier 1`, `### Tier 2`, `### Tier 3` sub-headings (all three present even if empty)
+- [ ] Threat IDs match `M\d{2}\.L[1-7X]` — never `T\d+` (that prefix is reserved for STRIDE-A)
+- [ ] Every threat cites a component from the component list locked in Step 1 — no invented components
+- [ ] Status column uses ONLY: `Open`, `Mitigated`, `Platform` — same as STRIDE-A
+- [ ] `## Cross-Layer Threats` section present, every row names ≥2 layers
+- [ ] If Step 1c determined NOT applicable, this file does NOT exist in the output folder (no empty placeholder)
+
 ### After writing `0-assessment.md`:
 - [ ] First `## ` heading is `## Report Files`
 - [ ] Count `## ` headings — exactly 7 with these exact names: Report Files, Executive Summary, Action Summary, Analysis Context & Assumptions, References Consulted, Report Metadata, Classification Reference
@@ -384,9 +395,10 @@ These checks validate relationships between files. They require reading multiple
 This is the most critical cross-file check. It ensures no identified threat is silently dropped.
 
 - [ ] **Every threat ID** in `2-stride-analysis.md` (e.g., T01.S, T01.T1, T02.I) is referenced by at least one finding in `3-findings.md` via its Related Threats field
-- [ ] **Collect all threat IDs** from all tier tables in `2-stride-analysis.md`
+- [ ] **If `2b-maestro-layers.md` exists**: every threat ID there (e.g., M01.L3, M02.LX) is ALSO referenced by at least one finding in `3-findings.md` — same rule, same coverage table, no separate MAESTRO findings file
+- [ ] **Collect all threat IDs** from all tier tables in `2-stride-analysis.md` and, if present, `2b-maestro-layers.md`
 - [ ] **Collect all threat IDs** referenced in Related Threats fields in `3-findings.md`
-- [ ] **Coverage gap report**: List any threat ID present in STRIDE but missing from findings. If gaps exist → either add a finding or group the threat into an existing related finding
+- [ ] **Coverage gap report**: List any threat ID present in STRIDE or MAESTRO but missing from findings. If gaps exist → either add a finding or group the threat into an existing related finding
 
 ### 3.4 Finding-to-STRIDE Anchor Integrity (Findings → STRIDE)
 

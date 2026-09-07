@@ -13,6 +13,7 @@ It is the primary workflow document for the `/threat-model-analyst` skill.
 - Before `1.1-threatmodel.mmd`: read `skeletons/skeleton-dfd.md`
 - Before `1-threatmodel.md`: read `skeletons/skeleton-threatmodel.md`
 - Before `2-stride-analysis.md`: read `skeletons/skeleton-stride-analysis.md`
+- Before `2b-maestro-layers.md` (only if Step 1c determined the target is agentic/AI-driven): read `maestro-framework.md` + `skeletons/skeleton-maestro.md`
 - Before `3-findings.md`: read `skeletons/skeleton-findings.md`
 - Before `0-assessment.md`: read `skeletons/skeleton-assessment.md`
 - Before `threat-inventory.json`: read `skeletons/skeleton-inventory.md`
@@ -62,6 +63,7 @@ These are the required behaviors for every threat model report. Follow each rule
 32. Report Files table in `0-assessment.md`: list `0-assessment.md` (this document) as the FIRST row, followed by 0.1-architecture.md, 1-threatmodel.md, etc. Use the exact template from `output-formats.md`
 33. `threat-inventory.json` MUST be generated for every analysis run (Step 8b). This file enables future comparisons. See `output-formats.md` for schema.
 34. **NEVER delete, modify, or remove any existing `threat-model-*` or `threat-model-compare-*` folders** in the repository. Only write to your own timestamped output folder. Cleaning up temporary git worktrees you created is allowed; deleting other report folders is FORBIDDEN.
+35. **MAESTRO applicability is determined once, in Step 1c, and is binding.** If the target has an LLM orchestration loop, tool-calling, multi-agent delegation, an MCP client/server, an agent/skill/persona marketplace, or a RAG pipeline feeding a model — generate `2b-maestro-layers.md` (Step 5b) and its threats join `3-findings.md` and the Threat Coverage Verification table alongside STRIDE-A threats. If none apply, do NOT generate the file — note the negative determination in `0-assessment.md` instead. See `maestro-framework.md`.
 
 ### Rule Precedence (when guidance conflicts)
 
@@ -349,6 +351,11 @@ Sub-agents are **independent execution contexts** — they have no memory of the
    - The Summary table S/T/R/I/D/E/A columns show the COUNT of concrete threats per category (0 is valid if N/A was justified).
    - This ensures comprehensive coverage while producing accurate, non-inflated threat counts.
 
+1c. **Determine MAESTRO applicability (MANDATORY — run once, right after component identification)**
+   - Check the locked component list against the Applicability Detection signals in `maestro-framework.md` (LLM orchestration loop, tool-calling, multi-agent/sub-agent delegation, MCP client/server, agent/skill/persona marketplace, RAG pipeline feeding a model)
+   - Record the determination (applicable / not applicable) and which signals were found — this becomes the Applicability section of `2b-maestro-layers.md` if applicable, or a one-line note in `0-assessment.md` → Analysis Context & Assumptions if not
+   - This determination is binding for the rest of the run — do not re-decide it later
+
 2. **Write architecture overview** (`0.1-architecture.md`)
    - **Read `skeletons/skeleton-architecture.md` first** — copy skeleton structure, fill `[FILL]` placeholders
    - System purpose, key components, top scenarios, tech stack, deployment
@@ -378,7 +385,16 @@ Sub-agents are **independent execution contexts** — they have no memory of the
    - **Reference:** `analysis-principles.md` for tier definitions, `output-formats.md` for STRIDE template
    - **⛔ PREREQUISITE FLOOR CHECK (per threat):** Before assigning a prerequisite to any threat, look up the component's `Min Prerequisite` and `Derived Tier` in the Component Exposure Table (`0.1-architecture.md`). The threat's prerequisite MUST be ≥ the component's floor. The threat's tier MUST be ≥ the component's derived tier (i.e., if component is T2, no threat can be T1). Use the canonical prerequisite→tier mapping from `analysis-principles.md`.
 
-6. **For each threat:** cite files/functions/endpoints, propose mitigations, provide verification steps
+5b. **MAESTRO layer analysis** (`2b-maestro-layers.md`) — **only if Step 1c determined the target is agentic/AI-driven**
+   - **Read `maestro-framework.md` and `skeletons/skeleton-maestro.md` first**
+   - Map each already-locked component to the MAESTRO layer(s) it participates in — do not invent new components
+   - Walk each applicable layer's threat pattern table in `maestro-framework.md`, grounding each threat in a real component and citing evidence
+   - Assign Tier and Status using the SAME rules as STRIDE-A (`analysis-principles.md`) — no separate risk scale
+   - Identify Cross-Layer (LX) threats after the per-layer pass
+   - Threat ID format: `M{NN}.L{layer}` or `M{NN}.LX`, sequential across the file
+   - **If Step 1c determined NOT applicable:** skip this step entirely. Do not create an empty `2b-maestro-layers.md`.
+
+6. **For each threat (STRIDE-A and, if generated, MAESTRO):** cite files/functions/endpoints, propose mitigations, provide verification steps
 
 7. **Verify findings** — confirm each finding against actual configuration before documenting
    - **Reference:** `analysis-principles.md` Finding Validation Checklist
@@ -391,6 +407,7 @@ Sub-agents are **independent execution contexts** — they have no memory of the
 8. **Compile findings** (`3-findings.md`)
    - **Reference:** `output-formats.md` for findings template and Related Threats link format
    - **Reference:** `skeletons/skeleton-findings.md` — read this skeleton, copy VERBATIM, fill in `[FILL]` placeholders for each finding
+   - **If `2b-maestro-layers.md` was generated:** every `Open` or `Mitigated` MAESTRO threat gets a finding too, sorted into the same three tier sections as STRIDE-A findings — there is no separate MAESTRO tier structure. A finding's `Related Threats` may link to `2-stride-analysis.md#anchor`, `2b-maestro-layers.md#anchor`, or both when the same underlying issue was identified from both angles (link both, do not duplicate the finding).
 
    ⛔ **PRE-WRITE GATE — Verify before calling `create_file` for `3-findings.md`:**
    1. Finding IDs: `### FIND-01:`, `### FIND-02:` — sequential, `FIND-` prefix (NOT `F01` or `F-01`)
@@ -420,7 +437,7 @@ Sub-agents are **independent execution contexts** — they have no memory of the
    1. **Scan the table you just wrote.** Count how many threats have status `✅ Covered` vs `🔄 Mitigated by Platform` vs `⚠️ Needs Review` vs `⚠️ Accepted Risk`.
    2. **If ANY threat has `⚠️ Accepted Risk`** → FAIL. The tool cannot accept risks. Go back and create a finding for each one.
    3. **If Platform ratio > 20%** → SUSPECT. Re-examine each `🔄 Mitigated by Platform` entry: is the mitigation truly from an EXTERNAL system managed by a DIFFERENT team? If the mitigation is the repo's own code (auth middleware, file permissions, TLS config, localhost binding), reclassify as `Open` and create a finding.
-   4. **If ANY `Open` threat in `2-stride-analysis.md` has NO corresponding finding** → create a finding NOW. Use the threat's description as the finding title, the mitigation column as the remediation guidance, and assign severity based on STRIDE category.
+   4. **If ANY `Open` threat in `2-stride-analysis.md` (or, if generated, `2b-maestro-layers.md`) has NO corresponding finding** → create a finding NOW. Use the threat's description as the finding title, the mitigation column as the remediation guidance, and assign severity based on STRIDE category or, for MAESTRO threats, the layer's typical severity per `maestro-framework.md`.
    5. **Update `3-findings.md`** with the newly created findings. Renumber sequentially. Update the Coverage table to show `✅ Covered` for each.
    6. **This loop is the ENTIRE POINT of the Coverage table** — it's not documentation, it's a self-check that forces complete coverage. If you write the table and don't act on gaps, you've wasted the effort.
 
@@ -448,7 +465,7 @@ Sub-agents are **independent execution contexts** — they have no memory of the
 
    ⛔ **PRE-WRITE SIZE CHECK (MANDATORY — before calling `create_file` for JSON):**
    Before writing `threat-inventory.json`, count the data you plan to include:
-   - Count total threats from `2-stride-analysis.md` (grep `^\| T\d+\.`)
+   - Count total threats from `2-stride-analysis.md` (grep `^\| T\d+\.`) plus, if generated, `2b-maestro-layers.md` (grep `^\| M\d+\.`)
    - Count total findings from `3-findings.md` (grep `### FIND-`)
    - Count total components from `0.1-architecture.md`
    - **If threats > 50 OR findings > 15:** DO NOT use a single `create_file` call.

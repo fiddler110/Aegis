@@ -44,7 +44,8 @@ Create a timestamped folder at the start of analysis:
 | `1.1-threatmodel.mmd` | Pure Mermaid DFD (source of truth for detailed diagram) | Yes |
 | `1.2-threatmodel-summary.mmd` | Summary DFD (only if >15 elements or >4 boundaries) | Conditional |
 | `2-stride-analysis.md` | Full STRIDE-A analysis for all components | Yes |
-| `3-findings.md` | Prioritized security findings with remediation | Yes |
+| `2b-maestro-layers.md` | MAESTRO 7-layer agentic AI threat analysis | Conditional (agentic/AI-driven systems only — see `maestro-framework.md`) |
+| `3-findings.md` | Prioritized security findings with remediation (STRIDE-A + MAESTRO threats, if applicable) | Yes |
 | `threat-inventory.json` | Structured JSON inventory for comparison matching | Yes |
 | `incremental-comparison.html` | Visual HTML comparison report (incremental mode only) | Conditional |
 
@@ -491,6 +492,7 @@ The Report Files table MUST list `0-assessment.md` (this file) as the FIRST row,
 | [1.1-threatmodel.mmd](1.1-threatmodel.mmd) | Pure Mermaid DFD source file |
 | [1.2-threatmodel-summary.mmd](1.2-threatmodel-summary.mmd) | Summary DFD (only if generated) |
 | [2-stride-analysis.md](2-stride-analysis.md) | Full STRIDE-A analysis for all components |
+| [2b-maestro-layers.md](2b-maestro-layers.md) | MAESTRO 7-layer agentic AI threat analysis (only if generated) |
 | [3-findings.md](3-findings.md) | Prioritized security findings with remediation |
 ```
 
@@ -805,6 +807,20 @@ This file enables automated comparison between two threat model runs.
       "affected_flow": "DF25",
       "mitigation": "Enable TLS on Redis connections",
       "status": "Open"
+    },
+    {
+      "id": "M03.L3",
+      "identity_key": {
+        "component_id": "SwarmDispatcher",
+        "maestro_layer": "L3",
+        "attack_surface": "internal/swarm/dispatch.go:SpawnSubAgent"
+      },
+      "title": "Agent Frameworks — sub-agent privilege inheritance unchecked",
+      "description": "A spawned sub-agent receives the parent's full tool registry clone...",
+      "tier": 2,
+      "prerequisites": "Authenticated User",
+      "mitigation": "Scope sub-agent tool registry clones to the parent's advisory persona tools list",
+      "status": "Open"
     }
   ],
 
@@ -839,12 +855,21 @@ This file enables automated comparison between two threat model runs.
     "threats_by_tier": { "T1": 12, "T2": 53, "T3": 32 },
     "findings_by_tier": { "T1": 7, "T2": 7, "T3": 4 },
     "findings_by_severity": { "Critical": 4, "Important": 8, "Moderate": 6 },
-    "threats_by_stride": { "S": 14, "T": 19, "R": 8, "I": 20, "D": 15, "E": 14, "A": 7 }
+    "threats_by_stride": { "S": 14, "T": 19, "R": 8, "I": 20, "D": 15, "E": 14, "A": 7 },
+    "maestro_applicable": true,
+    "threats_by_maestro_layer": { "L1": 3, "L2": 0, "L3": 5, "L4": 2, "L5": 1, "L6": 4, "L7": 0, "LX": 2 }
   }
 }
 ```
 
+**MAESTRO metrics fields** — only include `maestro_applicable` and `threats_by_maestro_layer` when
+Step 1c determined the target is agentic/AI-driven. `maestro_applicable: false` (with
+`threats_by_maestro_layer` omitted) when not applicable — this lets comparison tooling distinguish
+"not applicable" from "applicable but zero threats found."
+
 > **⛔ stride_category MUST be a SINGLE LETTER:** `S`, `T`, `R`, `I`, `D`, `E`, or `A`. NEVER use full names like `"Spoofing"` or `"Denial of Service"`. The heatmap computation and comparison matching depend on single-letter codes. If you write `"stride_category": "Denial of Service"` instead of `"stride_category": "D"`, the heatmap will show all zeros for STRIDE columns while tier columns have correct values — this is a critical data integrity bug.
+
+> **MAESTRO threats (when `2b-maestro-layers.md` was generated):** use `identity_key.maestro_layer` instead of `identity_key.stride_category` — format `L1`–`L7`, or `LX` for a cross-layer threat. A threat has EITHER `stride_category` OR `maestro_layer` in its identity key, never both. `data_flow_id` is optional for MAESTRO threats (many don't map to a single data flow); omit rather than fabricate one.
 
 ### Incremental Analysis Extensions
 
