@@ -156,7 +156,7 @@ A project skill shadows a same-named user skill, which shadows a same-named buil
 
 ## Built-in skills
 
-Aegis ships several skills embedded in the binary (`content-review`, `html-report`, `security-audit`, `architecture-diagram`, `debug-investigation`, `redteam-engagement`, `threat-modeling`, `latex-report`, `deep-research`, `structured-build`, `documentation-as-code`, `document-codebase`). Unlike a project/user skill file, nobody chose to author these for this project, so they stay **dormant by default** — zero system-prompt cost — until named explicitly:
+Aegis ships several skills embedded in the binary (`content-review`, `html-report`, `security-audit`, `architecture-diagram`, `diagram-design`, `debug-investigation`, `redteam-engagement`, `threat-modeling`, `latex-report`, `deep-research`, `structured-build`, `documentation-as-code`, `document-codebase`). Unlike a project/user skill file, nobody chose to author these for this project, so they stay **dormant by default** — zero system-prompt cost — until named explicitly:
 
 ```bash
 aegis skills list                           # every built-in + on/off status
@@ -168,6 +168,19 @@ aegis skills disable security-audit
 Or from the TUI: `/skills` (list), `/skills enable <name> [global]`, `/skills disable <name> [global]`. This is the config-driven route: it writes `.aegis/config.yaml` (or the user-global one) and takes effect on the next daemon restart.
 
 A project or user skill file with the same name always takes precedence over a built-in of that name — enabling a built-in never overrides something you authored yourself.
+
+`architecture-diagram` and `diagram-design` cover the same ground differently:
+`architecture-diagram` picks a notation (mermaid/plantuml/graphviz/...) and
+renders it via the `render_diagram` tool — the right choice for diagrams
+generated from structured/live input, where auto-layout beats hand-placement.
+`diagram-design` (vendored from [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design),
+MIT-licensed — see `LICENSE`/`NOTICE.md` in its built-in directory) has no
+renderer at all: it's a design system of 39 layout references that guides the
+model to hand-write a self-contained HTML+SVG file in an editorial style
+(brand tokens, a density budget, a style-guide gate on first use), and it can
+redraw an existing `.drawio`/`.mmd` source into that style. Reach for it when
+the diagram is a deliverable meant to look designed, not a quick structural
+sketch.
 
 ### On-demand activation
 

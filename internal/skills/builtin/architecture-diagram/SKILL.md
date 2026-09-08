@@ -66,3 +66,9 @@ If the render fails (invalid syntax for the chosen notation), fix the
 source and retry rather than switching to a plainer notation just to make
 it succeed — a mermaid syntax error is almost always a small fixable
 mistake, not a sign mermaid can't express the diagram.
+
+If the diagram is a deliverable meant to look designed — going in a report,
+a doc, or in front of someone outside the team — rather than a quick
+structural sketch, use the `diagram-design` skill instead: it hand-writes
+self-contained HTML+SVG in an editorial style instead of delegating to
+mermaid/graphviz's generic auto-layout.

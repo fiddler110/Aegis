@@ -8,7 +8,17 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated: 2026-09-04 — P66.17/LLM-11 closed in full, live-verified, including the daemon-side
+**Last updated: 2026-09-04 — P81.28 closed in full.** The one remediation bullet left after
+2026-09-03's provenance-labeling half — never promote a prose-parsed tool call that reproduces a span
+of untrusted content already in the turn — turned out to need no new taint mechanism: P81.1's
+`taint_after_untrusted_content` rule had already shipped in full on 2026-08-31, and this item's own
+"what remains" text just hadn't been updated to say so. `internal/provider/prosetaint.go` is a new
+32-byte shingle-hash index over a turn's `trust.Wrap`-marked tool results; `salvageToolCall` now
+checks each fenced/tagged/XML/bare-object candidate against it before accepting, skipping only the
+tainted branch rather than the whole reply. Full record:
+[P81.28 closed in full, 2026-09-04](#p8128-closed-in-full-2026-09-04).
+
+**2026-09-04 — P66.17/LLM-11 closed in full, live-verified, including the daemon-side
 half the original finding named but left open.** Failover was riding the *primary* model's serving
 window to every fallback target, in two independent places: the runtime `numCtxAdapter` wrapper
 (stamped before `failoverAdapter` ever saw the request) and `providerfactory.Build` itself (every
@@ -164,6 +174,59 @@ no trigger comparison for a stale window to get wrong — and the request it sen
 failover. Nothing here needed converting `wireCompaction` from a startup-time constant to a per-call
 read; that would have been a materially larger, riskier change (shared mutable state across concurrent
 sessions) for a gap that, on inspection, does not exist.
+
+---
+
+### P81.28 closed in full, 2026-09-04
+
+**Taken on direct request, to close the one remaining Tier-4 item that names a concrete build rather
+than a promotion condition.** P81.28/FIND-28's provenance-labeling half shipped 2026-09-03 (below);
+what remained was remediation #1 from the finding itself: "Never run the prose parser over a span of
+model output that reproduces content which arrived inside an untrusted-content wrapper; track those
+spans by content hash for the turn." That containment was filed as sequenced behind **P81.1**'s taint
+bookkeeping — but P81.1 had already shipped in full the same sitting it was filed
+(`taint_after_untrusted_content`, `trust.IsWrapped`, closed 2026-08-31, described below), which this
+item's own "what remains" text had not caught up to. No new taint mechanism was needed; only a new
+*consumer* of the existing one.
+
+**What shipped.** `internal/provider/prosetaint.go` is a new file: `buildProseTaintIndex(msgs
+[]Message)` scans a turn's message history for `ToolResultBlock`s carrying `trust.IsWrapped`'s
+provenance marker and indexes each one by 32-byte shingle hash (`fnv.New64a`, one hash per byte
+offset); `reproducesUntrustedContent(span string)` reports whether span shares any shingle with that
+index. A nil index (the common case — no MCP or web tool used this turn) and a span shorter than the
+32-byte window both report false without hashing anything, so a turn with no untrusted content pays
+nothing extra.
+
+`salvageToolCall` (`internal/provider/prosetoolcall.go`) now takes that index as a third argument,
+built once per `Stream` call from `req.Messages` — the same request the base adapter already carries
+the full conversation history on — and checks it against each candidate's body before accepting: the
+tagged-block, bare-XML, and fenced-JSON branches, plus the bare-object branch (already narrowed to
+"the entire reply is the object" by M2). A candidate that reproduces an indexed span is **not**
+accepted — the branch is skipped rather than the whole reply rejected, so a genuine call elsewhere in
+the same reply still salvages (`TestProseToolCallSalvage_UntrustedContentPresentButCallNotQuoted`
+pins this: unrelated untrusted content in history does not blanket-suppress salvage of a real call).
+
+**32 bytes as the shingle window is a judgment call, not a measured constant.** Long enough that a
+coincidental match on ordinary JSON tokens (`{"name":`, `"arguments":`) is vanishingly unlikely; short
+enough to still catch a call quoted back with minor surrounding reformatting. Written down as a named
+constant (`taintWindowBytes`) rather than inlined, so it is one place to revisit if a real quoted call
+is ever observed to slip past it with different padding.
+
+**What this does not do, by design.** It is exact-shingle matching against *this turn's* history —
+the same turn-scoping P81.1's containment rule already uses, for the same reason (no compaction
+question to solve: a fresh index is built from whatever messages are on the request each call). A call
+reconstructed by the model from a *paraphrase* of untrusted content, rather than a byte-for-byte quote,
+is not caught by this mechanism — `IsProseSalvagedCallID`'s provenance label (shipped 2026-09-03)
+remains the defense-in-depth for that case, and its own doc comment now says so explicitly rather than
+describing the taint gap as wholly unbuilt.
+
+Tests: `internal/provider/prosetaint_test.go` (`TestProseTaintIndex_NilWhenNoUntrustedContent`,
+`TestProseTaintIndex_DetectsReproducedSpan`, `TestProseTaintIndex_ShortSpanNeverFlagged`);
+`internal/provider/prosetoolcall_test.go`'s `TestProseToolCallSalvage_QuotedFromUntrustedContentIsNotACall`
+(a fenced call reproduced verbatim from a `trust.Wrap`-marked tool result is never promoted, and the
+reply is forwarded as plain text unchanged) and
+`TestProseToolCallSalvage_UntrustedContentPresentButCallNotQuoted` (the negative). `go build ./...`,
+`go vet ./...` and the full `go test ./...` are green.
 
 ---
 

@@ -159,7 +159,7 @@ func (a *proseToolCallAdapter) run(req Request, in <-chan Event, out chan<- Even
 		return
 	}
 
-	call, remaining, ok := salvageToolCall(text.String(), req.Tools)
+	call, remaining, ok := salvageToolCall(text.String(), req.Tools, buildProseTaintIndex(req.Messages))
 	if !ok {
 		replay(textEvents, out)
 		out <- doneEv
@@ -210,7 +210,15 @@ var toolCallTag = regexp.MustCompile(`(?is)<(tool_call|function_call)>(.*?)</(?:
 // A candidate is only accepted when its name matches one of tools exactly —
 // the request actually sent, not the tool registry at large — so a reply that
 // merely mentions a tool by name in a sentence never becomes a call.
-func salvageToolCall(reply string, tools []ToolSchema) (*ToolUseBlock, string, bool) {
+//
+// taint, when non-nil, is P81.28/FIND-28's containment: a candidate whose
+// body reproduces a span of untrusted content already in this turn's message
+// history (an MCP result, a fetched/searched page — anything trust.Wrap
+// marked) is never promoted, on the reasoning that such a span is far more
+// likely to be quoted, injected content than a call the model actually
+// intends. The branch is skipped rather than the whole reply rejected, so a
+// genuine call elsewhere in the same reply still salvages.
+func salvageToolCall(reply string, tools []ToolSchema, taint *proseTaintIndex) (*ToolUseBlock, string, bool) {
 	if strings.TrimSpace(reply) == "" {
 		return nil, reply, false
 	}
@@ -221,7 +229,7 @@ func salvageToolCall(reply string, tools []ToolSchema) (*ToolUseBlock, string, b
 
 	if loc := toolCallTag.FindStringSubmatchIndex(reply); loc != nil {
 		body := reply[loc[4]:loc[5]]
-		if call, ok := parseCallBody(body, names); ok {
+		if call, ok := parseCallBody(body, names); ok && !taint.reproducesUntrustedContent(body) {
 			remaining := reply[:loc[0]] + reply[loc[1]:]
 			return call, remaining, true
 		}
@@ -230,7 +238,8 @@ func salvageToolCall(reply string, tools []ToolSchema) (*ToolUseBlock, string, b
 	// EXEC-3: the XML form is also emitted *without* the <tool_call> wrapper,
 	// so it gets a pass of its own rather than riding only on the tag above.
 	if loc := functionCallXML.FindStringSubmatchIndex(reply); loc != nil {
-		if call, ok := parseFunctionXML(reply[loc[0]:loc[1]], names); ok {
+		span := reply[loc[0]:loc[1]]
+		if call, ok := parseFunctionXML(span, names); ok && !taint.reproducesUntrustedContent(span) {
 			remaining := reply[:loc[0]] + reply[loc[1]:]
 			return call, remaining, true
 		}
@@ -238,7 +247,7 @@ func salvageToolCall(reply string, tools []ToolSchema) (*ToolUseBlock, string, b
 
 	if loc := toolCallFence.FindStringSubmatchIndex(reply); loc != nil {
 		body := reply[loc[2]:loc[3]]
-		if call, ok := parseCallBody(body, names); ok {
+		if call, ok := parseCallBody(body, names); ok && !taint.reproducesUntrustedContent(body) {
 			remaining := reply[:loc[0]] + reply[loc[1]:]
 			return call, remaining, true
 		}
@@ -257,7 +266,7 @@ func salvageToolCall(reply string, tools []ToolSchema) (*ToolUseBlock, string, b
 	// still has the two explicit spellings above; narrating a call inside prose
 	// and having that narration executed is the case worth losing.
 	if trimmed := strings.TrimSpace(reply); strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
-		if call, ok := parseCallObject(trimmed, names); ok {
+		if call, ok := parseCallObject(trimmed, names); ok && !taint.reproducesUntrustedContent(trimmed) {
 			return call, "", true
 		}
 	}
@@ -335,9 +344,12 @@ const callSalvageID = "tu_salvaged"
 // IsProseSalvagedCallID reports whether id names a tool call
 // WithProseToolCallSalvage recovered from a model's free-form text rather
 // than a structured tool_calls entry (P81.28/FIND-28). The engine uses this
-// to label the call's provenance in the approval prompt, since untrusted
-// content that reached model context is sometimes quoted back verbatim and
-// this salvage path cannot yet tell an intended call from a quoted one.
+// to label the call's provenance in the approval prompt: salvageToolCall's
+// taint check (above) refuses to promote a candidate that reproduces a span
+// of untrusted content already in the turn, but that check is exact-shingle
+// matching against this turn's history, not a guarantee against every way a
+// quoted call could reach the model paraphrased or reconstructed — so a
+// recovered call still carries this label for a human approver to weigh.
 func IsProseSalvagedCallID(id string) bool {
 	return id == callSalvageID
 }

@@ -1682,7 +1682,7 @@ personas:
 
 # ── Built-in skills ───────────────────────────────────────────────────────────
 # Skills embedded in the Aegis binary (content-review, html-report,
-# security-audit, architecture-diagram, debug-investigation,
+# security-audit, architecture-diagram, diagram-design, debug-investigation,
 # redteam-engagement, threat-modeling, latex-report, deep-research,
 # structured-build, documentation-as-code, document-codebase — see
 # `aegis skills list`). Empty by

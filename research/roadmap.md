@@ -6,7 +6,6 @@
   - [Up next](#up-next)
   - [Open Work — Tier 4](#open-work--tier-4)
     - [P81.7 — The local model endpoint is unauthenticated plaintext HTTP on loopback (FIND-07)](#p817--the-local-model-endpoint-is-unauthenticated-plaintext-http-on-loopback-find-07)
-    - [P81.28 — Prose tool-call parsing can promote quoted untrusted text into real calls (FIND-28)](#p8128--prose-tool-call-parsing-can-promote-quoted-untrusted-text-into-real-calls-find-28)
     - [P77.6 — No OS-level process sandbox on Windows (GAP-05, spun out of P66.19)](#p776--no-os-level-process-sandbox-on-windows-gap-05-spun-out-of-p6619)
     - [P60.3 — Checkpoints capture files only, so `/rewind` is silent about everything else](#p603--checkpoints-capture-files-only-so-rewind-is-silent-about-everything-else)
     - [P65.4 — Resume is phase-granular, artifact-inferred, and only the drive has it](#p654--resume-is-phase-granular-artifact-inferred-and-only-the-drive-has-it)
@@ -31,6 +30,16 @@
 ---
 
 ## Status
+
+**P81.28 closed in full, 2026-09-04.** The remediation bullet left open after 2026-09-03's
+provenance-labeling half — never promote a prose-parsed tool call that reproduces a span of untrusted
+content already in the turn — turned out to need no new taint mechanism: P81.1's
+`taint_after_untrusted_content` rule had already shipped in full on 2026-08-31, and this item's own
+"what remains" text simply hadn't caught up. `internal/provider/prosetaint.go` indexes a turn's
+`trust.Wrap`-marked tool results by 32-byte shingle hash; `salvageToolCall` now refuses to promote any
+candidate call whose body reproduces an indexed span, skipping only that branch rather than the whole
+reply. Full record:
+[P81.28 closed in full](releases/releases-01.md#p8128-closed-in-full-2026-09-04).
 
 **P66.17/LLM-11 closed 2026-09-04, live-verified.** Failover was riding the primary model's serving
 window to every fallback target, at both the runtime request layer and the adapter-construction
@@ -65,7 +74,7 @@ same day it was re-tiered, P81.31 shipped in full, P81.18 shipped except one exp
 helper — see below); full closing
 record in
 [releases.md](releases/releases-01.md#threat-model-2026-08-31--the-p81-batch-closing-record).
-Tier 4: **15 open** — parked build items, none with a fired trigger; see
+Tier 4: **14 open** — parked build items, none with a fired trigger; see
 [Open Work — Tier 4](#open-work--tier-4). Verification: **6 open** — code already written,
 waiting on a live-model run; see [Verification Work](#verification-work).
 
@@ -175,9 +184,9 @@ condition for what would change that.
 
 ## Open Work — Tier 4
 
-**Status: 15 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
-trigger), two from the P81 threat-model batch (**P81.7**, **P81.28**, each parked for a stated
-reason — see each entry; both partially shipped 2026-09-03, remainder described in each entry),
+**Status: 14 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
+trigger), one from the P81 threat-model batch (**P81.7**, parked for a stated reason — see its
+entry; mechanism half shipped 2026-09-03, remainder upstream-blocked),
 one from the P66 review batch (**P66.19**'s GAP-07 remainder),
 three from the P67 external-source reading (**P67.11**, **P67.12**, **P67.13**), and **P77.6**
 (spun out of P66.19). **P81.11** closed 2026-09-03 (see
@@ -188,7 +197,8 @@ shipped except its explicitly-deferred trust-store helper, both 2026-09-03 (see
 **P66.23** closed in full 2026-09-03 in the P66/P67 sweep; their write-ups moved to
 [releases.md](releases/releases-01.md#the-p66p67-sweep-2026-09-03). **P66.17** closed in full
 2026-09-04 (its LLM-11 remainder resolved live — see
-[Status](#status)). Everything else that was ever
+[Status](#status)). **P81.28** closed in full 2026-09-04 — see
+[Status](#status). Everything else that was ever
 in this tier has shipped — see
 [releases.md](releases/releases-01.md#roadmap-housekeeping-closed-items-migrated-from-roadmapmd-2026-09-03)
 for the closed-item record.
@@ -256,41 +266,6 @@ remaining socket/pipe question if Ollama ever merges PR #8072 (or ships Windows 
 that's also the condition that promotes **P81.24**'s encryption half.
 
 Priority: Tier 4 — mechanism half shipped; the remainder is upstream-blocked, not a local decision.
-
-### P81.28 — Prose tool-call parsing can promote quoted untrusted text into real calls (FIND-28)
-
-**Filed 2026-08-31**, from the threat model
-([**FIND-28**](../threat-model-20260831-002123/3-findings.md#find-28-prose-tool-call-parsing-can-promote-quoted-untrusted-text-into-real-tool-calls),
-CVSS 5.4, `Moderate`, CWE-1427). `internal/provider/prosetoolcall.go` and `internal/toolshim` exist
-because some local models emit tool calls as free-form text rather than structured calls, and they
-recover those — P74.8's whole point. What the parser cannot do is distinguish a call the model
-_intended_ from a call the model merely _quoted_, and untrusted content that reaches model context is
-frequently quoted back verbatim in a summary or an explanation.
-
-**The `internal/toolshim` half is off by default** (`provider.tool_call_shim: off`). **The
-`internal/provider/prosetoolcall.go` half is not** — `WithProseToolCallSalvage` is on by default for
-every model served by a local provider (`profile.NewResolver`, `ProseToolCallSalvage: true`), so this
-finding's exposure is broader than "off by default" suggested: it is live on the local profile today,
-not gated behind an opt-in.
-
-**Shipped 2026-09-03: the two separable, cheap halves.** A tool call recovered by either mechanism —
-`provider.IsProseSalvagedCallID` for the always-on salvage path, an id prefix check for the shim's
-per-call ids — now carries a **"recovered from prose"** label appended to the approval-prompt reason
-(`tool.WithCallProvenance`/`tool.CallProvenance`, read by `permission.Gate.Check` and by the
-contextual gate's egress-then-write and taint-after-untrusted-content Ask branches). This is
-provenance, not containment: it gives a human approver the signal that a pending write/execute/network
-call did not arrive as a native structured call, so they can judge whether the model actually meant to
-make it. `docs/local-model-tuning.md` §5 now documents the injection interaction and the label's
-meaning. Regression tests: `TestGateCheckAnnotatesReasonWithCallProvenance`,
-`TestRecoveredCallProvenance`.
-
-**What remains.** The actual containment — never promoting a call parsed out of a span of model output
-that reproduces content which arrived inside an untrusted-content wrapper, tracked by content hash for
-the turn — still needs **P81.1**'s taint bookkeeping, which does not exist yet. Building a second,
-weaker taint mechanism just for this would be wasted work; this stays sequenced behind P81.1.
-
-Priority: Tier 4 — the cheap, separable half has shipped. The remaining containment is **P81.1**'s to
-build, with no fired trigger of its own.
 
 ### P77.6 — No OS-level process sandbox on Windows (GAP-05, spun out of P66.19)
 
