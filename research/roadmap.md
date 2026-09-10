@@ -19,6 +19,14 @@
     - [P65.5 — Rewinding away from a branch discards its work instead of summarizing it forward](#p655--rewinding-away-from-a-branch-discards-its-work-instead-of-summarizing-it-forward)
     - [P67.11 — Every budget is a ceiling; none expresses how much effort is wanted](#p6711--every-budget-is-a-ceiling-none-expresses-how-much-effort-is-wanted)
     - [P67.12 — Personas cannot accumulate anything across runs](#p6712--personas-cannot-accumulate-anything-across-runs)
+    - [P85.1 — No declarative compatibility schema for OpenAI-compatible local and third-party backends](#p851--no-declarative-compatibility-schema-for-openai-compatible-local-and-third-party-backends)
+    - [P85.2 — Context overflow detection has no usage-vs-window fallback for silent truncation](#p852--context-overflow-detection-has-no-usage-vs-window-fallback-for-silent-truncation)
+    - [P85.3 — No way to browse or reorder multiple queued follow-up messages before they send](#p853--no-way-to-browse-or-reorder-multiple-queued-follow-up-messages-before-they-send)
+    - [P85.4 — Session and branch navigation is a flat list, not a foldable, filterable tree](#p854--session-and-branch-navigation-is-a-flat-list-not-a-foldable-filterable-tree)
+    - [P85.5 — Agent-triggered self-refinement of persona, memory and skill definitions is not represented](#p855--agent-triggered-self-refinement-of-persona-memory-and-skill-definitions-is-not-represented)
+    - [P85.6 — Non-blocking recursive sub-agent spawn as a language-level call (design reading, not recommended)](#p856--non-blocking-recursive-sub-agent-spawn-as-a-language-level-call-design-reading-not-recommended)
+    - [P85.7 — Agent-owned internal heartbeat schedule with steer-vs-follow-up delivery, distinct from cron](#p857--agent-owned-internal-heartbeat-schedule-with-steer-vs-follow-up-delivery-distinct-from-cron)
+    - [P85.8 — Persistent cross-turn goal object with token-budget accounting (adjacent to P67.11)](#p858--persistent-cross-turn-goal-object-with-token-budget-accounting-adjacent-to-p6711)
   - [Verification Work](#verification-work)
     - [P80.4 — `live_workflow`'s two standalone tests both need a stronger model than this machine has run](#p804--live_workflows-two-standalone-tests-both-need-a-stronger-model-than-this-machine-has-run)
     - [P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)](#p381--non-orchestrated-single-context-threat-model-build-primary-path-for-local-models)
@@ -30,6 +38,21 @@
 ---
 
 ## Status
+
+**P85 batch filed, 2026-09-10 — eight Tier 4 items, none built.** Comparative reading of
+PrimeIntellect-ai/prime-agent (public, MIT-licensed TypeScript coding agent — not leaked, so this
+carries none of the P67/P74 batches' reproduction restriction, but each item is still written as an
+independent Go mechanism, not a port) against this tree, done at the user's request. Every claim
+about Aegis's own code was checked against this tree at the file cited; the claims about the
+comparison source were not independently verified beyond reading its own code and rest on that
+reading alone. **P85.1** (a declarative per-provider/per-model compatibility schema for
+OpenAI-compatible local and third-party backends) is the standout item — self-contained and closes a
+documented gap in the exact area, local-model support, the project's own docs already treat as a
+first-class concern. The rest range from small UI surfacing (**P85.2**, **P85.3**) to genuine
+paradigm-level design readings recorded but explicitly not recommended without a driving need
+(**P85.6**). Full entries: [Open Work — Tier 4](#open-work--tier-4). Tier 4 open count: **22** (14
+pre-existing + 8 new). No item in this batch has a fired trigger; see each entry's own **Promote
+when**.
 
 **P81.28 closed in full, 2026-09-04.** The remediation bullet left open after 2026-09-03's
 provenance-labeling half — never promote a prose-parsed tool call that reproduces a span of untrusted
@@ -184,12 +207,13 @@ condition for what would change that.
 
 ## Open Work — Tier 4
 
-**Status: 14 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
+**Status: 22 open.** Eight pre-existing (all blocked or explicitly parked, none with a fired
 trigger), one from the P81 threat-model batch (**P81.7**, parked for a stated reason — see its
 entry; mechanism half shipped 2026-09-03, remainder upstream-blocked),
 one from the P66 review batch (**P66.19**'s GAP-07 remainder),
-three from the P67 external-source reading (**P67.11**, **P67.12**, **P67.13**), and **P77.6**
-(spun out of P66.19). **P81.11** closed 2026-09-03 (see
+three from the P67 external-source reading (**P67.11**, **P67.12**, **P67.13**), **P77.6**
+(spun out of P66.19), and eight from the P85 comparative reading against PrimeIntellect-ai/prime-agent
+(**P85.1**–**P85.8**, filed 2026-09-10 — see [Status](#status)). **P81.11** closed 2026-09-03 (see
 [Status](#status)) rather than staying in this count; **P81.31** shipped in full and **P81.18**
 shipped except its explicitly-deferred trust-store helper, both 2026-09-03 (see
 [releases.md](releases/releases-01.md#p8131-shipped-p8118-shipped-except-its-trust-store-helper-2026-09-03)).
@@ -216,6 +240,13 @@ feature idea; an item a prior sitting explicitly judged not worth its cost sits 
 reading order, not a build queue — nothing below has a fired trigger, and each item's own
 "Priority: Tier 4" line and "do not build speculatively" caveat still governs whether to act on
 it.
+
+**The P85 items are, like the P66 grab-bags, kept together as one block** (at the end of this list)
+rather than interleaved into the importance ordering above, for the same reason: they share one
+filing date and one comparison source, and reading them together matters more than their individual
+rank. Within that block they are ordered by importance — **P85.1** is judged comparable to this
+list's mid-ranked items despite sitting last positionally; **P85.6** is the least actionable and is
+recorded chiefly so the design reading is not lost.
 
 ### P81.7 — The local model endpoint is unauthenticated plaintext HTTP on loopback (FIND-07)
 
@@ -579,6 +610,185 @@ filesystem — namespaced names carry characters Windows rejects outright.
 same context each run. Until then this is storage without a demonstrated reader.
 
 Priority: Tier 4 — no fired trigger. Do not build speculatively.
+
+### P85.1 — No declarative compatibility schema for OpenAI-compatible local and third-party backends
+
+**Filed 2026-09-10**, from a comparative reading of PrimeIntellect-ai/prime-agent (public,
+MIT-licensed) at the user's request. Their `models.json` accepts a `compat` block per provider or
+per model — `supportsDeveloperRole`, `maxTokensField` (`max_tokens` vs `max_completion_tokens`),
+`thinkingFormat` (`openai`/`deepseek`/`zai`/`qwen`/`qwen-chat-template`), `requiresToolResultName`,
+`requiresAssistantAfterToolResult`, `supportsStrictMode`, `cacheControlFormat`, and several more —
+applied from config alone to any endpoint speaking OpenAI Completions/Responses, Anthropic Messages,
+or Google Generative AI (`packages/coding-agent/src/core/model-registry.ts`,
+`packages/coding-agent/docs/models.md`).
+
+**Checked against this tree.** `internal/provider/openai/openai.go` and
+`internal/provider/ollama/ollama.go` are each one hardcoded Go adapter —
+`WithBaseURL`/`WithReasoningEffort`/`WithThink` are fixed constructor options, not a per-endpoint
+quirk table. A local or third-party OpenAI-compatible server whose surface diverges (wrong role name
+for the system prompt, a different max-tokens field, a Qwen-style thinking toggle needing a different
+request shape) needs a new Go option and a rebuilt binary today. This is real surface: `numctx.go`
+and `prosetoolcall.go` already exist specifically because Ollama's serving quirks needed first-class
+handling, and `docs/local-model-tuning.md` treats local-backend compatibility as an ongoing concern
+rather than a solved one.
+
+**Building it:** a `compat` map in the existing provider config layer (`internal/config`), read by
+the openai adapter's request-building path (`translate`, the request struct's field selection) the
+same way `WithReasoningEffort` already is, rather than a new Go option per quirk.
+
+**Promote when:** an operator reports a specific OpenAI-compatible local or third-party server (vLLM,
+SGLang, LM Studio, a corporate proxy) Aegis cannot serve correctly without a code change.
+
+Priority: Tier 4 — no fired trigger, but the standout item in this batch: self-contained, and it
+closes a documented gap in exactly the area — local-model support — this project already treats as
+first-class.
+
+### P85.2 — Context overflow detection has no usage-vs-window fallback for silent truncation
+
+**Filed 2026-09-10**, same comparative reading. `IsContextOverflowError`/`classifyStreamMessage`
+(`internal/provider/errors.go`) match only string signatures — `contextOverflowSignals`: "context
+length", "context window", "exceeds context", "prompt is too long", and similar — against an error
+message. There is no comparison of a response's reported usage tokens against the request's
+configured context window for the case where a backend accepts an oversized prompt and returns
+success with no error text at all, silently truncating instead of failing.
+
+Their `packages/ai/src/utils/overflow.ts` documents this failure mode by name for several backends —
+z.ai accepts overflow silently, Xiaomi MiMo truncates to fill the window then returns `stopReason:
+"length"` with zero output — and closes it with a fallback: `usage.input + usage.cacheRead` compared
+against the model's `contextWindow`. Their own comment notes "some [Ollama] deployments truncate
+silently" too. Aegis already carries both pieces of state this fallback would need —
+`internal/provider/numctx.go`'s `NumCtx` and the `Usage` already parsed off every stream — so this
+closes an existing detector's blind spot rather than adding a new subsystem.
+
+**Promote when:** a live or reported run shows a backend returning `stopReason: "stop"` (or
+`"length"` with zero output) with no error text, after a prompt that should have overflowed the
+configured context window — a silent-truncation incident, the same evidentiary bar P66.17/LLM-11's
+fix was held to.
+
+Priority: Tier 4 — no fired trigger, S — one arithmetic check added where `IsContextOverflowError`
+already inspects a message, gated on `contextWindow` being known exactly as the z.ai/Xiaomi cases
+are.
+
+### P85.3 — No way to browse or reorder multiple queued follow-up messages before they send
+
+**Filed 2026-09-10**, same comparative reading. `internal/tui/keymap.go:44` binds `alt+enter` to
+"steer the running model (while streaming)" — an interrupt, not a queue. The TUI does drain messages
+sent during a stream in arrival order (`tui_stream.go`'s queued-message drain;
+`internal/tui/approval.go`'s `approvalQueue` for tool approvals specifically), and `tui.go`'s
+`stash.json` persists exactly one draft across restarts (P5.6) — none of this lets an operator queue
+several follow-up messages while the agent works and then browse or reorder them before they go out.
+Their queue (`prompt-stash-state.ts`, `queue-selection.ts`) does exactly that: `alt+up/down` browses
+queued drafts, `ctrl+alt+up/down` reorders them before send.
+
+**Promote when:** an operator reports wanting more than one queued follow-up — the natural case is
+two corrections landing while a long tool round runs, where the second should be reprioritized ahead
+of the first.
+
+Priority: Tier 4 — no fired trigger, S/M — the drain and stash primitives already exist; this
+surfaces them as a browsable/reorderable list rather than building new storage.
+
+### P85.4 — Session and branch navigation is a flat list, not a foldable, filterable tree
+
+**Filed 2026-09-10**, same comparative reading. `internal/tui/backtrackpicker.go`'s Esc-Esc backtrack
+dialog (P22.3) is a flat, reverse-chronological list of prior user turns — no fold/unfold of
+branches, no per-branch labels, no filter. `/fork` exists as a command (`fork_test.go`) with no
+visual tree over the result. Their `/tree`
+(`packages/coding-agent`, `docs/keybindings.md` "Tree Navigation") renders an actual
+git-branch-style tree: fold/unfold, editable branch labels, cyclable filters (`noTools`, `userOnly`,
+`labeledOnly`, `all`), and per-node token-usage bars for sub-agent trees.
+
+This overlaps **P65.5**'s aside on "lanes" — named cursors into one shared session tree — which that
+entry explicitly declined to file "with no complaint behind it either." A read-only tree *view* over
+the checkpoint/fork data Aegis already has is a smaller, non-storage-changing slice of the same idea
+and could ship ahead of lanes without conflicting with it, but the underlying branch model should be
+designed once, not twice.
+
+**Promote when:** an operator reports losing track of which fork/checkpoint holds which abandoned
+approach — the same trigger condition P65.5 already names.
+
+Priority: Tier 4 — no fired trigger, M, sequenced next to P65.5 — do not design the branch model
+twice.
+
+### P85.5 — Agent-triggered self-refinement of persona, memory and skill definitions is not represented
+
+**Filed 2026-09-10**, same comparative reading. This is the closest thing to genuine
+"self-improvement" found in the source (`prime-agent-runtime/src/rlm/`, described on GitHub as "a
+self-improving RLM agent"). Its refinement harness (`refinement.ts`, `skills/refine/`) lets the agent
+itself flag, mid-turn, a repeated failure or reusable tactic worth keeping; a separate LLM-judged
+pass — scheduled, never applied mid-turn — then makes evidence-logged CRUD edits to a small store of
+`prompt`/`memory`/`skill`/`subagent` entries and rebuilds the system prompt before the agent resumes.
+
+This generalizes **P67.12** (personas cannot accumulate anything across runs, still open) from "give
+a persona a memory directory" to "let the agent decide what's worth keeping and log why." P67.12's
+per-persona memory-directory design (user/project/local scopes, the path-containment and
+filename-sanitization constraints it already names) is the storage substrate this would write
+through; the refinement half — an agent-initiated, turn-boundary-gated, evidence-logged write path —
+is the new piece. The turn-boundary gating is load-bearing in their design specifically to avoid a
+mid-turn self-edit destabilizing the run in progress, the same reason `internal/compaction` and
+`internal/checkpoint` already avoid mutating state mid-round.
+
+**Promote when:** P67.12 promotes — a persona in repeated use whose operator is re-explaining the
+same context every run. This is the mechanized version of that same trigger.
+
+Priority: Tier 4 — no fired trigger, L, sequenced behind P67.12 — do not build the refinement pass
+before the memory substrate it would write to exists.
+
+### P85.6 — Non-blocking recursive sub-agent spawn as a language-level call (design reading, not recommended)
+
+**Filed 2026-09-10**, same comparative reading. `prime-agent-runtime`'s `rlm()` is a callable inside
+the agent's persistent Python REPL: `await rlm("sub-task")` spawns a full child agent session and
+returns an admission handle immediately; the child reports back only via explicit message-passing
+(`agent_message.send`), never a return value the parent blocks on.
+
+`internal/swarm`'s sub-agents are dispatched as ordinary tool calls the engine's parallel-round
+machinery already governs — `execLock`, `RoundResultCap`, the per-round path-dependency graph, the
+stall heartbeat (all documented in this file's own "Invariants worth knowing" section). Moving to a
+non-blocking spawn-and-message-later model means either rebuilding those same guarantees on a second,
+out-of-round channel, or losing them for anything spawned that way — the invariants list is long
+precisely because each entry closed a real defect (P8.6, P67.4, P65.1, CRIT-4). This is recorded as a
+design comparison, not a recommendation: it is architecturally a different paradigm from Aegis's
+per-round tool dispatch, not a bolt-on.
+
+Priority: Tier 4 — no fired trigger, XL, **not recommended without a concrete driving need** (the
+same explicit caveat P67.13 used for the speculation half of the overlay idea) — `internal/swarm`'s
+current blocking model has no reported problem this would solve.
+
+### P85.7 — Agent-owned internal heartbeat schedule with steer-vs-follow-up delivery, distinct from cron
+
+**Filed 2026-09-10**, same comparative reading. Their `rlm-heartbeat` skill lets the agent schedule
+its own recurring internal prompt (default 5 min) with two explicit delivery modes: `steer`
+(interrupt the current turn) or `follow_up` (queue until idle) — separate from any user-facing
+schedule.
+
+`internal/cron` already runs scheduled jobs, and `internal/heartbeat` already exists as the
+stall-detection beat chain this file documents ("a sub-agent's watch must never shadow its parent's")
+— but that is liveness plumbing, not an agent-authored recurring self-prompt. The distinguishing
+feature worth naming is the explicit steer-vs-follow-up choice per schedule, which `internal/cron`'s
+job model doesn't have: a cron job runs as a new session/turn, it doesn't choose to interrupt a live
+one.
+
+**Promote when:** a drive or long-running session needs to check on itself periodically without
+waiting for the next user turn — the shape of need `internal/drive`'s phased builds already partly
+cover for a fixed multi-phase build, but not for an open-ended session.
+
+Priority: Tier 4 — no fired trigger, M, narrow scope — the closest existing analog (`internal/drive`
+phases) already covers the scheduled-build case.
+
+### P85.8 — Persistent cross-turn goal object with token-budget accounting (adjacent to P67.11)
+
+**Filed 2026-09-10**, same comparative reading. Their `goal` skill holds one persistent objective plus
+a token budget that the harness re-prompts the agent to pursue across turns until it explicitly calls
+`goal.complete()`.
+
+This is close kin to **P67.11** (every Aegis budget is a ceiling that aborts; nothing means "keep
+going until this is genuinely done or returns diminish") — P67.11 already proposes a
+diminishing-returns continuation nudge and names `internal/drive` as its natural home. A goal object
+is a lighter-weight version of the same idea for a plain session rather than a phased drive: state the
+objective once, keep a running budget, let completion be an explicit model action rather than an
+external stop condition.
+
+Priority: Tier 4 — no fired trigger, S/M — not a separate design track from P67.11, same underlying
+gap with a smaller surface.
 
 ---
 
