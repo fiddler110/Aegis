@@ -1,6 +1,6 @@
 module github.com/fiddler110/aegis
 
-go 1.26
+go 1.26.0
 
 toolchain go1.26.6
 
@@ -26,7 +26,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/net v0.58.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.57.0
 )
