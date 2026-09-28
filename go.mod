@@ -14,7 +14,7 @@ require (
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/ultraviolet v0.0.0-20260811164956-006e29f97886
 	github.com/charmbracelet/x/ansi v0.11.8
-	github.com/charmbracelet/x/exp/charmtone v0.0.0-20260803091719-3755ebad01b1
+	github.com/charmbracelet/x/exp/charmtone v0.1.0
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/google/uuid v1.6.0
 	github.com/knadh/koanf/parsers/yaml v1.1.1
