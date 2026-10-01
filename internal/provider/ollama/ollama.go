@@ -754,6 +754,11 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		Provider:        "ollama",
 		IdleTimeout:     a.resolveStreamIdleTimeout(),
 		MissingTerminal: missingCompletionChunk,
+		// P85.2: the same value doChat resolves and sends as options.num_ctx —
+		// resolveNumCtx is a cheap, side-effect-free mutex read, so recomputing
+		// it here rather than threading doChat's result back out is the
+		// simpler wiring.
+		NumCtx: a.resolveNumCtx(req.NumCtx),
 	}, newChunkDecoder())
 	return out, nil
 }

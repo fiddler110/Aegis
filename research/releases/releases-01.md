@@ -8,7 +8,37 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated: 2026-09-04 — P81.28 closed in full.** The one remediation bullet left after
+**Last updated: 2026-09-13 — P68.4 shipped in full; P65.4 found almost entirely already shipped and
+corrected; P68.5/P68.6 closed as not worth pursuing on this hardware.** Full record:
+[2026-09-13 record](#2026-09-13-p684-shipped-p654-corrected-p685p686-closed).
+
+**2026-09-10 — P85.4 shipped in full, and P85.8 folded into P67.11.** A read-only tree
+view over every session's `/fork` ancestry: `/tree` nests each fork under the session it branched
+from, with fold/unfold and an all-sessions/this-lineage filter, instead of Ctrl+Y's flat list. Needed
+one small new piece of storage — a `parent_id` column recording which session a fork branched from.
+P85.8 (a persistent cross-turn goal object) was filed "adjacent to P67.11" and is folded into that
+entry rather than kept separate. Full record:
+[P85.4 shipped, 2026-09-10](#p854-shipped-2026-09-10).
+
+**2026-09-10 — P85.3 shipped in full.** Browse and reorder for the TQ8 queued-message
+list (`internal/tui`), the smallest item from the same P85 batch: `Alt+↑`/`Alt+↓` browse the queue,
+`Ctrl+Alt+↑`/`Ctrl+Alt+↓` swap the selected entry with its neighbor before it auto-sends. Full record:
+[P85.3 shipped, 2026-09-10](#p853-shipped-2026-09-10).
+
+**2026-09-10 — P85.2 shipped in full.** A usage-vs-window fallback for silent context
+truncation, from the same P85 batch as P85.1 below: `IsContextOverflowError`/`classifyStreamMessage`
+only ever matched an error message's text, so a backend that accepted an oversized prompt and answered
+as if nothing were wrong went undetected. Implemented once in `internal/provider/sse.Run`, shared by
+every adapter, rather than duplicated per adapter. Full record:
+[P85.2 shipped, 2026-09-10](#p852-shipped-2026-09-10).
+
+**2026-09-10 — P85.1 shipped in full.** The standout item from the P85 batch (filed the
+same day, from a comparative reading of PrimeIntellect-ai/prime-agent): a declarative `provider.compat`
+config block for the `openai` adapter, closing the "needs a new Go option and a rebuilt binary" gap the
+roadmap entry named for a divergent OpenAI-compatible local or third-party server. Full record:
+[P85.1 shipped, 2026-09-10](#p851-shipped-2026-09-10).
+
+**2026-09-04 — P81.28 closed in full.** The one remediation bullet left after
 2026-09-03's provenance-labeling half — never promote a prose-parsed tool call that reproduces a span
 of untrusted content already in the turn — turned out to need no new taint mechanism: P81.1's
 `taint_after_untrusted_content` rule had already shipped in full on 2026-08-31, and this item's own
@@ -59,6 +89,245 @@ resetting it; and three of the batch's findings were **refuted against current c
 implemented.
 
 ---
+
+### 2026-09-13: P68.4 shipped, P65.4 corrected, P68.5/P68.6 closed
+
+Taken on direct request after a roadmap validation pass found the installed model set had drifted out
+from under three Verification items (`gemma4:12b`, `qwen2.5-coder:1.5b` and every `qwen3:14b` build
+were gone; only `aegis-qwen35-9b`, two `phi4` reasoning builds, `llama3.2:3b` and `nomic-embed-text`
+remained) and one Tier-4 item's write-up had drifted from the code by an unusually large margin.
+
+**P68.4 shipped in full: the security-triage rubric is harder.** The fixture
+(`internal/eval/triagefixture.go`) gained a sixth planted issue, `dispatch.py`'s `ssrf`: a callback
+URL is read straight out of the job dict `jobs.py`'s `run_next` builds via `pickle.loads` — itself fed
+by `wire.py`'s untrusted network frame — and passed unchecked to `urllib.request.urlopen`. Finding it
+needs a three-file trace (`wire.py` → `jobs.py` → `dispatch.py`), one hop past `unsafe_deserialization`,
+the old hardest criterion. The rubric (`internal/eval/triagetask.go`) gained two new criteria:
+`severity_accuracy` (2 points, scored only against true positives against a fixed answer key —
+`triageSeverity`, two `medium` and four `high` on purpose so "label everything high" is
+distinguishable from actually grading each issue) and `no_scope_creep` (1 point, penalizing any edit
+to a non-fix, non-protected `.py` file — the entry's own prompt already says "fix those two, and only
+those two"). `readFindings` changed shape from `map[finding]bool` to `map[finding]string` to carry the
+reported severity through to the new criterion. Rubric is now worth 16 points (was 12); `PassMark`
+raised to 12, keeping the same 75% bar. New tests `TestTriageSeverityScoring` and
+`TestTriageScopeCreepPenalizesUnrelatedEdits`; the existing suite was updated for the new totals.
+`go test ./internal/eval/...` and `go build ./...` both green. **Not yet live-run** — the item stays
+open in Verification until a sitting against `aegis-qwen35-9b:32k` (and, later, a stronger model) shows
+whether the harder rubric actually gives a strong model room below the ceiling.
+
+**P65.4 investigated for implementation and found almost entirely already shipped, unrecorded.** Before
+writing anything, a check of what the entry named as its two "cheap slices" found both already done:
+`internal/opregister` (added 2026-08-21, commit `e13bd13`) makes P65.1's `startedTools` record durable
+across a daemon restart, and `tool.ReplayClass`/`ReplayClassifier`/`EffectiveReplay` (same commit,
+extended 2026-09-02 in P67.10's tool-interface sweep) implements exactly the per-tool
+`replay: "safe"|"never"` declaration the entry called for — wired into
+`repairOrphanedToolUses` (`internal/engine/toolexec.go`), which swaps the universal "verify before
+assuming" synthetic-result wording for "safe to just retry" when the interrupted tool declares
+`ReplaySafe` (every read-only builtin: `read_file`, `grep`, `glob`, `ls`, the LSP tools, `repomap`,
+`task_list`/`task_get`, `web_fetch`/`web_search`, project knowledge). `opregister_test.go` and
+`TestRepairOrphanUsesSafeWordingForReplaySafeTool` (`internal/engine/orphanrepair_test.go`, citing
+P65.4 by name) both already covered it. Nothing was built; the roadmap entry was rewritten to describe
+the actual remaining scope (full-turn resume outside the drive, a mutable current-state register) —
+the large, explicitly-parked half the entry has always argued against building without a real loss
+report, which still has none.
+
+**P68.5 and P68.6 closed rather than pursued.** Both needed a model no longer installed
+(`qwen2.5-coder:1.5b`, `qwen3:14b`); asked whether the installed Phi models
+(`aegis-phi4-reasoning:16k`, `phi4-mini-reasoning:3.8b`) could stand in instead of a re-pull, direct
+inspection of their shared Ollama chat template (blob `f4dd2368e6c3`) found it renders `{{ .Content }}`
+per message and never references `.ToolCalls` anywhere — every tool call an assistant turn makes is
+absent from every later turn's rendered history, unconditionally. That is the same defect family
+`internal/ollamainfo.TemplateDropsToolCalls` looks for (P68.2), but more severe and not the specific
+case either item needed re-measured: P68.5 needed the *same* confound its original measurement ran
+through, and P68.6 needed the specific qwen3:14b behavior under investigation, not a different template
+bug on a different model family. Neither substitution would have answered the question filed. Closed
+rather than kept open with no path to a re-run the user was willing to take.
+
+---
+
+### P85.4 shipped, 2026-09-10
+
+Filed and shipped the same day as the rest of the P85 batch, at the user's request ahead of any fired
+trigger. The roadmap entry named the gap: `internal/tui/backtrackpicker.go`'s Esc-Esc backtrack dialog
+is a flat, reverse-chronological list of prior user turns, and `/fork` had no visual tree over the
+sessions it produced — a chain of forks read as unrelated entries in Ctrl+Y's session switcher, with
+no way to see which session branched from which.
+
+**What changed.** A read-only tree view, deliberately scoped as "a smaller, non-storage-changing slice"
+of the idea the entry itself named against **P65.5**'s still-unfiled "lanes" concept — this adds one
+new edge of metadata, not the lanes design. `internal/session/session.go` gained a `ParentID` field on
+`Session`/`Meta` and a `parent_id` column (the usual idempotent `ALTER TABLE` migration), plus a
+`SetParent` method mirroring `SetModel`'s existing "second write, not a `Create` param" pattern since
+`Create` predates this and only one caller needs it. `internal/server/sessions.go`'s `handleFork` calls
+it right after creating the forked session, recording which session it branched from — the one edge
+that made a tree possible at all; nothing tracked it before. `api.SessionMeta` and `toMeta` carry the
+field through to the client.
+
+A new `/tree` slash command (`internal/tui/slash_session.go`'s `cmdTree`) fetches every session
+synchronously — the same "fully-loaded result, no loading-dialog phase" shape `/model`'s picker
+already uses, since the TUI needs the whole list in hand before it can compute the tree at all.
+`internal/tui/sessiontree.go` is the tree itself: `buildSessionForest` nests sessions under their
+`ParentID` (an orphaned fork whose parent isn't in the list surfaces as its own root rather than
+vanishing), `flattenSessionTree` walks it depth-first into tree-connector-prefixed rows (`├─`/`└─`/`│`)
+with a `▾`/`▸` fold marker on any node with children, and `lineageIDs` computes the **this lineage**
+filter — walk up to the current session's ultimate ancestor, then every ID reachable back down from
+there — for `treeFilterMode`'s second setting. The generic `listDialog` (already shared by every other
+picker) renders the flattened rows unmodified; a new `sessionTreeState` held alongside it in
+`model.overlays` (not inside `listDialog` itself, which has nowhere to keep per-node fold state or the
+full fetched list a re-flatten needs) carries the fold set and filter mode. `Space` toggles fold on the
+selected node and `Tab` cycles the filter, both intercepted in `update_dialog.go` ahead of the generic
+list key handling and gated on the list not actively filtering (bubbles' own `Filter` binding is `/`
+alone, so this can never collide with typed filter text). `Enter` switches session exactly like Ctrl+Y's
+picker already does — same `switchSessionCmd`, so nothing about session-switching itself is new.
+
+**What was deliberately left out of scope.** No editable branch labels (Aegis has no session-rename
+primitive to hang that off yet — a future item, not this one) and no per-node token-usage bars (the
+comparison source's version is for sub-agent trees, which is a different tree over different data than
+session forks). No lanes/shared-tree-cursor model — that overlap is P65.5's to design, once, and this
+entry explicitly says not to design it twice.
+
+**Tested:** new `internal/tui/sessiontree_test.go` — `TestBuildSessionForestNestsForksUnderParent`,
+`_OrphanedParentBecomesRoot` and `_RootsMostRecentlyUpdatedFirst` cover the forest construction;
+`TestLineageIDsIncludesAncestorAndDescendants` and `_UnknownCurrentReturnsNil` cover the lineage filter
+and its documented fallback; `TestFlattenSessionTreeConnectorsAndFold` covers row order, connector
+prefixes, and that collapsing a node hides its subtree; `TestSessionTreeSlashOpensDialog`,
+`_FoldToggleHidesChildren`, `_FilterCycleNarrowsToLineage` and `_SelectSwitchesSessionAndClearsState`
+drive the dialog end-to-end through the model. `docs/tui-guide.md` and `docs/sessions.md` gained the
+`/tree` command. `go build ./...`, `go vet ./...` and `go test ./...` (the full suite, including
+`internal/session` and `internal/server`) are green.
+
+### P85.3 shipped, 2026-09-10
+
+Filed and shipped the same day as P85.1 and P85.2 below, at the user's request ahead of any fired
+trigger — the third and smallest item worked from the P85 batch (a comparative reading of
+PrimeIntellect-ai/prime-agent). The roadmap entry named the gap: `alt+enter` steers a running turn, and
+Enter-while-streaming (TQ8, `internal/tui/tui_stream.go`) already queues follow-up drafts and
+auto-sends them one at a time as each run closes, but nothing let an operator see, browse, or reorder
+more than one queued draft before it went out.
+
+**What changed.** No new storage — the existing `composer.queued []string` is the whole list; this
+surfaces it rather than duplicating it. A new `composer.queuedSel int` cursor (`internal/tui/tui.go`)
+tracks the browse selection, `-1` when nothing is selected. Four new bindings
+(`internal/tui/keymap.go`): `Alt+↑`/`Alt+↓` move the selection — the first press enters from the
+direction pressed, `Alt+↑` landing on the last (bottom-most) entry and `Alt+↓` on the first, mirroring
+`HistUp`/`HistDown`'s own first-press behavior — and `Ctrl+Alt+↑`/`Ctrl+Alt+↓` swap the selected entry
+with its neighbor, with the selection following the swap so repeated presses walk an entry to either
+end of the queue. Handled in `internal/tui/update_key.go` as a guarded block ahead of the main key
+switch, a no-op whenever the queue is empty so the keys fall through untouched. The render side
+(`internal/tui/tui.go`'s queued-block loop) shows the selected entry's full text with a `▸▸` marker and
+a `[i/n]` position, where every other queued entry still gets the truncated one-line `▸` summary it
+always had.
+
+**What was deliberately left out of scope.** No in-place editing of a queued draft — browsing shows the
+full text and reordering changes send order, but pulling an entry back into the composer for editing
+was not part of the roadmap entry and was left for a future item if ever asked for. The selection is
+reset to `-1` at every point the queue's shape changes out from under it: the front entry draining into
+the next auto-sent turn (`update_stream.go`'s `updateStreamClosed`), and the queue being discarded
+outright by an explicit interrupt (`Esc`/`Ctrl+C`) or a stream error — a stale index pointing at a
+departed or renumbered entry would be more confusing than no selection at all.
+
+**Tested:** new `internal/tui/queuebrowse_test.go` —
+`TestQueueBrowseEntersFromPressedDirection`/`_ClampsAtEnds` cover the browse cursor's entry point and
+boundary behavior; `TestQueueMoveReordersSelection` walks an entry from the back of a three-item queue
+to the front and back, asserting both the queue order and the selection follow each swap;
+`TestQueueMoveRequiresSelection` checks the reorder keys are no-ops before anything is selected;
+`TestQueueSelectionResetsOnDrainAndDiscard` covers both reset paths. `docs/tui-guide.md`'s keyboard
+table and "Message queueing" section gained the new bindings. `go build ./...`, `go vet ./...` and
+`go test ./...` (the full suite) are green.
+
+### P85.2 shipped, 2026-09-10
+
+Filed and shipped the same day as P85.1 below, immediately after it, at the user's request — the
+second item worked from the P85 batch (a comparative reading of PrimeIntellect-ai/prime-agent). The
+roadmap entry named the gap precisely: `IsContextOverflowError`/`classifyStreamMessage`
+(`internal/provider/errors.go`) match only string signatures — `contextOverflowSignals` — against an
+error message, so a backend that accepts an oversized prompt and returns success with **no error text
+at all**, silently truncating instead of failing, was invisible to it. The comparison source names two
+concrete shapes: z.ai accepts overflow silently and answers normally; Xiaomi MiMo truncates the prompt
+to fill the window, then reports `finish_reason: "length"` with zero output tokens.
+
+**What changed.** Rather than adding the check to each adapter's own `Stream` (openai, ollama, and in
+principle anthropic each build their own wire-format decoder), it went into
+`internal/provider/sse.Run` — the one place already shared by all three, which already receives the
+decoder's final `(StopReason, *Usage)` pair right before constructing the terminal `EventDone`. A new
+`Options.NumCtx` field carries the request's known serving window (0 disables the check entirely — no
+honest number to compare against, which is the correct behavior for Anthropic today); `openai.go` and
+`ollama.go` were updated to populate it from `req.NumCtx`/`a.resolveNumCtx(req.NumCtx)` respectively.
+`silentTruncationOverflow` (`internal/provider/sse/run.go`) is the arithmetic itself: `usage.InputTokens
++ usage.CacheReadTokens >= numCtx`, gated on `!usage.IsEstimated` (a character-count guess proves
+nothing about what the backend actually consumed) and narrowed to exactly the two documented shapes —
+`StopEndTurn`, or `StopMaxTokens` with `OutputTokens == 0`. A `StopToolUse` or a genuine `StopMaxTokens`
+with real output is left alone deliberately: those are ordinary completions that happen to have used a
+lot of context, and — since the engine's own compaction trigger should already keep a well-behaved run
+well under its window — reaching the ceiling on the prompt alone is a strong enough signal on its own
+that no third condition was needed to avoid false positives. A hit is reported as the same
+`provider.NewContextTruncationError` a message-based detection would have produced, so every existing
+consumer of `IsContextOverflowError` — the phased drive's resumable phase reset above all — handles it
+identically to a backend that failed honestly.
+
+**What was deliberately not touched.** `contextOverflowSignals`/`classifyStreamMessage` gained no new
+entries — this is a second, independent detection path for the case where there is no message to
+classify, not a change to the existing one. The anthropic adapter passes no `NumCtx` today, so the
+fallback is a no-op there; nothing about Anthropic's overflow behavior needed this (a cloud endpoint
+with a fixed, known window and a real 400 on an actual overflow), and adding one would have meant
+inventing a number to compare against that the API doesn't expose.
+
+**Tested:** `internal/provider/sse/run_test.go` — `TestRun_SilentOverflowEndTurn` and
+`_SilentOverflowMaxTokensZeroOutput` cover the two documented failure shapes end-to-end through `Run`,
+asserting the final event is `EventError` classified by `provider.IsContextOverflowError`;
+`TestRun_NoOverflowFallbackWithoutAKnownWindow` and `_OnEstimatedUsage` cover the two conditions that
+must disable it even when usage would otherwise look suspicious; `TestRun_NoOverflowFallbackOnToolUseOrRealOutput`
+covers both stop reasons the check deliberately leaves alone. `go build ./...`, `go vet ./...` and
+`go test ./...` (the full suite) are green.
+
+### P85.1 shipped, 2026-09-10
+
+Filed and shipped the same day, at the user's request, as the first item worked from the P85 batch
+(a comparative reading of PrimeIntellect-ai/prime-agent). The roadmap entry named the gap precisely:
+`internal/provider/openai/openai.go` was one hardcoded Go adapter — `WithBaseURL`/`WithReasoningEffort`/
+`WithThink` fixed constructor options, not a per-endpoint quirk table — so a local or third-party
+OpenAI-compatible server whose wire format diverges needed a new Go option and a rebuilt binary.
+
+**Scope.** Three quirks, each shipped complete rather than as a stub, chosen for being cheap, low-risk,
+and fully wireable without new plumbing: `max_tokens_field` (override which wire field carries the
+completion-length cap, bypassing `isReasoningModel`'s o1/o3 name-based heuristic — wrong for a backend
+whose reasoning models aren't named that way, or a gateway that renames them), `requires_tool_result_name`
+(send the calling tool's name on a tool-role message; not part of the upstream OpenAI schema but some
+servers reject a result missing it), and `supports_strict_mode` (`"strict": true` on every function tool
+definition). `requires_assistant_after_tool_result` and `thinking_format`, both present in prime-agent's
+`compat` block, were deliberately left out: the former needed message-sequence surgery with no concrete
+reported failure behind it, and the latter is already handled — the decoder already unions
+`thinking`/`reasoning`/`reasoning_content` deltas across backends — so declaring it would have been a
+no-op knob.
+
+**What changed.** `config.ProviderCompat` (`internal/config/config_provider.go`) is a flat struct — not a
+per-model map like `ModelCapabilities`/`ModelHarness`, since this is a property of the *backend endpoint*,
+not the model — with a field on `ProviderConfig` (the primary) and on `ProviderFallbackConfig` (each
+fallback's own override, never inherited from the primary, mirroring `ContextWindow`'s existing
+per-target rule). `providerfactory.Build` validates `max_tokens_field` up front (`validateCompat`) so a
+typo fails at startup rather than silently leaving the heuristic in charge, then wires the three
+`openai.With*` options only for the `"openai"` adapter case — `ollama`/`anthropic` speak their own wire
+formats. In the adapter itself: `wireMessage.Name` and `wireTool.Function.Strict` are new `omitempty`
+wire fields; `translate` gained an `includeToolName bool` parameter and resolves each tool result's name
+from the `ToolUseBlock` that necessarily preceded it (a result can't exist without its call already having
+streamed); `useMaxCompletionTokens` replaces the inline `isReasoningModel` check in `Stream`, checking the
+override before falling back to the same heuristic as before.
+
+**Config surface.** `provider.compat.{max_tokens_field,requires_tool_result_name,supports_strict_mode}` and
+`provider.fallback[].compat.*`, documented in `docs/configuration.md`. Left unlisted in
+`internal/config/freeze.go`'s per-key overrides, so it inherits `provider`'s `frozenUntilTrusted` policy —
+the same treatment `model_harness`/`tool_call_shim` already get and a deliberately more conservative
+default than the explicitly-allowlisted knobs (`reasoning_effort`, `model_capabilities`), since this is new
+surface with no operational track record yet.
+
+**Tested:** `internal/provider/openai/openai_test.go` (`TestMaxTokensFieldOverride` — both override
+directions against a real heuristic case each; `TestRequiresToolResultNameSendsToolName` — on and off;
+`TestStrictModeSetsStrictOnToolDefinitions` — marshaled JSON has `strict:true` when on, no `strict` key at
+all when off). `internal/providerfactory/factory_test.go`
+(`TestBuild_RejectsInvalidCompatMaxTokensField`, `_RejectsInvalidFallbackCompatMaxTokensField`).
+`TestEveryConfigFieldDeclaresATrustPolicy` (`internal/config`) confirms the new field is classified rather
+than silently unclassified. `go build ./...`, `go vet ./...` and `go test ./...` (the full suite) are
+green.
 
 ### P66.17/LLM-11 closed, 2026-09-04
 

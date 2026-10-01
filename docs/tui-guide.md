@@ -114,6 +114,8 @@ A streaming run reports its phase: `◐ waiting for first token` until the model
 | `Ctrl+C` | Cancel the current run, or quit if nothing is running |
 | `Ctrl+O` | Expand/collapse a collapsed thinking block |
 | `Ctrl+↑` | Expand/collapse the most recently finished tool result or read/search group, independent of `/tools full`/`/tools compact` |
+| `Alt+↑` / `Alt+↓` | Browse queued messages when more than one is waiting to send |
+| `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | Move the browse-selected queued message earlier/later before it sends |
 | Click | Click the small ▸/▾ icon in front of a finished tool result or read/search group's own line to expand/collapse just that one, in place — clicking elsewhere on the card still selects text as usual |
 | `/` | Open slash-command completion popup |
 | `@` | Open workspace file/reference completion |
@@ -174,6 +176,10 @@ Pasting or typing a bare image file path (PNG/JPEG/GIF/WebP, quoted or unquoted)
 
 Typing while a run is streaming and pressing `Enter` queues the draft rather than sending it immediately — the composer's border dims and its placeholder reads `Queue the next message…` to signal it. Queued messages show as a dimmed `⏳ queued ▸` block and are sent automatically, one per completed run, once the stream closes. An explicit interrupt (`Esc` or `Ctrl+C`) or a stream error discards the queue instead of auto-sending it — the assumption is that if you stopped the run, you don't want the next queued message firing on its own.
 
+### Browsing and reordering the queue
+
+With more than one message queued, `Alt+↑`/`Alt+↓` browse the list: the first press enters from the direction pressed (`Alt+↑` selects the last entry, `Alt+↓` the first), and the selected entry renders its full text (`▸▸`) instead of the truncated one-line summary the rest of the queue gets. `Ctrl+Alt+↑`/`Ctrl+Alt+↓` swap the selected entry with its neighbor — repeated presses walk it to the front or back of the queue — and the selection follows the entry it moved. The selection resets once the queue changes shape: a message auto-sending, or an interrupt/error discarding the rest.
+
 ### Steering a running turn
 
 `Alt+Enter` while a run is streaming *steers*: the draft is injected into the turn already in flight, and the model picks it up at the next tool round rather than after the run finishes. Queueing is on the reflex key (`Enter`) and steering on the deliberate one because steering changes a run that's already underway, while a queued message can still be discarded by interrupting.
@@ -199,6 +205,7 @@ Type `/` to open the command completion popup and browse available commands.
 | `/rewind <n> [code\|conversation\|both]` | Restore checkpoint n |
 | `/rollback [n]` | Restore checkpoint n and run `git reset --hard` |
 | `/fork [n]` | Branch the conversation into a brand-new session — as-is at its current end (no args), or truncated to checkpoint n, ready for a fresh/edited message; the source session is never modified |
+| `/tree` | Read-only foldable tree over every session's `/fork` ancestry — `Space` fold/unfold, `Tab` cycle all-sessions/this-lineage, `Enter` switch |
 | `/compact` | Force context compaction now, ahead of a heavy stretch, instead of waiting for the automatic budget-driven trigger |
 | `/timeline` | Jump to a past turn in the conversation |
 | `/detach [on\|off]` | Run session in background (survives TUI close) |

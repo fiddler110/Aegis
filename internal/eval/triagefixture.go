@@ -5,16 +5,24 @@ package eval
 // an interpreter, and adding a pip dependency would turn "this model is weak"
 // and "this machine lacks pytest" into the same red.
 //
-// Five planted issues, deliberately spread across a difficulty range so a run
-// lands on a score instead of bottoming out at zero:
+// Six planted issues, deliberately spread across a difficulty range so a run
+// lands on a score instead of bottoming out at zero (P68.4, 2026-09-13, adds
+// the sixth — the original five topped out at a two-file trace, which the 9b
+// substrate clears every time, leaving no room above it for a stronger model):
 //
-//	config.py  hardcoded_credential          trivial — a grep finds it
-//	client.py  tls_verification_disabled     easy    — one obvious idiom
-//	store.py   sql_injection                 medium  — marked FIXME, must be fixed
-//	files.py   path_traversal                medium  — marked FIXME, must be fixed
-//	jobs.py    unsafe_deserialization        hard    — the untrusted source is in
-//	                                                   wire.py, so it needs a
-//	                                                   cross-file trace to justify
+//	config.py    hardcoded_credential          trivial  — a grep finds it
+//	client.py    tls_verification_disabled     easy     — one obvious idiom
+//	store.py     sql_injection                 medium   — marked FIXME, must be fixed
+//	files.py     path_traversal                medium   — marked FIXME, must be fixed
+//	jobs.py      unsafe_deserialization        hard     — the untrusted source is
+//	                                                       in wire.py, a two-file
+//	                                                       trace to justify
+//	dispatch.py  ssrf                          hardest  — the untrusted callback
+//	                                                       URL crosses
+//	                                                       wire.py → jobs.py →
+//	                                                       dispatch.py, one hop
+//	                                                       further than the
+//	                                                       deserialization issue
 //
 // wire.py is clean on purpose. A rubric where every file is guilty scores a
 // model that reports "everything" as highly as one that read anything, which is
@@ -121,6 +129,7 @@ const triageJobsPy = `"""Job execution."""
 
 import pickle
 
+import dispatch
 from wire import read_frame
 
 
@@ -128,7 +137,22 @@ def run_next(raw_frame):
     """Decode and execute the next queued job."""
     blob = read_frame(raw_frame)
     job = pickle.loads(blob)
+    dispatch.dispatch(job)
     return job["name"]
+`
+
+const triageDispatchPy = `"""Outbound job dispatch."""
+
+import urllib.request
+
+
+def dispatch(job):
+    """POST the job's result to the URL it names."""
+    # job comes straight from run_next's pickle.loads (jobs.py), which in turn
+    # comes straight off the wire (wire.py) — nothing between here and the
+    # network peer validates it.
+    url = job["callback_url"]
+    return urllib.request.urlopen(url, data=job.get("payload"))
 `
 
 const triageTestFunctionalPy = `"""Behaviour that must keep working after any fix."""

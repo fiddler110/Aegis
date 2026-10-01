@@ -299,6 +299,51 @@ type ProviderConfig struct {
 	// "Authorization" key — an explicit header always wins. "" (default)
 	// adds nothing, matching today's behavior exactly.
 	LocalAuthToken string `koanf:"local_auth_token"`
+	// Compat declares OpenAI-compat wire-format quirks for the primary
+	// backend (P85.1). Only the "openai" adapter reads it — the native
+	// ollama and anthropic adapters speak their own wire formats and have no
+	// use for it. See ProviderCompat.
+	Compat ProviderCompat `koanf:"compat"`
+}
+
+// ProviderCompat declares OpenAI-compatible-endpoint wire-format quirks a
+// specific backend needs, so a divergent local or third-party server (vLLM,
+// SGLang, LM Studio, a corporate gateway) is a config change instead of a new
+// Go adapter option and a rebuilt binary (P85.1). Every field defaults to the
+// adapter's existing behavior; naming a backend here only ever adds a quirk,
+// never removes one that was already correct.
+type ProviderCompat struct {
+	// MaxTokensField forces which wire field carries the completion-length
+	// cap: "max_tokens" or "max_completion_tokens". "" (default) keeps the
+	// adapter's existing name-based heuristic — o1/o3-prefixed models (bare
+	// or behind a vendor prefix like "openai/o1-mini") get
+	// max_completion_tokens, everything else gets max_tokens — which is wrong
+	// for a backend whose reasoning models aren't named that way, or a
+	// gateway that renames o1/o3 behind a prefix the heuristic doesn't
+	// recognize.
+	MaxTokensField string `koanf:"max_tokens_field"`
+	// RequiresToolResultName sends the calling tool's name alongside a
+	// tool-role message's tool_call_id. Not part of the upstream OpenAI
+	// chat-completions schema, but some OpenAI-compatible servers reject a
+	// tool result that omits it.
+	RequiresToolResultName bool `koanf:"requires_tool_result_name"`
+	// SupportsStrictMode sets "strict": true on every function tool
+	// definition sent to the backend, requesting OpenAI's schema-constrained
+	// strict function-calling mode on servers that support it.
+	SupportsStrictMode bool `koanf:"supports_strict_mode"`
+}
+
+// MaxTokensFieldValid reports whether ProviderCompat.MaxTokensField holds a
+// value the adapter recognizes ("", "max_tokens", "max_completion_tokens").
+// Callers surface a false as a config error rather than silently falling back
+// to the name-based heuristic, since a typo here would otherwise look like a
+// working override.
+func (c ProviderCompat) MaxTokensFieldValid() bool {
+	switch c.MaxTokensField {
+	case "", "max_tokens", "max_completion_tokens":
+		return true
+	}
+	return false
 }
 
 // HeadersFor returns the HTTP headers to send to the (provider name, base
@@ -534,4 +579,9 @@ type ProviderFallbackConfig struct {
 	// window was never measured, rather than a number borrowed from a
 	// different model.
 	ContextWindow int `koanf:"context_window"`
+	// Compat overrides ProviderConfig.Compat for this fallback target only
+	// (P85.1), the same per-target-not-inherited rule ContextWindow follows —
+	// a fallback pointed at a different OpenAI-compatible server has its own
+	// wire-format quirks, not the primary's.
+	Compat ProviderCompat `koanf:"compat"`
 }

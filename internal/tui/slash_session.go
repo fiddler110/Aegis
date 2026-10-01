@@ -189,6 +189,26 @@ func (d *SlashDispatcher) cmdFork(args []string) SlashResult {
 	}
 }
 
+// cmdTree fetches every session on the daemon for the P85.4 fork-lineage tree
+// picker. Unlike cmdPersona's picker (which opens ahead of its data, P33.13),
+// this one fetches synchronously and hands back a fully-loaded result — the
+// same shape cmdModel already uses for the model picker — since the TUI still
+// needs the whole list in hand before it can compute the tree/fold state, so
+// there is nothing useful for a loading dialog to show in between.
+func (d *SlashDispatcher) cmdTree(_ []string) SlashResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sessions, err := d.client.ListSessions(ctx)
+	if err != nil {
+		return SlashResult{Output: fmt.Sprintf("Failed to list sessions: %v", err), IsError: true}
+	}
+	if len(sessions) == 0 {
+		return SlashResult{Output: "No sessions yet."}
+	}
+	return SlashResult{SessionTree: sessions}
+}
+
 // cmdSide runs a quick, unrelated question through a brand-new session
 // (P22.5) — a scratch pad, not a full session switch. Unlike /fork (which
 // branches the current conversation and switches the TUI into it), /side

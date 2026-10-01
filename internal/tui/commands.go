@@ -243,6 +243,12 @@ func commandDefs() []commandDef {
 			handler:      (*SlashDispatcher).cmdFork,
 		},
 		{
+			name:         "tree",
+			shortDesc:    "Browse the fork lineage of every session as a foldable tree",
+			detailedHelp: "/tree\n  Opens a read-only tree over every session's /fork ancestry: each fork nests under the session it branched from instead of the flat, unrelated list Ctrl+Y's switcher shows.\n  space: fold/unfold the node under the cursor.\n  tab: cycle between 'all sessions' and 'this lineage only' (just the current session's own ancestors and forks).\n  enter: switch to the selected session, same as picking it from Ctrl+Y.\n  The current session is marked (current) in the list.",
+			handler:      (*SlashDispatcher).cmdTree,
+		},
+		{
 			name: "side", argHint: "<question>", needsArgs: true,
 			shortDesc:    "Ask a quick, unrelated question in a fresh throwaway session",
 			detailedHelp: "/side <question>\n  Runs the question through a brand-new, isolated session — no shared history with the current conversation — and prints the answer inline once it comes back.\n  The main session's messages, token/cost accounting, and on-screen view are completely untouched; nothing here counts against this conversation's context.\n  Always runs read-only (plan mode) with the default persona, regardless of the current session's mode/persona/model.\n  The side session is kept (not deleted) so the Q&A isn't lost — titled \"[side] ...\" so it's easy to spot and prune later via /session list or `aegis sessions delete`.\n  Blocks while the answer is generated, same as /debate.",

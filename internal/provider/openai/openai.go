@@ -48,6 +48,24 @@ type Adapter struct {
 	// caller that has positively identified the backend: see
 	// clampMaxTokens for why nothing weaker is allowed to turn it on.
 	sharedContextWindow bool
+
+	// maxTokensField (P85.1) overrides isReasoningModel's name-based guess at
+	// which wire field carries the completion-length cap. "" (default) keeps
+	// the heuristic; "max_tokens" or "max_completion_tokens" forces the
+	// choice regardless of the model name, for a backend whose reasoning
+	// models aren't o1/o3-prefixed or a gateway that renames them.
+	maxTokensField string
+
+	// requiresToolResultName (P85.1) sends the calling tool's name alongside
+	// a tool-role message's tool_call_id. Not part of the upstream OpenAI
+	// schema, but some OpenAI-compatible servers reject a tool result
+	// missing it.
+	requiresToolResultName bool
+
+	// strictMode (P85.1) sets "strict": true on every function tool
+	// definition, requesting OpenAI's schema-constrained strict
+	// function-calling mode on backends that support it.
+	strictMode bool
 }
 
 // Option configures the adapter.
@@ -116,6 +134,29 @@ func WithStreamIdleTimeout(d time.Duration) Option {
 // max_tokens against a separate output allowance.
 func WithSharedContextWindow(v bool) Option {
 	return func(a *Adapter) { a.sharedContextWindow = v }
+}
+
+// WithMaxTokensField forces which wire field carries the completion-length
+// cap (P85.1), bypassing isReasoningModel's o1/o3 name-based heuristic. Valid
+// values are "max_tokens" and "max_completion_tokens"; any other value
+// (including "") leaves the heuristic in charge.
+func WithMaxTokensField(v string) Option {
+	return func(a *Adapter) { a.maxTokensField = v }
+}
+
+// WithRequiresToolResultName sends the calling tool's name on every tool-role
+// message the adapter emits (P85.1). Off by default: the field isn't part of
+// the upstream OpenAI chat-completions schema, but some OpenAI-compatible
+// servers reject a tool result that omits it.
+func WithRequiresToolResultName(v bool) Option {
+	return func(a *Adapter) { a.requiresToolResultName = v }
+}
+
+// WithStrictMode sets "strict": true on every function tool definition sent
+// to the backend (P85.1), requesting OpenAI's schema-constrained strict
+// function-calling mode on servers that support it.
+func WithStrictMode(v bool) Option {
+	return func(a *Adapter) { a.strictMode = v }
 }
 
 // resolveStreamIdleTimeout maps the configured value onto the bound sse.Run
@@ -215,6 +256,10 @@ type wireMessage struct {
 	Content    any            `json:"content,omitempty"`
 	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+	// Name carries the calling tool's name on a tool-role message, sent only
+	// when the adapter's requiresToolResultName is set (P85.1) — see
+	// Adapter.requiresToolResultName.
+	Name string `json:"name,omitempty"`
 }
 
 // contentPart is one element of a multimodal user message.
@@ -243,6 +288,10 @@ type wireTool struct {
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
 		Parameters  json.RawMessage `json:"parameters"`
+		// Strict requests OpenAI's schema-constrained strict function-calling
+		// mode (P85.1, Adapter.strictMode). omitempty so it's absent rather
+		// than sent as `false` on every backend that hasn't asked for it.
+		Strict bool `json:"strict,omitempty"`
 	} `json:"function"`
 }
 
@@ -283,9 +332,31 @@ func hasReasoningPrefix(model string) bool {
 	return strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3")
 }
 
+// useMaxCompletionTokens decides which wire field carries the
+// completion-length cap for model. a.maxTokensField (P85.1) — a declarative
+// override for a backend whose reasoning models aren't o1/o3-prefixed, or a
+// gateway that renames them — wins when set; otherwise isReasoningModel's
+// name-based heuristic decides, exactly as before P85.1.
+func (a *Adapter) useMaxCompletionTokens(model string) bool {
+	switch a.maxTokensField {
+	case "max_tokens":
+		return false
+	case "max_completion_tokens":
+		return true
+	default:
+		return isReasoningModel(model)
+	}
+}
+
 // translate converts harness messages to chat-completions messages.
-func translate(system string, msgs []provider.Message) ([]wireMessage, error) {
+// includeToolName sends the calling tool's name on every emitted tool-role
+// message (P85.1, Adapter.requiresToolResultName) — resolved from the
+// ToolUseBlock a matching ToolResultBlock always follows in the harness's
+// message model, since a result can't exist without the call that produced
+// it having already streamed.
+func translate(system string, msgs []provider.Message, includeToolName bool) ([]wireMessage, error) {
 	out := make([]wireMessage, 0, len(msgs)+1)
+	toolNames := map[string]string{}
 	if system != "" {
 		out = append(out, wireMessage{Role: "system", Content: system})
 	}
@@ -299,6 +370,9 @@ func translate(system string, msgs []provider.Message) ([]wireMessage, error) {
 				case provider.TextBlock:
 					text += v.Text
 				case provider.ToolUseBlock:
+					if includeToolName {
+						toolNames[v.ID] = v.Name
+					}
 					tc := wireToolCall{ID: v.ID, Type: "function"}
 					tc.Function.Name = v.Name
 					tc.Function.Arguments = string(v.Input)
@@ -327,7 +401,11 @@ func translate(system string, msgs []provider.Message) ([]wireMessage, error) {
 				case provider.ImageBlock:
 					images = append(images, v)
 				case provider.ToolResultBlock:
-					out = append(out, wireMessage{Role: "tool", ToolCallID: v.ToolUseID, Content: v.Content})
+					tm := wireMessage{Role: "tool", ToolCallID: v.ToolUseID, Content: v.Content}
+					if includeToolName {
+						tm.Name = toolNames[v.ToolUseID]
+					}
+					out = append(out, tm)
 				}
 			}
 			switch {
@@ -351,13 +429,14 @@ func translate(system string, msgs []provider.Message) ([]wireMessage, error) {
 	return out, nil
 }
 
-func translateTools(tools []provider.ToolSchema) []wireTool {
+func translateTools(tools []provider.ToolSchema, strict bool) []wireTool {
 	return provider.TranslateTools(tools, func(name, description string, parameters json.RawMessage) wireTool {
 		var wt wireTool
 		wt.Type = "function"
 		wt.Function.Name = name
 		wt.Function.Description = description
 		wt.Function.Parameters = parameters
+		wt.Function.Strict = strict
 		return wt
 	})
 }
@@ -415,14 +494,14 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	if a.apiKey == "" && a.baseURL == defaultBaseURL {
 		return nil, fmt.Errorf("openai: missing API key (set OPENAI_API_KEY)")
 	}
-	msgs, err := translate(req.System, req.Messages)
+	msgs, err := translate(req.System, req.Messages, a.requiresToolResultName)
 	if err != nil {
 		return nil, err
 	}
 	wr := wireRequest{
 		Model:           req.Model,
 		Messages:        msgs,
-		Tools:           translateTools(req.Tools),
+		Tools:           translateTools(req.Tools, a.strictMode),
 		Temperature:     req.Temperature,
 		Seed:            req.Seed,
 		Stream:          true,
@@ -431,7 +510,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		ReasoningEffort: a.reasoningEffort,
 	}
 	maxTokens := a.clampMaxTokens(req.MaxTokens, req.NumCtx, req.System, req.Messages)
-	if isReasoningModel(req.Model) {
+	if a.useMaxCompletionTokens(req.Model) {
 		wr.MaxCompletionTokens = maxTokens
 	} else {
 		wr.MaxTokens = maxTokens
@@ -474,6 +553,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		Provider:        "openai",
 		IdleTimeout:     a.resolveStreamIdleTimeout(),
 		MissingTerminal: missingTerminator,
+		NumCtx:          req.NumCtx,
 	}, newChunkDecoder())
 	return out, nil
 }

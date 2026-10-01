@@ -152,6 +152,109 @@ func TestRun_TerminalChunkPresent(t *testing.T) {
 	}
 }
 
+// TestRun_SilentOverflowEndTurn is the P85.2 regression: a backend that
+// accepted a prompt at least as large as its serving window and reported a
+// clean end of turn with no error text at all — the z.ai shape — must
+// surface as a context-overflow error, not EventDone, when the caller told
+// Run the window (Options.NumCtx).
+func TestRun_SilentOverflowEndTurn(t *testing.T) {
+	dec := newTestDecoder()
+	dec.usage.InputTokens = 8192
+	dec.usage.OutputTokens = 40
+	evs := runCollect(t, context.Background(), stringBody("hi\nTERMINAL\n"),
+		Options{Provider: "test", MissingTerminal: "no terminator", NumCtx: 8192}, dec)
+
+	done := lastEvent(t, evs)
+	if done.Type != provider.EventError {
+		t.Fatalf("final event = %+v, want EventError for a silent overflow", done)
+	}
+	if !provider.IsContextOverflowError(done.Err) {
+		t.Errorf("err = %v, want a classified context-overflow error", done.Err)
+	}
+}
+
+// TestRun_SilentOverflowMaxTokensZeroOutput is the Xiaomi MiMo shape from the
+// same P85.2 regression: the backend truncated the prompt to fill the window,
+// leaving no room to generate anything, and reported "length" with zero
+// output tokens rather than an error.
+func TestRun_SilentOverflowMaxTokensZeroOutput(t *testing.T) {
+	dec := newTestDecoder()
+	dec.stop = provider.StopMaxTokens
+	dec.usage.InputTokens = 4096
+	dec.usage.OutputTokens = 0
+	evs := runCollect(t, context.Background(), stringBody("hi\nTERMINAL\n"),
+		Options{Provider: "test", MissingTerminal: "no terminator", NumCtx: 4096}, dec)
+
+	done := lastEvent(t, evs)
+	if done.Type != provider.EventError || !provider.IsContextOverflowError(done.Err) {
+		t.Fatalf("final event = %+v, want a classified context-overflow error", done)
+	}
+}
+
+// TestRun_NoOverflowFallbackWithoutAKnownWindow confirms Options.NumCtx <= 0
+// (Anthropic, or openai/ollama before any window is known) disables the
+// P85.2 fallback entirely, even when usage would otherwise look suspicious —
+// there is no honest number to compare against.
+func TestRun_NoOverflowFallbackWithoutAKnownWindow(t *testing.T) {
+	dec := newTestDecoder()
+	dec.usage.InputTokens = 999999
+	evs := runCollect(t, context.Background(), stringBody("hi\nTERMINAL\n"),
+		Options{Provider: "test", MissingTerminal: "no terminator"}, dec)
+
+	done := lastEvent(t, evs)
+	if done.Type != provider.EventDone {
+		t.Fatalf("final event = %+v, want EventDone when no window is known", done)
+	}
+}
+
+// TestRun_NoOverflowFallbackOnEstimatedUsage confirms a character-count usage
+// estimate (used when a provider reports none) never triggers the P85.2
+// fallback — it proves nothing about what the backend actually consumed, so
+// treating it as ground truth for an overflow verdict risks a false positive.
+func TestRun_NoOverflowFallbackOnEstimatedUsage(t *testing.T) {
+	dec := newTestDecoder()
+	dec.usage.InputTokens = 8192
+	dec.usage.IsEstimated = true
+	evs := runCollect(t, context.Background(), stringBody("hi\nTERMINAL\n"),
+		Options{Provider: "test", MissingTerminal: "no terminator", NumCtx: 8192}, dec)
+
+	done := lastEvent(t, evs)
+	if done.Type != provider.EventDone {
+		t.Fatalf("final event = %+v, want EventDone for estimated usage", done)
+	}
+}
+
+// TestRun_NoOverflowFallbackOnToolUseOrRealOutput confirms the two shapes
+// this closes stay narrow: a tool-call stop, and a genuine max-tokens stop
+// that produced real output, are ordinary completions that happen to have
+// used a lot of context — not evidence of truncation — even when usage meets
+// the window.
+func TestRun_NoOverflowFallbackOnToolUseOrRealOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		stop provider.StopReason
+		out  int
+	}{
+		{"tool_use", provider.StopToolUse, 0},
+		{"max_tokens with real output", provider.StopMaxTokens, 500},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dec := newTestDecoder()
+			dec.stop = tc.stop
+			dec.usage.InputTokens = 8192
+			dec.usage.OutputTokens = tc.out
+			evs := runCollect(t, context.Background(), stringBody("hi\nTERMINAL\n"),
+				Options{Provider: "test", MissingTerminal: "no terminator", NumCtx: 8192}, dec)
+
+			done := lastEvent(t, evs)
+			if done.Type != provider.EventDone {
+				t.Fatalf("final event = %+v, want EventDone", done)
+			}
+		})
+	}
+}
+
 // TestRun_TerminalChunkAbsent is P61.2 lifted into the skeleton: a stream that
 // ends cleanly without a terminator is a truncated generation, not a finished
 // turn, and must surface as a transport error so IsBackendUnavailableError

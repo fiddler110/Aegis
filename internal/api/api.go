@@ -36,7 +36,8 @@ type SessionMeta struct {
 	Model        string     `json:"model,omitempty"`      // P14.7: per-session override; "" = persona/global default
 	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
-	Origin       string     `json:"origin,omitempty"` // P81.14/P80.1: internal/reqorigin
+	Origin       string     `json:"origin,omitempty"`    // P81.14/P80.1: internal/reqorigin
+	ParentID     string     `json:"parent_id,omitempty"` // P85.4: the session /fork branched this one from
 	InputTokens  int        `json:"input_tokens,omitempty"`
 	OutputTokens int        `json:"output_tokens,omitempty"`
 	CostUSD      float64    `json:"cost_usd,omitempty"`

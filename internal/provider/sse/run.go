@@ -105,6 +105,14 @@ type Options struct {
 	// adapter does — it exists so a future wire format with no terminator at
 	// all does not have to lie about one.
 	MissingTerminal string
+
+	// NumCtx is the serving context window this request was sent with — the
+	// same value that ends up on provider.Request.NumCtx — when the calling
+	// adapter has resolved one (P85.2). It gates the silent-truncation
+	// fallback below entirely: 0 (Anthropic, or openai/ollama before a window
+	// is ever known) means there is no honest number to compare usage
+	// against, so nothing is checked.
+	NumCtx int
 }
 
 // Run owns the lifecycle of one streamed response: it closes body and out when
@@ -256,5 +264,51 @@ readLoop:
 	if !ok {
 		return
 	}
+	// P85.2: a backend that accepted an oversized prompt and silently
+	// truncated it instead of failing looks identical, on the wire, to a
+	// legitimate short answer — there is no error text for
+	// classifyStreamMessage/contextOverflowSignals to match. Usage reported
+	// against the known serving window is the only signal left, so it is
+	// checked here, once, for every adapter that resolves opts.NumCtx.
+	if usage != nil && silentTruncationOverflow(stop, usage, opts.NumCtx) {
+		emit(provider.Event{Type: provider.EventError, Err: provider.NewContextTruncationError(opts.Provider, "")})
+		return
+	}
 	emit(provider.Event{Type: provider.EventDone, Stop: stop, Usage: usage})
+}
+
+// silentTruncationOverflow reports whether usage proves the backend consumed
+// at least its whole serving window on the prompt alone while reporting no
+// error — the P85.2 blind spot IsContextOverflowError's message-matching
+// can't see. numCtx <= 0 (no window known) always answers false: there is no
+// honest number to compare against, and the compaction trigger that should
+// have kept a well-behaved backend well under numCtx makes prompt tokens
+// alone reaching it a strong signal something already went wrong, not normal
+// operation grazing a boundary.
+//
+// Two shapes count, matching the documented failure modes this closes: a
+// clean end of turn (the backend accepted the overflow and answered as if
+// nothing were wrong), and a max-tokens stop with zero output (the backend
+// truncated the prompt to fill the window, leaving no room to generate
+// anything). A stream reporting estimated usage (a character-count guess,
+// used when a provider returns none) proves nothing about what the backend
+// actually consumed, so it is excluded rather than risk a false positive on
+// a heuristic. Any other stop reason (tool_use, or a genuine mid-generation
+// max-tokens with real output) is left alone — those are ordinary completions
+// that happen to have used a lot of context, not evidence of truncation.
+func silentTruncationOverflow(stop provider.StopReason, usage *provider.Usage, numCtx int) bool {
+	if numCtx <= 0 || usage.IsEstimated {
+		return false
+	}
+	if usage.InputTokens+usage.CacheReadTokens < numCtx {
+		return false
+	}
+	switch stop {
+	case provider.StopEndTurn:
+		return true
+	case provider.StopMaxTokens:
+		return usage.OutputTokens == 0
+	default:
+		return false
+	}
 }

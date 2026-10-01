@@ -81,6 +81,46 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 
+	// P85.3: browse and reorder the TQ8 queued-message list. A no-op (falls
+	// through) when nothing is queued, so alt+up/alt+down don't swallow a key
+	// the textarea might otherwise want. First press of either browse key
+	// enters from the direction it was pressed, mirroring HistUp/HistDown's
+	// own first-press behavior below.
+	if len(m.composer.queued) > 0 {
+		switch {
+		case key.Matches(msg, m.overlays.keys.QueueBrowseUp):
+			if m.composer.queuedSel == -1 {
+				m.composer.queuedSel = len(m.composer.queued) - 1
+			} else if m.composer.queuedSel > 0 {
+				m.composer.queuedSel--
+			}
+			m.refresh()
+			return m, nil, true
+		case key.Matches(msg, m.overlays.keys.QueueBrowseDown):
+			if m.composer.queuedSel == -1 {
+				m.composer.queuedSel = 0
+			} else if m.composer.queuedSel < len(m.composer.queued)-1 {
+				m.composer.queuedSel++
+			}
+			m.refresh()
+			return m, nil, true
+		case key.Matches(msg, m.overlays.keys.QueueMoveUp):
+			if i := m.composer.queuedSel; i > 0 && i < len(m.composer.queued) {
+				m.composer.queued[i-1], m.composer.queued[i] = m.composer.queued[i], m.composer.queued[i-1]
+				m.composer.queuedSel--
+				m.refresh()
+			}
+			return m, nil, true
+		case key.Matches(msg, m.overlays.keys.QueueMoveDown):
+			if i := m.composer.queuedSel; i >= 0 && i < len(m.composer.queued)-1 {
+				m.composer.queued[i], m.composer.queued[i+1] = m.composer.queued[i+1], m.composer.queued[i]
+				m.composer.queuedSel++
+				m.refresh()
+			}
+			return m, nil, true
+		}
+	}
+
 	// P40.1: resize the sidebar when it has focus (terminal-focused resize
 	// is handled in handleTerminalKey). A no-op when the sidebar is closed
 	// or too narrow to show — the keys then fall through harmlessly.
@@ -141,6 +181,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			}
 			m.composer.backtrackArmed = false
 			m.composer.queued = nil
+			m.composer.queuedSel = -1
 			m.composer.interrupted = true
 			m.refresh()
 			return m, nil, true
@@ -171,6 +212,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			m.streamState.cancel() // interrupt the in-flight run; press again to quit
 			m.composer.backtrackArmed = false
 			m.composer.queued = nil // TQ8: explicit interrupt discards the queue
+			m.composer.queuedSel = -1
 			m.composer.interrupted = true
 			return m, nil, true
 		}

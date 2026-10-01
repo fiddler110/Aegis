@@ -70,6 +70,9 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 	if err := validateModelHarness(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateCompat(cfg); err != nil {
+		return nil, err
+	}
 
 	primaryBase, err := buildOne(buildOneConfig{
 		name:                  cfg.Provider.Default,
@@ -85,6 +88,7 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 		streamIdleTimeout:     cfg.Provider.StreamIdleTimeout(),
 		logger:                logger,
 		caps:                  o.caps,
+		compat:                cfg.Provider.Compat,
 	})
 	if err != nil {
 		return nil, err
@@ -120,6 +124,7 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 			streamIdleTimeout:     cfg.Provider.StreamIdleTimeout(),
 			logger:                logger,
 			caps:                  o.caps,
+			compat:                fb.Compat,
 		})
 		if err != nil {
 			logger.Warn("provider fallback: skipping misconfigured fallback", "provider", fb.Provider, "err", err)
@@ -175,6 +180,25 @@ func validateModelHarness(cfg *config.Config) error {
 		if !sysprompt.FitsLocalBudget(*o.PromptSuffix, local) {
 			return fmt.Errorf("model_harness[%q].prompt_suffix: %d estimated tokens exceeds the %d-token local-profile budget (sysprompt.LocalPromptSuffixMaxTokens)",
 				model, tokenest.Estimate(*o.PromptSuffix), sysprompt.LocalPromptSuffixMaxTokens)
+		}
+	}
+	return nil
+}
+
+// validateCompat rejects a provider.compat (or a fallback's own compat
+// override) whose max_tokens_field names something the openai adapter
+// doesn't recognize (P85.1). Checked once here, at Build time, so a typo
+// fails at startup rather than looking like a working override until the
+// backend rejects the request it silently never overrode.
+func validateCompat(cfg *config.Config) error {
+	if !cfg.Provider.Compat.MaxTokensFieldValid() {
+		return fmt.Errorf("provider.compat.max_tokens_field %q: must be \"\", \"max_tokens\", or \"max_completion_tokens\"",
+			cfg.Provider.Compat.MaxTokensField)
+	}
+	for i, fb := range cfg.Provider.Fallback {
+		if !fb.Compat.MaxTokensFieldValid() {
+			return fmt.Errorf("provider.fallback[%d].compat.max_tokens_field %q: must be \"\", \"max_tokens\", or \"max_completion_tokens\"",
+				i, fb.Compat.MaxTokensField)
 		}
 	}
 	return nil
@@ -327,6 +351,7 @@ type buildOneConfig struct {
 	streamIdleTimeout     time.Duration
 	logger                *slog.Logger
 	caps                  ollama.CapabilityStore
+	compat                config.ProviderCompat
 }
 
 // buildOne constructs a single unwrapped adapter for cfg.name. Shared by the
@@ -337,7 +362,7 @@ func buildOne(cfg buildOneConfig) (provider.Adapter, error) {
 	headers, think, reasoningEffort := cfg.headers, cfg.think, cfg.reasoningEffort
 	maxTokens, contextWindow, keepAlive := cfg.maxTokens, cfg.contextWindow, cfg.keepAlive
 	responseHeaderTimeout, streamIdleTimeout := cfg.responseHeaderTimeout, cfg.streamIdleTimeout
-	logger, caps := cfg.logger, cfg.caps
+	logger, caps, compat := cfg.logger, cfg.caps, cfg.compat
 	if err := validateBaseURL(name, apiKey, baseURL, logger); err != nil {
 		return nil, err
 	}
@@ -446,6 +471,18 @@ func buildOne(cfg buildOneConfig) (provider.Adapter, error) {
 		}
 		if reasoningEffort != "" {
 			opts = append(opts, openai.WithReasoningEffort(reasoningEffort))
+		}
+		// P85.1: a declarative override for a backend whose wire format
+		// diverges from stock OpenAI/Ollama-compat in a way the adapter's
+		// built-in heuristics don't cover.
+		if compat.MaxTokensField != "" {
+			opts = append(opts, openai.WithMaxTokensField(compat.MaxTokensField))
+		}
+		if compat.RequiresToolResultName {
+			opts = append(opts, openai.WithRequiresToolResultName(true))
+		}
+		if compat.SupportsStrictMode {
+			opts = append(opts, openai.WithStrictMode(true))
 		}
 		return openai.New(apiKey, opts...), nil
 

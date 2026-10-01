@@ -316,6 +316,12 @@ type overlays struct {
 	// is active: it captures keyboard input, greps the transcript's rendered
 	// content, and drives match navigation. See search.go.
 	search *searchState
+	// sessionTree (P85.4) holds the /tree dialog's fold state and filter mode
+	// alongside the flattened rows in dialog — the generic listDialog has
+	// nowhere to keep per-node fold state or the full fetched session list a
+	// re-flatten needs, so this lives beside it instead. Non-nil only while
+	// dialog.kind == dialogSessionTree.
+	sessionTree *sessionTreeState
 }
 
 // chrome (QUAL-05) groups terminal-geometry and display-preference state:
@@ -474,6 +480,14 @@ type composer struct {
 	// render as dimmed pending blocks and auto-send one at a time when the
 	// current stream closes. An explicit cancel discards the queue.
 	queued []string
+
+	// queuedSel is the browse cursor into queued (P85.3): -1 means nothing is
+	// selected, otherwise an index into queued whose full (untruncated) text
+	// renders expanded instead of the one-line summary the rest of the queue
+	// gets, and which alt+up/alt+down move and ctrl+alt+up/ctrl+alt+down swap
+	// with its neighbor. Reset to -1 whenever queued is drained or discarded
+	// so a stale index never survives into the next queue.
+	queuedSel int
 
 	// pendingSteers holds steers posted during the current run that the daemon
 	// hasn't reported back on yet (P33.2); they render as dimmed pending blocks
@@ -691,7 +705,7 @@ func newModel(cfg Config) model {
 		th:         th,
 		status:     "ready",
 		slash:      NewSlashDispatcher(cfg.Client, cfg.SessionID, cfg.Mode, cfg.Model, cfg.WorkDir),
-		composer:   composer{histIdx: -1},
+		composer:   composer{histIdx: -1, queuedSel: -1},
 		focusedIdx: -1,
 
 		transcript: newTranscriptPane(80, 24), // initial size; resized on first WindowSizeMsg
@@ -1201,7 +1215,16 @@ func (m *model) refresh() {
 	}
 
 	// TQ8: queued messages render as dimmed pending blocks below the live tail.
-	for _, q := range m.composer.queued {
+	// P85.3: the browse-selected entry (if any) renders its full text instead
+	// of the one-line summary the rest of the queue gets, and a "▸▸" marker
+	// instead of "▸" so alt+up/alt+down's effect is visible without a
+	// separate overlay.
+	for i, q := range m.composer.queued {
+		if i == m.composer.queuedSel {
+			line := m.th.statusDim.Render(fmt.Sprintf("⏳ queued [%d/%d] ▸▸ %s", i+1, len(m.composer.queued), oneLine(q)))
+			tail.WriteString("\n" + wrap(line, w))
+			continue
+		}
 		line := m.th.statusDim.Render("⏳ queued ▸ " + truncate(oneLine(q), max(w-12, 16)))
 		tail.WriteString("\n" + wrap(line, w))
 	}

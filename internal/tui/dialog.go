@@ -154,6 +154,7 @@ const (
 	dialogHistoryPicker
 	dialogThreatModelPicker
 	dialogBacktrackPicker
+	dialogSessionTree
 )
 
 // noticeItem is a non-selectable placeholder row: the spinner shown while a

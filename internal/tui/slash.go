@@ -92,6 +92,11 @@ type SlashResult struct {
 	// "switch into a different, already-fully-formed session" is exactly the
 	// Ctrl+Y case, not the "refetch this same session" ReloadSession case.
 	SwitchToSession string
+
+	// SessionTree is non-nil to open the P85.4 fork-lineage tree with these
+	// entries — every session (this one's own lineage plus everything else on
+	// the daemon), already carrying ParentID, for the TUI to nest into a tree.
+	SessionTree []api.SessionMeta
 }
 
 // SlashDispatcher dispatches slash commands to built-in handlers or custom

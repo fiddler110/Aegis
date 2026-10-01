@@ -81,6 +81,7 @@ func (m model) updateStreamClosed(msg streamClosedMsg) (tea.Model, tea.Cmd) {
 	if len(m.composer.queued) > 0 {
 		next := m.composer.queued[0]
 		m.composer.queued = m.composer.queued[1:]
+		m.composer.queuedSel = -1 // P85.3: an index into the pre-drain queue no longer applies
 		return m, m.sendUserMessage(next)
 	}
 	m.refresh()
@@ -98,6 +99,7 @@ func (m model) updateErr(msg errMsg) (tea.Model, tea.Cmd) {
 	// TQ8: don't auto-send into a failing session.
 	if len(m.composer.queued) > 0 {
 		m.composer.queued = nil
+		m.composer.queuedSel = -1
 		m.transcript.Append(m.th.statusDim.Render("⏳ queued messages discarded after error") + "\n\n")
 	}
 	for _, st := range m.composer.pendingSteers {

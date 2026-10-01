@@ -44,6 +44,9 @@ aegis --resume abc12345
 **Switch sessions inside TUI:**
 Press `Ctrl+Y` to open the interactive session picker. Sessions are listed newest-first with title, mode, persona, and last-updated time. Select one to replay its transcript.
 
+**Browse the fork lineage:**
+`/tree` opens a read-only tree over every session's `/fork` ancestry: each fork nests under the session it branched from instead of Ctrl+Y's flat, unrelated list. `Space` folds/unfolds the node under the cursor, `Tab` cycles between "all sessions" and "this lineage only" (just the current session's own ancestors and forks), and `Enter` switches to the selected session.
+
 ---
 
 ## Listing Sessions

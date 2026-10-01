@@ -32,6 +32,7 @@ type Session struct {
 	Background   bool               `json:"background,omitempty"` // P3.2: runs detached from TUI
 	Archived     bool               `json:"archived,omitempty"`   // soft-deleted; hidden from normal listings
 	Origin       string             `json:"origin,omitempty"`     // P81.14/P80.1: who created it — tui/web/acp/mcp/cli; "" for pre-migration rows
+	ParentID     string             `json:"parent_id,omitempty"`  // P85.4: the session /fork branched this one from; "" for a top-level session
 	Messages     []provider.Message `json:"messages"`
 	Traces       []trace.TurnTrace  `json:"traces,omitempty"`
 	InputTokens  int                `json:"input_tokens"`
@@ -52,7 +53,8 @@ type Meta struct {
 	Model        string     `json:"model,omitempty"`      // P14.7
 	Background   bool       `json:"background,omitempty"` // P3.2
 	Archived     bool       `json:"archived,omitempty"`
-	Origin       string     `json:"origin,omitempty"` // P81.14/P80.1
+	Origin       string     `json:"origin,omitempty"`    // P81.14/P80.1
+	ParentID     string     `json:"parent_id,omitempty"` // P85.4
 	InputTokens  int        `json:"input_tokens"`
 	OutputTokens int        `json:"output_tokens"`
 	CostUSD      float64    `json:"cost_usd"`
@@ -231,6 +233,7 @@ CREATE TABLE IF NOT EXISTS daily_tokens (
 		`ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''`,        // P14.7: per-session override
 		`ALTER TABLE sessions ADD COLUMN workdir TEXT NOT NULL DEFAULT ''`,      // P25.1: per-session working directory
 		`ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT ''`,       // P81.14/P80.1: creating surface (tui/web/acp/mcp/cli)
+		`ALTER TABLE sessions ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,    // P85.4: the session /fork branched this one from
 	} {
 		_, _ = s.db.Exec(col) // "duplicate column name" error expected on fresh schema
 	}
@@ -363,14 +366,14 @@ func (s *Store) Create(ctx context.Context, title, system, mode, persona, workdi
 // Get loads a full session by id.
 func (s *Store) Get(ctx context.Context, id string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, title, system, mode, persona, workdir, model, origin, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
+		`SELECT id, title, system, mode, persona, workdir, model, origin, parent_id, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions WHERE id = ?`, id)
 	var (
 		sess         Session
 		created, upd int64
 		background   int
 		archivedAtMS sql.NullInt64
 	)
-	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &sess.Workdir, &sess.Model, &sess.Origin, &background, &archivedAtMS,
+	if err := row.Scan(&sess.ID, &sess.Title, &sess.System, &sess.Mode, &sess.Persona, &sess.Workdir, &sess.Model, &sess.Origin, &sess.ParentID, &background, &archivedAtMS,
 		&sess.InputTokens, &sess.OutputTokens, &sess.CostUSD, &created, &upd); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -554,6 +557,15 @@ func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 	return err
 }
 
+// SetParent records the session /fork branched id from (P85.4), for the
+// read-only fork-lineage tree view. A second write rather than a Create
+// param, the same reasoning SetModel already uses: Create predates this and
+// only handleFork's one call site needs it.
+func (s *Store) SetParent(ctx context.Context, id, parentID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET parent_id = ? WHERE id = ?`, parentID, id)
+	return err
+}
+
 // List returns active (non-archived) session metadata, most recently updated first.
 func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	return s.listSessions(ctx, false)
@@ -565,7 +577,7 @@ func (s *Store) ListAll(ctx context.Context) ([]Meta, error) {
 }
 
 func (s *Store) listSessions(ctx context.Context, includeArchived bool) ([]Meta, error) {
-	q := `SELECT id, title, mode, persona, workdir, model, origin, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions`
+	q := `SELECT id, title, mode, persona, workdir, model, origin, parent_id, background, archived_at, input_tokens, output_tokens, cost_usd, created_at, updated_at FROM sessions`
 	if !includeArchived {
 		q += ` WHERE archived_at IS NULL`
 	}
@@ -581,7 +593,7 @@ func (s *Store) listSessions(ctx context.Context, includeArchived bool) ([]Meta,
 		var created, upd int64
 		var background int
 		var archivedAtMS sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &m.Workdir, &m.Model, &m.Origin, &background, &archivedAtMS, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
+		if err := rows.Scan(&m.ID, &m.Title, &m.Mode, &m.Persona, &m.Workdir, &m.Model, &m.Origin, &m.ParentID, &background, &archivedAtMS, &m.InputTokens, &m.OutputTokens, &m.CostUSD, &created, &upd); err != nil {
 			return nil, err
 		}
 		m.Background = background == 1

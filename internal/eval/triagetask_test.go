@@ -57,7 +57,11 @@ func applyCorrectFixes(t *testing.T, dir string) {
 	patch(t, dir, "files.py", traversalVulnerable, traversalFixed)
 }
 
-// writeFindings emits a findings.json from a list of "file:category" pairs.
+// writeFindings emits a findings.json from a list of "file:category" pairs,
+// each defaulting to the answer key's correct severity for that category so
+// tests that don't care about severity_accuracy still score it in full.
+// "file:category:severity" overrides the severity explicitly, for tests that
+// do care.
 func writeFindings(t *testing.T, dir string, pairs ...string) {
 	t.Helper()
 	type entry struct {
@@ -67,11 +71,16 @@ func writeFindings(t *testing.T, dir string, pairs ...string) {
 	}
 	list := make([]entry, 0, len(pairs))
 	for _, p := range pairs {
-		file, cat, ok := strings.Cut(p, ":")
-		if !ok {
+		parts := strings.SplitN(p, ":", 3)
+		if len(parts) < 2 {
 			t.Fatalf("bad pair %q", p)
 		}
-		list = append(list, entry{File: file, Category: cat, Severity: "high"})
+		file, cat := parts[0], parts[1]
+		sev := triageSeverity[cat]
+		if len(parts) == 3 {
+			sev = parts[2]
+		}
+		list = append(list, entry{File: file, Category: cat, Severity: sev})
 	}
 	b, err := json.Marshal(list)
 	if err != nil {
@@ -146,8 +155,8 @@ func TestTriagePerfectRunScoresFull(t *testing.T) {
 	if score.Earned != score.Possible {
 		t.Errorf("a perfect run scored %d/%d, want full marks:\n%s", score.Earned, score.Possible, score.Table())
 	}
-	if score.Possible != 12 {
-		t.Errorf("rubric is worth %d points, want 12", score.Possible)
+	if score.Possible != 16 {
+		t.Errorf("rubric is worth %d points, want 16", score.Possible)
 	}
 	if outcome := TriageTask().Outcome(dir, py); !outcome.Passed {
 		t.Errorf("a perfect run did not pass: %v", outcome.Failures)
@@ -233,6 +242,87 @@ func TestTriagePrecisionPunishesOverReporting(t *testing.T) {
 	writeFindings(t, dir2, append(allPlanted(), "wire.py:sql_injection")...)
 	if got := scoreOf(t, TriageTask().Grade(dir2, py), "precision"); got.Earned != 1 {
 		t.Errorf("precision with one false positive = %d, want 1", got.Earned)
+	}
+}
+
+// TestTriageSeverityScoring is the counterweight P68.4 added: a finding
+// reported at the wrong severity used to be worth the same as one reported
+// correctly. Three arms — all correct, all wrong, and a mix — pin that the
+// criterion actually varies with severity accuracy rather than with discovery.
+func TestTriageSeverityScoring(t *testing.T) {
+	py := findInterpreter(t)
+
+	correct := materializeTriage(t)
+	writeFindings(t, correct, allPlanted()...) // defaults to the correct severity
+	if got := scoreOf(t, TriageTask().Grade(correct, py), "severity_accuracy"); got.Earned != 2 {
+		t.Errorf("all-correct severities scored %d/2, want 2: %s", got.Earned, got.Detail)
+	}
+
+	wrong := materializeTriage(t)
+	writeFindings(t, wrong,
+		"config.py:hardcoded_credential:low",
+		"client.py:tls_verification_disabled:low",
+		"store.py:sql_injection:low",
+		"files.py:path_traversal:low",
+		"jobs.py:unsafe_deserialization:low",
+		"dispatch.py:ssrf:low",
+	)
+	wrongScore := scoreOf(t, TriageTask().Grade(wrong, py), "severity_accuracy")
+	if wrongScore.Earned != 0 {
+		t.Errorf("all-wrong severities scored %d/2, want 0: %s", wrongScore.Earned, wrongScore.Detail)
+	}
+	if wrongScore.Detail == "" {
+		t.Error("wrong severities should be named in the detail")
+	}
+
+	// Half right, half wrong (the two mediums mislabeled "high") should land
+	// in between, not collapse to either end.
+	mixed := materializeTriage(t)
+	writeFindings(t, mixed,
+		"config.py:hardcoded_credential",
+		"client.py:tls_verification_disabled:high", // wrong — wants medium
+		"store.py:sql_injection",
+		"files.py:path_traversal",
+		"jobs.py:unsafe_deserialization",
+		"dispatch.py:ssrf:high", // wrong — wants medium
+	)
+	mixedScore := scoreOf(t, TriageTask().Grade(mixed, py), "severity_accuracy")
+	if mixedScore.Earned == 0 || mixedScore.Earned == 2 {
+		t.Errorf("4/6 correct severities scored %d/2, want a value strictly between 0 and 2", mixedScore.Earned)
+	}
+
+	// A finding with no severity field at all is a miss, not a free pass.
+	noSev := materializeTriage(t)
+	if err := os.WriteFile(filepath.Join(noSev, "findings.json"),
+		[]byte(`[{"file":"config.py","category":"hardcoded_credential"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := scoreOf(t, TriageTask().Grade(noSev, py), "severity_accuracy"); got.Earned != 0 {
+		t.Errorf("a finding with no severity field scored %d/2, want 0", got.Earned)
+	}
+}
+
+// TestTriageScopeCreepPenalizesUnrelatedEdits: step 2 of the prompt says "fix
+// those two, and only those two" — this is what makes that scored rather than
+// a suggestion a model can ignore for free.
+func TestTriageScopeCreepPenalizesUnrelatedEdits(t *testing.T) {
+	py := findInterpreter(t)
+
+	clean := materializeTriage(t)
+	applyCorrectFixes(t, clean)
+	if got := scoreOf(t, TriageTask().Grade(clean, py), "no_scope_creep"); got.Earned != 1 {
+		t.Errorf("touching only the two FIXME files scored %d/1, want 1", got.Earned)
+	}
+
+	strayEdit := materializeTriage(t)
+	applyCorrectFixes(t, strayEdit)
+	patch(t, strayEdit, "config.py", `DB_PATH = "service.db"`, `DB_PATH = "other.db"`)
+	got := scoreOf(t, TriageTask().Grade(strayEdit, py), "no_scope_creep")
+	if got.Earned != 0 {
+		t.Errorf("editing config.py scored %d/1, want 0", got.Earned)
+	}
+	if !strings.Contains(got.Detail, "config.py") {
+		t.Errorf("detail should name the file that was edited, got %q", got.Detail)
 	}
 }
 
@@ -329,28 +419,29 @@ func TestTriageBrokenProjectIsChargedOnceAndDiagnosed(t *testing.T) {
 // must be.
 func TestTriageFindingsParsing(t *testing.T) {
 	dir := t.TempDir()
-	write := func(body string) map[finding]bool {
+	write := func(body string) map[finding]string {
 		if err := os.WriteFile(filepath.Join(dir, "findings.json"), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		got, _ := readFindings(dir)
 		return got
 	}
+	has := func(m map[finding]string, f finding) bool { _, ok := m[f]; return ok }
 
 	got := write(`[{"file":"./store.py","category":"SQL Injection"},{"file":"src\\files.py","category":"path-traversal"}]`)
-	if !got[finding{"store.py", "sql_injection"}] {
+	if !has(got, finding{"store.py", "sql_injection"}) {
 		t.Errorf("path and category normalization failed for store.py: %v", got)
 	}
-	if !got[finding{"files.py", "path_traversal"}] {
+	if !has(got, finding{"files.py", "path_traversal"}) {
 		t.Errorf("path and category normalization failed for files.py: %v", got)
 	}
 
 	got = write(`{"findings":[{"file":"config.py","category":"hardcoded_credential"}]}`)
-	if !got[finding{"config.py", "hardcoded_credential"}] {
+	if !has(got, finding{"config.py", "hardcoded_credential"}) {
 		t.Errorf("wrapped-object findings.json was not read: %v", got)
 	}
 
-	if _, detail := func() (map[finding]bool, string) {
+	if _, detail := func() (map[finding]string, string) {
 		if err := os.WriteFile(filepath.Join(dir, "findings.json"), []byte("not json at all"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -371,6 +462,7 @@ func TestTriageAnswerKeyMatchesTheFixture(t *testing.T) {
 		"path_traversal":            "os.path.join(UPLOAD_ROOT, name)",
 		"tls_verification_disabled": "CERT_NONE",
 		"unsafe_deserialization":    "pickle.loads",
+		"ssrf":                      "callback_url",
 	}
 	for _, issue := range triageIssues {
 		src, ok := files[issue.File]

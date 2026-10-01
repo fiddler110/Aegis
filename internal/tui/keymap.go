@@ -36,6 +36,10 @@ type keyMap struct {
 	PaneWider        key.Binding
 	TranscriptSearch key.Binding
 	ToolBlockToggle  key.Binding
+	QueueBrowseUp    key.Binding
+	QueueBrowseDown  key.Binding
+	QueueMoveUp      key.Binding
+	QueueMoveDown    key.Binding
 }
 
 func defaultKeyMap() keyMap {
@@ -87,6 +91,15 @@ func defaultKeyMap() keyMap {
 		// resize) and textarea's own default keymap doesn't touch it, unlike
 		// ctrl+u/ctrl+k/ctrl+a which it binds to line-editing commands.
 		ToolBlockToggle: key.NewBinding(key.WithKeys("ctrl+up"), key.WithHelp("ctrl+↑", "expand/collapse last tool result")),
+		// P85.3: browse and reorder the TQ8 queued-message list while it holds
+		// more than one draft. alt+up/alt+down and ctrl+alt+up/ctrl+alt+down are
+		// both free — the textarea's own keymap only claims plain/ctrl arrows
+		// and alt+left/right (word navigation), and up/down alone are history
+		// nav (HistUp/HistDown above), never alt-modified.
+		QueueBrowseUp:   key.NewBinding(key.WithKeys("alt+up"), key.WithHelp("alt+↑", "browse queued messages")),
+		QueueBrowseDown: key.NewBinding(key.WithKeys("alt+down"), key.WithHelp("alt+↓", "browse queued messages")),
+		QueueMoveUp:     key.NewBinding(key.WithKeys("ctrl+alt+up"), key.WithHelp("ctrl+alt+↑", "move selected queued message earlier")),
+		QueueMoveDown:   key.NewBinding(key.WithKeys("ctrl+alt+down"), key.WithHelp("ctrl+alt+↓", "move selected queued message later")),
 	}
 }
 
@@ -120,6 +133,10 @@ func (km *keyMap) bindingsByName() map[string]*key.Binding {
 		"panewider":        &km.PaneWider,
 		"transcriptsearch": &km.TranscriptSearch,
 		"toolblocktoggle":  &km.ToolBlockToggle,
+		"queuebrowseup":    &km.QueueBrowseUp,
+		"queuebrowsedown":  &km.QueueBrowseDown,
+		"queuemoveup":      &km.QueueMoveUp,
+		"queuemovedown":    &km.QueueMoveDown,
 	}
 }
 
@@ -217,5 +234,9 @@ func (km keyMap) helpEntries() []keyHelpEntry {
 		{km.PaneWider.Help().Key, km.PaneWider.Help().Desc},
 		{km.TranscriptSearch.Help().Key, km.TranscriptSearch.Help().Desc},
 		{km.ToolBlockToggle.Help().Key, km.ToolBlockToggle.Help().Desc},
+		{km.QueueBrowseUp.Help().Key, km.QueueBrowseUp.Help().Desc},
+		{km.QueueBrowseDown.Help().Key, km.QueueBrowseDown.Help().Desc},
+		{km.QueueMoveUp.Help().Key, km.QueueMoveUp.Help().Desc},
+		{km.QueueMoveDown.Help().Key, km.QueueMoveDown.Help().Desc},
 	}
 }

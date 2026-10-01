@@ -393,6 +393,30 @@ provider:
   # Only applies to o-series models; ignored otherwise.
   reasoning_effort: ""
 
+  # Declares OpenAI-compat wire-format quirks for the primary backend (P85.1).
+  # Only the "openai" adapter reads this — the native ollama and anthropic
+  # adapters have their own wire formats and no use for it. Exists so a
+  # divergent local or third-party OpenAI-compatible server (vLLM, SGLang, LM
+  # Studio, a corporate gateway) is a config change, not a new Go option and a
+  # rebuilt binary. Every field defaults to the adapter's existing behavior.
+  compat:
+    # Forces which wire field carries the completion-length cap:
+    # "max_tokens" or "max_completion_tokens". "" (default) keeps the
+    # adapter's built-in heuristic — o1/o3-prefixed models (bare or behind a
+    # vendor prefix like "openai/o1-mini") get max_completion_tokens,
+    # everything else gets max_tokens — which is wrong for a backend whose
+    # reasoning models aren't named that way, or a gateway that renames o1/o3
+    # behind a prefix the heuristic doesn't recognize.
+    max_tokens_field: ""
+    # Sends the calling tool's name alongside a tool-role message's
+    # tool_call_id. Not part of the upstream OpenAI chat-completions schema,
+    # but some OpenAI-compatible servers reject a tool result that omits it.
+    requires_tool_result_name: false
+    # Sets "strict": true on every function tool definition, requesting
+    # OpenAI's schema-constrained strict function-calling mode on servers
+    # that support it.
+    supports_strict_mode: false
+
   # Model context window in tokens. 0 = auto-detect: for Ollama (or an openai
   # provider whose base_url points at an Ollama server) the daemon queries the
   # native Ollama API for the context actually being served — the loaded
@@ -512,6 +536,8 @@ provider:
   #   - provider: openai
   #     model: "gpt-4o-mini"
   #     base_url: ""      # optional per-fallback API base override
+  #     compat: {}        # this target's own wire-format quirks (P85.1);
+  #                        # never inherits the primary's compat block
 
   # Required to fail over FROM a local provider (ollama) TO a cloud provider
   # (anthropic, openai) — guards against a local-only session silently

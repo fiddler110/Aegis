@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/fiddler110/aegis/internal/commands"
@@ -40,11 +42,47 @@ func (m model) updateDialog(msg tea.Msg) (model, tea.Cmd, bool) {
 			m.overlays.pendingThreatModelTarget = ""
 			m.overlays.pendingThreatModelUnattended = false
 		}
+		if c.kind == dialogSessionTree {
+			m.overlays.sessionTree = nil
+		}
 		return m, nil, true
+	}
+	// P85.4: fold/unfold (space) and filter-mode cycling (tab) for the /tree
+	// dialog, intercepted ahead of the generic list handling below — neither
+	// key is bound in bubbles' own list.KeyMap, but only while not actively
+	// typing a filter query (list's Filter binding is "/" alone, so this can
+	// never fire mid-query, but check anyway rather than rely on that staying
+	// true of a dependency this package doesn't own).
+	if k, ok := msg.(tea.KeyPressMsg); ok && m.overlays.dialog.kind == dialogSessionTree && m.overlays.sessionTree != nil &&
+		m.overlays.dialog.list.FilterState() == list.Unfiltered {
+		st := m.overlays.sessionTree
+		switch k.String() {
+		case "space":
+			if item, ok := m.overlays.dialog.list.SelectedItem().(sessionTreeItem); ok && item.hasChildren {
+				st.collapsed[item.meta.ID] = !st.collapsed[item.meta.ID]
+				rows := st.sessionTreeRows()
+				cmd := m.overlays.dialog.setItems(rows, sessionTreePickerH(m.chrome.height, len(rows)))
+				return m, cmd, true
+			}
+			return m, nil, true
+		case "tab":
+			if st.filter == treeFilterAll {
+				st.filter = treeFilterLineage
+			} else {
+				st.filter = treeFilterAll
+			}
+			rows := st.sessionTreeRows()
+			m.overlays.dialog.list.Title = fmt.Sprintf("Session Tree (%s)", st.filter)
+			cmd := m.overlays.dialog.setItems(rows, sessionTreePickerH(m.chrome.height, len(rows)))
+			return m, cmd, true
+		}
 	}
 	if sel, ok := msg.(dialogSelectedMsg); ok && sel.kind == m.overlays.dialog.kind {
 		kind := m.overlays.dialog.kind
 		m.overlays.dialog = nil
+		if kind == dialogSessionTree {
+			m.overlays.sessionTree = nil
+		}
 		m.ta.Focus()
 		switch kind {
 		case dialogPalette:
@@ -66,6 +104,12 @@ func (m model) updateDialog(msg tea.Msg) (model, tea.Cmd, bool) {
 				return m, nil, true // already on this session
 			}
 			return m, m.switchSessionCmd(item.id), true
+		case dialogSessionTree:
+			item := sel.item.(sessionTreeItem)
+			if item.meta.ID == m.cfg.SessionID {
+				return m, nil, true // already on this session
+			}
+			return m, m.switchSessionCmd(item.meta.ID), true
 		case dialogTimelinePicker:
 			item := sel.item.(timelineItem)
 			// Scroll to the selected turn's recorded item position.

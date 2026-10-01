@@ -56,6 +56,13 @@ func (m model) updateSlashResult(msg slashResultMsg) (tea.Model, tea.Cmd) {
 		m.overlays.dialog = &picker
 		return m, nil
 	}
+	if msg.SessionTree != nil {
+		st := &sessionTreeState{all: msg.SessionTree, current: m.cfg.SessionID, collapsed: map[string]bool{}}
+		m.overlays.sessionTree = st
+		picker := newSessionTreePicker(m.chrome.width, m.chrome.height, st)
+		m.overlays.dialog = &picker
+		return m, nil
+	}
 	if msg.ThreatModelTarget != nil {
 		picker := newThreatModelFrameworkPicker(m.chrome.width, m.chrome.height)
 		m.overlays.dialog = &picker

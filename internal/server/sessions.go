@@ -899,6 +899,11 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// P85.4: record the lineage edge so the tree view can render this fork
+	// under its source rather than as an unrelated top-level session.
+	if err := s.store.SetParent(r.Context(), forked.ID, id); err != nil {
+		s.logger.Warn("fork: set parent", "session", forked.ID, "err", err)
+	}
 
 	writeJSON(w, http.StatusCreated, api.ForkResponse{SessionID: forked.ID, Title: title, MessagesKept: keep})
 }
@@ -1087,6 +1092,7 @@ func toMeta(m session.Meta) api.SessionMeta {
 		Background:   m.Background,
 		Archived:     m.Archived,
 		Origin:       m.Origin,
+		ParentID:     m.ParentID,
 		ArchivedAt:   m.ArchivedAt,
 		InputTokens:  m.InputTokens,
 		OutputTokens: m.OutputTokens,

@@ -116,6 +116,43 @@ func TestBuild_RejectsModelHarnessDeferringToolSearch(t *testing.T) {
 	}
 }
 
+// TestBuild_RejectsInvalidCompatMaxTokensField is the P85.1 regression: a
+// typo'd provider.compat.max_tokens_field must fail at Build time rather than
+// silently leaving the adapter's name-based heuristic in charge.
+func TestBuild_RejectsInvalidCompatMaxTokensField(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", APIKey: "fake-key",
+		Compat: config.ProviderCompat{MaxTokensField: "max_toklens"},
+	}}
+	_, err := Build(cfg, nil)
+	if err == nil {
+		t.Fatal("expected an error for an invalid compat.max_tokens_field")
+	}
+	if !strings.Contains(err.Error(), "max_tokens_field") {
+		t.Errorf("error should name max_tokens_field, got: %v", err)
+	}
+}
+
+// TestBuild_RejectsInvalidFallbackCompatMaxTokensField mirrors
+// TestBuild_RejectsInvalidCompatMaxTokensField for a fallback target's own
+// compat override, which config.ProviderFallbackConfig.Compat carries
+// independently of the primary's.
+func TestBuild_RejectsInvalidFallbackCompatMaxTokensField(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", APIKey: "fake-key",
+		Fallback: []config.ProviderFallbackConfig{
+			{Provider: "openai", Model: "m", Compat: config.ProviderCompat{MaxTokensField: "bogus"}},
+		},
+	}}
+	_, err := Build(cfg, nil)
+	if err == nil {
+		t.Fatal("expected an error for an invalid fallback compat.max_tokens_field")
+	}
+	if !strings.Contains(err.Error(), "fallback[0]") {
+		t.Errorf("error should name fallback[0], got: %v", err)
+	}
+}
+
 // TestBuild_RejectsOversizedPromptSuffixUnderLocalProfile confirms a
 // per-model PromptSuffix is measured against sysprompt's local-profile
 // budget for that model — not accepted just because *some* model's suffix

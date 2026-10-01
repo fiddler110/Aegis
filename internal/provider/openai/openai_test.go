@@ -23,7 +23,7 @@ func TestTranslateImage(t *testing.T) {
 			provider.ImageBlock{MediaType: "image/jpeg", Data: "aGk="},
 		},
 	}}
-	wire, err := translate("", msgs)
+	wire, err := translate("", msgs, false)
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -479,6 +479,114 @@ func TestReasoningModelUsesMaxCompletionTokens(t *testing.T) {
 	}
 }
 
+// TestMaxTokensFieldOverride is the P85.1 regression: WithMaxTokensField
+// must win over isReasoningModel's name-based heuristic in both directions —
+// forcing max_completion_tokens on a plain-named model, and forcing
+// max_tokens on an o1/o3-prefixed one for a backend that renamed the
+// reasoning model in a way the heuristic doesn't see.
+func TestMaxTokensFieldOverride(t *testing.T) {
+	tests := []struct {
+		name            string
+		model           string
+		field           string
+		wantField       string
+		wantOtherAbsent string
+	}{
+		{"forces max_completion_tokens", "gpt-4o", "max_completion_tokens", "max_completion_tokens", "max_tokens"},
+		{"forces max_tokens", "o1-mini", "max_tokens", "max_tokens", "max_completion_tokens"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var body map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			}))
+			defer srv.Close()
+
+			a := New("k", WithBaseURL(srv.URL), WithMaxTokensField(tc.field))
+			stream, err := a.Stream(context.Background(), provider.Request{
+				Model: tc.model, MaxTokens: 123,
+				Messages: []provider.Message{
+					{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Stream: %v", err)
+			}
+			for range stream {
+			}
+
+			if v, ok := body[tc.wantField]; !ok || v != float64(123) {
+				t.Errorf("%s = %v (ok=%v), want 123", tc.wantField, v, ok)
+			}
+			if _, ok := body[tc.wantOtherAbsent]; ok {
+				t.Errorf("%s should be absent, got %v", tc.wantOtherAbsent, body[tc.wantOtherAbsent])
+			}
+		})
+	}
+}
+
+// TestRequiresToolResultNameSendsToolName is the P85.1 regression: with
+// WithRequiresToolResultName set, a tool-role message carries the calling
+// tool's name resolved from the ToolUseBlock that preceded it; unset, the
+// field stays absent exactly as before P85.1.
+func TestRequiresToolResultNameSendsToolName(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.Block{
+			provider.ToolUseBlock{ID: "c1", Name: "search", Input: []byte(`{}`)},
+		}},
+		{Role: provider.RoleUser, Content: []provider.Block{
+			provider.ToolResultBlock{ToolUseID: "c1", Content: "done"},
+		}},
+	}
+
+	out, err := translate("", msgs, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 || out[1].Role != "tool" || out[1].Name != "search" {
+		t.Fatalf("tool message wrong: %+v", out)
+	}
+
+	out, err = translate("", msgs, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out[1].Name != "" {
+		t.Errorf("Name = %q, want empty when requiresToolResultName is off", out[1].Name)
+	}
+}
+
+// TestStrictModeSetsStrictOnToolDefinitions is the P85.1 regression:
+// WithStrictMode sets "strict": true on every function tool definition;
+// unset, the field is absent rather than sent as false.
+func TestStrictModeSetsStrictOnToolDefinitions(t *testing.T) {
+	tools := []provider.ToolSchema{{Name: "search", Description: "d", InputSchema: json.RawMessage(`{}`)}}
+
+	strict := translateTools(tools, true)
+	if len(strict) != 1 || !strict[0].Function.Strict {
+		t.Fatalf("strict tool definition: %+v", strict)
+	}
+	raw, err := json.Marshal(strict[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"strict":true`) {
+		t.Errorf("marshaled tool missing strict:true: %s", raw)
+	}
+
+	loose := translateTools(tools, false)
+	raw, err = json.Marshal(loose[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "strict") {
+		t.Errorf("marshaled tool should omit strict when off: %s", raw)
+	}
+}
+
 // TestStreamingClientHasNoWholeRequestTimeout is the P33.1 regression: the
 // adapter used to build its client with Timeout: 10*time.Minute, which bounds
 // the entire request including reading the streamed body, so a turn that
@@ -761,7 +869,7 @@ func TestTranslateToolResults(t *testing.T) {
 			provider.ToolResultBlock{ToolUseID: "c1", Content: "done"},
 		}},
 	}
-	out, err := translate("sys", msgs)
+	out, err := translate("sys", msgs, false)
 	if err != nil {
 		t.Fatal(err)
 	}
