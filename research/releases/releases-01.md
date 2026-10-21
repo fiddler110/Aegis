@@ -8,7 +8,14 @@ or next, see [roadmap.md](roadmap.md).
 
 ## Latest changes
 
-**Last updated: 2026-09-13 — P68.4 shipped in full; P65.4 found almost entirely already shipped and
+**Last updated: 2026-10-21 — cloud-and-local harness pass.** P88.1, P88.2, P86.12 and P86.19 shipped in
+full; P88.7's scenario built (no live sitting yet); three unfiled defects fixed — Claude thinking requests
+that every current model rejects, Opus priced at the 4.0 rate, and `/config` deleting provider keys it does
+not render; plus Anthropic effort/cache-TTL, a model capability table with live model listing, first-run
+setup, and hybrid local/cloud small models. Full record:
+[2026-10-21 record](#2026-10-21-cloud-and-local-harness-pass).
+
+**2026-09-13 — P68.4 shipped in full; P65.4 found almost entirely already shipped and
 corrected; P68.5/P68.6 closed as not worth pursuing on this hardware.** Full record:
 [2026-09-13 record](#2026-09-13-p684-shipped-p654-corrected-p685p686-closed).
 
@@ -87,6 +94,84 @@ CRIT-2-family defect that the fuzz corpus was passing *by accident*); the Anthro
 mid-stream errors were unclassifiable, so a recoverable overflow aborted a drive instead of
 resetting it; and three of the batch's findings were **refuted against current code** rather than
 implemented.
+
+---
+
+### 2026-10-21: cloud-and-local harness pass
+
+Taken on direct request: "improve the quality of the agent harness with local models, build out a better
+cloud integration, improve how menus function, overhaul the config wizards". Five commits on one branch, in
+the order the user agreed to.
+
+**1. Anthropic adapter: model-aware requests (unfiled defect).** `provider.think: true` sent
+`{type:"enabled", budget_tokens: max_tokens/2}` to every model. From Opus 4.7 on that is a 400; current
+models take `{type:"adaptive"}` with depth set by `output_config.effort`, several think whether asked or
+not (Opus 5+, Sonnet 5+, Haiku 5.5, Fable), two cannot be told not to (Opus 5.5, Fable), Sonnet 5.5's off
+switch is `between_tools`, and the 4.7+ generation rejects a non-default `temperature`. The adapter also
+ignored `provider.SuppressesExtendedThinking` and `Request.SuppressThinking`, so on a model that thinks by
+default the guard's small-budget verdict was EXEC-1 again. `internal/provider/anthropic/models.go` now
+classifies the request's model id (vendor prefixes, Vertex `@` snapshots and dated suffixes parsed;
+unknown ids keep the old shape) and `reasoningFor` builds thinking/effort/temperature per request:
+adaptive with `display: "summarized"` where the default is omitted (else the TUI shows a silent pause),
+the model's own off switch when suppressing, effort `low` where there is none, effort clamped to each
+model's levels (`xhigh` → `high` on 4.6). Also: empty thinking text is replayed with an explicit
+`"thinking": ""` instead of dropping the field; `stop_reason: "refusal"` is a terminal
+`provider.NewRefusalError` naming the category (it used to look like an empty answer, which the
+empty-answer nudge re-asked and re-billed); `provider.cache_ttl: "1h"`; `provider.reasoning_effort` now
+drives Anthropic effort. **Cost table (unfiled defect):** every `claude-opus*` was priced at $15/$75 (the
+4.0 rate) — current Opus is $5/$25, Opus 5.5 $4/$20 — so `cost.budget_usd` aborted runs at roughly a
+third of the stated budget. Per-generation entries now, with a test per generation. Default model
+`claude-opus-5-5`; curated lists and docs refreshed. Tests: `models_test.go` (budget never sent to current
+models, per-model suppression, explicit think false, effort clamping, temperature, empty-thinking replay,
+1h TTL, refusal classification), `TestClaudePricingByGeneration`; `TestBudgetResetsPerRunNotPerTracker`
+rescaled to the new rate.
+
+**2. P88.1, P88.2 shipped; P88.7 built.** `editMissHint` (`internal/tool/builtin/editmiss.go`) appends
+to `old_string not found` the first diagnosis that applies — escaped `\n` where the file has real breaks,
+CRLF endings, a match that only fails on whitespace (lines quoted), or the closest line by shared tokens
+(≥ half, else nothing) — bounded to 640 bytes and a pure function of its inputs, so the P52.3 breaker
+still sees repeated misses as one. `write_file` refuses content with ≥ 3 `\n`/`\t` escapes outside
+string literals and at most a quarter as many real line breaks (one-line JSON fixtures and ordinary
+`"\n"` source are left alone; refusal, not unescaping). `GoFixTask` + `TestLiveGoFixRepeated` — see
+the roadmap's Verification entry; not yet run.
+
+**3. Capability table and live discovery.** `modelcatalog.Lookup` composes the Anthropic trait table
+with `internal/cost` and renders a picker annotation; the TUI context meter reads it (Claude is 1M, not
+200k). `provider.ModelLister` is a new optional capability (reached through decorators like
+`CheckBackendHealth`), implemented over Anthropic's paginated `/v1/models` and OpenAI-compatible
+`/models`; the daemon serves `GET /models/remote` (non-chat models filtered, the provider's window over
+the table's) and `/models` uses it on a cloud provider. **Deliberately unchanged:** cloud compaction
+still defaults to a 120k budget when `context_window` is unset — a 1M window is what the model can
+hold, not what every turn should resend.
+
+**4. Setup flow.** First run: a bare `aegis` with no global or project config, no `AEGIS_PROVIDER_*`
+env, a new session and a terminal opens the `/config` menu standalone (`tui.RunSetup`) before the daemon
+starts; every other case starts as before. The menu gained **Connection** (lists models with the key the
+daemon would read, or probes Ollama; a missing key is named with where it may live), a live **Models**
+list annotated from the table, effort and cache TTL under **Generation**, and **Small-model backend**:
+`provider.small_provider`/`small_base_url`, served by `provider.WithModelRouter`, which routes requests
+naming `small_model` to their own adapter — no call site changed, since each already names the small
+model. A local main model with a cloud small one is refused without `allow_cloud_small_model` (compaction
+sends whole transcripts); the new keys stay frozen in an untrusted project config like `base_url`.
+Stale curated OpenAI/Groq/OpenRouter lists were removed in favor of the listing. **Unfiled defect:**
+`PatchGlobalProvider` spliced in a freshly built `provider:` block, so saving `/config` deleted
+`fallback`, `headers`, `keep_alive`, `compat` and every other key the menu does not render; it now
+rewrites only the keys it owns (`TestPatchGlobalProviderKeepsUnownedKeys`). Smoke-tested by driving the
+built binary through a pty with a throwaway `HOME`: discard leaves no config file; save writes one that
+loads.
+
+**5. P86.12, P86.19 shipped.** `titledFrame` — dim edge, title in the top edge, keys in the bottom edge,
+rows padded to one width — backs the wizard and `/security-config` through `fixedPanelFrame`, with huh's
+own help rows hidden so keys are said once. Pickers stay frameless (P74.5); approval keeps its bright
+edge as the dialog meant to interrupt; quit-confirm keeps its destructive edge. Composer hints read
+`ctrl+k commands · f1 help · ctrl+e editor`, and the idle status row draws nothing instead of a solid
+`READY` chip.
+
+**Not done / not verified.** No request reached the real Anthropic API — the new shapes are checked
+against the published API rules and recorded wire formats only. No local model was run (Ollama was not
+running). `TestWindowsSpecialNameRule` and `TestLatexBuildResolvesCitationsLive` fail on `main` before
+this work and still do; `gofmt -l` flags `internal/server/server.go` and
+`session_scoping_test.go` on `main` too. Neither was touched.
 
 ---
 

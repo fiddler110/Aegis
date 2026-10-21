@@ -33,28 +33,24 @@
     - [P86.9 — The local prompt profile is chosen from the base URL, not the window it is meant to protect](#p869--the-local-prompt-profile-is-chosen-from-the-base-url-not-the-window-it-is-meant-to-protect)
     - [P86.10 — Skills are reached only if the model chooses to load them](#p8610--skills-are-reached-only-if-the-model-chooses-to-load-them)
     - [P86.11 — Guard changes have no written "is this fail-safe actually closed-loop" review rule](#p8611--guard-changes-have-no-written-is-this-fail-safe-actually-closed-loop-review-rule)
-    - [P86.12 — Footer hints are bare key names, and the status bar keeps a permanent solid `READY` chip](#p8612--footer-hints-are-bare-key-names-and-the-status-bar-keeps-a-permanent-solid-ready-chip)
     - [P86.13 — Markdown is drawn by glamour's stock style: off-palette, 7–11× the visible bytes, full-width](#p8613--markdown-is-drawn-by-glamours-stock-style-off-palette-711-the-visible-bytes-full-width)
     - [P86.14 — Live reasoning is streamed whole into the transcript tail](#p8614--live-reasoning-is-streamed-whole-into-the-transcript-tail)
     - [P86.15 — Mid-turn narration is drawn identically to the answer](#p8615--mid-turn-narration-is-drawn-identically-to-the-answer)
     - [P86.16 — Every mark is a hard-coded literal; there is no glyph tier and no ASCII floor](#p8616--every-mark-is-a-hard-coded-literal-there-is-no-glyph-tier-and-no-ascii-floor)
     - [P86.17 — No contrast or theme lint; the palette is ~32 role fields with no measured relationships](#p8617--no-contrast-or-theme-lint-the-palette-is-32-role-fields-with-no-measured-relationships)
     - [P86.18 — The working shimmer emits an escape pair per rune and steps by tick count](#p8618--the-working-shimmer-emits-an-escape-pair-per-rune-and-steps-by-tick-count)
-    - [P86.19 — Dialogs put their title and keys inside the box, on a bright primary edge](#p8619--dialogs-put-their-title-and-keys-inside-the-box-on-a-bright-primary-edge)
     - [P86.20 — Blank rows are added by hand at each append site, with no spacing authority](#p8620--blank-rows-are-added-by-hand-at-each-append-site-with-no-spacing-authority)
     - [P87.1 — The live workflow tier scores pass/fail and elapsed time; it never records how many steps or tokens the run took](#p871--the-live-workflow-tier-scores-passfail-and-elapsed-time-it-never-records-how-many-steps-or-tokens-the-run-took)
     - [P87.2 — Traces are read one session at a time; nothing aggregates failure modes across sessions](#p872--traces-are-read-one-session-at-a-time-nothing-aggregates-failure-modes-across-sessions)
     - [P87.3 — Eval scenarios always start at turn 0; there is no "resume from a recorded state and vary one thing"](#p873--eval-scenarios-always-start-at-turn-0-there-is-no-resume-from-a-recorded-state-and-vary-one-thing)
     - [P87.4 — Skills cannot be induced from recorded runs (design reading; sequenced behind P87.2, P87.3 and P85.5)](#p874--skills-cannot-be-induced-from-recorded-runs-design-reading-sequenced-behind-p872-p873-and-p855)
     - [P87.5 — No way to inject faults into tool results on a live run (design reading, low priority)](#p875--no-way-to-inject-faults-into-tool-results-on-a-live-run-design-reading-low-priority)
-    - [P88.1 — `old_string not found` carries no hint, so a small model re-sends the same wrong string](#p881--old_string-not-found-carries-no-hint-so-a-small-model-re-sends-the-same-wrong-string)
-    - [P88.2 — `write_file` accepts content whose newlines are literal `\n`, and writes an uncompilable file](#p882--write_file-accepts-content-whose-newlines-are-literal-n-and-writes-an-uncompilable-file)
     - [P88.3 — Sampling parameters for a local Ollama model are set only by hand-built Modelfiles](#p883--sampling-parameters-for-a-local-ollama-model-are-set-only-by-hand-built-modelfiles)
     - [P88.4 — A run can end on a failing build or test with no report, or an empty one](#p884--a-run-can-end-on-a-failing-build-or-test-with-no-report-or-an-empty-one)
     - [P88.5 — Repeated failed edits to one file have no "stop patching, rewrite it" exit](#p885--repeated-failed-edits-to-one-file-have-no-stop-patching-rewrite-it-exit)
     - [P88.6 — `edit_section` is exposed for code, and fails on it with a message the model does not act on](#p886--edit_section-is-exposed-for-code-and-fails-on-it-with-a-message-the-model-does-not-act-on)
-    - [P88.7 — There is no repeatable scenario for "refactor, add a test, run it" to compare models or sampling settings](#p887--there-is-no-repeatable-scenario-for-refactor-add-a-test-run-it-to-compare-models-or-sampling-settings)
   - [Verification Work](#verification-work)
+    - [P88.7 — `GoFixTask` and its repeated live test are built; no live sitting yet](#p887--gofixtask-and-its-repeated-live-test-are-built-no-live-sitting-yet)
     - [P80.4 — `live_workflow`'s two standalone tests both need a stronger model than this machine has run](#p804--live_workflows-two-standalone-tests-both-need-a-stronger-model-than-this-machine-has-run)
     - [P38.1 — Non-orchestrated, single-context threat-model build (primary path for local models)](#p381--non-orchestrated-single-context-threat-model-build-primary-path-for-local-models)
     - [P68.4 — The triage rubric's measuring band sits below the strongest local model](#p684--the-triage-rubrics-measuring-band-sits-below-the-strongest-local-model)
@@ -64,6 +60,23 @@
 
 ## Status
 
+**2026-10-21 — cloud-and-local harness pass: P88.1, P88.2, P86.12, P86.19 shipped; P88.7 built and
+moved to Verification Work; three unfiled defects found and fixed.** Done at the user's request, in their
+order: cloud-model correctness first, then the P88 local fixes, then a model capability table with live
+discovery, then the setup flow, then dialog polish. Found while doing it and fixed, none previously filed:
+**(1)** `provider.think: true` sent `{type:"enabled", budget_tokens}` to every Claude model — a 400 on
+everything from Opus 4.7 on — and the adapter ignored the guard's thinking suppression entirely; **(2)**
+`internal/cost` priced every Opus at the 4.0 rate ($15/$75), overstating current spend 3–4× and tripping
+`budget_usd` early; **(3)** saving `/config` replaced the whole `provider:` block, silently deleting
+`fallback`, `headers`, `keep_alive`, `compat` and every other key the menu does not render. New, also
+shipped: `provider.cache_ttl`, Anthropic `reasoning_effort`, `provider.small_provider` (hybrid
+local/cloud small model behind `allow_cloud_small_model`), `GET /models/remote`, first-run setup. Full
+record: [releases](releases/releases-01.md#2026-10-21-cloud-and-local-harness-pass). Tier 4 open count:
+**45** (49 − 4); Verification Work: **5** (4 + P88.7). **Not live-verified:** no request reached the real
+Anthropic API (every new request shape is checked against recorded wire formats and the published API
+rules only), and no local model was run. **Suite note:** `TestWindowsSpecialNameRule` (`internal/sandbox`)
+and `TestLatexBuildResolvesCitationsLive` (biber on this Mac) fail on `main` before any of this work — not
+fixed here, and not caused by it.
 **P88 batch filed, 2026-10-01 — seven Tier 4 items, none built** (**P88.1**–**P88.7**). From a live trial,
 at the user's request, of `ornith-1.5:9b` and `aegis-qwen35-9b:32k` driven through `aegis chat` on one
 small task (fix a divide-by-zero, add a table-driven test, run `go test`): the untuned ornith left an
@@ -376,7 +389,7 @@ about 60% of that on purpose. Sizes are estimates from reading (see the caveat u
 | --- | ------- | ------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 1   | Mon am  | **P68.4** live run against `aegis-qwen35-9b:32k` (background)                                     | run     | The rubric is built and green; only the run is missing. The GPU is otherwise idle while TUI code is written, and TUI tests don't use it. Read the result at the end of the day.                                             |
 | 2   | Mon     | **P80.4** forced-overflow fixture (small change, then a run on the 9b)                            | S       | The one half of P80.4 not blocked on hardware. Serialize after #1 — both need the GPU.                                                                                                                                         |
-| 3   | Mon     | **P86.12** footer hints as `key verb`; drop the permanent `READY` chip                            | XS      | Ten-line change, verified defect, no dependency. Do it while `view.go` is open.                                                                                                                                                |
+| 3   | Mon     | ~~**P86.12** footer hints as `key verb`; drop the permanent `READY` chip~~ shipped 2026-10-21                            | XS      | Ten-line change, verified defect, no dependency. Do it while `view.go` is open.                                                                                                                                                |
 | 4   | Mon–Tue | **P86.14** bounded 3-line live reasoning window + collapsed `thought for Ns · N tok` row          | S       | Measured defect on the models actually in use (`aegis-phi4-reasoning`, the 9B's thinking mode). Self-contained.                                                                                                                 |
 | 5   | Tue     | **P86.13 (a)** glamour style built from the colour scheme, trim padded cells, cap the wrap        | S       | Measured (7–11× bytes, off-palette H1) and the most-read surface. Re-run the byte measurement afterwards and record before/after in the entry. Stop at (a); (b) only if (a) leaves a defect.                                 |
 | 6   | Tue     | **P86.18** shimmer: clock-based phase, merged same-colour runs, grapheme-aware widths             | XS–S    | Same rendering-cost theme as #5; do after it so the two are measured separately.                                                                                                                                               |
@@ -1259,29 +1272,6 @@ here is a judgement of how it looks on screen. CodeAF's stance is deliberate res
 per screen, colour on strokes only, no borders except one frame); Aegis's Crush-derived purple look is a
 brand choice and none of these entries proposes replacing it — they take the *mechanisms*.
 
-### P86.12 — Footer hints are bare key names, and the status bar keeps a permanent solid `READY` chip
-
-**Filed 2026-09-20**, second reading. Two small, verified defects in the bottom row.
-`contextualFooterHints` (`internal/tui/view.go`, ~958) builds its segment from `Help().Key` alone —
-the composer shows `ctrl+k · f1 · ctrl+e` with no verb, so a first-time user is shown three chords and
-told what none of them does (the verbs exist in `keymap.go`'s `WithHelp` strings and are simply not
-used). And `renderInputArea` (~495) draws `statusTag("READY", colBgLess, colSuccess)` — a solid-filled
-chip — whenever nothing else is happening, which is most of the time.
-
-CodeAF's fix for the first is a **hint grammar**: `chord verb · chord verb`, spelled the same at ~25
-call sites, with the chord in a distinct datum hue and the verb dim (its `docs/DESIGN-LANGUAGE.md`
-"payload rule": "a line may be quiet; the fact it carries may not be"; one or two lifted data per
-line, never every noun). For the second it states two rules: **colour is stroke, never fill**, and
-**absence is the normal state** — its approval-posture badge exists *only* when the posture is unsafe
-("a permanent SAFE badge is a badge nobody reads and therefore says nothing on the day it changes").
-Applied here, `READY` would become nothing (or one dim glyph) and filled tags would be reserved for
-toasts and errors, so their appearing is the message.
-
-**Promote when** the next TUI pass touches `view.go`'s status row — it is a ten-line change with no
-dependency.
-
-Priority: Tier 4 — no fired trigger, XS. Cheapest item in the batch; take it with any other TUI edit.
-
 ### P86.13 — Markdown is drawn by glamour's stock style: off-palette, 7–11× the visible bytes, full-width
 
 **Filed 2026-09-20**, second reading. Measured by rendering a sample through `newGlamourRenderer`
@@ -1458,36 +1448,6 @@ cycle cannot be mistaken for urgency, which is amber's job.
 **Promote when** the shimmer shows lag on a slow link, or with any edit to `shimmer.go`.
 
 Priority: Tier 4 — no fired trigger, XS–S.
-
-### P86.19 — Dialogs put their title and keys inside the box, on a bright primary edge
-
-**Filed 2026-09-20**, second reading. `dialogFrame` (`internal/tui/dialog.go`, ~114) draws a rounded
-border in `colPrimary` and every dialog puts its own header line and key hint inside it (the approval
-dialog's `⚡ tool  reason` row and its `↑/↓ select · enter confirm` line). CodeAF's single frame
-(`internal/tui3/frame.go`) makes three different choices: **the edge is dim, always** ("a frame is a
-claim about what a thing *is* — one object, apart from the conversation — and never emphasis; it does
-not light, thicken or follow a cursor"); **the top edge carries a title and a right-aligned aside and
-the bottom edge carries the keys** ("words written into an edge cannot be mistaken for content"; an edge
-too narrow for both gives up its aside first and cuts its title last); and **every row is set to one
-width** so the right edge lands in one column ("a row measured its own way is a frame with a notch in
-it"). A terminal refused box drawing gets two plain rules and no sides, keeping the geometry (a side
-becomes one blank cell, not zero).
-
-```
-╭─ ? Which storage for the session index? ──────────── model asks ─╮
-│ ▸ 1  SQLite         one file beside the conversation             │
-╰─ ↑↓ choose · enter take it · esc later ──────────────── c change ─╯
-```
-
-CodeAF also **dims the conversation under a modal** (a depth-fade of the underlying frame) so the eye
-lands on the sheet; whether `renderOverlay` does anything similar was not checked. Taste is involved:
-a bright brand edge is a legitimate choice, and this entry is only the mechanism if the dialogs are
-felt to be loud or crowded. It also pairs with **P86.4** (the approval block is where an extra key
-row would go).
-
-**Promote when** a dialog needs another row of keys and the interior is already full.
-
-Priority: Tier 4 — no fired trigger, S; pure presentation, no protocol change.
 
 ### P86.20 — Blank rows are added by hand at each append site, with no spacing authority
 
@@ -1666,53 +1626,6 @@ the shape. The provider-decorator composition Aegis already has (`providerfactor
 on directory listings; it was **not cloned, built or run**. Claims about Aegis were checked against this tree
 at the files cited.
 
-### P88.1 — `old_string not found` carries no hint, so a small model re-sends the same wrong string
-
-**Filed 2026-10-01**, from a live trial of `ornith-1.5:9b` and `aegis-qwen35-9b:32k` (see [Status](#status)).
-`applyReplacement` (`internal/tool/builtin/file.go`, ~474) answers a miss with `old_string not found in
-<path>` and nothing else, and both `edit_file` and `multi_edit` go through it. That is the one place the
-handle-based tools already do better: `edit_section` and `fill_marker` answer a wrong selector with the
-headings or markers that *do* exist, so the retry has the answer. Under the local profile `edit_file` is
-deferred (P62.9) and `edit_section` is markdown-only, so for **source code** `multi_edit`'s byte-exact match
-is the only surgical editor a small model is left with — and it is the one that gives no hint.
-
-Observed: in the three trial runs `old_string not found` came back on the same file up to three times in a
-row (untuned `ornith`) and at least once in each of the others. In the first `ornith` run the file on disk differed
-from what the model believed (see **P88.2**), which a hint naming the closest matching line would have
-exposed at once. Candidate content, cheapest first: the closest line by whitespace-normalised comparison
-with its line number; a note when `old_string` contains a literal `\n` or `\t` the file does not; the
-file's own text around that line. Keep the notice inside the existing truncation posture
-(`truncate.go`) — it is bytes the model pays for on every miss.
-
-**Promote when** a run is seen spending more than two consecutive calls on one file's misses (untuned `ornith` did). **Not checked:** how often this happens on a *real* task rather than this one small one.
-
-Priority: Tier 4 — no fired trigger, S (one function plus a test in `internal/tool/builtin`; the
-`applyReplacement` comment already says it is shared so the two tools "cannot drift apart"). **First or
-second in the batch.**
-
-### P88.2 — `write_file` accepts content whose newlines are literal `\n`, and writes an uncompilable file
-
-**Filed 2026-10-01**, same trial. The untuned `ornith-1.5:9b` called `write_file` for `main_test.go` with a
-`content` argument in which the line breaks inside the function body were the two characters `\` `n`, not
-newlines. The tool wrote it (`wrote 820 bytes`), `go vet` then failed with `illegal character U+005C '\'`,
-and the model spent its remaining ~10 calls — `edit_section` on a `.go` file, then increasingly garbled
-PowerShell — failing to repair a file it could not see was one line long. It never ran `go test`.
-
-The signature is cheap to detect and rare in real code: a file written with no (or very few) real newlines
-but several `\n`/`\t` escape pairs outside a string literal. Options: refuse with "content looks
-double-escaped; resend with real newlines" (the safe default — the model sees why), or unescape on write
-when the heuristic is unambiguous. Refuse first; auto-repair is the kind of silent rewrite a tool should
-not do without a measurement of false positives (a Go source file that *quotes* `\n` in a string is
-legitimate, so the check must not fire on those).
-
-The same run's sibling `aegis-qwen35-9b:32k` did **not** produce this, and neither did `ornith` once its
-sampling was pinned (**P88.3**), so this is a safety net for a failure that sampling mostly cures, not a
-fix for a systemic bug. Not checked: whether the cause is the model, the Ollama tool-call renderer, or
-`internal/provider`'s argument handling — `internal/provider/argshaperepair.go` repairs argument *shape*
-and was not read for this.
-
-**Promote when** a second occurrence is seen on any model. Priority: Tier 4 — no fired trigger, S.
-
 ### P88.3 — Sampling parameters for a local Ollama model are set only by hand-built Modelfiles
 
 **Filed 2026-10-01**, same trial. `ollama pull ornith-1.5:9b` ships with **no** `PARAMETER` lines, so a run
@@ -1792,32 +1705,6 @@ must never name a tool the active profile defers — the current message names `
 **Promote when** P88.1 is built and the wasted call is still seen. Priority: Tier 4 — no fired trigger,
 XS–S, and the lowest value in the batch.
 
-### P88.7 — There is no repeatable scenario for "refactor, add a test, run it" to compare models or sampling settings
-
-**Filed 2026-10-01**, same trial. Every claim in **P88.1**–**P88.6** rests on one run per configuration of
-one prompt, driven by hand in a scratch workspace (`aegis chat --yes --mode build`, `AEGIS_PROVIDER_MODEL`
-and `AEGIS_PROVIDER_BASE_URL` set per run, the result checked with `go vet` and `go test`). That is the
-shape the `live_workflow` tier exists for, and `P87.1` would let it report steps and tokens. What is
-missing is the scenario itself: a small Go module with a divide-by-zero in `Average`, the prompt, and a
-`go test` oracle, run N times per model/setting with pass rate, calls and elapsed reported.
-
-This is the measurement that decides **P88.3** and tells whether **P88.1**, **P88.2**, **P88.5** helped.
-**Not checked:** how `live_workflow` fixtures are declared and whether a Go-test oracle fits
-(`internal/eval/workflowtask.go`); read that before sizing. Machine is the constraint already recorded in
-**P80.4** — this tier runs only models this machine can serve.
-
-**Promote when** P88.3 or any of P88.1/P88.2/P88.5 is about to be built. If measuring is wanted first,
-this is the first item in the batch. Priority: Tier 4 — no fired trigger, S–M; depends on **P87.1** for
-step/token reporting but not for pass rate.
-
-**Provenance and what was not done.** All claims above come from three `aegis chat` runs on 2026-10-01
-(Ollama 0.30.10, Windows, `aegis version 2f77fee-dirty`): untuned `ornith-1.5:9b` (112 s), `aegis-qwen35-9b:32k`
-(66 s) and `aegis-ornith-9b:32k` — a local copy of ornith with the qwen build's sampling parameters, created
-with `ollama create` and **not committed anywhere** (140 s, tests passed on independent `go test`). One run
-each; no repetition; one prompt; a scratch workspace outside the repo. The Aegis code claims (file and
-function names, the P62.9 deferral, the P52.3/P34.1 behaviour) were checked by reading the cited files this
-session; no code was changed. Pinning a model's sampling in a Modelfile is not something Aegis does today.
-
 ---
 
 ## Verification Work
@@ -1836,6 +1723,30 @@ hardware exists), but its overflow-fixture half runs on the 9b. **P68.4**'s rubr
 (2026-09-13); what's left for it is exactly the live run this section is named for. See each entry.
 **P66.22**, **P62.9** and **P65.2** closed by live evidence 2026-09-01/09-02 — full record in
 [releases.md](releases/releases-01.md#roadmap-housekeeping-closed-items-migrated-from-roadmapmd-2026-09-03).
+
+### P88.7 — `GoFixTask` and its repeated live test are built; no live sitting yet
+
+**Built 2026-10-21** (record: [releases](releases/releases-01.md#2026-10-21-cloud-and-local-harness-pass)).
+`internal/eval/gofixtask.go` is the 2026-10-01 trial's scenario as a portable `WorkflowTask` — a Go module
+whose `Average` divides by `len(nums)`, an 8-criterion rubric (`fix_correct` via a behavioral oracle that runs
+with the agent's own test set aside, `test_added`, `test_table_driven`, `test_covers_empty`, `vet_clean`,
+`tests_pass`, `no_cheat`, `no_scope_creep`; `PassMark` 7) — and `TestLiveGoFixRepeated` (`live_workflow` tag)
+runs it `AEGIS_EVAL_RUNS` times (default 3) against `AEGIS_EVAL_MODEL` and logs one `SUMMARY` line: pass
+rate, score, mean calls, mean tokens, empty replies, mean elapsed. `TaskOutcome` now carries calls, tokens
+and an empty-reply flag (a first slice of **P87.1**).
+
+**What closes it:** one sitting per configuration the trial compared — untuned `ornith-1.5:9b`,
+`aegis-qwen35-9b:32k`, and ornith with the qwen build's sampling pinned — at the same N, read side by side.
+That is what decides **P88.3**, and it is the first measurement of whether the shipped **P88.1** hints and
+**P88.2** refusal change outcomes. Ollama was not running on 2026-10-21, so nothing has been run.
+
+**Provenance and what was not done.** All claims above come from three `aegis chat` runs on 2026-10-01
+(Ollama 0.30.10, Windows, `aegis version 2f77fee-dirty`): untuned `ornith-1.5:9b` (112 s), `aegis-qwen35-9b:32k`
+(66 s) and `aegis-ornith-9b:32k` — a local copy of ornith with the qwen build's sampling parameters, created
+with `ollama create` and **not committed anywhere** (140 s, tests passed on independent `go test`). One run
+each; no repetition; one prompt; a scratch workspace outside the repo. The Aegis code claims (file and
+function names, the P62.9 deferral, the P52.3/P34.1 behaviour) were checked by reading the cited files this
+session; no code was changed. Pinning a model's sampling in a Modelfile is not something Aegis does today.
 
 ### P80.4 — `live_workflow`'s two standalone tests both need a stronger model than this machine has run
 
