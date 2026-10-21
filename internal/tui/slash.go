@@ -636,8 +636,44 @@ func (d *SlashDispatcher) cmdModels(_ []string) SlashResult {
 		if resp, err := d.client.ListLocalModels(ctx); err == nil && resp.Reachable && len(resp.Models) > 0 {
 			return SlashResult{Models: localModelsToCatalog(resp.Models)}
 		}
+		// A cloud or OpenAI-compatible provider lists what this credential can
+		// actually reach. The curated catalog stays the fallback for a
+		// provider that cannot list, or a listing that fails.
+		if resp, err := d.client.ListRemoteModels(ctx); err == nil && resp.Supported && len(resp.Models) > 0 {
+			return SlashResult{Models: remoteModelsToCatalog(resp)}
+		}
 	}
 	return SlashResult{Models: modelcatalog.Curated()}
+}
+
+// remoteModelsToCatalog adapts GET /models/remote into picker entries. A
+// listed id the curated catalog also carries keeps its curated tier and note
+// (the recommendation is still worth showing); the rest are "available".
+func remoteModelsToCatalog(resp api.RemoteModelsResponse) []modelcatalog.Model {
+	curated := map[string]modelcatalog.Model{}
+	for _, m := range modelcatalog.Curated() {
+		curated[strings.ToLower(m.ID)] = m
+	}
+	out := make([]modelcatalog.Model, 0, len(resp.Models))
+	for _, m := range resp.Models {
+		entry := modelcatalog.Model{Provider: resp.Provider, ID: m.ID, Tier: "available", Context: "—", Notes: m.Notes}
+		if m.ContextWindow > 0 {
+			entry.Context = modelcatalog.FormatTokens(m.ContextWindow)
+		}
+		if c, ok := curated[strings.ToLower(m.ID)]; ok {
+			entry.Tier = c.Tier
+			if entry.Notes != "" {
+				entry.Notes = c.Notes + " " + entry.Notes
+			} else {
+				entry.Notes = c.Notes
+			}
+		}
+		if entry.Notes == "" {
+			entry.Notes = m.DisplayName
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // localModelsToCatalog adapts the daemon's live GET /models/local result into

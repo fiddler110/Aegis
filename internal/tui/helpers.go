@@ -6,6 +6,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/fiddler110/aegis/internal/modelcatalog"
 )
 
 func wrap(s string, width int) string {
@@ -16,9 +18,13 @@ func wrap(s string, width int) string {
 }
 
 // contextWindowFor returns an approximate context-window size (in tokens) for a
-// model, used to render the usage indicator. Values are conservative defaults
-// matched on common model-name fragments; unknown models fall back to 128k.
+// model, used to render the usage indicator. A model the capability table
+// knows (modelcatalog.Lookup) gets its real window; otherwise conservative
+// defaults matched on common model-name fragments, and 128k for the rest.
 func contextWindowFor(model string) int {
+	if w := modelcatalog.Lookup(model).ContextWindow; w > 0 {
+		return w
+	}
 	m := strings.ToLower(model)
 	switch {
 	case strings.Contains(m, "gemini"):

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fiddler110/aegis/internal/api"
@@ -35,5 +36,21 @@ func TestLocalModelsToCatalog(t *testing.T) {
 	gemma := out[1]
 	if gemma.Context != "Q4_K_M" {
 		t.Errorf("want Context to fall back to quantization for a non-window tag, got %q", gemma.Context)
+	}
+}
+
+func TestRemoteModelsToCatalogKeepsCuratedNotes(t *testing.T) {
+	got := remoteModelsToCatalog(api.RemoteModelsResponse{Provider: "anthropic", Models: []api.RemoteModelSummary{
+		{ID: "claude-opus-5-5", ContextWindow: 1_000_000, Notes: "1M ctx"},
+		{ID: "claude-new-thing", DisplayName: "Claude New Thing"},
+	}})
+	if len(got) != 2 {
+		t.Fatalf("got %d entries", len(got))
+	}
+	if got[0].Tier != modelcatalog.TierFrontier || got[0].Context != "1M" || !strings.Contains(got[0].Notes, "Default.") {
+		t.Errorf("curated entry lost its recommendation: %+v", got[0])
+	}
+	if got[1].Tier != "available" || got[1].Notes != "Claude New Thing" || got[1].Context != "—" {
+		t.Errorf("uncurated entry = %+v", got[1])
 	}
 }

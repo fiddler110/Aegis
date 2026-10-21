@@ -287,3 +287,38 @@ func outputConfig(effort string) *wireOutputConfig {
 	}
 	return &wireOutputConfig{Effort: effort}
 }
+
+// ModelSummary is the part of a model's traits a person choosing a model
+// needs to see: how big its window is and how it thinks.
+type ModelSummary struct {
+	Known         bool
+	ContextWindow int
+	// Thinking describes how thinking behaves: "budget", "adaptive",
+	// "adaptive, on by default" or "adaptive, always on".
+	Thinking string
+	// EffortLevels lists the reasoning_effort values the model accepts.
+	EffortLevels []string
+	// Sampling reports whether a non-default temperature is accepted.
+	Sampling bool
+}
+
+// Summarize describes a Claude model id for pickers and the setup wizard.
+// Known is false for an id this package does not recognize.
+func Summarize(model string) ModelSummary {
+	t := traitsFor(model)
+	if !t.known {
+		return ModelSummary{}
+	}
+	s := ModelSummary{Known: true, ContextWindow: t.contextWindow, EffortLevels: t.effort, Sampling: t.sampling}
+	switch {
+	case t.thinking == thinkingBudget:
+		s.Thinking = "budget"
+	case t.off == offNone:
+		s.Thinking = "adaptive, always on"
+	case t.thinksByDefault:
+		s.Thinking = "adaptive, on by default"
+	default:
+		s.Thinking = "adaptive"
+	}
+	return s
+}

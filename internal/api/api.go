@@ -905,6 +905,28 @@ type LocalModelSummary struct {
 	SizeBytes     int64  `json:"size_bytes,omitempty"`
 }
 
+// RemoteModelsResponse lists what GET /models/remote found the configured
+// cloud (or OpenAI-compatible) provider serving for this credential, so the
+// model picker offers ids that exist today instead of a curated list that
+// goes stale every launch. Supported is false for a local Ollama provider
+// (GET /models/local covers it) and for an adapter that cannot list; Error
+// carries a listing failure (a bad key, an unreachable gateway) for display.
+type RemoteModelsResponse struct {
+	Supported bool                 `json:"supported"`
+	Provider  string               `json:"provider,omitempty"`
+	Error     string               `json:"error,omitempty"`
+	Models    []RemoteModelSummary `json:"models,omitempty"`
+}
+
+// RemoteModelSummary is one listed model plus what Aegis knows about it.
+type RemoteModelSummary struct {
+	ID            string `json:"id"`
+	DisplayName   string `json:"display_name,omitempty"`
+	ContextWindow int    `json:"context_window,omitempty"`
+	// Notes is modelcatalog's annotation: window, price, thinking behaviour.
+	Notes string `json:"notes,omitempty"`
+}
+
 // ConfigHardenRequest applies the hardened profile computed by
 // config.ComputeHardenPlan (POST /config/harden, P15.2) — the HTTP
 // equivalent of `aegis harden`. Confirm must be true for anything to be

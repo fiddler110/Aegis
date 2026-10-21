@@ -10,6 +10,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 )
 
 // Role identifies the author of a message.
@@ -430,4 +431,45 @@ func CheckBackendHealth(ctx context.Context, a Adapter) (healthy, supported bool
 		a = u.Unwrap()
 	}
 	return false, false
+}
+
+// ModelInfo is one model a provider reports it can serve.
+type ModelInfo struct {
+	ID          string
+	DisplayName string
+	// ContextWindow and MaxOutput are the provider's own numbers when it
+	// publishes them (Anthropic's Models API does: max_input_tokens and
+	// max_tokens); 0 when it does not.
+	ContextWindow int
+	MaxOutput     int
+}
+
+// ModelLister is an optional Adapter capability: list the models the
+// configured endpoint and credential can actually reach. The Anthropic and
+// OpenAI-compatible adapters implement it. It replaces guessing from a
+// curated list that goes stale every model launch — the wizard and the /models
+// picker offered GPT-4o and Opus 4.8 as current until this existed. Reach it
+// through ListModels, which unwraps the retry / failover decorators.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]ModelInfo, error)
+}
+
+// ErrModelListingUnsupported is returned by ListModels for an adapter chain
+// with no ModelLister in it.
+var ErrModelListingUnsupported = errors.New("this provider cannot list its models")
+
+// ListModels lists a's models when a — or a base adapter it wraps — supports
+// it, unwrapping decorators exactly as CheckBackendHealth does.
+func ListModels(ctx context.Context, a Adapter) ([]ModelInfo, error) {
+	for a != nil {
+		if l, ok := a.(ModelLister); ok {
+			return l.ListModels(ctx)
+		}
+		u, ok := a.(interface{ Unwrap() Adapter })
+		if !ok {
+			break
+		}
+		a = u.Unwrap()
+	}
+	return nil, ErrModelListingUnsupported
 }

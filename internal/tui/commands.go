@@ -131,7 +131,7 @@ func commandDefs() []commandDef {
 		{
 			name:         "models",
 			shortDesc:    "Interactively pick a model, grouped by provider (current one marked)",
-			detailedHelp: "/models\n  Open an interactive picker of curated models grouped by provider, with the session's current model marked. Selecting one is equivalent to running /model <id>.\n  Use /model <id> directly if you already know the exact id, or /model with no args to print the current model without opening the picker.",
+			detailedHelp: "/models\n  Open an interactive picker of models, with the session's current model marked. On a local Ollama provider it lists the tags actually pulled; on a cloud or OpenAI-compatible provider it lists what your credential can reach right now, annotated with context window, price and thinking behaviour; otherwise the curated catalog. Selecting one is equivalent to running /model <id>.\n  Use /model <id> directly if you already know the exact id, or /model with no args to print the current model without opening the picker.",
 			handler:      (*SlashDispatcher).cmdModels,
 		},
 		{

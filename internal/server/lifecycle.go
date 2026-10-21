@@ -71,6 +71,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /config/security", s.requireAdminToken(s.handlePatchConfigSecurity))
 	mux.HandleFunc("GET /config/skills", s.handleGetConfigSkills)
 	mux.HandleFunc("GET /models/local", s.handleListLocalModels)
+	mux.HandleFunc("GET /models/remote", s.handleListRemoteModels)
 	mux.HandleFunc("PATCH /config/skills", s.requireAdminToken(s.handlePatchConfigSkills))
 	mux.HandleFunc("GET /config/cost", s.handleGetConfigCost)
 	mux.HandleFunc("PATCH /config/cost", s.requireAdminToken(s.handlePatchConfigCost))

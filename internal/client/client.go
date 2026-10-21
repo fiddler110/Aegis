@@ -594,6 +594,16 @@ func (c *Client) ListLocalModels(ctx context.Context) (api.LocalModelsResponse, 
 	return out, nil
 }
 
+// ListRemoteModels returns what the daemon's configured cloud or
+// OpenAI-compatible provider lists for this credential (GET /models/remote).
+func (c *Client) ListRemoteModels(ctx context.Context) (api.RemoteModelsResponse, error) {
+	var out api.RemoteModelsResponse
+	if err := c.do(ctx, http.MethodGet, "/models/remote", nil, &out); err != nil {
+		return api.RemoteModelsResponse{}, err
+	}
+	return out, nil
+}
+
 // ListPersonas returns available persona names and descriptions.
 func (c *Client) ListPersonas(ctx context.Context) ([]api.PersonaInfo, error) {
 	var out []api.PersonaInfo
