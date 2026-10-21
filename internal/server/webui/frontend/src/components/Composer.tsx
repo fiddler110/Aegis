@@ -1,4 +1,4 @@
-import type { JSX } from "preact";
+import type { TargetedKeyboardEvent } from "preact";
 import { useState } from "preact/hooks";
 import type { DriveSkillInfo } from "../types";
 
@@ -26,7 +26,7 @@ export function Composer({
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  const onKeyDown = (e: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>) => {
+  const onKeyDown = (e: TargetedKeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (!streaming) onSend();
