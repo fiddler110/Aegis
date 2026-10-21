@@ -203,7 +203,7 @@ func (m *securityConfigModel) buildListForm() *huh.Form {
 				Value(&m.selected).
 				Height(len(opts) + 2),
 		),
-	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // toolBadge summarizes a tool's pending (in-memory, possibly-edited) settings
@@ -279,7 +279,7 @@ func (m *securityConfigModel) buildEditForm() *huh.Form {
 
 	return huh.NewForm(
 		huh.NewGroup(fields...),
-	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────────
@@ -371,7 +371,7 @@ func (m *securityConfigModel) buildActionForm() *huh.Form {
 				Value(&m.action).
 				Height(len(opts) + 2),
 		),
-	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 func (m *securityConfigModel) updateAction(msg tea.Msg) tea.Cmd {
@@ -419,7 +419,7 @@ func (m *securityConfigModel) buildInstallConfirmForm() *huh.Form {
 				Negative("Cancel").
 				Value(&m.installConfirmed),
 		),
-	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(securityConfigPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 func (m *securityConfigModel) updateInstallConfirm(msg tea.Msg) tea.Cmd {
@@ -576,8 +576,7 @@ func (m *securityConfigModel) scopeLabel() string {
 // ─── View ─────────────────────────────────────────────────────────────────────
 
 func (m *securityConfigModel) view() string {
-	header := renderBrandMark() + " " +
-		m.th.statusDim.Render("Security Scanner Configuration") + "\n\n"
+	header := ""
 
 	var body string
 	switch {
@@ -601,5 +600,16 @@ func (m *securityConfigModel) view() string {
 		}
 	}
 
-	return fixedPanelFrame(header+body, securityConfigPanelW)
+	return fixedPanelFrame("Security scanner configuration", m.keyHints(), header+body, securityConfigPanelW)
+}
+
+// keyHints is the bottom-edge key line for the current phase (P86.19).
+func (m *securityConfigModel) keyHints() string {
+	switch m.phase {
+	case scPhaseList:
+		return "↑↓ choose · enter open · esc close"
+	case scPhaseAction, scPhaseEdit, scPhaseInstallConfirm:
+		return "tab next · enter confirm · esc back"
+	}
+	return ""
 }

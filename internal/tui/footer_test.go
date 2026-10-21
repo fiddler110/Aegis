@@ -17,6 +17,12 @@ func TestContextualFooterHints(t *testing.T) {
 			t.Errorf("chat hints %q missing %q", chat, want)
 		}
 	}
+	// P86.12: each chord carries its verb.
+	for _, want := range []string{"commands", "help", "editor"} {
+		if !strings.Contains(chat, want) {
+			t.Errorf("chat hints %q missing the verb %q", chat, want)
+		}
+	}
 	if strings.Contains(chat, "diagnose") {
 		t.Errorf("chat hints should not show terminal-only diagnose hint: %q", chat)
 	}

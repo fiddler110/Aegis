@@ -362,12 +362,12 @@ func testRemote(p wPreset, baseURL string) connResult {
 	if err != nil {
 		return connResult{tested: true, status: "✗ " + truncateStatus(err.Error())}
 	}
-	where := "key from " + p.keyEnv
+	where := p.keyEnv
 	if p.keyEnv == "" {
 		where = orDash(baseURL)
 	}
 	return connResult{tested: true, ok: true, remote: models,
-		status: fmt.Sprintf("✓ %d models available · %s", len(models), where)}
+		status: fmt.Sprintf("✓ %d models · %s", len(models), where)}
 }
 
 // localConn reports the Ollama probe as a connection check.
@@ -376,7 +376,7 @@ func localConn(baseURL string, models []modelpick.Model) connResult {
 	if len(models) == 0 {
 		return connResult{tested: true, status: "✗ no models found at " + base + " — is Ollama running, with a model pulled?"}
 	}
-	return connResult{tested: true, ok: true, status: fmt.Sprintf("✓ Ollama at %s · %d models pulled", base, len(models))}
+	return connResult{tested: true, ok: true, status: fmt.Sprintf("✓ %d models pulled · %s", len(models), base)}
 }
 
 func truncateStatus(s string) string {
@@ -500,7 +500,7 @@ func (w *wizardModel) menuRows() []menuRow {
 			usdOrUnlimited(w.budgetUSDStr), secondsOrDefault(w.turnStallStr))},
 		menuRow{secGuard, "Output guard", w.guardSummary()},
 		menuRow{secHostTools, "Host tools", ripgrepSummary()},
-		menuRow{secSave, "Save and exit", "write the changes above to " + config.GlobalConfigPath()},
+		menuRow{secSave, "Save and exit", "write to " + shortenPath(config.GlobalConfigPath())},
 		menuRow{secCancel, "Discard and exit", "leave the config file untouched"},
 	)
 	return rows
@@ -616,13 +616,12 @@ func (w *wizardModel) buildMenuForm() *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Aegis configuration").
 				Description(desc).
 				Options(opts...).
 				Value(&w.menuChoice).
 				Height(len(opts) + 2),
 		),
-	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // ─── Section forms ────────────────────────────────────────────────────────────
@@ -668,7 +667,7 @@ func (w *wizardModel) buildProviderForm() *huh.Form {
 				Placeholder("https://...").
 				Value(&w.baseURL),
 		),
-	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // applyRecommendedValue is the sentinel Value of the picker's first option. It
@@ -719,7 +718,7 @@ func (w *wizardModel) buildModelsForm() *huh.Form {
 
 	return huh.NewForm(
 		huh.NewGroup(mainField, smallField),
-	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // modelOptions builds the two pickers. Local models are annotated with the
@@ -860,7 +859,7 @@ func (w *wizardModel) buildGenerationForm() *huh.Form {
 				Height(5),
 		),
 		huh.NewGroup(w.reasoningFields()...),
-	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // reasoningFields are the effort and (Anthropic only) cache-TTL questions.
@@ -931,7 +930,7 @@ func (w *wizardModel) buildSmallBackendForm() *huh.Form {
 			Negative("Keep local").
 			Value(&w.allowCloudSmall))
 	}
-	return huh.NewForm(huh.NewGroup(fields...)).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	return huh.NewForm(huh.NewGroup(fields...)).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // thinkNote tells the operator what the selected model looks like, which is the
@@ -980,7 +979,7 @@ func (w *wizardModel) buildMemoryForm() *huh.Form {
 				Negative("Keep mine").
 				Value(&w.autofitContext),
 		),
-	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 func (w *wizardModel) buildSpendForm() *huh.Form {
@@ -997,7 +996,7 @@ func (w *wizardModel) buildSpendForm() *huh.Form {
 				Validate(optionalNonNegativeInt).
 				Value(&w.turnStallStr),
 		),
-	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 func (w *wizardModel) buildGuardForm() *huh.Form {
@@ -1023,7 +1022,7 @@ func (w *wizardModel) buildGuardForm() *huh.Form {
 				Validate(optionalNonNegativeInt).
 				Value(&w.guardRetriesStr),
 		),
-	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // guardCostNote states the latency trade the guard makes, and whether this
@@ -1046,7 +1045,7 @@ func (w *wizardModel) buildHostToolsForm() *huh.Form {
 					Title("Host tools").
 					Description("ripgrep is installed — file search uses it.\n\nOther optional binaries (git, gh, mmdc, plantuml) are resolved through the commands: config block; `aegis doctor` reports what is missing."),
 			),
-		).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+		).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 	}
 	return w.buildRipgrepForm()
 }
@@ -1362,7 +1361,7 @@ func (w *wizardModel) buildRipgrepForm() *huh.Form {
 	}
 	return huh.NewForm(
 		huh.NewGroup(confirm),
-	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme()).WithShowHelp(false)
 }
 
 // updateRipgrepFromSection drives the install confirm when it was reached from
@@ -1643,8 +1642,7 @@ func fitWindowForBudget(ctx context.Context, base, model string, budgetGB float6
 // ─── View ─────────────────────────────────────────────────────────────────────
 
 func (w *wizardModel) view() string {
-	header := renderBrandMark() + " " +
-		w.th.statusDim.Render("Configuration") + "\n\n"
+	header := ""
 
 	var body string
 	switch {
@@ -1663,7 +1661,20 @@ func (w *wizardModel) view() string {
 		body = w.form.View()
 	}
 
-	return fixedPanelFrame(header+body, wizardPanelW)
+	return fixedPanelFrame("Aegis configuration", w.keyHints(), header+body, wizardPanelW)
+}
+
+// keyHints is the bottom-edge key line for the current phase. The forms'
+// own help rows are hidden (see aegisForm) so the keys are said once, in the
+// edge, in the grammar every other dialog uses.
+func (w *wizardModel) keyHints() string {
+	switch w.phase {
+	case wPhaseMenu:
+		return "↑↓ choose · enter open · esc discard"
+	case wPhaseSection, wPhaseRipgrep:
+		return "tab next · enter confirm · esc back to menu"
+	}
+	return ""
 }
 
 // ─── Theme ────────────────────────────────────────────────────────────────────

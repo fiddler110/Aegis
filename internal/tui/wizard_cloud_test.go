@@ -25,7 +25,7 @@ func TestTestRemoteListsModels(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ANTHROPIC_API_KEY", "k")
 	c := testRemote(presetForLabel("Anthropic (Claude)"), srv.URL)
-	if !c.ok || len(c.remote) != 2 || !strings.Contains(c.status, "2 models available") {
+	if !c.ok || len(c.remote) != 2 || !strings.Contains(c.status, "✓ 2 models") {
 		t.Errorf("conn = %+v", c)
 	}
 }

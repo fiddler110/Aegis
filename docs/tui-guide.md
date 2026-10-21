@@ -309,7 +309,7 @@ choose **Save and exit**, and **Discard and exit** throws every edit away.
 ```
 Aegis configuration
 ▶ Provider              Ollama (local) · http://localhost:11434
-  Connection            ✓ Ollama at http://localhost:11434 · 6 models pulled
+  Connection            ✓ 6 models pulled · http://localhost:11434
   Models                aegis-qwen35-9b:32k · small llama3.2:3b
   Small-model backend   same as the main model
   Generation            8192 tokens · retries 3 · think enabled

@@ -120,23 +120,58 @@ func dialogFrame(content string) string {
 		Render(content)
 }
 
-// fixedPanelFrame wraps a fixed-width form overlay in the shared rounded
-// accent-bordered panel. It backs the two hand-built form overlays that are
-// NOT listDialogs — the setup wizard (wizard.go) and the security-scanner
-// config (securityconfig.go), both huh forms rather than pickers, so they can't
-// literally reuse the list widget. P40.7 folds their two byte-identical
-// hand-rolled frames into this one helper (living beside dialogFrame /
-// renderOverlay) so the panel chrome — border style, accent color, padding —
-// is defined once instead of per form; width stays a caller argument since the
-// wizard and scanner form size differently. The dimming/centering half of the
-// shared chrome the forms already get for free from renderOverlay (see View).
-func fixedPanelFrame(content string, width int) string {
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colAccent).
-		Padding(1, 3).
-		Width(width).
-		Render(content)
+// fixedPanelFrame wraps a fixed-width form overlay — the setup wizard
+// (wizard.go) and the security-scanner config (securityconfig.go), both huh
+// forms rather than pickers — in the shared titled frame (P86.19). width is
+// the panel's outer width, as before P86.19.
+//
+// It used to be a bright accent border with the title and the form's own help
+// line drawn *inside* the box, so the two forms looked unlike every picker
+// and their keys read as one more row of content. Now the edge is dim, the
+// title sits in the top edge and the keys in the bottom one, in the same
+// "chord verb · chord verb" grammar the pickers' footer and the status bar use.
+func fixedPanelFrame(title, keys, content string, width int) string {
+	return titledFrame(title, keys, lipgloss.NewStyle().Padding(1, 2).Render(content), width-2)
+}
+
+// titledFrame draws body inside a dim rounded edge with title written into
+// the top edge and keys into the bottom edge (P86.19):
+//
+//	╭─ Aegis configuration ─────────────╮
+//	│ body                              │
+//	╰─ ↑↓ choose · enter open · esc ────╯
+//
+// "Words written into an edge cannot be mistaken for content." The edge is
+// never emphasis — it does not light or follow the cursor — and every row is
+// padded to one width so the right edge lands in one column. inner is the
+// width between the side edges; a title or keys line too long for it is cut.
+func titledFrame(title, keys, body string, inner int) string {
+	inner = max(inner, 8)
+	edge := lipgloss.NewStyle().Foreground(colSeparator)
+	titleStyle := lipgloss.NewStyle().Foreground(colFgBase).Bold(true)
+	keyStyle := lipgloss.NewStyle().Foreground(colTextMuted)
+
+	rule := func(left, right, text string, style lipgloss.Style) string {
+		if text == "" {
+			return edge.Render(left + strings.Repeat("─", inner) + right)
+		}
+		text = ansi.Truncate(text, inner-4, "…")
+		fill := inner - 3 - lipgloss.Width(text)
+		return edge.Render(left+"─ ") + style.Render(text) + edge.Render(" "+strings.Repeat("─", max(fill, 0))+right)
+	}
+
+	var b strings.Builder
+	b.WriteString(rule("╭", "╮", title, titleStyle))
+	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		w := lipgloss.Width(line)
+		if w > inner {
+			line = ansi.Truncate(line, inner, "")
+			w = lipgloss.Width(line)
+		}
+		b.WriteString("\n" + edge.Render("│") + line + strings.Repeat(" ", inner-w) + edge.Render("│"))
+	}
+	b.WriteString("\n" + rule("╰", "╯", keys, keyStyle))
+	return b.String()
 }
 
 // dialogKind tags which logical overlay a listDialog instance backs, so the

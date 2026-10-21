@@ -492,7 +492,10 @@ func (m model) renderInputArea() string {
 		tag, fg, bg := toastTag(m.overlays.activeToast.level)
 		statusLeft = statusTag(tag, fg, bg) + " " + m.toastStyle(m.overlays.activeToast.level).Render(m.overlays.activeToast.message)
 	} else {
-		statusLeft = statusTag("READY", colBgLess, colSuccess)
+		// P86.12: idle is the normal state, so it draws nothing. A solid READY
+		// chip on screen nearly all the time is a chip nobody reads — filled
+		// tags are kept for toasts and errors, so their appearing is the news.
+		statusLeft = ""
 	}
 	leftW := lipgloss.Width(statusLeft)
 
@@ -967,10 +970,12 @@ func (m model) contextualFooterHints() string {
 	}
 	// Chat composer (default): palette, help overlay, external editor — plus a
 	// resize hint when a resizable pane is showing so the binding is discoverable.
+	// P86.12: "chord verb" pairs, not bare chords — "ctrl+k · f1 · ctrl+e"
+	// told a first-time user three keys and nothing about any of them.
 	parts := []string{
-		m.overlays.keys.Palette.Help().Key,
-		m.overlays.keys.Help.Help().Key,
-		m.overlays.keys.Editor.Help().Key,
+		m.overlays.keys.Palette.Help().Key + " commands",
+		m.overlays.keys.Help.Help().Key + " help",
+		m.overlays.keys.Editor.Help().Key + " editor",
 	}
 	if m.chrome.sidebarOpen && m.chrome.width >= sidebarMinTermW {
 		parts = append(parts, m.overlays.keys.PaneNarrower.Help().Key+"/"+m.overlays.keys.PaneWider.Help().Key+" resize")
