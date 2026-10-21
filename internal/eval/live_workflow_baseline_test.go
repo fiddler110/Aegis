@@ -5,6 +5,7 @@ package eval
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,6 +159,9 @@ func runTaskUnderAegis(t *testing.T, task WorkflowTask, dir, interpreter, baseUR
 	outcome = task.Outcome(dir, interpreter)
 	outcome.Harness = "aegis"
 	outcome.Elapsed = time.Since(start)
+	outcome.ToolCalls = len(summary.toolCalls)
+	outcome.InputTokens, outcome.OutputTokens = summary.inputTokens, summary.outputTokens
+	outcome.EmptyReply = strings.TrimSpace(summary.finalText) == ""
 	if summary.errText != "" {
 		outcome.Failures = append(outcome.Failures, "engine reported an error: "+summary.errText)
 		outcome.Passed = false

@@ -220,6 +220,16 @@ type TaskOutcome struct {
 	// reads only Passed throws away most of what the run measured.
 	Score   TaskScore
 	Elapsed time.Duration
+	// ToolCalls, InputTokens and OutputTokens are what the run cost, for a
+	// harness that can report it (Aegis reads its own event stream; a CLI
+	// baseline leaves them zero). Pass rate alone cannot tell a model that
+	// finishes in six calls from one that needs thirty (P87.1).
+	ToolCalls    int
+	InputTokens  int
+	OutputTokens int
+	// EmptyReply is set when the agent finished without a final report — the
+	// P88.4 failure, which the outcome on disk cannot show.
+	EmptyReply bool
 	// Err is set when the harness itself could not be run to completion
 	// (missing binary, timeout, non-zero exit). Distinct from a failed
 	// outcome: an agent that ran and got it wrong is a data point, an agent

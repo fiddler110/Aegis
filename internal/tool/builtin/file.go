@@ -326,6 +326,9 @@ func (t *writeTool) Execute(ctx context.Context, input json.RawMessage) (tool.Re
 	if len(args.Content) > maxWriteContent {
 		return tool.Result{Content: fmt.Sprintf("content too large (%d bytes, max %d)", len(args.Content), maxWriteContent), IsError: true}, nil
 	}
+	if escapes, newlines, suspect := doubleEscapedContent(args.Content); suspect {
+		return tool.Result{Content: fmt.Sprintf("content looks double-escaped: it has %d \\n or \\t escape sequences outside string literals but only %d real line breaks, so %s would be written as one long line. Resend content with real newlines and tabs — the JSON string's own escaping is decoded once, so escape them only once.", escapes, newlines, args.Path), IsError: true}, nil
+	}
 	// Refuse a directory-shaped path before resolution, which would clean the
 	// trailing separator away. A model reaching for "mkdir" via write_file
 	// otherwise creates an empty *file* exactly where the directory belongs,
@@ -471,7 +474,11 @@ func applyReplacement(content, oldStr, newStr string, replaceAll bool, display s
 	}
 	i := strings.Index(content, oldStr)
 	if i < 0 {
-		return "", 0, fmt.Sprintf("old_string not found in %s", display)
+		msg := fmt.Sprintf("old_string not found in %s", display)
+		if hint := editMissHint(content, oldStr); hint != "" {
+			msg += "\n" + hint
+		}
+		return "", 0, msg
 	}
 	if replaceAll {
 		return strings.ReplaceAll(content, oldStr, newStr), strings.Count(content, oldStr), ""
