@@ -50,9 +50,18 @@ type ProviderConfig struct {
 	// explicitly to disable. Individual call sites may still override it: a
 	// short classification call suppresses thinking regardless of this
 	// setting (see provider.SuppressesExtendedThinking).
-	Think           *bool  `koanf:"think"`
-	ReasoningEffort string `koanf:"reasoning_effort"` // OpenAI o1/o3 reasoning_effort: "low", "medium", "high", or "" (omit)
-	ContextWindow   int    `koanf:"context_window"`   // model context window in tokens; 0 = auto (skips compaction for local models)
+	Think *bool `koanf:"think"`
+	// ReasoningEffort is the reasoning depth: OpenAI's reasoning_effort, and
+	// Anthropic's output_config.effort ("low", "medium", "high", "xhigh",
+	// "max"). "" omits it. The Anthropic adapter clamps it per request to the
+	// levels that request's model accepts.
+	ReasoningEffort string `koanf:"reasoning_effort"`
+	// CacheTTL is the Anthropic prompt-cache TTL: "" or "5m" (default) or
+	// "1h". The 1-hour TTL costs more per cache write and pays for itself
+	// when turns are more than five minutes apart — common in agent sessions
+	// with approvals and long tool calls.
+	CacheTTL      string `koanf:"cache_ttl"`
+	ContextWindow int    `koanf:"context_window"` // model context window in tokens; 0 = auto (skips compaction for local models)
 	// VRAMBudgetGB is how much memory, in GiB, the operator is willing to let
 	// the model server hold across *every* concurrently resident model (P69.6).
 	// It is what makes a co-resident plan possible: since P69.1 each debate seat

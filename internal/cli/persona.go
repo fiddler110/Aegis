@@ -146,7 +146,7 @@ func newPersonaShowCmd() *cobra.Command {
 const personaTemplate = `---
 description: %s
 # Everything below is optional — delete what you don't need.
-# model: claude-opus-4-8          # pin a model for this persona
+# model: claude-opus-5-5          # pin a model for this persona
 # mode: plan                      # permission mode: plan | build | auto
 # tools: [read_file, grep, shell] # advisory: off-list tool use warns/asks, never blocked
 # rules:                          # permission rules merged into the session

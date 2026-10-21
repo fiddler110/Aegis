@@ -394,8 +394,8 @@ provider:
 #
 # provider:
 #   default: anthropic
-#   model: "claude-opus-4-8"   # claude-opus-4-8  |  claude-sonnet-4-6
-#                              # claude-haiku-4-5-20251001
+#   model: "claude-opus-5-5"   # claude-opus-5-5  |  claude-sonnet-5-5
+#                              # claude-haiku-5-5  |  claude-fable-5-1
 #   max_tokens: 16384
 #   max_retries: 4
 #   think: ~                   # ~ = provider default; false = disable thinking
@@ -541,18 +541,18 @@ output_guard:
 
 personas:
   general:                     { model: "" }
-  security:                    { model: "" }   # rec: claude-opus-4-8 — deep reasoning
-  platform-architect:          { model: "" }   # rec: claude-opus-4-8
-  security-architect:          { model: "" }   # rec: claude-opus-4-8 — threat modeling
+  security:                    { model: "" }   # rec: claude-opus-5-5 — deep reasoning
+  platform-architect:          { model: "" }   # rec: claude-opus-5-5
+  security-architect:          { model: "" }   # rec: claude-opus-5-5 — threat modeling
   security-engineer:           { model: "" }
-  appsec-engineer:             { model: "" }   # rec: claude-opus-4-8 — code review
-  developer:                   { model: "" }   # rec: claude-sonnet-4-6 — fast iteration
+  appsec-engineer:             { model: "" }   # rec: claude-opus-5-5 — code review
+  developer:                   { model: "" }   # rec: claude-sonnet-5-5 — fast iteration
   security-researcher:         { model: "" }
   risk-assessor:               { model: "" }
   business-analyst:            { model: "" }
-  data-analyst:                { model: "" }   # rec: claude-opus-4-8
+  data-analyst:                { model: "" }   # rec: claude-opus-5-5
   network-security-architect:  { model: "" }
-  report-writer:               { model: "" }   # rec: claude-sonnet-4-6 — long-form writing
+  report-writer:               { model: "" }   # rec: claude-sonnet-5-5 — long-form writing
   sre:                         { model: "" }
   infrastructure-architect:    { model: "" }
   cloud-architect:             { model: "" }
@@ -781,7 +781,7 @@ const projectConfigTemplate = `# ═══════════════�
 # whichever model happens to be listed first.
 #
 # provider:
-#   model: "auto"              # or pin a tag: "qwen3:32b", "claude-opus-4-8"
+#   model: "auto"              # or pin a tag: "qwen3:32b", "claude-opus-5-5"
 #   # small_model: "llama3.2"  # fast model for titles, compaction, guard verdicts
 #   # max_tokens: 32768
 #   # think: ~                 # ~ = provider default; true/false to force
@@ -829,7 +829,7 @@ const projectConfigTemplate = `# ═══════════════�
 # mapping, and from there to provider.model.
 #
 # personas:
-#   security-architect: { model: "claude-opus-4-8" }
+#   security-architect: { model: "claude-opus-5-5" }
 #   developer:          { model: "" }
 
 

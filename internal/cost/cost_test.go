@@ -12,11 +12,38 @@ func TestPricingForLongestPrefix(t *testing.T) {
 	if !ok {
 		t.Fatal("expected opus pricing")
 	}
-	if p.Input != 15 || p.Output != 75 {
-		t.Errorf("opus pricing = %+v", p)
+	if p.Input != 5 || p.Output != 25 {
+		t.Errorf("opus 4.8 pricing = %+v", p)
 	}
 	if _, ok := PricingFor("some-unknown-model"); ok {
 		t.Error("unknown model should not be priced")
+	}
+}
+
+// TestClaudePricingByGeneration pins the per-generation rates. A family-only
+// entry once priced every Opus at the 4.0 rate, overstating current spend
+// ~3-4x and tripping cost.budget_usd early.
+func TestClaudePricingByGeneration(t *testing.T) {
+	cases := []struct {
+		model         string
+		input, output float64
+	}{
+		{"claude-opus-5-5", 4, 20},
+		{"claude-opus-5", 5, 25},
+		{"claude-opus-4-1", 15, 75},
+		{"claude-opus-4-5-20251101", 5, 25},
+		{"claude-sonnet-5-5", 2, 10},
+		{"claude-sonnet-4-6", 3, 15},
+		{"claude-haiku-5-5", 0.10, 0.50},
+		{"claude-haiku-4-5-20251001", 1, 5},
+		{"claude-fable-5-1", 10, 50},
+		{"anthropic/claude-opus-5-5", 4, 20},
+	}
+	for _, c := range cases {
+		p, ok := PricingFor(c.model)
+		if !ok || p.Input != c.input || p.Output != c.output {
+			t.Errorf("%s pricing = %+v ok=%v; want %v/%v", c.model, p, ok, c.input, c.output)
+		}
 	}
 }
 
@@ -49,10 +76,10 @@ func TestCostUSD(t *testing.T) {
 
 func TestTrackerAccumulates(t *testing.T) {
 	tr := NewTracker()
-	tr.Add("claude-opus-4-8", provider.Usage{InputTokens: 1_000_000})           // $15
-	total := tr.Add("claude-opus-4-8", provider.Usage{OutputTokens: 1_000_000}) // +$75
-	if math.Abs(total-90) > 1e-9 {
-		t.Errorf("cumulative = %v, want 90", total)
+	tr.Add("claude-opus-4-8", provider.Usage{InputTokens: 1_000_000})           // $5
+	total := tr.Add("claude-opus-4-8", provider.Usage{OutputTokens: 1_000_000}) // +$25
+	if math.Abs(total-30) > 1e-9 {
+		t.Errorf("cumulative = %v, want 30", total)
 	}
 	snap := tr.Snapshot()
 	if snap.Turns != 2 {

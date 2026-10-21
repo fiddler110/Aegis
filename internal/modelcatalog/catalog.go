@@ -39,10 +39,10 @@ type Model struct {
 func Curated() []Model {
 	return []Model{
 		// Anthropic (exact IDs).
-		{Provider: "anthropic", ID: "claude-opus-4-8", Tier: TierFrontier, Context: "200K", Notes: "Most capable; best for complex agentic and multi-step work."},
-		{Provider: "anthropic", ID: "claude-sonnet-4-6", Tier: TierBalanced, Context: "200K", Notes: "Strong general coding/agentic quality at lower cost than Opus."},
-		{Provider: "anthropic", ID: "claude-haiku-4-5", Tier: TierBalanced, Context: "200K", Notes: "Fast and inexpensive for routine edits and tool loops."},
-		{Provider: "anthropic", ID: "claude-fable-5", Tier: TierFrontier, Context: "200K", Notes: "Creative/long-form strengths; latest Fable line."},
+		{Provider: "anthropic", ID: "claude-opus-5-5", Tier: TierFrontier, Context: "1M", Notes: "Default. Strong agentic coding; thinking always on — tune depth with provider.reasoning_effort."},
+		{Provider: "anthropic", ID: "claude-fable-5-1", Tier: TierFrontier, Context: "1M", Notes: "Most capable for the hardest, longest-horizon work; ~2.5x Opus 5.5's price."},
+		{Provider: "anthropic", ID: "claude-sonnet-5-5", Tier: TierBalanced, Context: "1M", Notes: "Fast everyday coding and tool loops at half Opus's price."},
+		{Provider: "anthropic", ID: "claude-haiku-5-5", Tier: TierBalanced, Context: "1M", Notes: "Very cheap; a good small_model for titles, compaction and guard verdicts."},
 
 		// Hosted OpenAI-compatible (confirm current IDs with the provider).
 		{Provider: "openai", ID: "gpt-5.x (see provider)", Tier: TierFrontier, Context: "—", Notes: "Set provider.model to the current GPT-5-class ID from OpenAI's docs."},

@@ -38,7 +38,7 @@ The sidebar is **off by default**. Toggle it with `Ctrl+B` or `/sidebar`. When h
  + http:  &http.Client{Timeout: 30 * time.Second},
  ✓ edit_file → edited client.go (1 replacement)
 ─────────────────────────────────────────────────────────────────────────
- ◐ generating…  ↑4.2k ↓~380  ▌AEGIS ● claude-opus-4-8  build  ▰▰▱ 31% $0.01
+ ◐ generating…  ↑4.2k ↓~380  ▌AEGIS ● claude-opus-5-5  build  ▰▰▱ 31% $0.01
 ─────────────────────────────────────────────────────────────────────────
  │ Message Aegis…
 ```
@@ -66,7 +66,7 @@ The sidebar is **off by default**. Toggle it with `Ctrl+B` or `/sidebar`. When h
  in  64210     ┃
  out 512       ┃
 ─────────────────────────────────────────────────────────────────────────
- ◐ generating…  ↑4.2k ↓~380  ▌AEGIS ● claude-opus-4-8  build
+ ◐ generating…  ↑4.2k ↓~380  ▌AEGIS ● claude-opus-5-5  build
 ─────────────────────────────────────────────────────────────────────────
  │ Message Aegis…
 ```

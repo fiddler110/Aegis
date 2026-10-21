@@ -299,8 +299,9 @@ Enable the OpenAI-compatible API extension in the webui.
 ```yaml
 provider:
   default: anthropic
-  model: "claude-opus-4-8"
+  model: "claude-opus-5-5"
   max_tokens: 16384
+  reasoning_effort: "high"   # optional; Opus 5.5 defaults to medium
 ```
 
 ```bash
@@ -308,13 +309,32 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
 **Available models (check Anthropic docs for current IDs):**
-- `claude-opus-4-8` — Most capable; best for complex reasoning
-- `claude-sonnet-4-6` — Balanced performance and cost
-- `claude-haiku-4-5-20251001` — Fast and cheap; good for `small_model`
+- `claude-opus-5-5` — The default; strong agentic coding, 1M context
+- `claude-fable-5-1` — Most capable, for the hardest long-horizon work; priced above Opus
+- `claude-sonnet-5-5` — Fast everyday coding at half Opus's price
+- `claude-haiku-5-5` — Very cheap; a good `small_model`
 
-**Anthropic-specific features:**
-- Extended thinking (`provider.think: true`)
-- Prompt caching (automatic; cache hit rate shown in TUI sidebar)
+**Thinking and effort.** Request shapes differ by model generation, and the
+adapter picks the right one per request from the model id:
+
+| Setting | Pre-4.6 models (Haiku 4.5, …) | 4.6 and later |
+|---|---|---|
+| `think: true` | `budget_tokens` = half of `max_tokens` | adaptive thinking (summarized text streamed to the TUI) |
+| `think: false` | no thinking | thinking disabled where the model allows it — Opus 5.5 and Fable cannot turn it off; lower `reasoning_effort` instead |
+| `think` unset | no thinking | the model's own default — **on** for Opus 5+, Sonnet 5+, Haiku 5.5 and Fable |
+| `reasoning_effort` | ignored (Opus 4.5: up to `high`) | `low` / `medium` / `high` / `xhigh` / `max`, clamped to what the model accepts |
+
+`temperature` is dropped for models that reject it (4.7 and later). The output
+guard and compaction retries always run with thinking off, or at effort `low` on
+models with no off switch, so a short verdict is never starved by its own
+preamble. A response the model declines (`stop_reason: refusal`) stops the run
+with a terminal error naming the refusal category rather than looking like an
+empty answer.
+
+**Other Anthropic-specific features:**
+- Prompt caching (automatic; cache hit rate shown in TUI sidebar). Set
+  `provider.cache_ttl: "1h"` when turns are often more than five minutes apart —
+  cache writes cost more, but an expired cache re-bills the whole prefix
 - Vision (image input via `@image:<path>`)
 - The `small_model` fallback is particularly useful with Haiku for fast compaction
 
@@ -380,7 +400,7 @@ export OPENAI_API_KEY="gsk_..."   # or GROQ_API_KEY
 provider:
   default: openai
   base_url: "https://openrouter.ai/api/v1"
-  model: "anthropic/claude-opus-4-8"
+  model: "anthropic/claude-opus-5-5"
   max_tokens: 8192
   headers:
     HTTP-Referer: "https://your-site.com"
@@ -390,7 +410,7 @@ provider:
 export OPENAI_API_KEY="sk-or-..."   # or OPENROUTER_API_KEY
 ```
 
-OpenRouter model IDs are in `vendor/model` format (e.g., `anthropic/claude-opus-4-8`, `meta-llama/llama-3.1-70b-instruct`).
+OpenRouter model IDs are in `vendor/model` format (e.g., `anthropic/claude-opus-5-5`, `meta-llama/llama-3.1-70b-instruct`).
 
 ### Vertex AI
 
@@ -507,8 +527,8 @@ Configure a fast, cheap secondary model for context compaction and quick operati
 
 ```yaml
 provider:
-  model: "claude-opus-4-8"
-  small_model: "claude-haiku-4-5-20251001"   # used for compaction summaries,
+  model: "claude-opus-5-5"
+  small_model: "claude-haiku-5-5"   # used for compaction summaries,
                                              # session titles, and output-guard
                                              # verdict calls
 ```
@@ -544,7 +564,7 @@ Route all model traffic through an internal gateway for audit logging, rate limi
 ```yaml
 provider:
   default: anthropic
-  model: "claude-opus-4-8"
+  model: "claude-opus-5-5"
   base_url: "https://ai-gateway.internal.example.com"
   headers:
     X-Gateway-Token: "your-gateway-token"
@@ -619,7 +639,7 @@ When the primary provider exhausts `max_retries`, Aegis can fail over to an orde
 ```yaml
 provider:
   default: anthropic
-  model: "claude-opus-4-8"
+  model: "claude-opus-5-5"
   max_retries: 4
 
   fallback:

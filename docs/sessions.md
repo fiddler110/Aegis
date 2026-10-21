@@ -223,9 +223,9 @@ Prints a per-turn table:
 ```
 Turn  Model              In      Out   Cache    Cost    Tools                     Wall
 ───────────────────────────────────────────────────────────────────────────────────────
-  1   claude-opus-4-8   4821    321    4000   $0.009  glob(2ms) read_file(5ms)   8.2s
-  2   claude-opus-4-8   5210    892       0   $0.021  edit_file(1ms)             4.1s
-  3   claude-opus-4-8   6104    234    5100   $0.004  (none)                     2.3s
+  1   claude-opus-5-5   4821    321    4000   $0.009  glob(2ms) read_file(5ms)   8.2s
+  2   claude-opus-5-5   5210    892       0   $0.021  edit_file(1ms)             4.1s
+  3   claude-opus-5-5   6104    234    5100   $0.004  (none)                     2.3s
 ───────────────────────────────────────────────────────────────────────────────────────
 Total                  16135   1447    9100   $0.034                            14.6s
 ```

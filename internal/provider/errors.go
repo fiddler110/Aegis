@@ -162,6 +162,28 @@ func NewMalformedToolCallError(providerName, toolName string) *APIError {
 	}
 }
 
+// NewRefusalError builds the error for a response the provider's safety
+// classifiers declined (Anthropic's stop_reason "refusal"). It is terminal:
+// the same request is declined the same way, and each retry is billed. The
+// category and explanation go in Detail, not Message, so no classifier keys
+// on provider prose that may quote the request.
+func NewRefusalError(providerName, category, explanation string) *APIError {
+	var detail []string
+	if c := strings.TrimSpace(category); c != "" {
+		detail = append(detail, "category "+c)
+	}
+	if e := strings.TrimSpace(explanation); e != "" {
+		detail = append(detail, e)
+	}
+	return &APIError{
+		Provider:        providerName,
+		Message:         "the model declined this request (stop_reason: refusal) — rephrase it, or switch provider.model / configure a fallback",
+		Detail:          strings.Join(detail, ": "),
+		stream:          true,
+		streamRetryable: false,
+	}
+}
+
 // NewContextTruncationError builds the actionable error surfaced when a
 // generation is cut off at the model's context ceiling mid-tool-call (P35.2).
 // A local model server (Ollama/llama-server) that runs out of context partway

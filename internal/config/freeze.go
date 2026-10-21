@@ -155,6 +155,7 @@ var configTrustPolicy = map[string]trustPolicy{
 	"provider.seed":                    projectSettable,
 	"provider.think":                   projectSettable,
 	"provider.reasoning_effort":        projectSettable,
+	"provider.cache_ttl":               projectSettable,
 	"provider.context_window":          projectSettable,
 	"provider.keep_alive":              projectSettable,
 	"provider.response_header_timeout": projectSettable,

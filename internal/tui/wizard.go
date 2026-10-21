@@ -59,7 +59,7 @@ var wPresets = []wPreset{
 }
 
 var wCurated = map[string][]string{
-	"anthropic":  {"claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"},
+	"anthropic":  {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"},
 	"openai":     {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3", "o3-mini", "o1", "o1-mini"},
 	"groq":       {"llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"},
 	"openrouter": {"anthropic/claude-opus-4", "openai/gpt-4o", "google/gemini-2.0-flash-001", "meta-llama/llama-3.3-70b-instruct"},

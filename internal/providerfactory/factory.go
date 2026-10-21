@@ -81,6 +81,7 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 		headers:               cfg.Provider.HeadersFor(cfg.Provider.Default, cfg.Provider.BaseURL),
 		think:                 cfg.Provider.Think,
 		reasoningEffort:       cfg.Provider.ReasoningEffort,
+		cacheTTL:              cfg.Provider.CacheTTL,
 		maxTokens:             cfg.Provider.MaxTokens,
 		contextWindow:         cfg.Provider.ContextWindow,
 		keepAlive:             cfg.Provider.KeepAlive,
@@ -115,6 +116,7 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 			headers:         cfg.Provider.HeadersFor(fb.Provider, fb.BaseURL),
 			think:           cfg.Provider.Think,
 			reasoningEffort: cfg.Provider.ReasoningEffort,
+			cacheTTL:        cfg.Provider.CacheTTL,
 			maxTokens:       cfg.Provider.MaxTokens,
 			// LLM-11: this target's own window, never the primary's
 			// cfg.Provider.ContextWindow — see ProviderFallbackConfig.ContextWindow.
@@ -344,6 +346,7 @@ type buildOneConfig struct {
 	headers               map[string]string
 	think                 *bool
 	reasoningEffort       string
+	cacheTTL              string
 	maxTokens             int
 	contextWindow         int
 	keepAlive             string
@@ -360,6 +363,7 @@ type buildOneConfig struct {
 func buildOne(cfg buildOneConfig) (provider.Adapter, error) {
 	name, apiKey, baseURL := cfg.name, cfg.apiKey, cfg.baseURL
 	headers, think, reasoningEffort := cfg.headers, cfg.think, cfg.reasoningEffort
+	cacheTTL := cfg.cacheTTL
 	maxTokens, contextWindow, keepAlive := cfg.maxTokens, cfg.contextWindow, cfg.keepAlive
 	responseHeaderTimeout, streamIdleTimeout := cfg.responseHeaderTimeout, cfg.streamIdleTimeout
 	logger, caps, compat := cfg.logger, cfg.caps, cfg.compat
@@ -377,15 +381,22 @@ func buildOne(cfg buildOneConfig) (provider.Adapter, error) {
 			anthropic.WithResponseHeaderTimeout(responseHeaderTimeout),
 			anthropic.WithStreamIdleTimeout(streamIdleTimeout),
 		}
-		// Enable extended thinking when explicitly requested, budgeting half of
-		// max_tokens for reasoning (clamped to the API's 1024 minimum).
+		// Thinking is tri-state (EXEC-5). true enables it — adaptive on 4.6+
+		// models, and on older ones a budget of half max_tokens (clamped to
+		// the API's 1024 minimum). false turns it off where the model allows
+		// it; nil leaves each model's own default, which on Opus 5+, Sonnet 5+,
+		// Haiku 5.5 and Fable is *on*. The adapter maps all three per request,
+		// because the model is per request.
 		if think != nil && *think {
 			budget := maxTokens / 2
 			if budget < 1024 {
 				budget = 1024
 			}
 			opts = append(opts, anthropic.WithThinking(budget))
+		} else if think != nil {
+			opts = append(opts, anthropic.WithThinkingDisabled())
 		}
+		opts = append(opts, anthropic.WithEffort(reasoningEffort), anthropic.WithCacheTTL(cacheTTL))
 		return anthropic.New(apiKey, opts...), nil
 
 	case "ollama":

@@ -18,7 +18,7 @@ func TestBudgetGateStopsRun(t *testing.T) {
 		// Turn 1 requests a tool and reports usage that blows the budget.
 		{
 			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "t1", Name: "echo", Input: json.RawMessage(`{"msg":"x"}`)}},
-			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 1_000_000}}, // $15 of opus
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 1_000_000}}, // $5 of opus
 		},
 		// Turn 2 should never run.
 		{
@@ -37,7 +37,7 @@ func TestBudgetGateStopsRun(t *testing.T) {
 		Adapter:   adapter,
 		Tools:     reg,
 		Cost:      cost.NewTracker(),
-		BudgetUSD: 1.0, // $1 budget, turn 1 costs ~$15
+		BudgetUSD: 1.0, // $1 budget, turn 1 costs ~$5
 		Model:     "claude-opus-4-8",
 	})
 	if err != nil {
@@ -77,7 +77,7 @@ func TestBudgetGateStopsMaxTokenContinuation(t *testing.T) {
 		// Turn 1 is cut off by the token limit; its usage alone blows the budget.
 		{
 			{Type: provider.EventTextDelta, Text: "partial"},
-			{Type: provider.EventDone, Stop: provider.StopMaxTokens, Usage: &provider.Usage{InputTokens: 1_000_000}}, // $15 of opus
+			{Type: provider.EventDone, Stop: provider.StopMaxTokens, Usage: &provider.Usage{InputTokens: 1_000_000}}, // $5 of opus
 		},
 		// The continuation turn must never run.
 		{
@@ -304,21 +304,21 @@ func TestTokenBudgetErrorNamesTheOtherKey(t *testing.T) {
 // calls, each individually well under BudgetUSD, whose combined spend would
 // have tripped the old cumulative check.
 func TestBudgetResetsPerRunNotPerTracker(t *testing.T) {
-	// $15/1M input tokens for opus (internal/cost's pricing table): 60,000
+	// $5/1M input tokens for opus 4.8 (internal/cost's pricing table): 180,000
 	// input tokens costs $0.90.
 	adapter := &scriptedAdapter{turns: [][]provider.Event{
 		// Run A: a single turn that ends the run outright, spending $0.90 of
 		// a $1.00 budget.
 		{
 			{Type: provider.EventTextDelta, Text: "a"},
-			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 60_000}},
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 180_000}},
 		},
 		// Run B: a turn requesting a tool, spending another $0.50. Combined
 		// with run A's $0.90 that is $1.40 — over budget under the old
 		// cumulative check, but this run alone only spent $0.50.
 		{
 			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "t1", Name: "echo", Input: json.RawMessage(`{"msg":"x"}`)}},
-			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 33_334}}, // ~$0.50
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 100_000}}, // $0.50
 		},
 		{
 			{Type: provider.EventTextDelta, Text: "done"},

@@ -127,7 +127,7 @@ func defaults() map[string]any {
 		"log.max_size_mb":         20,
 		"log.max_backups":         5,
 		"provider.default":        "anthropic",
-		"provider.model":          "claude-opus-4-8",
+		"provider.model":          "claude-opus-5-5",
 		"provider.max_tokens":     32768,
 		"provider.max_retries":    4,
 		"provider.prompt_profile": "auto",

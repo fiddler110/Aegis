@@ -57,7 +57,7 @@ func TestLoadDefaults(t *testing.T) {
 		want string
 	}{
 		{"provider default", cfg.Provider.Default, "anthropic"},
-		{"provider model", cfg.Provider.Model, "claude-opus-4-8"},
+		{"provider model", cfg.Provider.Model, "claude-opus-5-5"},
 		{"server addr", cfg.Server.Addr, "127.0.0.1:4127"},
 		{"permission mode", cfg.Permission.Mode, "build"},
 		{"log level", cfg.LogLevel, "info"},

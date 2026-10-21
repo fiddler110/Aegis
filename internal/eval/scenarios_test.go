@@ -206,7 +206,7 @@ func TestScenario_BudgetAbortsSecondTurn(t *testing.T) {
 	adapter := &scriptedAdapter{turns: [][]provider.Event{
 		{
 			{Type: provider.EventToolUse, ToolUse: &provider.ToolUseBlock{ID: "t1", Name: "echo", Input: json.RawMessage(`{"msg":"x"}`)}},
-			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 1_000_000}}, // ~$15 of opus
+			{Type: provider.EventDone, Stop: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 1_000_000}}, // ~$5 of opus
 		},
 		{
 			{Type: provider.EventTextDelta, Text: "should never run"},

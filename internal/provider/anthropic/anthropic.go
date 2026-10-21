@@ -34,6 +34,18 @@ type Adapter struct {
 	cache    bool // emit prompt-cache breakpoints
 	headers  map[string]string
 	thinking *provider.ThinkingConfig // non-nil enables extended thinking
+	// thinkingOff records an explicit `think: false`. It differs from a nil
+	// thinking on models that think by default (Opus 5+, Sonnet 5+, Haiku 5.5,
+	// Fable): there, omitting the parameter leaves thinking on.
+	thinkingOff bool
+	// effort is output_config.effort as configured (provider.reasoning_effort);
+	// clamped per request to what the request's model accepts.
+	effort string
+	// cacheTTL is the prompt-cache breakpoint TTL: "" (the API's 5m default)
+	// or "1h". An agent session's turns are often more than five minutes
+	// apart once tool execution and approvals are counted, and every expiry
+	// re-bills the whole prefix at the cache-write rate.
+	cacheTTL string
 
 	// headerTimeout remembers an explicitly configured response-header timeout
 	// (P61.5) so a WithHTTPClient applied *after* WithResponseHeaderTimeout can
@@ -131,12 +143,40 @@ func WithHeaders(h map[string]string) Option {
 	return func(a *Adapter) { a.headers = h }
 }
 
-// WithThinking enables extended thinking with the given token budget. A budget
-// <1024 disables it (the API minimum).
+// WithThinking enables extended thinking. On a pre-4.6 model it is sent as
+// {type:"enabled", budget_tokens}, and a budget <1024 (the API minimum)
+// disables it there; on 4.6 and later it is sent as {type:"adaptive"} and
+// the budget is unused — depth is WithEffort's job.
 func WithThinking(budgetTokens int) Option {
 	return func(a *Adapter) {
-		if budgetTokens >= 1024 {
-			a.thinking = &provider.ThinkingConfig{BudgetTokens: budgetTokens}
+		a.thinking = &provider.ThinkingConfig{BudgetTokens: budgetTokens}
+		a.thinkingOff = false
+	}
+}
+
+// WithThinkingDisabled records an explicit `think: false`, so models that
+// think by default are told not to where the API allows it.
+func WithThinkingDisabled() Option {
+	return func(a *Adapter) {
+		a.thinking = nil
+		a.thinkingOff = true
+	}
+}
+
+// WithEffort sets output_config.effort ("low", "medium", "high", "xhigh",
+// "max"). Each request clamps it to what that request's model accepts and
+// omits it on models that take none.
+func WithEffort(effort string) Option {
+	return func(a *Adapter) { a.effort = strings.ToLower(strings.TrimSpace(effort)) }
+}
+
+// WithCacheTTL sets the prompt-cache TTL: "1h" or "" / "5m" for the default.
+func WithCacheTTL(ttl string) Option {
+	return func(a *Adapter) {
+		if strings.TrimSpace(ttl) == "1h" {
+			a.cacheTTL = "1h"
+		} else {
+			a.cacheTTL = ""
 		}
 	}
 }
@@ -220,28 +260,43 @@ func (a *Adapter) Healthy(ctx context.Context) bool {
 // --- wire types ---
 
 type wireRequest struct {
-	Model       string            `json:"model"`
-	MaxTokens   int               `json:"max_tokens"`
-	System      []wireSystemBlock `json:"system,omitempty"`
-	Messages    []wireMessage     `json:"messages"`
-	Tools       []wireTool        `json:"tools,omitempty"`
-	Temperature *float64          `json:"temperature,omitempty"`
-	Thinking    *wireThinking     `json:"thinking,omitempty"`
-	Stream      bool              `json:"stream"`
+	Model        string            `json:"model"`
+	MaxTokens    int               `json:"max_tokens"`
+	System       []wireSystemBlock `json:"system,omitempty"`
+	Messages     []wireMessage     `json:"messages"`
+	Tools        []wireTool        `json:"tools,omitempty"`
+	Temperature  *float64          `json:"temperature,omitempty"`
+	Thinking     *wireThinking     `json:"thinking,omitempty"`
+	OutputConfig *wireOutputConfig `json:"output_config,omitempty"`
+	Stream       bool              `json:"stream"`
 }
 
 type wireThinking struct {
-	Type         string `json:"type"` // "enabled"
-	BudgetTokens int    `json:"budget_tokens"`
+	Type         string `json:"type"` // "enabled" | "adaptive" | "disabled" | "between_tools"
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	Display      string `json:"display,omitempty"` // adaptive only: "summarized"
+}
+
+type wireOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 // cacheControl marks a content block as a prompt-cache breakpoint. Anthropic
 // caches the longest matching prefix ending at a breakpoint.
 type cacheControl struct {
-	Type string `json:"type"` // always "ephemeral"
+	Type string `json:"type"`          // always "ephemeral"
+	TTL  string `json:"ttl,omitempty"` // "" (5m default) or "1h"
 }
 
 var ephemeral = &cacheControl{Type: "ephemeral"}
+
+// breakpoint returns the cache_control marker for this adapter's TTL.
+func (a *Adapter) breakpoint() *cacheControl {
+	if a.cacheTTL == "" {
+		return ephemeral
+	}
+	return &cacheControl{Type: "ephemeral", TTL: a.cacheTTL}
+}
 
 type wireSystemBlock struct {
 	Type         string        `json:"type"` // "text"
@@ -273,9 +328,12 @@ type wireBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
-	// thinking
-	Thinking  string `json:"thinking,omitempty"`
-	Signature string `json:"signature,omitempty"`
+	// thinking. A pointer because an empty string is a real value here: from
+	// the 4.7 generation on, thinking text streams back empty unless display
+	// is "summarized", and a replayed block without its "thinking" field is
+	// not a thinking block the API will accept.
+	Thinking  *string `json:"thinking,omitempty"`
+	Signature string  `json:"signature,omitempty"`
 	// image
 	Source *wireImageSource `json:"source,omitempty"`
 	// caching
@@ -298,7 +356,8 @@ func toWireMessages(msgs []provider.Message) ([]wireMessage, error) {
 			case provider.ThinkingBlock:
 				// Replayed verbatim with its signature so the API can validate
 				// tool use that followed the model's reasoning.
-				wm.Content = append(wm.Content, wireBlock{Type: "thinking", Thinking: v.Text, Signature: v.Signature})
+				text := v.Text
+				wm.Content = append(wm.Content, wireBlock{Type: "thinking", Thinking: &text, Signature: v.Signature})
 			case provider.TextBlock:
 				wm.Content = append(wm.Content, wireBlock{Type: "text", Text: v.Text})
 			case provider.ToolUseBlock:
@@ -324,20 +383,17 @@ func toWireMessages(msgs []provider.Message) ([]wireMessage, error) {
 
 // buildSystem wraps the system prompt as a content-block array so a cache
 // breakpoint can be attached to it.
-func buildSystem(system string, cache bool) []wireSystemBlock {
+func buildSystem(system string, cc *cacheControl) []wireSystemBlock {
 	if system == "" {
 		return nil
 	}
-	b := wireSystemBlock{Type: "text", Text: system}
-	if cache {
-		b.CacheControl = ephemeral
-	}
+	b := wireSystemBlock{Type: "text", Text: system, CacheControl: cc}
 	return []wireSystemBlock{b}
 }
 
 // buildTools converts tool schemas, placing a cache breakpoint on the final
 // tool so the whole (stable) tool list is cached as one prefix segment.
-func buildTools(tools []provider.ToolSchema, cache bool) []wireTool {
+func buildTools(tools []provider.ToolSchema, cc *cacheControl) []wireTool {
 	if len(tools) == 0 {
 		return nil
 	}
@@ -345,15 +401,13 @@ func buildTools(tools []provider.ToolSchema, cache bool) []wireTool {
 	for i, t := range tools {
 		out[i] = wireTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}
 	}
-	if cache {
-		out[len(out)-1].CacheControl = ephemeral
-	}
+	out[len(out)-1].CacheControl = cc
 	return out
 }
 
 // cacheLastMessage marks the final block of the conversation as a breakpoint so
 // the growing message prefix is cached and reused on the next turn.
-func cacheLastMessage(msgs []wireMessage) {
+func cacheLastMessage(msgs []wireMessage, cc *cacheControl) {
 	if len(msgs) == 0 {
 		return
 	}
@@ -361,7 +415,7 @@ func cacheLastMessage(msgs []wireMessage) {
 	if len(last.Content) == 0 {
 		return
 	}
-	last.Content[len(last.Content)-1].CacheControl = ephemeral
+	last.Content[len(last.Content)-1].CacheControl = cc
 }
 
 // Stream implements provider.Adapter.
@@ -374,35 +428,25 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	if err != nil {
 		return nil, err
 	}
-	cache := a.cache && !req.SuppressCache
-	if cache {
-		cacheLastMessage(wmsgs)
+	var cc *cacheControl
+	if a.cache && !req.SuppressCache {
+		cc = a.breakpoint()
+		cacheLastMessage(wmsgs, cc)
 	}
 
-	// Extended thinking: budget_tokens must be < max_tokens, and temperature
-	// must be omitted (the API only permits the default while thinking).
-	var thinking *wireThinking
-	temperature := req.Temperature
-	if a.thinking != nil {
-		budget := a.thinking.BudgetTokens
-		if budget >= req.MaxTokens {
-			budget = req.MaxTokens - 1
-		}
-		if budget >= 1024 {
-			thinking = &wireThinking{Type: "enabled", BudgetTokens: budget}
-			temperature = nil
-		}
-	}
+	suppress := req.SuppressThinking || provider.SuppressesExtendedThinking(provider.EffectivePurpose(ctx, req))
+	thinking, outputConfig, temperature := a.reasoningFor(traitsFor(req.Model), req, suppress)
 
 	body, err := json.Marshal(wireRequest{
-		Model:       req.Model,
-		MaxTokens:   req.MaxTokens,
-		System:      buildSystem(req.System, cache),
-		Messages:    wmsgs,
-		Tools:       buildTools(req.Tools, cache),
-		Temperature: temperature,
-		Thinking:    thinking,
-		Stream:      true,
+		Model:        req.Model,
+		MaxTokens:    req.MaxTokens,
+		System:       buildSystem(req.System, cc),
+		Messages:     wmsgs,
+		Tools:        buildTools(req.Tools, cc),
+		Temperature:  temperature,
+		Thinking:     thinking,
+		OutputConfig: outputConfig,
+		Stream:       true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: marshal request: %w", err)
@@ -526,6 +570,10 @@ type sseEvent struct {
 		Thinking    string `json:"thinking"`
 		Signature   string `json:"signature"`
 		StopReason  string `json:"stop_reason"`
+		StopDetails *struct {
+			Category    string `json:"category"`
+			Explanation string `json:"explanation"`
+		} `json:"stop_details"`
 	} `json:"delta"`
 	Message struct {
 		Usage struct {
@@ -645,6 +693,19 @@ func (d *eventDecoder) handleData(data string, emit func(provider.Event) bool) s
 			// reported as a transport failure.
 			terminal = true
 			d.stop = mapStopReason(ev.Delta.StopReason)
+			if ev.Delta.StopReason == "refusal" {
+				// A safety classifier declined the request (HTTP 200). Left as
+				// StopOther it looked like an empty answer, and the engine's
+				// empty-answer nudge re-asked the same thing — billed again for
+				// the same refusal. Name it, terminally.
+				var category, explanation string
+				if sd := ev.Delta.StopDetails; sd != nil {
+					category, explanation = sd.Category, sd.Explanation
+				}
+				emit(provider.Event{Type: provider.EventError,
+					Err: provider.NewRefusalError(providerName, category, explanation)})
+				return sse.StatusAbort
+			}
 		}
 		if ev.Usage.OutputTokens > 0 {
 			usage.OutputTokens = ev.Usage.OutputTokens

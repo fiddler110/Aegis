@@ -248,7 +248,7 @@ Any config key can be overridden with an environment variable by converting the 
 | Variable | Config key | Example |
 |----------|-----------|---------|
 | `AEGIS_PROVIDER_DEFAULT` | `provider.default` | `anthropic` |
-| `AEGIS_PROVIDER_MODEL` | `provider.model` | `claude-opus-4-8` |
+| `AEGIS_PROVIDER_MODEL` | `provider.model` | `claude-opus-5-5` |
 | `AEGIS_PROVIDER_BASE_URL` | `provider.base_url` | `http://localhost:11434/v1` |
 | `AEGIS_PROVIDER_MAX_TOKENS` | `provider.max_tokens` | `16384` |
 | `AEGIS_PERMISSION_MODE` | `permission.mode` | `plan` |
@@ -290,7 +290,7 @@ provider:
 
   # Model ID. "auto" or "" ranks what the local Ollama has pulled and takes the
   # best fit at startup (see "How a model is chosen" below).
-  # Set any explicit ID: "llama3.2", "claude-opus-4-8", "gpt-4o", etc.
+  # Set any explicit ID: "llama3.2", "claude-opus-5-5", "gpt-4o", etc.
   model: "auto"
 
   # Required for local LLMs and API gateways. Leave empty for direct cloud calls.
@@ -389,9 +389,14 @@ provider:
   # false  = disable explicitly
   think: ~
 
-  # OpenAI o1/o3 reasoning effort: "low", "medium", or "high".
-  # Only applies to o-series models; ignored otherwise.
+  # Reasoning depth. OpenAI o-series: reasoning_effort ("low", "medium",
+  # "high"). Anthropic: output_config.effort ("low", "medium", "high",
+  # "xhigh", "max"), clamped per request to the levels the model accepts and
+  # omitted on models that take none. "" leaves the model's default.
   reasoning_effort: ""
+
+  # Anthropic prompt-cache TTL: "" (5 minutes) or "1h". See docs/providers.md.
+  cache_ttl: ""
 
   # Declares OpenAI-compat wire-format quirks for the primary backend (P85.1).
   # Only the "openai" adapter reads this — the native ollama and anthropic
@@ -1702,7 +1707,7 @@ default_persona: ""   # e.g. "developer"; empty falls back to "general"
 # Pin specific built-in personas to a different model within the same provider.
 # Model resolution: config personas[name].model > persona file model > global model.
 personas:
-  security-architect: { model: claude-opus-4-8 }
+  security-architect: { model: claude-opus-5-5 }
   developer: { model: "" }   # blank = use global provider.model
 
 
@@ -2107,7 +2112,7 @@ In `.aegis/config.yaml`:
 ```yaml
 provider:
   default: anthropic
-  model: "claude-opus-4-8"
+  model: "claude-opus-5-5"
   max_tokens: 16384
 ```
 
@@ -2270,9 +2275,9 @@ debate`, the `agent` tool's `mode:"debate"`).
 
 ```yaml
 personas:
-  security-architect: { model: claude-opus-4-8 }
+  security-architect: { model: claude-opus-5-5 }
   developer:          { model: gpt-4o }
-  report-writer:      { model: claude-opus-4-8 }
+  report-writer:      { model: claude-opus-5-5 }
 ```
 
 ### Set this project's default persona
@@ -2378,7 +2383,7 @@ attribution to keep; it's worth using only if you're already paying for it.
 ```yaml
 provider:
   default: anthropic
-  model: "claude-opus-4-8"
+  model: "claude-opus-5-5"
   base_url: "https://ai-gateway.internal.example.com"
   headers:
     X-Gateway-Token: "your-token"

@@ -23,13 +23,30 @@ type Pricing struct {
 }
 
 // catalog maps a model-id prefix to its pricing. Lookup uses longest-prefix
-// match so e.g. "claude-opus-4-8" resolves via the "claude-opus" entry.
+// match so e.g. "claude-opus-4-8-20260101" resolves via the "claude-opus-4-8" entry.
 var catalog = map[string]Pricing{
-	// Anthropic (USD / Mtok)
-	"claude-opus":   {Input: 15, Output: 75, CacheWrite: 18.75, CacheRead: 1.50},
-	"claude-sonnet": {Input: 3, Output: 15, CacheWrite: 3.75, CacheRead: 0.30},
-	"claude-haiku":  {Input: 1, Output: 5, CacheWrite: 1.25, CacheRead: 0.10},
-	"claude-3-opus": {Input: 15, Output: 75, CacheWrite: 18.75, CacheRead: 1.50},
+	// Anthropic (USD / Mtok), first-party list prices as of 2026-10. CacheWrite
+	// is the 5-minute rate (1.25x input); a 1-hour TTL writes at 2x input and
+	// is under-counted here. Generation matters: Opus fell from $15 to $5 at
+	// 4.5 and to $4 at 5.5, so a bare "claude-opus" entry priced at the old
+	// rate overstated current spend ~3-4x and tripped BudgetUSD early. The
+	// family-only keys are the fallback for an id newer than this table.
+	"claude-fable":     {Input: 10, Output: 50, CacheWrite: 12.50, CacheRead: 1.00},
+	"claude-fable-5-1": {Input: 10, Output: 50, CacheWrite: 12.50, CacheRead: 0.25},
+	"claude-mythos":    {Input: 10, Output: 50, CacheWrite: 12.50, CacheRead: 1.00},
+	"claude-opus":      {Input: 5, Output: 25, CacheWrite: 6.25, CacheRead: 0.50},
+	"claude-opus-5-5":  {Input: 4, Output: 20, CacheWrite: 5, CacheRead: 0.20},
+	"claude-opus-4":    {Input: 15, Output: 75, CacheWrite: 18.75, CacheRead: 1.50}, // 4.0 / 4.1
+	"claude-opus-4-5":  {Input: 5, Output: 25, CacheWrite: 6.25, CacheRead: 0.50},
+	"claude-opus-4-6":  {Input: 5, Output: 25, CacheWrite: 6.25, CacheRead: 0.50},
+	"claude-opus-4-7":  {Input: 5, Output: 25, CacheWrite: 6.25, CacheRead: 0.50},
+	"claude-opus-4-8":  {Input: 5, Output: 25, CacheWrite: 6.25, CacheRead: 0.50},
+	"claude-sonnet":    {Input: 3, Output: 15, CacheWrite: 3.75, CacheRead: 0.30},
+	"claude-sonnet-5":  {Input: 2, Output: 10, CacheWrite: 2.50, CacheRead: 0.20},
+	"claude-haiku":     {Input: 1, Output: 5, CacheWrite: 1.25, CacheRead: 0.10},
+	"claude-haiku-5-5": {Input: 0.10, Output: 0.50, CacheWrite: 0.125, CacheRead: 0.01},
+	"claude-3-opus":    {Input: 15, Output: 75, CacheWrite: 18.75, CacheRead: 1.50},
+	"claude-3-5-haiku": {Input: 0.80, Output: 4, CacheWrite: 1, CacheRead: 0.08},
 
 	// OpenAI (USD / Mtok); cache read where applicable, no separate write rate.
 	"gpt-4o-mini":  {Input: 0.15, Output: 0.60, CacheRead: 0.075},

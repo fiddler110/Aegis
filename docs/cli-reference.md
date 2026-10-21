@@ -249,9 +249,9 @@ aegis compare <model-A> <model-B> [prompt] [flags]
 | `--synth-model <id>` | Model to use for `--synthesize`; defaults to the configured `provider.model` — a third model, not either compared one |
 
 ```bash
-aegis compare claude-sonnet-4-6 gpt-5 "explain the CAP theorem"
-echo "explain the CAP theorem" | aegis compare claude-sonnet-4-6 gpt-5
-aegis compare claude-opus-4-8 qwen3 "review this diff" --synthesize
+aegis compare claude-sonnet-5-5 gpt-5 "explain the CAP theorem"
+echo "explain the CAP theorem" | aegis compare claude-sonnet-5-5 gpt-5
+aegis compare claude-opus-5-5 qwen3 "review this diff" --synthesize
 ```
 
 Both responses stream to completion labeled only "Response 1" / "Response 2" — in a randomized order, so which model landed in which slot isn't a positional tell — with which model produced which answer withheld until you vote. You're then prompted `Vote — which response is better? [1/2/tie/skip]:`; after voting, a reveal prints which model was actually Response 1 vs Response 2. With `--synthesize`, one further call (to `--synth-model`, or `provider.model` by default) combines the two revealed answers into a single, clearly labeled synthesis — not a third blind response. Both sessions persist and can be resumed with `aegis --resume <id>`, matching `aegis parallel`'s convention of never auto-deleting.

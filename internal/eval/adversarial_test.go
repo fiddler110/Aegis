@@ -227,7 +227,7 @@ func TestAdversarial_BudgetStopsStuckGuardRetryLoop(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		turns = append(turns, []provider.Event{
 			{Type: provider.EventTextDelta, Text: "attempt"},
-			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 1_000_000}}, // ~$15 of opus
+			{Type: provider.EventDone, Stop: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 1_000_000}}, // ~$5 of opus
 		})
 	}
 	adapter := &scriptedAdapter{turns: turns}
