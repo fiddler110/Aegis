@@ -193,7 +193,11 @@ func (s *Server) autofitSet(extra []string) []string {
 		out = append(out, m)
 	}
 	add(s.cfg.Provider.Model)
-	add(s.cfg.Provider.SmallModel)
+	// A small model on another backend (provider.small_provider) holds no
+	// memory on this model server, so it has no place in this plan.
+	if sp := s.cfg.Provider.SmallProvider; sp == "" || sp == s.cfg.Provider.Default {
+		add(s.cfg.Provider.SmallModel)
+	}
 	for _, m := range extra {
 		add(m)
 	}

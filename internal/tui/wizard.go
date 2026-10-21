@@ -16,8 +16,12 @@ import (
 
 	"github.com/fiddler110/aegis/internal/config"
 	"github.com/fiddler110/aegis/internal/hwinfo"
+	"github.com/fiddler110/aegis/internal/modelcatalog"
 	"github.com/fiddler110/aegis/internal/modelpick"
 	"github.com/fiddler110/aegis/internal/ollamainfo"
+	"github.com/fiddler110/aegis/internal/provider"
+	"github.com/fiddler110/aegis/internal/provider/anthropic"
+	"github.com/fiddler110/aegis/internal/provider/openai"
 )
 
 // `/config` — a hierarchical settings menu (P82).
@@ -41,29 +45,46 @@ import (
 // ─── Provider presets ─────────────────────────────────────────────────────────
 
 type wPreset struct {
-	label       string
-	adapter     string
-	defaultURL  string
-	defaultMax  int
-	modelSource string // "discover:ollama" | "discover:lmstudio" | "curated:X" | "input"
+	label      string
+	adapter    string
+	defaultURL string
+	defaultMax int
+	// modelSource is where the model list comes from: "discover:ollama"
+	// (probe and rank what is pulled) or "remote:<curated key>" (the
+	// provider's own listing, with the curated list — if the key names one —
+	// as the fallback when listing fails).
+	modelSource string
+	// keyEnv is the environment variable the key comes from, named in the
+	// connection check so a missing key says where it goes. "" for a local
+	// server that needs none.
+	keyEnv string
 }
 
 var wPresets = []wPreset{
-	{"Ollama (local)", "ollama", "http://localhost:11434", 8192, "discover:ollama"},
-	{"LM Studio (local)", "openai", "http://localhost:1234/v1", 4096, "discover:lmstudio"},
-	{"Anthropic (Claude)", "anthropic", "", 16384, "curated:anthropic"},
-	{"OpenAI", "openai", "", 16384, "curated:openai"},
-	{"OpenRouter", "openai", "https://openrouter.ai/api/v1", 16384, "curated:openrouter"},
-	{"Groq", "openai", "https://api.groq.com/openai/v1", 8192, "curated:groq"},
-	{"Custom", "openai", "", 8192, "input"},
+	{"Ollama (local)", "ollama", "http://localhost:11434", 8192, "discover:ollama", ""},
+	{"LM Studio (local)", "openai", "http://localhost:1234/v1", 4096, "remote:", ""},
+	{"Anthropic (Claude)", "anthropic", "", 16384, "remote:anthropic", "ANTHROPIC_API_KEY"},
+	{"OpenAI", "openai", "", 16384, "remote:", "OPENAI_API_KEY"},
+	{"OpenRouter", "openai", "https://openrouter.ai/api/v1", 16384, "remote:", "OPENROUTER_API_KEY"},
+	{"Groq", "openai", "https://api.groq.com/openai/v1", 8192, "remote:", "GROQ_API_KEY"},
+	{"Custom", "openai", "", 8192, "remote:", "OPENAI_API_KEY"},
 }
 
+// wCurated is the offline fallback when a provider's listing cannot be
+// reached. Only Anthropic's is kept: the other providers' lists went stale
+// within months (GPT-4o, o1 and mixtral were still offered in 2026-10), and
+// the live listing is the answer for them.
 var wCurated = map[string][]string{
-	"anthropic":  {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"},
-	"openai":     {"gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o3", "o3-mini", "o1", "o1-mini"},
-	"groq":       {"llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"},
-	"openrouter": {"anthropic/claude-opus-4", "openai/gpt-4o", "google/gemini-2.0-flash-001", "meta-llama/llama-3.3-70b-instruct"},
+	"anthropic": {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"},
 }
+
+// Small-model backends: where provider.small_model runs.
+const (
+	smallBackendSame      = ""
+	smallBackendOllama    = "ollama"
+	smallBackendAnthropic = "anthropic"
+	smallBackendOpenAI    = "openai"
+)
 
 // presetForLabel resolves a preset by its menu label. An unrecognized label
 // falls back to Custom — deliberately not to Ollama: the VRAM budget question,
@@ -112,12 +133,25 @@ type configLoadedMsg struct {
 	err    error
 	models []modelpick.Model
 	rec    modelpick.Selection
+	conn   connResult
 }
 
-// modelsDiscoveredMsg re-reports the model list after the provider changed.
+// modelsDiscoveredMsg re-reports the model list after the provider changed
+// or the connection was re-tested.
 type modelsDiscoveredMsg struct {
 	models []modelpick.Model
 	rec    modelpick.Selection
+	conn   connResult
+}
+
+// connResult is the connection check: can this preset, at this base URL and
+// with the key in the environment, list its models? It doubles as the model
+// source for a cloud preset, so the check costs nothing extra.
+type connResult struct {
+	tested bool
+	ok     bool
+	status string
+	remote []provider.ModelInfo
 }
 
 // wizardSavedMsg carries the save outcome back onto the update loop. fitNote
@@ -148,7 +182,9 @@ const (
 // which form to build.
 const (
 	secProvider   = "provider"
+	secConnection = "connection"
 	secModels     = "models"
+	secSmall      = "smallbackend"
 	secGeneration = "generation"
 	secMemory     = "memory"
 	secSpend      = "spend"
@@ -189,6 +225,14 @@ type wizardModel struct {
 	guardEnabled     bool
 	guardMode        string
 	guardRetriesStr  string
+	effortStr        string // provider.reasoning_effort; "" = model default
+	cacheTTLStr      string // provider.cache_ttl; "" = 5 minutes
+	smallBackend     string // provider.small_provider; smallBackend* constants
+	smallBaseURL     string
+	allowCloudSmall  bool
+
+	// conn is the latest connection check, shown on the menu.
+	conn connResult
 
 	// ── discovered models ──
 	// local is the ranked list behind the model picker; rec is what
@@ -248,9 +292,13 @@ func loadConfigCmd() tea.Cmd {
 			return configLoadedMsg{err: err}
 		}
 		msg := configLoadedMsg{cfg: *cfg}
-		if base := ollamainfo.NativeBase(cfg.Provider.BaseURL); base != "" || strings.EqualFold(cfg.Provider.Default, "ollama") {
-			msg.models, msg.rec = probeLocalModels(cfg.Provider.BaseURL, cfg.Provider.VRAMBudgetGB)
+		preset := presetForConfig(cfg.Provider)
+		if strings.HasPrefix(preset.modelSource, "remote:") {
+			msg.conn = testRemote(preset, cfg.Provider.BaseURL)
+			return msg
 		}
+		msg.models, msg.rec = probeLocalModels(cfg.Provider.BaseURL, cfg.Provider.VRAMBudgetGB)
+		msg.conn = localConn(cfg.Provider.BaseURL, msg.models)
 		return msg
 	}
 }
@@ -285,6 +333,60 @@ func probeLocalModels(baseURL string, budgetGB float64) ([]modelpick.Model, mode
 	return models, modelpick.Select(models, hwinfo.Detect(), budgetGB)
 }
 
+// remoteListTimeout bounds the connection check; the menu waits on it.
+const remoteListTimeout = 8 * time.Second
+
+// testRemote is the connection check for a listing provider: it builds the
+// same adapter the daemon would, with the key the daemon would read, and asks
+// for the model list. A missing key is reported without a request, naming the
+// variable and where it can live — the failure this exists for is a cloud user
+// learning their key was unset only from the first turn's error.
+func testRemote(p wPreset, baseURL string) connResult {
+	if baseURL == "" {
+		baseURL = p.defaultURL
+	}
+	key := config.ProviderAPIKey(p.adapter)
+	if key == "" && p.keyEnv != "" {
+		return connResult{tested: true, status: "✗ " + p.keyEnv + " is not set — export it, or put it in .aegis/.env in a trusted workspace"}
+	}
+	var lister provider.ModelLister
+	switch p.adapter {
+	case "anthropic":
+		lister = anthropic.New(key, anthropic.WithBaseURL(baseURL))
+	default:
+		lister = openai.New(key, openai.WithBaseURL(baseURL))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), remoteListTimeout)
+	defer cancel()
+	models, err := lister.ListModels(ctx)
+	if err != nil {
+		return connResult{tested: true, status: "✗ " + truncateStatus(err.Error())}
+	}
+	where := "key from " + p.keyEnv
+	if p.keyEnv == "" {
+		where = orDash(baseURL)
+	}
+	return connResult{tested: true, ok: true, remote: models,
+		status: fmt.Sprintf("✓ %d models available · %s", len(models), where)}
+}
+
+// localConn reports the Ollama probe as a connection check.
+func localConn(baseURL string, models []modelpick.Model) connResult {
+	base := ollamainfo.NativeBase(baseURL)
+	if len(models) == 0 {
+		return connResult{tested: true, status: "✗ no models found at " + base + " — is Ollama running, with a model pulled?"}
+	}
+	return connResult{tested: true, ok: true, status: fmt.Sprintf("✓ Ollama at %s · %d models pulled", base, len(models))}
+}
+
+func truncateStatus(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 110 {
+		s = s[:110] + "…"
+	}
+	return s
+}
+
 // adoptConfig seeds the working copy from the config on disk. Every field is
 // rendered as the string huh will edit, and an unset value becomes an empty
 // field rather than a zero — "" and "0" mean different things for a context
@@ -316,6 +418,11 @@ func (w *wizardModel) adoptConfig(cfg config.Config) {
 		w.guardMode = "llm"
 	}
 	w.guardRetriesStr = itoaOrBlank(cfg.OutputGuard.MaxRetries)
+	w.effortStr = strings.ToLower(cfg.Provider.ReasoningEffort)
+	w.cacheTTLStr = cfg.Provider.CacheTTL
+	w.smallBackend = cfg.Provider.SmallProvider
+	w.smallBaseURL = cfg.Provider.SmallBaseURL
+	w.allowCloudSmall = cfg.Provider.AllowCloudSmallModel
 	w.adoptPreset(preset)
 }
 
@@ -324,7 +431,7 @@ func (w *wizardModel) adoptConfig(cfg config.Config) {
 func (w *wizardModel) adoptPreset(p wPreset) {
 	w.curated = nil
 	w.discovery = strings.HasPrefix(p.modelSource, "discover:")
-	if key, ok := strings.CutPrefix(p.modelSource, "curated:"); ok {
+	if key, ok := strings.CutPrefix(p.modelSource, "remote:"); ok {
 		w.curated = wCurated[key]
 	}
 	if w.baseURL == "" {
@@ -380,9 +487,10 @@ type menuRow struct {
 func (w *wizardModel) menuRows() []menuRow {
 	rows := []menuRow{
 		{secProvider, "Provider", fmt.Sprintf("%s · %s", w.presetLabel, orDash(w.baseURL))},
+		{secConnection, "Connection", w.connSummary()},
 		{secModels, "Models", w.modelSummary()},
-		{secGeneration, "Generation", fmt.Sprintf("%s tokens · retries %s · think %s",
-			orDash(w.maxTokensStr), orDash(w.maxRetriesStr), w.thinkStr)},
+		{secSmall, "Small-model backend", w.smallBackendSummary()},
+		{secGeneration, "Generation", w.generationSummary()},
 	}
 	if w.adapterName() == "ollama" {
 		rows = append(rows, menuRow{secMemory, "Memory & context", w.memorySummary()})
@@ -396,6 +504,35 @@ func (w *wizardModel) menuRows() []menuRow {
 		menuRow{secCancel, "Discard and exit", "leave the config file untouched"},
 	)
 	return rows
+}
+
+func (w *wizardModel) connSummary() string {
+	if !w.conn.tested {
+		return "not tested — select to test"
+	}
+	return w.conn.status
+}
+
+func (w *wizardModel) generationSummary() string {
+	s := fmt.Sprintf("%s tokens · retries %s · think %s", orDash(w.maxTokensStr), orDash(w.maxRetriesStr), w.thinkStr)
+	if w.effortStr != "" {
+		s += " · effort " + w.effortStr
+	}
+	if w.cacheTTLStr == "1h" {
+		s += " · cache 1h"
+	}
+	return s
+}
+
+func (w *wizardModel) smallBackendSummary() string {
+	switch w.smallBackend {
+	case smallBackendSame:
+		return "same as the main model"
+	case smallBackendOllama:
+		return "local Ollama · " + orDash(w.smallBaseURL)
+	default:
+		return w.smallBackend + " (cloud)"
+	}
 }
 
 func (w *wizardModel) modelSummary() string {
@@ -496,6 +633,8 @@ func (w *wizardModel) buildSectionForm(section string) *huh.Form {
 		return w.buildProviderForm()
 	case secModels:
 		return w.buildModelsForm()
+	case secSmall:
+		return w.buildSmallBackendForm()
 	case secGeneration:
 		return w.buildGenerationForm()
 	case secMemory:
@@ -557,7 +696,14 @@ func (w *wizardModel) buildModelsForm() *huh.Form {
 	}
 
 	var smallField huh.Field
-	if len(smallOpts) > 0 {
+	if w.smallBackend != smallBackendSame && w.smallBackend != w.adapterName() {
+		placeholder := map[string]string{smallBackendOllama: "e.g. qwen3:4b", smallBackendAnthropic: "e.g. claude-haiku-5-5"}[w.smallBackend]
+		smallField = huh.NewInput().
+			Title("Small model (on " + w.smallBackend + ")").
+			Description("Runs session titles, compaction and guard verdicts on the small-model backend chosen in its own section.").
+			Placeholder(placeholder).
+			Value(&w.smallModelName)
+	} else if len(smallOpts) > 0 {
 		smallField = huh.NewSelect[string]().
 			Title("Small model (background calls)").
 			Description("Session titles, compaction and output-guard verdicts run here. Keeping them off the primary model is what makes the guard affordable locally.").
@@ -581,10 +727,17 @@ func (w *wizardModel) buildModelsForm() *huh.Form {
 // tool support, whether it reasons — because an operator overriding a
 // recommendation should be able to see what they are trading away.
 func (w *wizardModel) modelOptions() (main, small []huh.Option[string]) {
+	if len(w.local) == 0 && len(w.conn.remote) > 0 {
+		return w.remoteModelOptions()
+	}
 	if len(w.local) == 0 {
 		for _, name := range w.curated {
-			main = append(main, huh.NewOption(name, name))
-			small = append(small, huh.NewOption(name, name))
+			label := name
+			if a := modelcatalog.Lookup(name).Annotation(); a != "" {
+				label += "  (" + a + ")"
+			}
+			main = append(main, huh.NewOption(label, name))
+			small = append(small, huh.NewOption(label, name))
 		}
 		if len(small) > 0 {
 			small = append([]huh.Option[string]{huh.NewOption("(none — use the main model)", "")}, small...)
@@ -602,6 +755,43 @@ func (w *wizardModel) modelOptions() (main, small []huh.Option[string]) {
 	for _, m := range w.local {
 		small = append(small, huh.NewOption(annotateModel(m, m.Name == w.rec.Small), m.Name))
 	}
+	return main, small
+}
+
+// remoteModelOptions lists what the provider reported, annotated from the
+// capability table where Aegis knows the model. The model already configured
+// is kept as an option even when the listing lacks it, so opening this section
+// and pressing enter never silently swaps it for the first entry.
+func (w *wizardModel) remoteModelOptions() (main, small []huh.Option[string]) {
+	seen := map[string]bool{}
+	add := func(id, extra string) {
+		label := id
+		caps := modelcatalog.Lookup(id)
+		if a := caps.Annotation(); a != "" {
+			label += "  (" + a + ")"
+		}
+		label += extra
+		main = append(main, huh.NewOption(label, id))
+		small = append(small, huh.NewOption(label, id))
+		seen[id] = true
+	}
+	if w.modelName != "" {
+		found := false
+		for _, m := range w.conn.remote {
+			if m.ID == w.modelName {
+				found = true
+			}
+		}
+		if !found {
+			add(w.modelName, "  — current, not in the provider's list")
+		}
+	}
+	for _, m := range w.conn.remote {
+		if !seen[m.ID] {
+			add(m.ID, "")
+		}
+	}
+	small = append([]huh.Option[string]{huh.NewOption("(none — use the main model)", "")}, small...)
 	return main, small
 }
 
@@ -669,7 +859,79 @@ func (w *wizardModel) buildGenerationForm() *huh.Form {
 				Value(&w.thinkStr).
 				Height(5),
 		),
+		huh.NewGroup(w.reasoningFields()...),
 	).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
+}
+
+// reasoningFields are the effort and (Anthropic only) cache-TTL questions.
+// Effort applies to cloud reasoning models only; on Ollama the field is
+// replaced by a note so the section does not ask a question with no effect.
+func (w *wizardModel) reasoningFields() []huh.Field {
+	if w.adapterName() == "ollama" {
+		return []huh.Field{huh.NewNote().Title("Reasoning effort").
+			Description("Not used by local Ollama models — the think setting above is the control there.")}
+	}
+	desc := "How hard a reasoning model works per turn. Clamped to what the model accepts."
+	if c := modelcatalog.Lookup(w.modelName); len(c.EffortLevels) > 0 {
+		desc = w.modelName + " accepts: " + strings.Join(c.EffortLevels, ", ") + ". Higher costs more tokens."
+	}
+	fields := []huh.Field{
+		huh.NewSelect[string]().
+			Title("Reasoning effort").
+			Description(desc).
+			Options(
+				huh.NewOption("Model default", ""),
+				huh.NewOption("low", "low"),
+				huh.NewOption("medium", "medium"),
+				huh.NewOption("high", "high"),
+				huh.NewOption("xhigh", "xhigh"),
+				huh.NewOption("max", "max"),
+			).
+			Value(&w.effortStr).
+			Height(8),
+	}
+	if w.adapterName() == "anthropic" {
+		fields = append(fields, huh.NewSelect[string]().
+			Title("Prompt-cache lifetime").
+			Description("1 hour costs more per cache write but survives long tool calls and approvals; an expired cache re-bills the whole prefix.").
+			Options(huh.NewOption("5 minutes (default)", ""), huh.NewOption("1 hour", "1h")).
+			Value(&w.cacheTTLStr).
+			Height(4))
+	}
+	return fields
+}
+
+// buildSmallBackendForm asks where provider.small_model runs. Splitting it
+// from the main backend is the hybrid setup: a cloud main model with titles,
+// compaction and guard verdicts on a free local model, or a local main model
+// whose compaction runs on a stronger cloud one.
+func (w *wizardModel) buildSmallBackendForm() *huh.Form {
+	fields := []huh.Field{
+		huh.NewSelect[string]().
+			Title("Where does the small model run?").
+			Description("Session titles, compaction summaries and output-guard verdicts go here.").
+			Options(
+				huh.NewOption("Same backend as the main model", smallBackendSame),
+				huh.NewOption("Local Ollama", smallBackendOllama),
+				huh.NewOption("Anthropic (Claude)", smallBackendAnthropic),
+				huh.NewOption("OpenAI-compatible", smallBackendOpenAI),
+			).
+			Value(&w.smallBackend).
+			Height(6),
+		huh.NewInput().
+			Title("Small-model base URL").
+			Description("Blank uses the backend's default (http://localhost:11434 for Ollama).").
+			Value(&w.smallBaseURL),
+	}
+	if w.adapterName() == "ollama" {
+		fields = append(fields, huh.NewConfirm().
+			Title("Allow a cloud small model?").
+			Description("Your main model is local. Compaction sends whole transcripts to the small model, so a cloud small model sends them off this machine.").
+			Affirmative("Allow").
+			Negative("Keep local").
+			Value(&w.allowCloudSmall))
+	}
+	return huh.NewForm(huh.NewGroup(fields...)).WithWidth(wizardPanelW - 8).WithTheme(aegisHuhTheme())
 }
 
 // thinkNote tells the operator what the selected model looks like, which is the
@@ -685,7 +947,16 @@ func (w *wizardModel) thinkNote() string {
 			return w.modelName + " does not look like a reasoning model — Disabled is usually right."
 		}
 	}
-	return "For reasoning models (Claude 3.7+, o1, qwen3, deepseek-r1)."
+	if s := anthropic.Summarize(w.modelName); s.Known {
+		switch s.Thinking {
+		case "adaptive, always on":
+			return w.modelName + " always thinks; Disabled has no effect — use reasoning effort below to make it lighter."
+		case "adaptive, on by default":
+			return w.modelName + " thinks unless told not to; Auto leaves it on."
+		}
+		return w.modelName + " thinks only when Enabled."
+	}
+	return "For reasoning models (Claude, o-series, qwen3, deepseek-r1)."
 }
 
 func (w *wizardModel) buildMemoryForm() *huh.Form {
@@ -856,8 +1127,11 @@ func (w *wizardModel) updateLoading(msg tea.Msg) tea.Cmd {
 			w.done = true
 			return nil
 		}
-		w.local, w.rec = msg.models, msg.rec
+		w.local, w.rec, w.conn = msg.models, msg.rec, msg.conn
 		w.adoptConfig(msg.cfg)
+		if w.conn.tested && !w.conn.ok {
+			w.notice = w.conn.status
+		}
 		return w.enterMenu()
 	}
 	return nil
@@ -892,6 +1166,9 @@ func (w *wizardModel) updateMenu(msg tea.Msg) tea.Cmd {
 		case secSave:
 			w.phase = wPhaseSaving
 			return tea.Batch(w.sp.Tick, w.saveCmd())
+		case secConnection:
+			w.phase = wPhaseDiscovery
+			return tea.Batch(w.sp.Tick, w.discoverCmd())
 		default:
 			return w.enterSection(w.menuChoice)
 		}
@@ -950,14 +1227,9 @@ func (w *wizardModel) leaveSection() tea.Cmd {
 			}
 		}
 		w.adoptPreset(preset)
-		if w.discovery {
-			w.phase = wPhaseDiscovery
-			return tea.Batch(w.sp.Tick, w.discoverCmd())
-		}
 		w.local, w.rec = nil, modelpick.Selection{}
-		if w.modelName == "" && len(w.curated) > 0 {
-			w.modelName = w.curated[0]
-		}
+		w.phase = wPhaseDiscovery
+		return tea.Batch(w.sp.Tick, w.discoverCmd())
 	case secModels:
 		if w.modelName == applyRecommendedValue {
 			w.modelName, w.smallModelName = w.rec.Main, w.rec.Small
@@ -981,16 +1253,24 @@ func (w *wizardModel) leaveSection() tea.Cmd {
 // belongs to the newly-chosen preset, so switching provider does not silently
 // discard a name the operator typed for that same backend.
 func (w *wizardModel) modelKnownToPreset(p wPreset) bool {
-	if key, ok := strings.CutPrefix(p.modelSource, "curated:"); ok {
+	if key, ok := strings.CutPrefix(p.modelSource, "remote:"); ok {
+		if key == "" {
+			// An OpenAI-compatible endpoint can serve almost any id, and the
+			// listing that follows the switch shows what it has. Two shapes
+			// are known not to carry over: a bare Claude id (a gateway names
+			// it "anthropic/claude-…") and an Ollama "name:tag".
+			bareClaude := anthropic.Summarize(w.modelName).Known && !strings.Contains(w.modelName, "/")
+			return !bareClaude && !strings.Contains(w.modelName, ":")
+		}
+		if key == "anthropic" && anthropic.Summarize(w.modelName).Known {
+			return true
+		}
 		for _, name := range wCurated[key] {
 			if name == w.modelName {
 				return true
 			}
 		}
 		return false
-	}
-	if p.modelSource == "input" {
-		return true
 	}
 	for _, m := range w.local {
 		if m.Name == w.modelName {
@@ -1000,11 +1280,17 @@ func (w *wizardModel) modelKnownToPreset(p wPreset) bool {
 	return false
 }
 
+// discoverCmd re-runs the connection check for the current preset: an
+// Ollama probe and ranking, or the provider's model listing.
 func (w *wizardModel) discoverCmd() tea.Cmd {
 	baseURL, budget := w.baseURL, atofOrZero(w.vramBudgetStr)
+	preset := presetForLabel(w.presetLabel)
 	return func() tea.Msg {
+		if !strings.HasPrefix(preset.modelSource, "discover:") {
+			return modelsDiscoveredMsg{conn: testRemote(preset, baseURL)}
+		}
 		models, rec := probeLocalModels(baseURL, budget)
-		return modelsDiscoveredMsg{models: models, rec: rec}
+		return modelsDiscoveredMsg{models: models, rec: rec, conn: localConn(baseURL, models)}
 	}
 }
 
@@ -1015,11 +1301,19 @@ func (w *wizardModel) updateDiscovery(msg tea.Msg) tea.Cmd {
 		w.sp, cmd = w.sp.Update(msg)
 		return cmd
 	case modelsDiscoveredMsg:
-		w.local, w.rec = msg.models, msg.rec
-		if w.modelName == "" && w.rec.Main != "" {
+		w.local, w.rec, w.conn = msg.models, msg.rec, msg.conn
+		switch {
+		case w.modelName == "" && w.rec.Main != "":
 			w.modelName = w.rec.Main
 			w.smallModelName = w.rec.Small
 			w.notice = "Discovered " + strconv.Itoa(len(w.local)) + " local models; preselected the recommended pair."
+		case w.modelName == "" && len(w.curated) > 0:
+			w.modelName = w.curated[0]
+		case w.modelName == "" && len(w.conn.remote) > 0:
+			w.notice = "Connected — pick a model under Models."
+		}
+		if !w.conn.ok {
+			w.notice = w.conn.status
 		}
 		return w.enterMenu()
 	}
@@ -1169,7 +1463,29 @@ func (w *wizardModel) providerPatch() config.ProviderPatch {
 		// answers "14.5 GiB", gets the training-max recommendation written
 		// anyway, and nothing ever revisits it.
 		AutofitContext: w.autofitContext && atofOrZero(w.vramBudgetStr) > 0 && preset.adapter == "ollama",
+
+		ReasoningEffort:      w.effortStr,
+		CacheTTL:             w.cacheTTLStr,
+		SmallProvider:        w.smallProviderToWrite(preset),
+		SmallBaseURL:         w.smallBaseURLToWrite(preset),
+		AllowCloudSmallModel: w.allowCloudSmall && preset.adapter == "ollama" && w.smallProviderToWrite(preset) != "",
 	}
+}
+
+// smallProviderToWrite is "" when the small model shares the main backend —
+// including when the operator picked that backend explicitly.
+func (w *wizardModel) smallProviderToWrite(p wPreset) string {
+	if w.smallBackend == p.adapter || w.smallModelName == "" {
+		return ""
+	}
+	return w.smallBackend
+}
+
+func (w *wizardModel) smallBaseURLToWrite(p wPreset) string {
+	if w.smallProviderToWrite(p) == "" {
+		return ""
+	}
+	return strings.TrimSpace(w.smallBaseURL)
 }
 
 // costPatch carries every cost: key through, changing only the two this dialog
@@ -1338,7 +1654,7 @@ func (w *wizardModel) view() string {
 	case w.phase == wPhaseLoading:
 		body = w.sp.View() + " Reading config and probing for local models…"
 	case w.phase == wPhaseDiscovery:
-		body = w.sp.View() + " Discovering models…"
+		body = w.sp.View() + " Testing the connection and listing models…"
 	case w.phase == wPhaseSaving:
 		body = w.sp.View() + " Saving configuration…"
 	case w.phase == wPhaseRipgrepInstalling:

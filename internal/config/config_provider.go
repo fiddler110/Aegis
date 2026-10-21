@@ -14,14 +14,23 @@ import (
 
 // ProviderConfig selects and configures the model provider.
 type ProviderConfig struct {
-	Default       string `koanf:"default"`        // adapter name: "anthropic", "openai", "ollama"
-	Model         string `koanf:"model"`          // model id
-	SmallModel    string `koanf:"small_model"`    // optional fast model for title gen + compaction (falls back to Model)
-	MaxTokens     int    `koanf:"max_tokens"`     // response token cap
-	BaseURL       string `koanf:"base_url"`       // optional API base override
-	MaxRetries    int    `koanf:"max_retries"`    // transient-failure retries; 0 disables
-	MaxIterations int    `koanf:"max_iterations"` // max engine turns per run; 0 = harness default (40)
-	LoopThreshold int    `koanf:"loop_threshold"` // identical-turn abort count; 0 = harness default (5)
+	Default    string `koanf:"default"`     // adapter name: "anthropic", "openai", "ollama"
+	Model      string `koanf:"model"`       // model id
+	SmallModel string `koanf:"small_model"` // optional fast model for title gen + compaction (falls back to Model)
+	// SmallProvider and SmallBaseURL put SmallModel on a different backend
+	// from Model: "anthropic", "openai" or "ollama", and that backend's base
+	// URL. Empty SmallProvider keeps the small model on the main backend. A
+	// local main backend with a cloud small one also needs
+	// AllowCloudSmallModel: compaction sends the whole transcript to the
+	// small model, so this is the "keep it local" decision, made explicitly.
+	SmallProvider        string `koanf:"small_provider"`
+	SmallBaseURL         string `koanf:"small_base_url"`
+	AllowCloudSmallModel bool   `koanf:"allow_cloud_small_model"`
+	MaxTokens            int    `koanf:"max_tokens"`     // response token cap
+	BaseURL              string `koanf:"base_url"`       // optional API base override
+	MaxRetries           int    `koanf:"max_retries"`    // transient-failure retries; 0 disables
+	MaxIterations        int    `koanf:"max_iterations"` // max engine turns per run; 0 = harness default (40)
+	LoopThreshold        int    `koanf:"loop_threshold"` // identical-turn abort count; 0 = harness default (5)
 	// ZeroToolNudge (P28.3) bounds the corrective-nudge retries fired when a
 	// turn that plainly reads as actionable produces zero tool calls (a model
 	// dumping its reasoning as prose instead of calling a tool). 0 = harness

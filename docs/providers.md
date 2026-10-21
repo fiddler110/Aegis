@@ -450,14 +450,21 @@ export AEGIS_PROVIDER_MODEL="llama3.2"
 
 ### Via the `/config` wizard
 
-Run `/config` inside the TUI:
-1. Select provider
-2. Set base URL
-3. Pick from discovered local models (or enter any model ID)
-4. Set max tokens
-5. Set thinking mode
+Run `/config` inside the TUI — or just run `aegis` with no config file yet,
+which opens the same menu before starting (first-run setup). It shows each area
+with its current value; the **Connection** row tests the provider as soon as
+it opens:
 
-Changes are written to `config.yaml` and take effect on the next restart.
+- For a cloud or OpenAI-compatible provider it lists the models your key can
+  reach (`GET /v1/models` / `/models`), and the **Models** picker offers that
+  live list, annotated with context window, price and thinking behaviour. A
+  missing key is reported by name (`ANTHROPIC_API_KEY is not set …`) instead of
+  surfacing as the first turn's error.
+- For Ollama it probes and ranks what is pulled.
+
+Changes are written to `~/.config/aegis/config.yaml` and take effect on the next
+restart. Keys the menu does not show (`fallback`, `headers`, `keep_alive`,
+`compat`, …) are kept as they are.
 
 ### `aegis models`
 
@@ -549,11 +556,33 @@ The advice about **non-thinking** models still stands wherever you do split them
 
 ---
 
-## Separate Provider for Small Model
+## Separate Provider for Small Model (hybrid setups)
 
-The `small_model` runs within the same provider configuration (same adapter, same API key). It cannot use a different provider.
+`small_model` normally runs on the main backend. `small_provider` puts it on
+another one, so a cloud main model can run its titles, compaction and guard
+verdicts on a free local model — or a local main model can compact with a
+stronger cloud one:
 
-For cost optimization with Anthropic, pairing Opus (main) with Haiku (small) is effective.
+```yaml
+provider:
+  default: anthropic
+  model: "claude-opus-5-5"
+  small_model: "qwen3:4b"
+  small_provider: ollama
+  small_base_url: "http://localhost:11434"   # optional; the backend's default otherwise
+```
+
+The key comes from that backend's own environment variable. A **local** main
+model with a **cloud** small model also needs `allow_cloud_small_model: true`:
+compaction sends whole transcripts to the small model, so this is the "keep my
+data local" decision, made explicitly; without it the daemon refuses to start
+and says why. `/config` → **Small-model backend** sets all of this.
+
+Like `base_url`, these keys are ignored in a project's `.aegis/config.yaml`
+until the workspace is trusted.
+
+For cost optimization on Anthropic alone, pairing Opus (main) with Haiku 5.5
+(small) on the same backend is still the simplest effective setup.
 
 ---
 

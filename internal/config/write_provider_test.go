@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -60,5 +61,58 @@ func TestPatchGlobalProviderOmitsZeroContextWindow(t *testing.T) {
 	}
 	if strings.Contains(string(data), "context_window") {
 		t.Errorf("context_window should be omitted when unset:\n%s", data)
+	}
+}
+
+// TestPatchGlobalProviderKeepsUnownedKeys pins the data-loss fix: the splice
+// used to replace the whole provider: block, so saving /config deleted a
+// configured fallback chain, gateway headers and every other key the wizard
+// does not render.
+func TestPatchGlobalProviderKeepsUnownedKeys(t *testing.T) {
+	redirectConfigDir(t)
+	path := GlobalConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	orig := `provider:
+  default: anthropic
+  model: "claude-opus-4-8"
+  # gateway auth
+  headers:
+    X-Team: platform
+  fallback:
+    - provider: openai
+      model: gpt-5
+  keep_alive: 30m
+  think: true
+  max_tokens: 8000
+
+cost:
+  budget_usd: 5
+`
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PatchGlobalProvider(ProviderPatch{Adapter: "anthropic", Model: "claude-opus-5-5", MaxTokens: 16000, ReasoningEffort: "high"}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	out := string(data)
+	for _, want := range []string{"# gateway auth", "  headers:\n    X-Team: platform", "  fallback:\n    - provider: openai\n      model: gpt-5", "keep_alive: 30m", `model: "claude-opus-5-5"`, `reasoning_effort: "high"`, "budget_usd: 5"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	for _, gone := range []string{"claude-opus-4-8", "max_tokens: 8000", "think: true"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("owned key %q was not replaced:\n%s", gone, out)
+		}
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("rewritten config does not load: %v\n%s", err, out)
+	}
+	if len(cfg.Provider.Fallback) != 1 || cfg.Provider.Headers["X-Team"] != "platform" || cfg.Provider.ReasoningEffort != "high" {
+		t.Errorf("loaded provider = %+v", cfg.Provider)
 	}
 }

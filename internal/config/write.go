@@ -50,10 +50,33 @@ type ProviderPatch struct {
 	// to my machine", so the daemon is allowed to finish the job on the first
 	// boot where the model is measurable.
 	AutofitContext bool
+	// ReasoningEffort and CacheTTL are provider.reasoning_effort and
+	// provider.cache_ttl. Empty omits the line.
+	ReasoningEffort string
+	CacheTTL        string
+	// SmallProvider, SmallBaseURL and AllowCloudSmallModel put SmallModel on
+	// its own backend; see ProviderConfig.SmallProvider. Empty/false omits.
+	SmallProvider        string
+	SmallBaseURL         string
+	AllowCloudSmallModel bool
 }
 
-// PatchGlobalProvider replaces the provider: block in the global config file
-// and preserves all other sections. Creates the file if it does not exist.
+// providerPatchKeys are the provider: keys a ProviderPatch owns. Every other
+// key already in the block — fallback, headers, keep_alive, compat, a
+// per-model harness, anything added after this writer was — is carried
+// through untouched. The splice used to replace the whole block, so saving
+// /config silently deleted a configured fallback chain or gateway headers.
+var providerPatchKeys = map[string]bool{
+	"default": true, "base_url": true, "model": true, "small_model": true,
+	"context_window": true, "vram_budget_gb": true, "autofit_context": true,
+	"max_tokens": true, "max_retries": true, "think": true,
+	"reasoning_effort": true, "cache_ttl": true,
+	"small_provider": true, "small_base_url": true, "allow_cloud_small_model": true,
+}
+
+// PatchGlobalProvider rewrites the keys ProviderPatch owns in the global
+// config's provider: block, keeping every other key in that block and every
+// other section. Creates the file if it does not exist.
 func PatchGlobalProvider(p ProviderPatch) error {
 	if p.MaxRetries <= 0 {
 		p.MaxRetries = 4
@@ -66,6 +89,9 @@ func PatchGlobalProvider(p ProviderPatch) error {
 	}
 
 	block := buildProviderBlock(p)
+	if kept := unownedProviderLines(existing); len(kept) > 0 {
+		block = strings.TrimRight(block, "\n") + "\n" + strings.Join(kept, "\n") + "\n"
+	}
 	var out []byte
 	if len(existing) == 0 {
 		out = []byte("# Aegis configuration\n\n" + block + "\n")
@@ -92,6 +118,17 @@ func buildProviderBlock(p ProviderPatch) string {
 		b.WriteString("  # output-guard verdicts. Keeping them off the primary model is what\n")
 		b.WriteString("  # makes output_guard affordable on a local setup.\n")
 		fmt.Fprintf(&b, "  small_model: %q\n", p.SmallModel)
+		if p.SmallProvider != "" {
+			b.WriteString("  # The small model runs on its own backend.\n")
+			fmt.Fprintf(&b, "  small_provider: %s\n", p.SmallProvider)
+			if p.SmallBaseURL != "" {
+				fmt.Fprintf(&b, "  small_base_url: %q\n", p.SmallBaseURL)
+			}
+			if p.AllowCloudSmallModel {
+				b.WriteString("  # Compaction sends whole transcripts to the small model's backend.\n")
+				b.WriteString("  allow_cloud_small_model: true\n")
+			}
+		}
 	}
 	if p.ContextWindow > 0 {
 		b.WriteString("  # Serving context window in tokens (sent to Ollama as num_ctx,\n")
@@ -123,7 +160,62 @@ func buildProviderBlock(p ProviderPatch) string {
 		}
 	}
 	fmt.Fprintf(&b, "  think: %s\n", think)
+	if p.ReasoningEffort != "" {
+		fmt.Fprintf(&b, "  reasoning_effort: %q\n", p.ReasoningEffort)
+	}
+	if p.CacheTTL != "" {
+		fmt.Fprintf(&b, "  cache_ttl: %q\n", p.CacheTTL)
+	}
 	return b.String()
+}
+
+// unownedProviderLines returns the lines of data's provider: block that belong
+// to keys ProviderPatch does not own — each key with its nested lines and the
+// comments directly above it — in their original order. A flow-style
+// "provider: {...}" header has no block to carry and returns nil.
+func unownedProviderLines(data []byte) []string {
+	lines := strings.Split(string(data), "\n")
+	start := -1
+	for i, l := range lines {
+		if l == "provider:" || strings.HasPrefix(l, "provider:") && strings.TrimSpace(strings.SplitN(l, "#", 2)[0]) == "provider:" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+	var kept, pending, current []string
+	currentKept := false
+	flush := func() {
+		if currentKept {
+			kept = append(kept, current...)
+		}
+		current, currentKept = nil, false
+	}
+	for _, l := range lines[start+1:] {
+		if l != "" && l[0] != ' ' && l[0] != '\t' && l[0] != '#' {
+			break // next top-level section
+		}
+		trimmed := strings.TrimSpace(l)
+		indent := len(l) - len(strings.TrimLeft(l, " "))
+		switch {
+		case indent == 2 && trimmed != "" && !strings.HasPrefix(trimmed, "#"):
+			flush()
+			key := strings.TrimSpace(strings.SplitN(trimmed, ":", 2)[0])
+			current = append(append(current, pending...), l)
+			currentKept = !providerPatchKeys[key]
+			pending = nil
+		case trimmed == "" || (strings.HasPrefix(trimmed, "#") && indent <= 2):
+			pending = append(pending, l)
+		default:
+			current = append(current, pending...)
+			current = append(current, l)
+			pending = nil
+		}
+	}
+	flush()
+	return kept
 }
 
 // OutputGuardPatch holds the output_guard: fields to write into a config file.

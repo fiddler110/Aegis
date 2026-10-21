@@ -14,6 +14,7 @@ import (
 	"github.com/fiddler110/aegis/internal/reqorigin"
 	"github.com/fiddler110/aegis/internal/server"
 	"github.com/fiddler110/aegis/internal/tui"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -77,6 +78,21 @@ Use "aegis <command> --help" for details on any command below.`,
 					return diffProjectInit()
 				}
 				return runProjectInit(initOverwrite)
+			}
+
+			if needsFirstRunSetup(resume) {
+				saved, note, err := tui.RunSetup("auto", mustGetwd())
+				switch {
+				case err != nil:
+					fmt.Fprintln(os.Stderr, "aegis: setup did not finish:", err)
+				case saved:
+					fmt.Fprintln(os.Stderr, "aegis: saved", config.GlobalConfigPath())
+					if note != "" {
+						fmt.Fprintln(os.Stderr, note)
+					}
+				default:
+					fmt.Fprintln(os.Stderr, "aegis: no config saved — continuing with built-in defaults. /config opens setup again; `aegis --first-init` writes a commented template instead.")
+				}
 			}
 
 			cfg, err := config.Load()
@@ -387,4 +403,26 @@ func waitForDaemon(cl *client.Client, timeout time.Duration) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return false
+}
+
+// needsFirstRunSetup reports whether a bare `aegis` should open guided setup
+// before starting: no global or project config exists yet, nothing in the
+// environment already picks a provider, this is a new session rather than a
+// resume, and there is a terminal to ask on. Every other case starts exactly
+// as before, so a scripted or containerized run is never stopped by a dialog.
+func needsFirstRunSetup(resume string) bool {
+	if resume != "" || os.Getenv("AEGIS_PROVIDER_DEFAULT") != "" || os.Getenv("AEGIS_PROVIDER_MODEL") != "" {
+		return false
+	}
+	for _, p := range []string{config.GlobalConfigPath(), config.ProjectConfigPath()} {
+		if _, err := os.Stat(p); err == nil {
+			return false
+		}
+	}
+	return isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
+}
+
+func mustGetwd() string {
+	wd, _ := os.Getwd()
+	return wd
 }

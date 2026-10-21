@@ -398,6 +398,14 @@ provider:
   # Anthropic prompt-cache TTL: "" (5 minutes) or "1h". See docs/providers.md.
   cache_ttl: ""
 
+  # Run small_model on a different backend ("ollama", "anthropic", "openai"),
+  # e.g. a cloud main model with a local small one. A local main model with a
+  # cloud small one also needs allow_cloud_small_model: true, since compaction
+  # sends whole transcripts there. See docs/providers.md.
+  small_provider: ""
+  small_base_url: ""
+  allow_cloud_small_model: false
+
   # Declares OpenAI-compat wire-format quirks for the primary backend (P85.1).
   # Only the "openai" adapter reads this — the native ollama and anthropic
   # adapters have their own wire formats and no use for it. Exists so a

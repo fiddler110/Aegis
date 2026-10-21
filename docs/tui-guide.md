@@ -309,7 +309,9 @@ choose **Save and exit**, and **Discard and exit** throws every edit away.
 ```
 Aegis configuration
 ▶ Provider              Ollama (local) · http://localhost:11434
+  Connection            ✓ Ollama at http://localhost:11434 · 6 models pulled
   Models                aegis-qwen35-9b:32k · small llama3.2:3b
+  Small-model backend   same as the main model
   Generation            8192 tokens · retries 3 · think enabled
   Memory & context      window 32768 · budget 14.5 GiB · autofit on
   Spend & stall limits  budget unlimited · stall 2100s
@@ -321,9 +323,11 @@ Aegis configuration
 
 | Section | What it sets |
 |---------|--------------|
-| Provider | Preset (Ollama, LM Studio, Anthropic, OpenAI, OpenRouter, Groq, Custom) and base URL. Changing it re-probes a local backend for models. |
-| Models | `provider.model` and `provider.small_model`. |
-| Generation | `provider.max_tokens`, `max_retries`, `think`. |
+| Provider | Preset (Ollama, LM Studio, Anthropic, OpenAI, OpenRouter, Groq, Custom) and base URL. Changing it re-tests the connection. |
+| Connection | The connection check: lists the provider's models with the key from the environment, or probes Ollama. A missing key is named here. Select it to test again. |
+| Models | `provider.model` and `provider.small_model`, picked from the live list with context window, price and thinking behaviour shown. |
+| Small-model backend | `provider.small_provider`, `small_base_url`, `allow_cloud_small_model` — run the small model on a different backend (see docs/providers.md). |
+| Generation | `provider.max_tokens`, `max_retries`, `think`, `reasoning_effort`, and `cache_ttl` on Anthropic. |
 | Memory & context | `provider.vram_budget_gb`, `context_window`, `autofit_context`. Ollama only — every other backend runs where Aegis does not manage residency. |
 | Spend & stall limits | `cost.budget_usd`, `cost.max_turn_stall`. |
 | Output guard | `output_guard.enabled`, `mode`, `max_retries`. |

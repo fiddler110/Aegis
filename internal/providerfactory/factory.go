@@ -66,6 +66,54 @@ func Build(cfg *config.Config, logger *slog.Logger, opts ...Option) (provider.Ad
 	for _, fn := range opts {
 		fn(&o)
 	}
+	main, err := buildMain(cfg, logger, o)
+	if err != nil {
+		return nil, err
+	}
+	small, err := buildSmall(cfg, logger, o)
+	if err != nil {
+		return nil, err
+	}
+	return provider.WithModelRouter(main, cfg.Provider.SmallModel, small), nil
+}
+
+// buildSmall constructs the adapter for provider.small_provider, or nil when
+// the small model shares the main backend.
+func buildSmall(cfg *config.Config, logger *slog.Logger, o options) (provider.Adapter, error) {
+	p := cfg.Provider
+	if p.SmallProvider == "" || p.SmallModel == "" {
+		return nil, nil
+	}
+	mainLocal := isLocalProvider(p.Default) || config.IsLoopbackBaseURL(p.BaseURL)
+	smallLocal := isLocalProvider(p.SmallProvider) || config.IsLoopbackBaseURL(p.SmallBaseURL)
+	if mainLocal && !smallLocal && !p.AllowCloudSmallModel {
+		return nil, fmt.Errorf("provider.small_provider %q is a cloud backend but provider.model runs locally: "+
+			"compaction would send whole transcripts to it — set provider.allow_cloud_small_model: true to allow that, "+
+			"or keep the small model local", p.SmallProvider)
+	}
+	base, err := buildOne(buildOneConfig{
+		name:                  p.SmallProvider,
+		apiKey:                config.ProviderAPIKey(p.SmallProvider),
+		baseURL:               p.SmallBaseURL,
+		headers:               p.HeadersFor(p.SmallProvider, p.SmallBaseURL),
+		think:                 p.Think,
+		reasoningEffort:       p.ReasoningEffort,
+		cacheTTL:              p.CacheTTL,
+		maxTokens:             p.MaxTokens,
+		keepAlive:             p.KeepAlive,
+		responseHeaderTimeout: p.ResponseHeaderTimeout(),
+		streamIdleTimeout:     p.StreamIdleTimeout(),
+		logger:                logger,
+		caps:                  o.caps,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("provider.small_provider %q: %w", p.SmallProvider, err)
+	}
+	return decorate(base, cfg, p.SmallProvider, p.SmallBaseURL, logger), nil
+}
+
+// buildMain is the primary adapter and its failover chain.
+func buildMain(cfg *config.Config, logger *slog.Logger, o options) (provider.Adapter, error) {
 
 	if err := validateModelHarness(cfg); err != nil {
 		return nil, err

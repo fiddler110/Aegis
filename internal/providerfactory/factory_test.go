@@ -624,3 +624,63 @@ func (n *noopAdapter) Stream(context.Context, provider.Request) (<-chan provider
 	close(ch)
 	return ch, nil
 }
+
+// TestBuild_SmallProviderRoutesTheSmallModel: a cloud main model with its
+// small model on a local Ollama server. The request for the small model must
+// reach the local server; the main model must not.
+func TestBuild_SmallProviderRoutesTheSmallModel(t *testing.T) {
+	var hits []string
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		hits = append(hits, r.URL.Path+" "+body.Model)
+		w.Header().Set("content-type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"model":"qwen3:4b","message":{"role":"assistant","content":"ok"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer local.Close()
+
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "anthropic", APIKey: "fake-key", Model: "claude-opus-5-5", MaxRetries: 0,
+		SmallModel: "qwen3:4b", SmallProvider: "ollama", SmallBaseURL: local.URL,
+	}}
+	a, err := Build(cfg, nil)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	ch, err := a.Stream(context.Background(), provider.Request{Model: "qwen3:4b", MaxTokens: 10,
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{provider.TextBlock{Text: "hi"}}}}})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range ch { //nolint:revive // drain
+	}
+	chats := 0
+	for _, h := range hits {
+		if h == "/api/chat qwen3:4b" {
+			chats++
+		}
+	}
+	if chats != 1 {
+		t.Errorf("local server hits = %v; want one /api/chat for qwen3:4b", hits)
+	}
+	if a.Name() != "anthropic" {
+		t.Errorf("the router must report the main backend's name, got %q", a.Name())
+	}
+}
+
+func TestBuild_CloudSmallModelFromLocalMainNeedsOptIn(t *testing.T) {
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Default: "ollama", Model: "qwen3:14b", MaxRetries: 0,
+		SmallModel: "claude-haiku-5-5", SmallProvider: "anthropic",
+	}}
+	t.Setenv("ANTHROPIC_API_KEY", "fake-key")
+	if _, err := Build(cfg, nil); err == nil || !strings.Contains(err.Error(), "allow_cloud_small_model") {
+		t.Fatalf("want a refusal naming allow_cloud_small_model, got %v", err)
+	}
+	cfg.Provider.AllowCloudSmallModel = true
+	if _, err := Build(cfg, nil); err != nil {
+		t.Fatalf("with the opt-in: %v", err)
+	}
+}
