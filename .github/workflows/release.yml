@@ -1,18 +1,55 @@
 name: Release
 
-# Temporarily disabled (non-security pipeline) — re-enable by uncommenting
-# the trigger below.
+# Every push to main (other than docs-only, or with [skip release] in a commit
+# message) bumps the version (patch by default; #minor / #major in a commit
+# message bumps higher), builds the binaries and publishes the GitHub release.
 on:
-  # push:
-  #   tags:
-  #     - "v*"
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "research/**", "docs/**"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # Computes the next semver tag from the commits in this push: patch by
+  # default, `#minor` / `#major` anywhere in a commit message bumps higher,
+  # `[skip release]` skips the release. Empty output = nothing to release.
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: v
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"; exit 0; fi
+          latest=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)
+          if git tag --points-at HEAD | grep -q '^v'; then echo "HEAD is already released"; exit 0; fi
+          if [ -n "$BEFORE" ] && ! [ "$BEFORE" = 0000000000000000000000000000000000000000 ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            msgs=$(git log --format=%B "$BEFORE..HEAD")
+          else
+            msgs=$(git log -1 --format=%B)
+          fi
+          if grep -qiF '[skip release]' <<<"$msgs"; then echo "[skip release] found"; exit 0; fi
+          if [ -z "$latest" ]; then echo "tag=v0.1.0" >> "$GITHUB_OUTPUT"; exit 0; fi
+          IFS=. read -r maj min pat <<<"${latest#v}"
+          if grep -qi '#major' <<<"$msgs"; then maj=$((maj+1)); min=0; pat=0
+          elif grep -qi '#minor' <<<"$msgs"; then min=$((min+1)); pat=0
+          else pat=$((pat+1))
+          fi
+          echo "tag=v$maj.$min.$pat" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
+    if: ${{ needs.version.outputs.tag != '' }}
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
     strategy:
@@ -47,6 +84,7 @@ jobs:
       # per-OS build matrix the way ci.yml's test matrix needs one.
       - name: Build
         env:
+          TAG: ${{ needs.version.outputs.tag }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
@@ -55,7 +93,7 @@ jobs:
           mkdir -p dist
           out="dist/aegis-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           go build -trimpath \
-            -ldflags "-s -w -X github.com/fiddler110/aegis/internal/cli.Version=${GITHUB_REF_NAME}" \
+            -ldflags "-s -w -X github.com/fiddler110/aegis/internal/cli.Version=${TAG}" \
             -o "$out" ./cmd/aegis
 
       - name: Archive
@@ -80,7 +118,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -102,8 +140,10 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" out/* \
-            --title "${GITHUB_REF_NAME}" \
+          gh release create "${TAG}" out/* \
+            --target "${GITHUB_SHA}" \
+            --title "${TAG}" \
             --generate-notes \
-            --notes "See [research/releases.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/research/releases.md) for the full shipped-feature history and design rationale behind this release."
+            --notes "See [research/releases.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/research/releases.md) for the full shipped-feature history and design rationale behind this release."
